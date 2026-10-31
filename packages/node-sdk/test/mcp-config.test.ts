@@ -605,3 +605,87 @@ function oauthHarness(rpc: OAuthRpc): KimiHarness {
     onClose: async () => {},
   });
 }
+
+/**
+ * Locator-addressed (workspace-scoped) authorization: a project `.mcp.json`
+ * entry is resolved through the session's MCP layers, and the same encrypted
+ * grant store backs the flow (v2 `beginMcpServerAuth({ locator })`).
+ */
+describe('workspace-scoped MCP OAuth', () => {
+  it('authorizes a project .mcp.json server and skips the browser once authorized', async () => {
+    process.env['KIMI_CODE_TRUST_WORKSPACE'] = 'true';
+    const homeDir = await makeTempDir();
+    const root = await makeTempDir();
+    await mkdir(join(root, '.git'), { recursive: true });
+    const workDir = join(root, 'app');
+    await mkdir(workDir, { recursive: true });
+    const statusServer = await startMcpAuthStatusServer();
+    await writeFile(
+      join(root, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          project_remote: { transport: 'http', url: statusServer.oauthUrl, auth: 'oauth' },
+        },
+      }),
+      'utf-8',
+    );
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      // An unknown locator is refused before any listener or network call.
+      await expect(
+        harness.authenticateAppMcpServer(
+          { serverName: 'missing' },
+          {
+            cwd: workDir,
+            onAuthorizationUrl: async () => true,
+          },
+        ),
+      ).rejects.toThrow(/not a configured remote server/);
+
+      const urls: string[] = [];
+      await harness.authenticateAppMcpServer(
+        { serverName: 'project_remote' },
+        {
+          cwd: workDir,
+          onAuthorizationUrl: async (url) => {
+            urls.push(url);
+            const response = await fetch(url, { redirect: 'follow' });
+            expect(response.ok).toBe(true);
+          },
+        },
+      );
+      expect(urls).toHaveLength(1);
+      expect(new URL(urls[0]!).searchParams.get('code_challenge_method')).toBe('S256');
+
+      // The grant lands in the engine's encrypted store under the same key the
+      // engine looks up when it injects the server.
+      const key = mcpOAuthStoreKey('project_remote', statusServer.oauthUrl);
+      const raw = await readFile(
+        join(homeDir, 'credentials', 'mcp', `${key}-tokens.json`),
+        'utf-8',
+      );
+      expect(raw).not.toContain(statusServer.authToken);
+
+      // A second call sees the stored grant and never opens the browser.
+      await harness.authenticateAppMcpServer(
+        { serverName: 'project_remote' },
+        {
+          cwd: workDir,
+          onAuthorizationUrl: async () => {
+            throw new Error('the browser must not open again');
+          },
+        },
+      );
+
+      await harness.resetAppMcpServerAuth({ serverName: 'project_remote' }, { cwd: workDir });
+      await expect(
+        readFile(join(homeDir, 'credentials', 'mcp', `${key}-tokens.json`), 'utf-8'),
+      ).rejects.toThrow();
+    } finally {
+      await harness.close();
+      await statusServer.close();
+      delete process.env['KIMI_CODE_TRUST_WORKSPACE'];
+    }
+  }, 20_000);
+});

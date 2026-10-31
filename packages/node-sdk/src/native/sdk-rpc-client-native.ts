@@ -3355,8 +3355,97 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     native.mcpOauthRemove(name, config.url, this.mcpOAuthDir());
   }
 
-  override async completeMcpServerAuth(): Promise<void> {}
-  override async cancelMcpServerAuth(): Promise<void> {}
+  /**
+   * Authorize a *workspace-scoped* MCP server (a project `.mcp.json` entry
+   * resolved through {@link loadSessionMcpConfig}). The browser flow is the
+   * global one; only the config source differs — the locator-addressed variant
+   * exists so a session/plugin panel can authenticate a server that is not in
+   * the user-global config (v2 `beginMcpServerAuth({ locator })`).
+   *
+   * Plugin-contributed servers are not host-side config: the engine's plugin
+   * manager owns them, so a locator naming one resolves to no entry here and
+   * is reported as not configured.
+   */
+  override async beginMcpServerAuth(
+    locator: McpServerLocator,
+    options: { readonly cwd?: string } = {},
+  ): Promise<BeginGlobalMcpServerAuthResult> {
+    const workDir = options.cwd ?? process.cwd();
+    const servers = await this.loadSessionMcpConfig(workDir);
+    const config = servers[locator.serverName];
+    if (
+      config !== undefined &&
+      (config.transport === 'stdio' || (config.transport === undefined && config.command))
+    ) {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        `MCP server "${locator.serverName}" uses stdio transport and does not support OAuth authorization`,
+      );
+    }
+    const url = config?.url;
+    if (config === undefined || url === undefined) {
+      throw new KimiError(
+        ErrorCodes.MCP_SERVER_NOT_FOUND,
+        `MCP server "${locator.serverName}" is not a configured remote server in ${workDir}`,
+      );
+    }
+    // A stored grant that is still usable (or refreshable) needs no browser.
+    const state = await this.readMcpOAuthTokens(locator.serverName, url);
+    if (state.hasTokens && (!state.expired || state.hasRefreshToken)) {
+      return { status: 'already-authorized' };
+    }
+    const started = await beginMcpOAuthFlow({
+      name: locator.serverName,
+      serverUrl: url,
+      clientName: 'Kimi Code',
+      persist: async (tokens) => {
+        const native = await this.engineMcpOAuth();
+        native.mcpOauthStoreTokens(
+          locator.serverName,
+          url,
+          JSON.stringify(tokens),
+          this.mcpOAuthDir(),
+        );
+      },
+    });
+    return {
+      status: 'authorization-required',
+      flowId: started.flowId,
+      authorizationUrl: started.authorizationUrl,
+    };
+  }
+
+  override async completeMcpServerAuth(
+    input: { readonly flowId: string; readonly timeoutMs?: number },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const { name } = await completeMcpOAuthFlow(input.flowId, {
+      timeoutMs: input.timeoutMs,
+      signal,
+    });
+    try {
+      const native = await this.engineMcpOAuth();
+      await native.mcpOauthReconnect(name);
+    } catch {
+      // A host without live managers still completed the login.
+    }
+  }
+
+  override async cancelMcpServerAuth(flowId: string): Promise<void> {
+    await cancelMcpOAuthFlow(flowId);
+  }
+
+  /** Drop the workspace-scoped grant for a locator-addressed server. */
+  override async resetMcpServerAuth(
+    locator: McpServerLocator,
+    options: { readonly cwd?: string } = {},
+  ): Promise<void> {
+    const workDir = options.cwd ?? process.cwd();
+    const config = (await this.loadSessionMcpConfig(workDir))[locator.serverName];
+    if (config?.url === undefined) return;
+    const native = await this.engineMcpOAuth();
+    native.mcpOauthRemove(locator.serverName, config.url, this.mcpOAuthDir());
+  }
 
   /**
    * The engine pipeline's task runner (Rust `TaskRunner`, attached to the

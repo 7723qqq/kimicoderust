@@ -9256,3 +9256,16 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   `truncating_the_transcript_rebases_the_context_gauge`。
 - **剩余**：napi 会话的锚点仍在 SDK（`meta.contextTokens` 只取输入侧）；回合循环内部
   的溢出/压缩阈值仍按估算，未接锚点。
+
+## 34. 2026-10-31 工作区级（locator）MCP OAuth 授权
+
+- native 客户端补齐 `beginMcpServerAuth(locator)` / `completeMcpServerAuth` /
+  `cancelMcpServerAuth` / `resetMcpServerAuth`：locator 经会话 MCP 分层
+  （`loadSessionMcpConfig`：全局 + 受信任工作区的 `.mcp.json`）解析出服务器，
+  其余与全局流程共用（同一加密授权存储、同一 PKCE 回环），已授权时不再打开浏览器。
+  此前这些方法落到 Proxy 的 NOT_IMPLEMENTED，`complete/cancel` 还是静默 no-op。
+- 测试：`workspace-scoped MCP OAuth`（未知 locator 拒绝、真实授权写入
+  `<key>-tokens.json` 加密信封、二次调用不打开浏览器、reset 删除授权）。
+- **剩余**：plugin 提供的 MCP 服务器由引擎插件管理器持有，host 侧没有其配置层，
+  locator 解析不到（v2 以 pluginId+manifest 名解析）；standalone Rust server 仍只有
+  device-code，没有浏览器 auth-code 路由。

@@ -10,9 +10,9 @@ description:
   en: >
       The native transport: SDKRpcClientNative, ensurePluginStore seeding and the plugin API surface.
       
-revision: 50f704d9e74f1addcd8ed2ea7edff61672b2b1e2
-updated_at: "2026-10-31T16:09:06.718Z"
-fingerprint: 19ef8bbc8b66ea5c1d18b78715441bf79ce18d1cf9ba118916e132e37bfa9974
+revision: 4a743b653438353822cc9dd361dd179153d4c2aa
+updated_at: "2026-10-31T17:23:55.645Z"
+fingerprint: 0f01e63665e9509b0c0c61f5ce72a4bfd57a77132500e18918dadc3a8c8f660d
 source:
   - path: "packages/node-sdk/src/native/sdk-rpc-client-native.ts"
 apis:

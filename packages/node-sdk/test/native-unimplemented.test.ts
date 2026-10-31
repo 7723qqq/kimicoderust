@@ -61,9 +61,12 @@ describe('SDKRpcClientNative unimplemented surfaces', () => {
     );
   });
 
-  it('refuses to claim an MCP server is already authorized', async () => {
+  it('refuses to claim an unknown scoped MCP server is already authorized', async () => {
+    // The locator flow resolves the server through the session's MCP layers;
+    // an unknown name is refused up front instead of inventing an
+    // `already-authorized` answer (v2 `beginMcpServerAuth`).
     await expect(client().beginMcpServerAuth({ serverName: 'example' })).rejects.toThrow(
-      /has not wired RPC method "beginMcpServerAuth"/,
+      /is not a configured remote server/,
     );
   });
 });
