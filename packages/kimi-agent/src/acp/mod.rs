@@ -284,16 +284,24 @@ impl AcpServer {
             "usage" => {
                 let model = self.session_model(session_id);
                 let usage = crate::session::usage::status(&self.store, session_id, &model);
-                let used: u64 = self
-                    .store
-                    .load_session_history(session_id)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|message| crate::compaction::estimate_tokens(&message.content) as u64)
-                    .sum();
-                let size = match self.engine.as_ref() {
-                    Some(engine) => engine.model_context_window(session_id).await,
-                    None => None,
+                // Measured+estimated when an engine holds the counting state;
+                // a bare estimate is the fallback for an engine-less server.
+                let (used, size) = match self.engine.as_ref() {
+                    Some(engine) => (
+                        engine.session_context_tokens(session_id),
+                        engine.model_context_window(session_id).await,
+                    ),
+                    None => (
+                        self.store
+                            .load_session_history(session_id)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|message| {
+                                crate::compaction::estimate_tokens(&message.content) as u64
+                            })
+                            .sum(),
+                        None,
+                    ),
                 };
                 let mut lines = Vec::new();
                 match size {
@@ -453,13 +461,7 @@ impl AcpServer {
         report: &crate::server::engine::TurnReport,
     ) {
         if let Some(size) = report.context_window {
-            let used: u64 = self
-                .store
-                .load_session_history(session_id)
-                .unwrap_or_default()
-                .iter()
-                .map(|message| crate::compaction::estimate_tokens(&message.content) as u64)
-                .sum();
+            let used = engine.session_context_tokens(session_id);
             self.channel.notify(
                 "session/update",
                 events_map::usage_update_notification(session_id, used, size as u64),
@@ -1419,14 +1421,7 @@ impl AcpServer {
                                     self.channel.notify("session/update", plan);
                                 }
                                 if let Some(size) = engine.model_context_window(sid).await {
-                                    let used: u64 = history
-                                        .iter()
-                                        .map(|stored| {
-                                            crate::compaction::estimate_tokens(
-                                                &stored.message.content,
-                                            ) as u64
-                                        })
-                                        .sum();
+                                    let used = engine.session_context_tokens(sid);
                                     self.channel.notify(
                                         "session/update",
                                         events_map::usage_update_notification(

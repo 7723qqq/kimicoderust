@@ -10,9 +10,9 @@ description:
   en: >
       Session lifecycle and patching: create/resume/fork, session patch, SQLite store, title generation.
       
-revision: 8b2bb47f4c742505790fcb3bc6ebbb38bffcff4c
-updated_at: "2026-10-31T16:57:50.349Z"
-fingerprint: 93119be0ebd4d4ba249e6d74e8a6f6eb13be4a51dff2935b1c2f587a466a18ca
+revision: ee32b98286f1d07451856b39e280e99fa2ab54c4
+updated_at: "2026-10-31T17:16:52.877Z"
+fingerprint: 5735afa1c12bab2533ab3019ff9ed818c81cef3be523e21c9e07bd3ce74f66ff
 source:
   - path: "packages/kimi-agent/src/session/mod.rs"
   - path: "packages/kimi-agent/src/session/sqlite_store.rs"

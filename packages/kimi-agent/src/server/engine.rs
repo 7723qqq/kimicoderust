@@ -1013,9 +1013,9 @@ impl ServerEngine {
 
     /// Assemble the status snapshot from every state source the client folds:
     /// `agent_config` (model / thinking / permission / plan mode) and the
-    /// session history (context-token estimate, the same `len() / 4` budget
-    /// `format_wire_session` reports). `maxContextTokens` needs the model
-    /// catalog the engine does not hold, so it stays the caller's addition.
+    /// session history (context tokens, measured + estimated). `maxContextTokens`
+    /// needs the model catalog the engine does not hold, so it stays the
+    /// caller's addition.
     fn status_payload(&self, session_id: &str) -> serde_json::Value {
         let agent_config = self
             .store
@@ -1029,20 +1029,11 @@ impl ServerEngine {
             .ok()
             .flatten()
             .unwrap_or_else(|| serde_json::json!({}));
-        let history = self
-            .store
-            .load_session_history(session_id)
-            .unwrap_or_default();
-        // Token estimate for the status line. Uses the compaction estimator
-        // rather than `len() / 4`: that shortcut charges a quarter token per
-        // BYTE, so CJK text (3 UTF-8 bytes per char) reads ~25% low — the gauge
-        // drifts low precisely in the sessions that are filling up. Sharing
-        // `compaction::estimate_tokens` also means the gauge and the compaction
-        // trigger cannot disagree about how full the context is.
-        let context_tokens: usize = history
-            .iter()
-            .map(|m| crate::compaction::estimate_tokens(&m.content) as usize)
-            .sum();
+        // The measured+estimated figure (v2 `statusSize`): a provider response
+        // anchors the prefix it measured, the rest is estimated with the same
+        // estimator compaction uses. A pure estimate drifts low exactly in the
+        // sessions that are filling up.
+        let context_tokens = self.session_context_tokens(session_id);
 
         let model = agent_config
             .get("model")
@@ -1355,6 +1346,103 @@ impl ServerEngine {
         crate::tools::skill::render_user_slash_skill_prompt(&scan, name, args, session_id)
     }
 
+    /// The session's durable token-counting state (v2 `TokenCountingState`):
+    /// the measured anchors and the newest total, persisted with the session's
+    /// metadata so a restarted server keeps the gauge.
+    fn token_counting(
+        &self,
+        session_id: &str,
+    ) -> crate::session::token_counting::TokenCountingState {
+        self.store
+            .get_state("metadata", session_id)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.get("token_counting").cloned())
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_token_counting(
+        &self,
+        session_id: &str,
+        state: &crate::session::token_counting::TokenCountingState,
+    ) {
+        let mut metadata = self
+            .store
+            .get_state("metadata", session_id)
+            .ok()
+            .flatten()
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "token_counting".into(),
+                serde_json::to_value(state).unwrap_or_default(),
+            );
+        }
+        if let Err(error) = self
+            .store
+            .put_session_state("metadata", session_id, session_id, &metadata)
+        {
+            tracing::warn!(%session_id, %error, "could not persist the token-counting state");
+        }
+    }
+
+    /// Fold the finished turn into the counting state: a measured request
+    /// anchors the conversation exactly, a turn without an LLM call — or one
+    /// whose provider reported no usage (v2 skips `measured` when the response
+    /// carries `undefined` usage) — records an estimate instead.
+    fn record_token_counting(&self, session_id: &str, last_request: Option<&TokenUsage>) {
+        let history = self
+            .store
+            .load_session_history(session_id)
+            .unwrap_or_default();
+        let mut state = self.token_counting(session_id);
+        match last_request.filter(|usage| usage.measured_context_tokens() > 0) {
+            Some(usage) => state.measured(history.len(), usage.measured_context_tokens()),
+            None => state.record_turn(&history),
+        }
+        self.save_token_counting(session_id, &state);
+    }
+
+    /// The session's context size for the status gauge and usage events (v2
+    /// `statusSize`, measured+estimated): the newest measured prefix plus an
+    /// estimate of everything appended after it.
+    pub fn session_context_tokens(&self, session_id: &str) -> u64 {
+        let history = self
+            .store
+            .load_session_history(session_id)
+            .unwrap_or_default();
+        self.token_counting(session_id).status_size(&history)
+    }
+
+    /// Re-baseline the counting state after the transcript was cut (undo).
+    pub fn record_context_truncation(&self, session_id: &str) {
+        let history = self
+            .store
+            .load_session_history(session_id)
+            .unwrap_or_default();
+        let mut state = self.token_counting(session_id);
+        state.truncate(&history, history.len());
+        self.save_token_counting(session_id, &state);
+    }
+
+    /// Replace the counting state after a compaction: the transcript is now
+    /// the summary prefix (v2 `rebase`).
+    pub fn record_context_rebase(&self, session_id: &str) {
+        let history = self
+            .store
+            .load_session_history(session_id)
+            .unwrap_or_default();
+        let mut state = self.token_counting(session_id);
+        state.rebase(
+            history.len(),
+            crate::session::token_counting::estimate_messages(&history),
+            false,
+        );
+        self.save_token_counting(session_id, &state);
+    }
+
     /// The LLM one session's turns run on, without building a pipeline.
     ///
     /// `None` when the session's spec selects no model the engine can reach —
@@ -1446,6 +1534,12 @@ impl ServerEngine {
             .store
             .compact_session_with_summary(session_id, instruction, summary)
             .map_err(EngineError::Turn)?;
+        if report.removed > 0 {
+            // The transcript is now the summary prefix: re-baseline the
+            // counting state so the gauge does not keep the pre-compaction
+            // measurement (v2 `rebase`).
+            self.record_context_rebase(session_id);
+        }
         self.hub
             .bus_for(session_id)
             .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
@@ -1692,10 +1786,9 @@ impl ServerEngine {
         if let Some(config) = self.micro_compaction_config().await {
             let now = chrono::Utc::now().timestamp_millis();
             let last_assistant_at = self.last_assistant_at_for(session_id);
-            let context_tokens: usize = history
-                .iter()
-                .map(|m| crate::compaction::estimate_tokens(&m.content) as usize)
-                .sum();
+            // Measured+estimated, the same figure the status gauge reports, so
+            // the fullness gate and the gauge cannot disagree.
+            let context_tokens = self.token_counting(session_id).status_size(&history) as usize;
             let outcome_gate = crate::compaction::micro::detect_micro_compaction(
                 last_assistant_at,
                 now,
@@ -2012,6 +2105,11 @@ impl ServerEngine {
             )
             .map_err(EngineError::Store)?;
 
+        // Fold the turn into the context-token counting state: the last
+        // request measured the prefix it served, everything after it is
+        // estimated until the next measurement (v2 `TokenCountingMeasured`).
+        self.record_token_counting(session_id, result.last_request_usage.as_ref());
+
         // Fold the turn's counters into the session's per-model usage buckets
         // (v2 `UsageAgentModel.record` -> durable `byModel`). The turn is
         // already durable; a usage write failure degrades the status snapshot
@@ -2044,18 +2142,9 @@ impl ServerEngine {
 
         // Live token accounting for the Web client (kap-server
         // `event.session.usage_updated`): the turn's counters ride as the
-        // delta, and the usage snapshot carries the same context estimate
-        // the wire session reports (session totals are not persisted here
-        // yet, so the client folds the deltas).
-        let session_history = self
-            .store
-            .load_session_history(session_id)
-            .unwrap_or_default();
-        let context_tokens = (session_history
-            .iter()
-            .map(|m| m.content.len())
-            .sum::<usize>()
-            / 4) as u64;
+        // delta, and the usage snapshot carries the same context figure the
+        // status payload reports (measured + estimated).
+        let context_tokens = self.session_context_tokens(session_id);
         self.hub
             .bus_for(session_id)
             .publish(&crate::events::EngineEvent::Custom(serde_json::json!({

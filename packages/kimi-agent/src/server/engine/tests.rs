@@ -1165,6 +1165,53 @@ async fn a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuatio
     );
 }
 
+/// The status gauge is measured + estimated (v2 `statusSize`): the turn's
+/// last request anchors the context it served, so the gauge reports the
+/// provider's total rather than a small content estimate.
+#[tokio::test]
+async fn a_finished_turn_anchors_the_context_gauge_on_its_last_request() {
+    let engine = engine();
+    engine.store().create_session("sess-count", None).unwrap();
+
+    engine
+        .run_turn_on(&UsageLlm, "sess-count", 1, Vec::new(), "hello")
+        .await
+        .expect("scripted turn completes");
+
+    // UsageLlm reports input 10, cache read 3, cache creation 2, output 5 —
+    // v2's measured total is their sum.
+    let measured = 20;
+    assert_eq!(engine.session_context_tokens("sess-count"), measured);
+    assert_eq!(
+        engine.status_payload("sess-count")["contextTokens"],
+        measured,
+        "the gauge carries the measured total"
+    );
+}
+
+/// A transcript cut re-baselines the gauge: anchors that measured the removed
+/// messages no longer apply (v2 `recordTruncation` on undo).
+#[tokio::test]
+async fn truncating_the_transcript_rebases_the_context_gauge() {
+    let engine = engine();
+    engine.store().create_session("sess-cut", None).unwrap();
+    engine
+        .run_turn_on(&UsageLlm, "sess-cut", 1, Vec::new(), "hello")
+        .await
+        .expect("scripted turn completes");
+    assert_eq!(engine.session_context_tokens("sess-cut"), 20);
+
+    let undone = engine.store().undo_turns("sess-cut", 1).expect("undo");
+    assert_eq!(undone, 1);
+    engine.record_context_truncation("sess-cut");
+    assert_eq!(
+        engine.session_context_tokens("sess-cut"),
+        0,
+        "no messages remain, so no tokens remain"
+    );
+    assert_eq!(engine.status_payload("sess-cut")["contextTokens"], 0);
+}
+
 /// The todo list the ACP `plan` notification projects: read from the same
 /// workspace state domain the todo tools write, empty for an unknown
 /// session.

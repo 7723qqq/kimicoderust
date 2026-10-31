@@ -26,6 +26,7 @@
 pub mod patch;
 pub mod sqlite_store;
 pub mod title;
+pub mod token_counting;
 pub mod usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};

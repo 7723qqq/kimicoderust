@@ -911,6 +911,11 @@ impl HttpServer {
                                 "undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session."
                             ));
                         }
+                        // The transcript shrank: anchors that measured the cut
+                        // messages no longer apply to the session's context.
+                        if let Some(engine) = self.engine.as_ref() {
+                            engine.record_context_truncation(session_id);
+                        }
                         // Online transcripts must learn about the cut, exactly
                         // like delete/patch publish their own events.
                         self.hub

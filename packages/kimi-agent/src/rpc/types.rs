@@ -1293,6 +1293,16 @@ impl TokenUsage {
         self.input_cache_read += other.input_cache_read;
         self.input_cache_creation += other.input_cache_creation;
     }
+
+    /// The context one request measured: every input bucket plus the output
+    /// (v2 `tokenUsageTotal`). Unlike `total_tokens`, which some providers
+    /// report and others leave at zero, this is always derivable.
+    pub fn measured_context_tokens(&self) -> u64 {
+        u64::from(self.input_tokens)
+            + u64::from(self.input_cache_read)
+            + u64::from(self.input_cache_creation)
+            + u64::from(self.output_tokens)
+    }
 }
 
 /// Health check response.

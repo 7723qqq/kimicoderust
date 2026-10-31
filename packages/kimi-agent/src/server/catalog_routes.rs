@@ -343,7 +343,12 @@ pub(super) fn format_wire_session(
     let busy = engine.map(|e| e.is_busy(session_id)).unwrap_or(false);
     let history = store.load_session_history(session_id).unwrap_or_default();
     let message_count = history.len();
-    let context_tokens: usize = history.iter().map(|m| m.content.len() / 4).sum();
+    // Measured+estimated with an engine (v2 `statusSize`); the byte/4 floor is
+    // only the engine-less fallback (a route test store has no engine).
+    let context_tokens = engine.map_or_else(
+        || history.iter().map(|m| m.content.len() / 4).sum::<usize>(),
+        |engine| engine.session_context_tokens(session_id) as usize,
+    );
 
     // Derive `pending_interaction` from the engine's InteractionManager
     // when an engine is attached: v2 surfaced a real value here instead of

@@ -9232,3 +9232,27 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   --check` 通过。
 - **剩余**：标题仍只在交互时推送（自动标题生成本身未接线）；ACP 没有后台任务唤醒；
   消息级 origin 不持久化（只在 `turns` 行），重放以 turn origin 为准。
+
+## 33. 2026-10-31 上下文 token 计数：measured + estimated 锚点
+
+- `turn_loop::TurnResult.last_request_usage`：回合**最后一请求**的用量（区别于
+  `usage` 的整回合累计），由 step 循环每步更新，所有退出路径携带。
+- `session::token_counting`（v2 `TokenCountingAgentModel` 的移植）：
+  `TokenAnchor { length, tokens, measured }` 列表 + `tokens`；`measured` 记录一次
+  实测（长度 ≤ 新长度之前的锚点保留、之后的丢弃）、`record_turn` 记录估算锚点、
+  `context_size` = 最新锚点实测值 + 尾部消息估算、`status_size` = 两者与最新实测
+  的较大者、`truncate`（undo）与 `rebase`（压缩）按 v2 语义收缩/替换。
+- `ServerEngine` 把状态持久化到会话 `metadata.token_counting`：回合结束
+  `record_token_counting`（provider 未报 usage 时 v2 不记录实测，这里同样以
+  `measured_context_tokens() == 0` 退化为估算锚点）；`status_payload`、
+  `event.session.usage_updated.context_tokens`、`format_wire_session.context_tokens`、
+  micro-compaction 满度门、ACP `/usage` / `usage_update` / `session/load` 全部改用
+  `session_context_tokens()`；REST `:undo` 后 `record_context_truncation`，手动压缩后
+  `record_context_rebase`。
+- `TokenUsage::measured_context_tokens()` = 全部输入桶 + 输出（v2 `tokenUsageTotal`），
+  不依赖 provider 是否填 `total_tokens`。
+- 测试：`token_counting` 六项单测（无锚点纯估算、实测+尾部、覆盖序、truncate、
+  rebase、同长度不叠加）、`a_finished_turn_anchors_the_context_gauge_on_its_last_request`、
+  `truncating_the_transcript_rebases_the_context_gauge`。
+- **剩余**：napi 会话的锚点仍在 SDK（`meta.contextTokens` 只取输入侧）；回合循环内部
+  的溢出/压缩阈值仍按估算，未接锚点。

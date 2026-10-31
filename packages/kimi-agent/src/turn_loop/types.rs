@@ -51,6 +51,12 @@ pub struct TurnResult {
     /// transcript there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<LLMMessage>,
+    /// The usage of the turn's **last** LLM request, as opposed to `usage`
+    /// which sums every request of the turn. Its total (input + output) is the
+    /// measured anchor the context-token counting service puts on the
+    /// conversation (v2 `TokenCountingAgentModel.measured`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_request_usage: Option<TokenUsage>,
     /// Stop-hook continuation (v2 `runStopHooks`): when a text-finished turn
     /// trips a matching `Stop` hook, its veto text rides here as the user
     /// message the driver should re-prompt with. `None` = the stop proceeds.
@@ -59,6 +65,15 @@ pub struct TurnResult {
     /// observe (and must act on) this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_hook_continuation: Option<String>,
+}
+
+impl TurnResult {
+    /// Attach the turn's last-request usage — the measured context anchor
+    /// callers put on the conversation (v2 `TokenCountingAgentModel`).
+    pub fn with_last_request_usage(mut self, usage: Option<TokenUsage>) -> Self {
+        self.last_request_usage = usage;
+        self
+    }
 }
 
 /// Reasons a turn can stop.

@@ -133,6 +133,7 @@ fn turn_result(
         llm_transport: String::new(),
         native_tool_calls: 0,
         messages,
+        last_request_usage: None,
         stop_hook_continuation: None,
     }
 }
@@ -755,6 +756,9 @@ pub fn run_turn<'a>(
                 .await;
         }
         let mut total_usage = crate::rpc::types::TokenUsage::default();
+        // The most recent step's own usage: the measured context anchor a
+        // caller puts on the conversation (v2 `TokenCountingAgentModel`).
+        let mut last_request_usage: Option<crate::rpc::types::TokenUsage> = None;
         let mut steps: u32 = 0;
         // LLM retries performed so far (attempts beyond the first per step);
         // surfaced on the turn result as a telemetry figure. Event counting
@@ -1030,7 +1034,8 @@ pub fn run_turn<'a>(
                         0,
                         llm_retries,
                         messages.clone(),
-                    ));
+                    )
+                    .with_last_request_usage(last_request_usage.clone()));
                 }
                 // Check budgets with cumulative usage so far.
                 let turn_tokens = total_usage.total_tokens as i64;
@@ -1048,7 +1053,8 @@ pub fn run_turn<'a>(
                         0,
                         llm_retries,
                         messages.clone(),
-                    ));
+                    )
+                    .with_last_request_usage(last_request_usage.clone()));
                 }
                 // Update steering text in system prompt with current progress.
                 let steering =
@@ -1070,7 +1076,8 @@ pub fn run_turn<'a>(
                     0,
                     llm_retries,
                     messages.clone(),
-                ));
+                )
+                .with_last_request_usage(last_request_usage.clone()));
             }
 
             // Drain mid-turn steering from host when engine owns the history.
@@ -1311,7 +1318,8 @@ pub fn run_turn<'a>(
                             0,
                             llm_retries,
                             messages.clone(),
-                        ));
+                        )
+                        .with_last_request_usage(last_request_usage.clone()));
                     }
                     // v2 `nextProjectionPolicyForError`: a provider
                     // "request too large" (`APIRequestTooLargeError`)
@@ -1554,6 +1562,7 @@ pub fn run_turn<'a>(
             consecutive_overflow_compactions = 0;
 
             total_usage.accumulate(&step_result.usage);
+            last_request_usage = Some(step_result.usage.clone());
             llm_retries += step_result.attempts.saturating_sub(1);
             last_finish_reason = step_result.finish_reason.clone();
 
@@ -1626,7 +1635,8 @@ pub fn run_turn<'a>(
                         0,
                         llm_retries,
                         messages.clone(),
-                    );
+                    )
+                    .with_last_request_usage(last_request_usage.clone());
                     result.stop_hook_continuation = stop_hook_continuation;
                     return Ok(result);
                 }
@@ -1964,7 +1974,8 @@ pub fn run_turn<'a>(
                                         0,
                                         llm_retries,
                                         messages.clone(),
-                                    ));
+                                    )
+                                    .with_last_request_usage(last_request_usage.clone()));
                                 }
                                 return Err(err);
                             }
@@ -2078,7 +2089,8 @@ pub fn run_turn<'a>(
                             0,
                             llm_retries,
                             messages.clone(),
-                        ));
+                        )
+                        .with_last_request_usage(last_request_usage.clone()));
                     }
 
                     if dedupe_force_stop {
@@ -2147,7 +2159,8 @@ Deliver your final response as text now. Further tool calls are refused.",
                             0,
                             llm_retries,
                             messages.clone(),
-                        ));
+                        )
+                        .with_last_request_usage(last_request_usage.clone()));
                     }
                 }
             }
@@ -2163,14 +2176,10 @@ Deliver your final response as text now. Further tool calls are refused.",
             LoopTurnStopReason::EndTurn => LoopTurnStopReason::MaxSteps,
             other => other,
         };
-        Ok(turn_result(
-            reason,
-            steps,
-            total_usage,
-            0,
-            llm_retries,
-            messages.clone(),
-        ))
+        Ok(
+            turn_result(reason, steps, total_usage, 0, llm_retries, messages.clone())
+                .with_last_request_usage(last_request_usage),
+        )
     })
 }
 

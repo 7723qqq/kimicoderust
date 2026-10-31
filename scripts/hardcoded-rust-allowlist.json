@@ -3128,6 +3128,11 @@
       "text": "Interaction channel closed",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/engine.rs:could not persist the token-counting state": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "could not persist the token-counting state",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/server/engine.rs:could not persist the turn outcome": {
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "could not persist the turn outcome",
