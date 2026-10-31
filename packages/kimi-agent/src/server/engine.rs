@@ -1175,6 +1175,38 @@ impl ServerEngine {
         self.store.get_workspace(&workspace_id).ok().flatten()
     }
 
+    /// The session-scoped durable state store (v2 agent scope), when the
+    /// session's workspace resolves. The domain fold the goal needs — turn
+    /// and token totals — belongs to the engine, not to a host round-trip.
+    fn session_state_store(&self, session_id: &str) -> Option<Arc<crate::storage::StateStore>> {
+        let workspace = self.session_workspace(session_id);
+        let ws_ref = workspace
+            .as_ref()
+            .map(|workspace| std::path::PathBuf::from(&workspace.root))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        crate::storage::StateStore::for_session(&ws_ref, session_id)
+            .ok()
+            .map(Arc::new)
+    }
+
+    /// The goal-continuation prompt the session's next autonomous turn owes,
+    /// or `None` when the goal is inactive or its budget is spent.
+    ///
+    /// v2's `goalService` launched the continuation from the turn-end hook,
+    /// so the prompt loop that drives REST / ACP turns owns the re-prompt
+    /// here: the turn loop reports the decision as telemetry and no host
+    /// consumes it on this entry point.
+    pub async fn pending_goal_continuation(&self, session_id: &str) -> Option<String> {
+        let workspace = self.session_workspace(session_id);
+        let ws_ref = workspace
+            .as_ref()
+            .map(|workspace| std::path::PathBuf::from(&workspace.root))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let callbacks = self.session_callbacks(session_id, &ws_ref);
+        let goal = callbacks.goal().await.ok().flatten();
+        crate::session::goal_continuation_prompt(goal.as_ref())
+    }
+
     /// The project's `workspace.additional_dir` roots.
     ///
     /// v2 `WorkspaceDirsService.reloadFromDisk` reads the project-local config
@@ -1907,6 +1939,15 @@ impl ServerEngine {
             crate::session::usage::record_turn(&self.store, session_id, &turn_model, &result.usage)
         {
             tracing::warn!(%session_id, %e, "could not persist turn usage");
+        }
+
+        // v2 `incrementGoalTurn` + `accountTokenUsage`: fold the finished turn
+        // into an active goal, so the next turn's steering and the
+        // continuation budget read real totals. The REPL folds the same way
+        // after its turns; without it a server goal's budget could never be
+        // exhausted.
+        if let Some(store) = self.session_state_store(session_id) {
+            store.goal_record_usage(1, result.usage.output_tokens.into());
         }
 
         // Reset micro compaction's idle clock: this turn produced assistant

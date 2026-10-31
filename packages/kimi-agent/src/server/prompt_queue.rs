@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::events::EngineEvent;
 use crate::rpc::types::ContentBlock;
-use crate::server::engine::ServerEngine;
+use crate::server::engine::{ServerEngine, TurnReport};
 use crate::server::hub::EventHub;
 use crate::session::sqlite_store::SqliteSessionStore;
 
@@ -385,6 +385,33 @@ pub async fn run_prompt_loop(
                 }),
             );
         }
+        // v2 `launchContinuationTurn`: a cleanly completed turn of an active
+        // goal owes the model another prompt — without it a goal never
+        // progresses past one response, because no host loop re-prompts on
+        // this entry point. The continuation runs before the queue advances,
+        // so a queued user prompt cannot interleave with the goal's own
+        // turns; a cancel stops the chain, the way v2 pauses the goal on an
+        // interrupted turn.
+        let mut outcome = outcome;
+        while outcome.as_ref().is_ok_and(turn_completed) && !queue.active_is_cancelled(&session_id)
+        {
+            let Some(text) = engine.pending_goal_continuation(&session_id).await else {
+                break;
+            };
+            let history = store.load_session_history(&session_id).unwrap_or_default();
+            let turn_number = store.next_turn_number(&session_id).unwrap_or(1);
+            queue.stamp_active_turn(&session_id, turn_number);
+            outcome = engine
+                .run_turn_with_media(
+                    &session_id,
+                    turn_number,
+                    history,
+                    &text,
+                    Vec::new(),
+                    Some(json!({ "kind": "system_trigger", "name": "goal_continuation" })),
+                )
+                .await;
+        }
         match queue.advance(&session_id) {
             Some(next) => run = next,
             None => {
@@ -393,6 +420,16 @@ pub async fn run_prompt_loop(
             }
         }
     }
+}
+
+/// Whether a turn ended cleanly enough to owe a goal continuation. v2
+/// continues on a completed turn (a max-tokens finish included); a
+/// cancelled, filtered, or step-capped turn settles the goal instead.
+fn turn_completed(report: &TurnReport) -> bool {
+    matches!(
+        report.stop_reason.as_str(),
+        "EndTurn" | "MaxTokens" | "RepeatBreaker"
+    )
 }
 
 #[cfg(test)]

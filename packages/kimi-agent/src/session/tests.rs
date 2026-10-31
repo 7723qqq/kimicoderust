@@ -2014,3 +2014,35 @@ fn undo_anchor_origins_match_the_host_predicate() {
         );
     }
 }
+
+/// v2 `blockIfBudgetReached` runs before `launchContinuationTurn`: an active
+/// goal owes turns until its budget is spent, and a terminal goal owes none.
+#[test]
+fn goal_continuation_prompt_respects_status_and_budget() {
+    use crate::turn_loop::types::GoalStatus;
+
+    let goal = |status, turns_used, turn_budget| crate::turn_loop::types::GoalContext {
+        goal_id: "g1".into(),
+        objective: "ship the thing".into(),
+        status,
+        token_budget: None,
+        turn_budget,
+        wall_clock_budget_ms: None,
+        wall_clock_ms: 0,
+        tokens_used: 0,
+        turns_used,
+    };
+
+    assert!(goal_continuation_prompt(None).is_none());
+    assert!(
+        goal_continuation_prompt(Some(&goal(GoalStatus::Complete, 0, None))).is_none(),
+        "a terminal goal owes no continuation"
+    );
+    let active = goal_continuation_prompt(Some(&goal(GoalStatus::Active, 1, None)))
+        .expect("an active goal continues");
+    assert!(active.contains("ship the thing"), "{active}");
+    assert!(
+        goal_continuation_prompt(Some(&goal(GoalStatus::Active, 2, Some(2)))).is_none(),
+        "an exhausted turn budget must not buy another turn"
+    );
+}

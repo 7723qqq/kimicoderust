@@ -9098,3 +9098,52 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
 - **剩余**：未广告引擎 skill 命令（fork 的 ACP 没有 skill 执行面）；标题变化在
   空闲时不会主动推送，要等下一次交互；ACP 没有 `session/set_title`，客户端不能
   直接改名；`/mcp` `/tasks` 依赖会话/全局 MCP 与任务运行器，没有运行时返回空列表。
+
+## 30. 2026-10-31 会话级 state、undo 快照与 server/ACP goal continuation
+
+### 30.1 会话级 durable state
+
+- `StateStore::for_session` + `paths::engine_session_dir`：todo / plan / goal / task /
+  turn 落在 `~/.kimi-code/engine-state/<workspace-key>/sessions/<session-key>/state/`；
+  cron 仍是 workspace 级（`StateStoreCallbacks { store, cron_store }` 按域路由）。
+  同 workspace 的两个会话互不可见。
+- 预升级安装的 workspace 值保留为读取回退（会话未写过该域时可见），下一次写入即进入会话域。
+- napi `nativeReadEngineState(workspaceRoot, domain, sessionId?)`；SDK 的 todo / cron
+  读取传 `meta.id`。
+
+### 30.2 回合头快照与 undo 回滚
+
+- `HostCallbacks::checkpoint_state`（默认 no-op；`StateStoreCallbacks` 落实本地快照），
+  经 `NativeToolCallbacks` / `CountingCallbacks` / `SteerQueueCallbacks` /
+  `ActivityCallbacks` / `MessageCallbacks` / `ImagePreviewCallbacks` 透传。
+- `EngineSession` 与 `ServerEngine::execute` 在每个 undo-anchor 回合开始前推一个快照；
+  `origin_is_undo_anchor` 对齐宿主 `isUndoAnchorPrompt`（user / user-slash skill 与
+  plugin command，in-turn 不算）；goal continuation / cron / task 回合不推，
+  checkpoint 栈与宿主 `computeUndoCut` 删除的回合一一对应。
+- `StateStore::rollback_scoped_state` + napi `nativeRollbackEngineState`；SDK
+  `undoHistory` 在 `setHistory` 之后按 `cut.removedCount` 回滚同数量的快照（栈空即停）。
+- 测试：`rollback_scoped_state_unwinds_only_the_given_sessions_stack`、
+  `user_turns_checkpoint_state_and_continuations_do_not`、
+  `undo_anchor_origins_match_the_host_predicate`、
+  `a_session_checkpoint_snapshots_only_that_sessions_state`。
+
+### 30.3 server/ACP goal continuation（v2 `launchContinuationTurn`）
+
+- `session::goal_continuation_prompt`：goal 处于 active 且预算未耗尽才继续
+  （v2 `blockIfBudgetReached` 先于 launch）；print 回合与 server 回合共用。
+- `ServerEngine::pending_goal_continuation`（host seam 优先、本地 goal 域兜底）+
+  `run_prompt_loop` 在 `prompt.completed` 之后、`advance` 之前串行跑 continuation 回合
+  （origin `system_trigger/goal_continuation`，用户取消即停），REST 与 ACP 共用同一条环路。
+- `ServerEngine::execute` 在回合结束后把 `turns_used` / `output_tokens` 折进活动 goal
+  （v2 `incrementGoalTurn` + `accountTokenUsage`），否则 server 侧预算永远看不到消耗。
+- 测试：`goal_continuation_prompt_respects_status_and_budget`、
+  `a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuation`。
+
+### 30.4 验证与剩余
+
+- `cargo test --lib` 3285 passed / 0 failed；`cargo clippy --all-targets`、`cargo fmt
+  --check` 通过；node-sdk config / mcp / usage / undo / surface-contract 103 passed。
+- **剩余**：napi 交互式（TUI）会话的 goal continuation 仍由宿主折账驱动，engine 未主动
+  续回合（SDK 的 `meta.goal` 只在 prompt receipt 上累加，续回合会漏计）；后台任务完成
+  仍不唤醒交互会话；napi 的 plan 域归宿主所有，undo 只回滚 todo/goal 等引擎域；
+  server 的 `[background]` 完成唤醒策略未定。

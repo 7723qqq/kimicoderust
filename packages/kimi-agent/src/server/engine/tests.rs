@@ -1102,6 +1102,69 @@ async fn a_session_checkpoint_snapshots_only_that_sessions_state() {
     );
 }
 
+/// v2 folds a finished turn into an active goal (`incrementGoalTurn` +
+/// `accountTokenUsage`) and launches a continuation while the goal is still
+/// active; both halves live in the engine on this entry point because no host
+/// loop re-prompts a server or ACP turn.
+#[tokio::test]
+async fn a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuation() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = engine
+        .store()
+        .create_workspace(dir.path().to_str().unwrap(), None)
+        .unwrap();
+    engine
+        .store()
+        .create_session_with_workspace("sess-goal", None, Some(&workspace.id))
+        .unwrap();
+    let store = crate::storage::StateStore::for_session(dir.path(), "sess-goal").unwrap();
+    let outcome = store
+        .apply_write(
+            "goal",
+            &serde_json::json!({ "action": "create", "objective": "ship the thing" }),
+        )
+        .unwrap();
+    store.write_domain("goal", &outcome.stored).unwrap();
+
+    let continuation = engine
+        .pending_goal_continuation("sess-goal")
+        .await
+        .expect("an active goal owes its continuation");
+    assert!(continuation.contains("ship the thing"), "{continuation}");
+
+    engine
+        .run_turn_on(&UsageLlm, "sess-goal", 1, Vec::new(), "hello")
+        .await
+        .expect("scripted turn completes");
+
+    let goal = store.goal_context().expect("the goal is still stored");
+    assert_eq!(goal.turns_used, 1, "the turn is folded into the goal");
+    assert_eq!(goal.tokens_used, 5, "the turn's output tokens are folded");
+    assert!(
+        engine
+            .pending_goal_continuation("sess-goal")
+            .await
+            .is_some(),
+        "the goal is still active, so it still owes turns"
+    );
+
+    let outcome = store
+        .apply_write(
+            "goal",
+            &serde_json::json!({ "action": "update", "status": "complete" }),
+        )
+        .unwrap();
+    store.write_domain("goal", &outcome.stored).unwrap();
+    assert!(
+        engine
+            .pending_goal_continuation("sess-goal")
+            .await
+            .is_none(),
+        "a completed goal owes no continuation"
+    );
+}
+
 /// The todo list the ACP `plan` notification projects: read from the same
 /// workspace state domain the todo tools write, empty for an unknown
 /// session.

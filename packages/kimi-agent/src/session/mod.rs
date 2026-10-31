@@ -1226,7 +1226,8 @@ async fn pump(
         }
         // Follow-up producers, in v2's settle order (goal → cron → tasks) and
         // only for print runs: interactive sessions keep their per-turn
-        // round-trips unchanged.
+        // round-trips unchanged (the server prompt loop drives the equivalent
+        // continuation for REST / ACP turns).
         let mut goal_continuation = None;
         let mut cron_followups = Vec::new();
         if outcome.is_ok() && ctx.print_background.is_some() {
@@ -1429,7 +1430,33 @@ async fn pending_goal_continuation(
         return None;
     }
     let goal = (ctx.goal.as_ref()?)().await?;
+    goal_continuation_prompt(Some(&goal))
+}
+
+/// The prompt an autonomous continuation turn carries, or `None` when the
+/// goal is not active or its budget is already spent.
+///
+/// v2's `launchContinuationTurn` runs behind `blockIfBudgetReached`: a goal
+/// that used its last turn or token must not buy another. Shared by the
+/// session pump (interactive and print) and the server prompt loop, which is
+/// the entry point REST and ACP prompts run through.
+pub(crate) fn goal_continuation_prompt(
+    goal: Option<&crate::turn_loop::types::GoalContext>,
+) -> Option<String> {
+    let goal = goal?;
     if !goal.status.is_active() {
+        return None;
+    }
+    let tokens_spent = goal
+        .token_budget
+        .is_some_and(|budget| goal.tokens_used >= budget);
+    let turns_spent = goal
+        .turn_budget
+        .is_some_and(|budget| goal.turns_used >= budget);
+    let time_spent = goal
+        .wall_clock_budget_ms
+        .is_some_and(|budget| goal.wall_clock_ms >= budget);
+    if tokens_spent || turns_spent || time_spent {
         return None;
     }
     Some(crate::native::goal::steering::render_continuation(
