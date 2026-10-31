@@ -9336,4 +9336,6 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   `without_plugin_sections_the_prompt_is_unchanged`；`cargo test --lib` 3310 passed。
 - **剩余**：stdio CLI 入口没有插件管理器（不导入插件贡献）；插件 prompt 块在
   napi 路径上按 handle 构建时冻结（与 v2 每 profile 冻结一致，但插件启用变化要等
-  下一次 handle 重建）；预算跳过只记日志，没有像 v2 那样向宿主发 WarningIssued 事件。
+  下一次 handle 重建）；预算跳过只记日志，没有像 v2 那样向宿主发 WarningIssued 事件；
+  子代理回合（`subagent/manager.rs`）以 `hook_guard: None` 运行，配置 hooks 与插件
+  hooks 都不会在子代理回合触发（此前即如此，与本次导入无关）。
