@@ -1562,6 +1562,22 @@ impl ServerEngine {
         Ok(report)
     }
 
+    /// The process-wide background-task runner (installed by the server
+    /// builder or by the first pipeline that ran), when one exists.
+    pub async fn task_runner(&self) -> Option<Arc<crate::storage::TaskRunner>> {
+        self.subagent_manager.get_task_runner().await
+    }
+
+    /// Drain one session's queued task notifications into a wake prompt and its
+    /// v2 `TaskOrigin`, or `None` when nothing is queued.
+    pub async fn take_task_notification_prompt(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, serde_json::Value)> {
+        let runner = self.task_runner().await?;
+        crate::server::prompt_queue::take_task_wake_prompt(&runner, session_id)
+    }
+
     /// Live MCP server entries for one session (v2 `agent.getMcpServers`), for
     /// the ACP `/mcp` builtin. Session-injected servers win over the shared
     /// manager, exactly as the turn's toolset resolves them.

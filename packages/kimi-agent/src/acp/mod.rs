@@ -235,6 +235,54 @@ impl AcpServer {
         );
     }
 
+    /// Deliver background-task completions as their own turns (v2
+    /// `taskService.notifyAgentTask` → `loop.notify`): the ACP prompt path does
+    /// not use the REST prompt queue, so this is what turns a queued completion
+    /// into a model turn. One batch per turn; a task that finishes later rings
+    /// the runner's bell for [`Self::task_wake_loop`].
+    async fn run_task_notifications(
+        &self,
+        engine: &Arc<crate::server::engine::ServerEngine>,
+        session_id: &str,
+    ) {
+        let key = format!("wake-{}", fastrand::u64(..));
+        if !self.begin_prompt(&key, session_id) {
+            return;
+        }
+        while let Some((text, origin)) = engine.take_task_notification_prompt(session_id).await {
+            if let Ok(report) = self
+                .run_model_turn(engine, session_id, &text, Vec::new(), Some(origin))
+                .await
+            {
+                self.emit_turn_visibility(engine, session_id, &report).await;
+            }
+        }
+        self.end_prompt(&key);
+        self.emit_session_info(session_id, false);
+    }
+
+    /// Idle background-task wake for the stdio ACP server (v2 `loop.notify`): a
+    /// completion that lands while no prompt is running starts a notification
+    /// turn. Per-request bridge servers do not start it — their connection's
+    /// prompts drain the queue after each turn.
+    async fn task_wake_loop(&self) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        let Some(runner) = engine.task_runner().await else {
+            return;
+        };
+        let mut bell = runner.notification_bell();
+        loop {
+            if bell.changed().await.is_err() {
+                return;
+            }
+            for session_id in runner.sessions_with_pending_notifications() {
+                self.run_task_notifications(&engine, &session_id).await;
+            }
+        }
+    }
+
     /// Execute one advertised builtin locally. Never starts a model turn.
     async fn run_builtin_command(&self, session_id: &str, name: &str, args: &str) -> String {
         match name {
@@ -679,6 +727,15 @@ impl AcpServer {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpOutbound>();
         self.set_notification_sink(tx.clone());
+
+        // Idle background-task wake: a task that finishes while no prompt is
+        // running starts a notification turn (v2 `loop.notify`). Only the
+        // dedicated stdio server owns this loop — bridge servers are attached
+        // to a connection whose prompts drain the queue after each turn.
+        {
+            let wake = self.clone();
+            tokio::spawn(async move { wake.task_wake_loop().await });
+        }
 
         let writer = tokio::spawn(async move {
             let mut stdout = tokio::io::stdout();
@@ -1244,7 +1301,14 @@ impl AcpServer {
                                                 )
                                                 .await;
                                             self.end_prompt(&request_key);
-                                            self.prompt_outcome(engine, sid, req.id, result).await
+                                            let response = self
+                                                .prompt_outcome(engine, sid, req.id.clone(), result)
+                                                .await;
+                                            // Completions that landed while the
+                                            // turn ran become their own turns
+                                            // (v2 `loop.notify`).
+                                            self.run_task_notifications(engine, sid).await;
+                                            response
                                         }
                                         Err(error) => {
                                             self.end_prompt(&request_key);
@@ -1276,7 +1340,13 @@ impl AcpServer {
                                 let result =
                                     self.run_model_turn(engine, sid, &p, media, None).await;
                                 self.end_prompt(&request_key);
-                                self.prompt_outcome(engine, sid, req.id, result).await
+                                let response = self
+                                    .prompt_outcome(engine, sid, req.id.clone(), result)
+                                    .await;
+                                // Completions that landed while the turn ran
+                                // become their own turns (v2 `loop.notify`).
+                                self.run_task_notifications(engine, sid).await;
+                                response
                             }
                         } else {
                             // No engine is wired (e.g. no model could be
@@ -3772,6 +3842,44 @@ mod tests {
         (format!("http://{addr}/v1"), server)
     }
 
+    /// A local OpenAI-compatible SSE endpoint that answers `count` complete
+    /// turns, recording each request body's prompt text.
+    async fn spawn_repeating_openai_server(
+        count: usize,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for _ in 0..count {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 65536];
+                let read = sock.read(&mut buf).await.unwrap_or(0);
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..read]).into_owned());
+                let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                            data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                            data: [DONE]\n\n";
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        (format!("http://{addr}/v1"), requests, server)
+    }
+
     /// An engine whose one model is the local mock endpoint.
     fn engine_with_native_llm(
         store: &Arc<SqliteSessionStore>,
@@ -4644,5 +4752,105 @@ max_context_size = 100000
             .find(|update| update["update"]["sessionUpdate"] == "usage_update")
             .unwrap_or_else(|| panic!("missing replayed usage: {updates:?}"));
         assert_eq!(usage["update"]["size"], 100000);
+    }
+    /// v2 `loop.notify` on the ACP entry point: a background completion that
+    /// is waiting when a prompt runs becomes its own model turn after the
+    /// prompt response, carrying the rendered notification and task origin.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_acp_prompt_drains_background_task_notifications() {
+        let (base_url, requests, mock) = spawn_repeating_openai_server(2).await;
+        let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+        let engine = engine_with_native_llm(&store, &base_url);
+        let runner = Arc::new(crate::storage::TaskRunner::new(None));
+        engine
+            .subagent_manager()
+            .set_task_runner(runner.clone())
+            .await;
+        let server = AcpServer::with_engine(store.clone(), engine);
+
+        let new_req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {}
+        });
+        let sid = server
+            .handle_message(&new_req.to_string())
+            .await
+            .unwrap()
+            .result
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        runner
+            .spawn_task_with_meta(
+                crate::storage::TaskSpawnMeta {
+                    session_id: Some(sid.as_str()),
+                    kind: "bash",
+                    subagent_type: None,
+                    agent_id: None,
+                },
+                "t-wake".into(),
+                "wake job".into(),
+                async { crate::storage::TaskOutcome::Completed("wake output".to_string()) },
+            )
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runner.pending_notification_count(Some(&sid)) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the task never queued its notification"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let prompt = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/prompt",
+            "params": { "sessionId": sid, "prompt": "hello" }
+        });
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            server.handle_message(&prompt.to_string()),
+        )
+        .await
+        .expect("the prompt must settle")
+        .unwrap();
+        assert!(resp.error.is_none(), "unexpected error: {resp:?}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while requests.lock().unwrap().len() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the notification turn never reached the model"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let bodies = requests.lock().unwrap();
+        assert!(
+            bodies[1].contains("Background task t-wake (completed) finished: wake job"),
+            "the wake turn must carry the rendered notification: {}",
+            bodies[1]
+        );
+        assert!(
+            bodies[1].contains("wake output"),
+            "the wake turn must carry the output preview: {}",
+            bodies[1]
+        );
+        drop(bodies);
+
+        let turns = store.list_turns(&sid).unwrap();
+        assert!(
+            turns.iter().any(|turn| {
+                turn.origin
+                    .as_ref()
+                    .and_then(|origin| origin.get("kind"))
+                    .and_then(|kind| kind.as_str())
+                    == Some("task")
+            }),
+            "the wake turn records the v2 task origin: {turns:?}"
+        );
+
+        mock.abort();
     }
 }

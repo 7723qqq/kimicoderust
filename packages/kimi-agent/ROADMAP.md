@@ -9292,3 +9292,18 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
 - **剩余**：`adaptive_thinking = None` 时未按 v2 `requiresAdaptiveThinking` 从
   `support_efforts` 推断（`NativeLlmConfig` 不携带该字段）；budget 模式下
   `supportsEffortParam` 的 `output_config.effort` 未发送。
+
+## 36. 2026-10-31 ACP 后台任务唤醒（loop.notify）
+
+- `ServerEngine::task_runner()` / `take_task_notification_prompt()`：向 ACP 暴露
+  进程级 runner 与渲染好的通知批次（复用 `prompt_queue::take_task_wake_prompt`）。
+- ACP prompt 路径（`run_model_turn` 之后）在 `end_prompt` 后把排队中的后台任务通知
+  逐个跑成独立回合（`task` origin、无 prompt 事件），用户响应先返回，通知回合的事件
+  随后以 `session/update` 流式下发。
+- `run_stdio` 启动空闲唤醒循环：runner 的 bell 触发 → 枚举有待通知的会话 →
+  `run_task_notifications`（`begin_prompt` 以 `wake-*` 合成 key 串行化）。桥接型
+  per-request server 不启动该循环（其连接上的 prompt 回合结束会自行 drain）。
+- 测试：`test_acp_prompt_drains_background_task_notifications`（待通知 → prompt 回合
+  → 第二回合请求体含渲染通知与输出预览、turn origin 为 `task`）。
+- **剩余**：ACP 会话空闲时若任务完成，只有 stdio server 会唤醒；HTTP-ACP 桥接
+  连接没有空闲唤醒。
