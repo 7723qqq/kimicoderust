@@ -2155,3 +2155,58 @@ fn mcp_section_parses_the_global_deferred_default() {
     let absent = KimiConfig::from_str("[mcp]\nstartupTimeoutMs = 1000\n").unwrap();
     assert_eq!(absent.mcp.default_deferred, None);
 }
+
+/// An adaptive anthropic model takes the level on `output_config.effort` and
+/// never a token budget (v2 `encodeThinking` adaptive mode), so the resolved
+/// transport must carry the effort string — including an explicit `off`.
+#[test]
+fn adaptive_anthropic_native_llm_carries_the_effort_not_a_budget() {
+    let config = KimiConfig::from_str(
+        r#"
+[providers.anthropic]
+type = "anthropic"
+api_key = "sk-ant"
+base_url = "https://api.anthropic.com/v1"
+
+[models.adaptive]
+provider = "anthropic"
+model = "claude-adaptive"
+adaptive_thinking = true
+support_efforts = ["low", "medium", "high"]
+default_effort = "high"
+"#,
+    )
+    .unwrap();
+    let resolved = config.extract_native_llm(Some("adaptive")).unwrap();
+    let llm = super::native_llm_config(resolved, Some("medium"), None);
+    assert_eq!(llm.thinking_budget, None, "adaptive mode sends no budget");
+    assert_eq!(llm.reasoning_effort.as_deref(), Some("medium"));
+
+    let resolved = config.extract_native_llm(Some("adaptive")).unwrap();
+    let off = super::native_llm_config(resolved, Some("off"), None);
+    assert_eq!(
+        off.reasoning_effort.as_deref(),
+        Some("off"),
+        "the encoder needs the explicit disable"
+    );
+    assert_eq!(off.thinking_budget, None);
+
+    // A plain anthropic model keeps the budget encoding.
+    let config = KimiConfig::from_str(
+        r#"
+[providers.anthropic]
+type = "anthropic"
+api_key = "sk-ant"
+base_url = "https://api.anthropic.com/v1"
+
+[models.plain]
+provider = "anthropic"
+model = "claude-sonnet"
+"#,
+    )
+    .unwrap();
+    let resolved = config.extract_native_llm(Some("plain")).unwrap();
+    let plain = super::native_llm_config(resolved, Some("high"), None);
+    assert_eq!(plain.thinking_budget, Some(32_000));
+    assert_eq!(plain.reasoning_effort, None);
+}

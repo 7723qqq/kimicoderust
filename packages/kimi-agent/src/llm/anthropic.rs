@@ -88,15 +88,28 @@ pub fn build_request_full(
         None,
         None,
         None,
+        false,
     )
+}
+
+/// v2 `budgetTokensForEffort`: the Anthropic thinking budget a declared level
+/// maps to. A numeric level is its own budget; a level outside the table (or
+/// `on`) leaves the budget to the provider and yields `None`.
+fn budget_for_effort(effort: &str) -> Option<u32> {
+    match effort {
+        "low" => Some(1024),
+        "medium" => Some(4096),
+        "on" | "high" => Some(32_000),
+        other => other.parse::<u32>().ok().filter(|value| *value > 0),
+    }
 }
 
 /// [`build_request_full`] plus the runtime inputs the transport knows: the
 /// resolved effort and provider family (Kimi's anthropic trait encodes thinking
 /// as `{type:'enabled'}` + `output_config.effort` rather than an Anthropic
 /// `budget_tokens`), the session's prompt-cache key (`metadata.user_id`, v2
-/// `format.ts:243`), and the per-request completion cap (v2
-/// `resolveMaxCompletionCap`).
+/// `format.ts:243`), the per-request completion cap (v2
+/// `resolveMaxCompletionCap`), and whether the model's thinking is adaptive.
 #[allow(clippy::too_many_arguments)]
 pub fn build_request_for_provider(
     model: &str,
@@ -110,6 +123,7 @@ pub fn build_request_for_provider(
     provider_type: Option<&str>,
     cache_key: Option<&str>,
     completion_cap: Option<u32>,
+    adaptive_thinking: bool,
 ) -> Value {
     let mut system = String::new();
     let mut msgs: Vec<Value> = Vec::new();
@@ -229,6 +243,17 @@ pub fn build_request_for_provider(
     }
 
     let is_kimi = provider_type.is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
+    // v2 `budgetTokensForEffort`: a declared thinking level is the budget's
+    // source when the transport carries no explicit one — the standalone
+    // config path resolves `thinking.effort` into `reasoning_effort` only.
+    let effort_thinking_off =
+        reasoning_effort.is_some_and(|effort| matches!(effort, "" | "off" | "none"));
+    let effort_budget = reasoning_effort
+        .filter(|effort| !matches!(*effort, "" | "off" | "none"))
+        .and_then(budget_for_effort);
+    let thinking_budget = thinking_budget
+        .filter(|budget| *budget > 0)
+        .or(effort_budget);
     let effective_max_tokens = if is_kimi {
         // The Claude ceiling table says nothing about a Kimi model: v2's
         // `resolveDefaultMaxTokens` falls through to the requested cap for an
@@ -274,13 +299,34 @@ pub fn build_request_for_provider(
                 }
             }
         }
-    } else if let Some(budget) = thinking_budget
-        && budget > 0
-    {
+    } else if adaptive_thinking {
+        // v2 `encodeThinking` adaptive mode: the provider decides how much to
+        // think, the resolved level rides `output_config.effort`, and no
+        // `budget_tokens` is sent. `off` stays an explicit protocol disable.
+        match reasoning_effort.filter(|value| !value.is_empty()) {
+            Some(effort) if effort == "off" || effort == "none" => {
+                req["thinking"] = json!({ "type": "disabled" });
+            }
+            Some(effort) => {
+                req["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+                if effort != "on" {
+                    req["output_config"] = json!({ "effort": effort });
+                }
+            }
+            None => {
+                req["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+            }
+        }
+    } else if let Some(budget) = thinking_budget {
         req["thinking"] = json!({
             "type": "enabled",
             "budget_tokens": budget,
         });
+    } else if !effort_thinking_off && reasoning_effort.is_some() {
+        // A level the budget table does not know (or `on`) enables thinking
+        // without a concrete budget, matching v2's `budgetTokensForEffort`
+        // fallthrough.
+        req["thinking"] = json!({ "type": "enabled" });
     }
     if let Some(keep) = thinking_keep
         && !keep.is_empty()
@@ -1459,6 +1505,81 @@ mod tests {
         assert!(req_no_keep.get("context_management").is_none());
     }
 
+    /// v2 `encodeThinking` adaptive mode: the level rides
+    /// `output_config.effort`, the thinking block is `adaptive`, and no token
+    /// budget is sent.
+    #[test]
+    fn test_build_request_adaptive_thinking() {
+        let msgs = vec![WireMessage::text("user", "hello")];
+        let build = |effort: Option<&str>| {
+            build_request_for_provider(
+                "claude-opus-4-6",
+                64_000,
+                &msgs,
+                &[],
+                true,
+                None,
+                None,
+                effort,
+                Some("anthropic"),
+                None,
+                Some(50_000),
+                true,
+            )
+        };
+        let high = build(Some("high"));
+        assert_eq!(
+            high["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
+        );
+        assert_eq!(high["output_config"]["effort"], "high");
+        assert!(high["thinking"].get("budget_tokens").is_none());
+        // `on` enables adaptive thinking without a level.
+        let on = build(Some("on"));
+        assert_eq!(on["thinking"]["type"], "adaptive");
+        assert!(on.get("output_config").is_none());
+        // Off stays an explicit protocol-level disable.
+        let off = build(Some("off"));
+        assert_eq!(off["thinking"], json!({ "type": "disabled" }));
+        assert!(off.get("output_config").is_none());
+    }
+
+    /// v2 `budgetTokensForEffort`: a declared level is the budget source when
+    /// the transport carries no explicit budget (the standalone config path
+    /// resolves `thinking.effort` into `reasoning_effort` only).
+    #[test]
+    fn test_build_request_derives_the_budget_from_the_effort() {
+        let msgs = vec![WireMessage::text("user", "hello")];
+        let build = |effort: Option<&str>| {
+            build_request_for_provider(
+                "claude-sonnet-4-5",
+                4096,
+                &msgs,
+                &[],
+                true,
+                None,
+                None,
+                effort,
+                Some("anthropic"),
+                None,
+                None,
+                false,
+            )
+        };
+        for (effort, budget) in [
+            ("low", 1024),
+            ("medium", 4096),
+            ("high", 32_000),
+            ("8192", 8192),
+        ] {
+            let req = build(Some(effort));
+            assert_eq!(req["thinking"]["type"], "enabled", "{effort}");
+            assert_eq!(req["thinking"]["budget_tokens"], budget, "{effort}");
+        }
+        assert!(build(Some("off")).get("thinking").is_none());
+        assert!(build(None).get("thinking").is_none());
+    }
+
     #[test]
     fn test_build_request_kimi_anthropic_trait() {
         let msgs = vec![WireMessage::text("user", "hello")];
@@ -1475,6 +1596,7 @@ mod tests {
                 Some("kimi"),
                 Some("sess-9"),
                 Some(50_000),
+                false,
             )
         };
 
@@ -1511,6 +1633,7 @@ mod tests {
             Some("anthropic"),
             None,
             Some(50_000),
+            false,
         );
         assert_eq!(standard["thinking"]["budget_tokens"], 32_000);
         assert!(standard.get("output_config").is_none());

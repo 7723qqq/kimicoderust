@@ -417,6 +417,7 @@ impl NativeHttpLlm {
                 self.config.provider_type.as_deref(),
                 self.cache_key.as_deref(),
                 Some(completion_cap),
+                self.config.adaptive_thinking.unwrap_or(false),
             )
         } else if is_responses {
             openai_responses::build_request_with_budget(

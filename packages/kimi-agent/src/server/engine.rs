@@ -2256,21 +2256,33 @@ fn apply_session_overrides(spec: &mut PipelineSpec, profile: &serde_json::Value)
                 "off".to_string()
             });
         } else if native.protocol == "anthropic" {
-            native.reasoning_effort = None;
-            native.thinking_budget = if thinking_on {
-                Some(match effort {
-                    "low" => 1024,
-                    "medium" => 4096,
-                    "high" | "on" => 32000,
-                    other => other
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|v| *v > 0)
-                        .unwrap_or(32000),
-                })
+            if native.adaptive_thinking == Some(true) {
+                // v2 `encodeThinking` adaptive mode: the level rides
+                // `output_config.effort` (off is an explicit disable) and no
+                // token budget is sent.
+                native.thinking_budget = None;
+                native.reasoning_effort = Some(if thinking_on {
+                    effort.to_string()
+                } else {
+                    "off".to_string()
+                });
             } else {
-                None
-            };
+                native.reasoning_effort = None;
+                native.thinking_budget = if thinking_on {
+                    Some(match effort {
+                        "low" => 1024,
+                        "medium" => 4096,
+                        "high" | "on" => 32000,
+                        other => other
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|v| *v > 0)
+                            .unwrap_or(32000),
+                    })
+                } else {
+                    None
+                };
+            }
         } else {
             native.thinking_budget = None;
             native.reasoning_effort = thinking_on.then(|| effort.to_string());

@@ -9269,3 +9269,26 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
 - **剩余**：plugin 提供的 MCP 服务器由引擎插件管理器持有，host 侧没有其配置层，
   locator 解析不到（v2 以 pluginId+manifest 名解析）；standalone Rust server 仍只有
   device-code，没有浏览器 auth-code 路由。
+
+## 35. 2026-10-31 Anthropic adaptive thinking 与 effort→budget 推导
+
+- `llm/anthropic.rs`：`build_request_for_provider` 新增 `adaptive_thinking` 参数
+  （transport 传 `NativeLlmConfig.adaptive_thinking`）。adaptive 模型按 v2
+  `encodeThinking` 编码：`thinking: {type:'adaptive', display:'summarized'}` +
+  `output_config: {effort}`（`on` 省略 effort），`off` 为显式 `{type:'disabled'}`，
+  不再发送 `budget_tokens`。
+- 同函数补上 v2 `budgetTokensForEffort`：transport 未带显式预算时，`reasoning_effort`
+  推导预算（low 1024 / medium 4096 / on|high 32000 / 数字原样），并参与
+  `max_tokens` 抬升；`off` 不发送 thinking。此前 standalone 路径只解析
+  `thinking.effort` 而编码器只读 `thinking_budget`，非 Kimi anthropic 的
+  effort 配置因此**完全没有上线**。
+- `config::native_llm_config` 与 `apply_session_overrides`：adaptive anthropic 模型
+  把等级写入 `reasoning_effort`（含显式 `off`）、`thinking_budget` 保持 None；
+  非 adaptive 模型维持 budget 编码。
+- 测试：`test_build_request_adaptive_thinking`、
+  `test_build_request_derives_the_budget_from_the_effort`、
+  `adaptive_anthropic_native_llm_carries_the_effort_not_a_budget`；
+  `cargo test --lib` 3304 passed / 0 failed。
+- **剩余**：`adaptive_thinking = None` 时未按 v2 `requiresAdaptiveThinking` 从
+  `support_efforts` 推断（`NativeLlmConfig` 不携带该字段）；budget 模式下
+  `supportsEffortParam` 的 `output_config.effort` 未发送。

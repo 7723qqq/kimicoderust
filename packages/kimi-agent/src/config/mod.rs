@@ -1860,6 +1860,13 @@ fn native_llm_config(
             llm.reasoning_effort = Some(effort.to_string());
         }
     }
+    // Adaptive anthropic models take the level on `output_config.effort`, not
+    // a token budget (v2 `encodeThinking` adaptive mode), so the effort string
+    // — including an explicit `off` — is what the encoder needs.
+    if llm.protocol == "anthropic" && llm.adaptive_thinking == Some(true) {
+        llm.thinking_budget = None;
+        llm.reasoning_effort = Some(effort.unwrap_or("off").to_string());
+    }
     llm
 }
 
