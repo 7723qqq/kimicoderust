@@ -540,7 +540,7 @@ impl HttpServer {
         self,
         service: Arc<crate::mcp::oauth::McpOAuthService>,
     ) -> Self {
-        self.mcp_manager.set_oauth_service(service.clone()).await;
+        self.mcp_manager.set_oauth_service(service.clone());
         *self.mcp_oauth.lock().await = Some(service);
         self
     }
@@ -5542,25 +5542,6 @@ impl HttpServer {
                     .get("instruction")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty());
-                self.hub
-                    .bus_for(session_id)
-                    .publish(&crate::events::EngineEvent::Custom(json!({
-                        "type": "compaction.started",
-                        "sessionId": session_id,
-                        "instruction": instruction,
-                    })));
-                // Summarize the prefix this compaction is about to fold away, so
-                // the compacted history carries a written summary instead of the
-                // fixed placeholder. The NAPI path has always summarized; this
-                // endpoint did not, so the same "compact" action produced
-                // different history depending on which client asked for it.
-                //
-                // A summary is mandatory once the split is non-trivial (the
-                // store rejects blank ones), so the prerequisites are resolved
-                // BEFORE the history is touched and each failure carries its
-                // own status: no engine or no bound model is a server
-                // configuration problem (503, matching the steer route), while
-                // a summarizer that ran and failed is a request failure (500).
                 let engine = match self.engine.as_ref() {
                     Some(engine) => engine,
                     None => {
@@ -5570,105 +5551,19 @@ impl HttpServer {
                         );
                     }
                 };
-                let llm = match engine.session_llm(session_id).await {
-                    Some(llm) => llm,
-                    None => {
-                        return HttpResponse::json(
-                            503,
-                            &json!({
-                                "error": "no model is bound to this session; compact requires a model to write the summary",
-                            }),
-                        );
+                match engine.compact_session(session_id, instruction).await {
+                    Ok(report) => HttpResponse::ok(&json!({
+                        "compacted": true,
+                        "removed": report.removed,
+                        "sessionId": session_id,
+                        "compactedCount": report.compacted_count,
+                        "tokensBefore": report.tokens_before,
+                        "tokensAfter": report.tokens_after,
+                    })),
+                    Err(crate::server::engine::EngineError::NoModel(message)) => {
+                        HttpResponse::json(503, &json!({ "error": message }))
                     }
-                };
-                let history = match self.store.load_session_history(session_id) {
-                    Ok(history) => history,
-                    Err(e) => return HttpResponse::internal_error(format!("Database error: {e}")),
-                };
-                let config = crate::compaction::CompactionConfig {
-                    max_attempts: engine.compaction_max_attempts(),
-                    ..crate::compaction::CompactionConfig::default()
-                };
-                let count = crate::compaction::compute_compact_count_manual(&history, &config);
-                let summary = if count == 0 {
-                    // Nothing to fold: the store's own no-op path reports it.
-                    None
-                } else {
-                    // v2 #3911: pre-shrink the summarizer's first request to
-                    // the effective window — the configured `max_context_tokens`
-                    // lowered by any overflow observed in this process (v2
-                    // `getEffectiveMaxContextTokens`).
-                    let configured_window = self
-                        .store
-                        .get_state("metadata", session_id)
-                        .ok()
-                        .flatten()
-                        .and_then(|metadata| {
-                            metadata
-                                .get("max_context_tokens")
-                                .and_then(|value| value.as_u64())
-                                .and_then(|value| u32::try_from(value).ok())
-                        });
-                    let effective_window = crate::compaction::effective_max_tokens(
-                        llm.model_name(),
-                        configured_window,
-                    );
-                    match crate::compaction::summarize_with_llm_budgeted(
-                        &history[1..count as usize],
-                        llm.as_ref(),
-                        instruction,
-                        None,
-                        config.max_attempts,
-                        effective_window,
-                    )
-                    .await
-                    {
-                        // v2 `postProcessSummary`: a session with todos keeps
-                        // them — the rendered list rides after the summary.
-                        Ok(summary) => Some(crate::compaction::post_process_summary(
-                            summary,
-                            engine.session_todo_summary(session_id),
-                        )),
-                        Err(error) => return HttpResponse::internal_error(error.to_string()),
-                    }
-                };
-                match self
-                    .store
-                    .compact_session_with_summary(session_id, instruction, summary)
-                {
-                    Ok(report) => {
-                        self.hub
-                            .bus_for(session_id)
-                            .publish(&crate::events::EngineEvent::Custom(json!({
-                                "type": "compaction.completed",
-                                "sessionId": session_id,
-                                "compactedCount": report.compacted_count,
-                                "removed": report.removed,
-                                "tokensBefore": report.tokens_before,
-                                "tokensAfter": report.tokens_after,
-                                "keptUserMessageCount": report.kept_user_message_count,
-                            })));
-                        // Web-vocabulary alias (`event.session.history_compacted`):
-                        // the journal seq and summary message id are not tracked
-                        // on this path, so the cut is reported without them.
-                        self.hub
-                            .bus_for(session_id)
-                            .publish(&crate::events::EngineEvent::Custom(json!({
-                                "type": "event.session.history_compacted",
-                                "before_seq": Value::Null,
-                                "reason": "manual",
-                                "summary_message_id": Value::Null,
-                            })));
-                        HttpResponse::ok(&json!({
-                            "compacted": true,
-                            "removed": report.removed,
-                            "sessionId": session_id,
-                            "compactedCount": report.compacted_count,
-                            "tokensBefore": report.tokens_before,
-                            "tokensAfter": report.tokens_after,
-                        }))
-                    }
-                    Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
+                    Err(error) => HttpResponse::internal_error(error.to_string()),
                 }
             }
             ("POST", p) if extract_session_action(p, "undo").is_some() => {

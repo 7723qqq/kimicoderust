@@ -30,9 +30,16 @@ impl McpOAuthFileStore {
     /// "no credentials", exactly like v2's catch-and-return-undefined.
     pub fn read<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         let raw = std::fs::read_to_string(self.path(key)).ok()?;
-        let blob: EncryptedBlob = serde_json::from_str(&raw).ok()?;
-        let plaintext = crypto::decrypt(&blob).ok()?;
-        serde_json::from_str(&plaintext).ok()
+        // Encrypted envelope first. A plaintext record is the legacy shape
+        // other hosts in this fork still write (the node-sdk test helper, and
+        // tokens written before this store existed); it stays readable rather
+        // than being silently treated as absent and forcing a re-login.
+        if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(&raw)
+            && let Ok(plaintext) = crypto::decrypt(&blob)
+        {
+            return serde_json::from_str(&plaintext).ok();
+        }
+        serde_json::from_str(&raw).ok()
     }
 
     /// Encrypt and atomically replace one entry.
@@ -123,6 +130,23 @@ mod tests {
             access_token: access.into(),
             refresh_token: "refresh".into(),
         }
+    }
+
+    #[test]
+    fn test_plaintext_records_remain_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McpOAuthFileStore::new(dir.path());
+        std::fs::write(
+            dir.path().join("legacy.json"),
+            r#"{"access_token":"legacy-token","token_type":"Bearer"}"#,
+        )
+        .unwrap();
+        #[derive(Deserialize)]
+        struct LegacyTokens {
+            access_token: String,
+        }
+        let read: LegacyTokens = store.read("legacy").expect("plaintext record");
+        assert_eq!(read.access_token, "legacy-token");
     }
 
     #[test]

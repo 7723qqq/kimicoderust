@@ -10,9 +10,9 @@ description:
   en: >
       The napi export surface: session creation, plugin registry exports, tool callbacks and telemetry wiring.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T12:58:11.655Z"
-fingerprint: 498bd624208690b482bd33ee3c5e192c285ac80f74b6194be97770a910f00cbd
+revision: 2a1e7db68658f9ff1010d85502486526ccc37969
+updated_at: "2026-10-31T14:35:12.980Z"
+fingerprint: 4db9456af8d2ebe41a7e96ed4c4c769544566620fd1170c6d1218e718da4ef82
 source:
   - path: "packages/kimi-agent/src/napi_bindings.rs"
 apis:

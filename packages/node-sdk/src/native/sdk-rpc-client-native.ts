@@ -78,7 +78,7 @@ import type {
   TokenUsage,
   TurnEndReason,
 } from '@moonshot-ai/protocol';
-import { kimiErrorCodeSchema, mcpOAuthStoreKey } from '@moonshot-ai/protocol';
+import { kimiErrorCodeSchema } from '@moonshot-ai/protocol';
 import { ZipFile } from 'yazl';
 
 import { KimiAuthFacade } from '#/auth';
@@ -126,6 +126,16 @@ import {
   type UpdateSessionMetadataRpcInput,
 } from '#/rpc';
 import { appendAdditionalDir, readAdditionalDirs, resolveAdditionalDirs } from '#/project-local-config';
+import {
+  loadMcpServerLayers,
+  resolveMcpServersForEngine,
+  type StoredMcpServerConfig,
+} from './mcp-config';
+import {
+  beginMcpOAuthFlow,
+  cancelMcpOAuthFlow,
+  completeMcpOAuthFlow,
+} from './mcp-oauth';
 import type {
   AddAdditionalDirInput,
   AddAdditionalDirResult,
@@ -985,22 +995,6 @@ function resolveExperimentalFeatures(config: KimiConfig): readonly ExperimentalF
   });
 }
 
-/** A stored mcp.json entry as read from disk (the transport tag is optional). */
-interface StoredMcpServerConfig {
-  transport?: 'stdio' | 'http' | 'sse';
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>;
-  auth?: 'oauth';
-  bearerTokenEnvVar?: string;
-  enabled?: boolean;
-  name?: string;
-  /** Keep this server's tools out of the top-level list; load them via `select_tools`. */
-  deferred?: boolean;
-}
-
 export interface SDKRpcClientNativeOptions {
   readonly homeDir?: string | undefined;
   readonly configPath?: string | undefined;
@@ -1333,58 +1327,6 @@ function parseSwarmResultMembers(content: string): DiscoveredSubagent[] {
     tag.lastIndex = closeIndex + '</subagent>'.length;
   }
   return members;
-}
-
-function resolveMcpServersForEngine(servers: Record<string, StoredMcpServerConfig>): Array<{
-  name: string;
-  transport: string;
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>;
-  deferred?: boolean;
-}> {
-  const result: Array<{
-    name: string;
-    transport: string;
-    command?: string;
-    args?: string[];
-    env?: Record<string, string>;
-    url?: string;
-    headers?: Record<string, string>;
-    deferred?: boolean;
-  }> = [];
-
-  for (const [name, srv] of Object.entries(servers)) {
-    if ((srv as { enabled?: boolean }).enabled === false) continue;
-    // v2 `McpServerConfigSchema` infers the transport when the entry omits it
-    // (`mcpCore/config-schema.ts`): a `command` means stdio, a `url` means
-    // http. Requiring the field explicitly dropped every server written in the
-    // standard MCP shape — `{"mcpServers":{"x":{"command":"…","args":[…]}}}` —
-    // silently, so the session started with no MCP servers and nothing said so.
-    const transport =
-      srv.transport ?? (typeof srv.command === 'string' ? 'stdio' : typeof srv.url === 'string' ? 'http' : undefined);
-    if (transport === 'stdio' && srv.command) {
-      result.push({
-        name,
-        transport: 'stdio',
-        command: srv.command,
-        ...(srv.args ? { args: srv.args } : {}),
-        ...(srv.env ? { env: srv.env } : {}),
-        ...(srv.deferred === true ? { deferred: true } : {}),
-      });
-    } else if ((transport === 'http' || transport === 'sse') && srv.url) {
-      result.push({
-        name,
-        transport: 'sse',
-        url: srv.url,
-        ...(srv.headers ? { headers: srv.headers } : {}),
-        ...(srv.deferred === true ? { deferred: true } : {}),
-      });
-    }
-  }
-  return result;
 }
 
 export class SDKRpcClientNative extends SDKRpcClientBase {
@@ -2432,7 +2374,14 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       policySnapshot.non_interactive = true;
     }
     const githubCreds = resolveGithubCredentials(config);
-    const mcpConfig = this.loadGlobalMcpConfig();
+    // v2 `loadMcpServersDetailed`: user < project-root `.mcp.json` < project
+    // `.kimi-code/mcp.json`, with the project layers behind workspace trust.
+    const { trusted } = await this.getWorkspaceTrustInfo(meta.workDir);
+    const mcpConfig = loadMcpServerLayers({
+      homeDir: this.homeDir,
+      workDir: meta.workDir,
+      includeProject: trusted,
+    });
     const mcpServers = resolveMcpServersForEngine(mcpConfig);
     const subagentTimeoutMs = resolveSubagentTimeoutMs(config);
     const swarmTimeoutMs = resolveSwarmTimeoutMs(config);
@@ -2566,6 +2515,9 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       ...(githubCreds.githubBaseUrl ? { githubBaseUrl: githubCreds.githubBaseUrl } : {}),
       ...(nativeLlm ? { nativeLlm } : {}),
       ...(mcpServers.length > 0 ? { mcpServers } : {}),
+      // The engine installs its OAuth service from this directory, so stored
+      // grants are injected and refreshed on the same connection.
+      mcpOauthDir: this.mcpOAuthDir(),
       // M1c turn telemetry: the host knows the model configuration, the
       // engine contributes the outcome fields and emits turn_started /
       // turn_ended / turn_interrupted through the telemetry callback (v2's
@@ -5118,7 +5070,7 @@ private renderProjectSkillPrompt(
     if (server.bearerTokenEnvVar !== undefined) return 'bearer-token';
     if (server.headers !== undefined && server.auth !== 'oauth') return 'not-applicable';
     if (server.transport !== 'http' && server.auth !== 'oauth') return 'not-applicable';
-    const tokens = this.readMcpOAuthTokens(name, server.url ?? '');
+    const tokens = await this.readMcpOAuthTokens(name, server.url ?? '');
     const offline = (): GlobalMcpServerAuthStatus['authStatus'] => {
       if (tokens.hasTokens) {
         return !tokens.expired || tokens.hasRefreshToken
@@ -5140,34 +5092,60 @@ private renderProjectSkillPrompt(
     return offline();
   }
 
-  /** The stored MCP OAuth token state for one server (`<home>/credentials/mcp`). */
-  private readMcpOAuthTokens(
+  /** Directory holding the engine's encrypted MCP OAuth records. */
+  private mcpOAuthDir(): string {
+    return join(this.homeDir, 'credentials', 'mcp');
+  }
+
+  /** The engine stub: storage, decryption and refresh all live in Rust. */
+  private async engineMcpOAuth(): Promise<{
+    mcpOauthTokenState(name: string, url: string, dir: string): Promise<string>;
+    mcpOauthStoreTokens(
+      name: string,
+      url: string,
+      tokensJson: string,
+      dir: string,
+    ): string;
+    mcpOauthRemove(name: string, url: string, dir: string): boolean;
+    mcpOauthReconnect(name: string): Promise<number>;
+  }> {
+    return (await import('@moonshot-ai/kimi-agent/native')) as unknown as {
+      mcpOauthTokenState(name: string, url: string, dir: string): Promise<string>;
+      mcpOauthStoreTokens(
+        name: string,
+        url: string,
+        tokensJson: string,
+        dir: string,
+      ): string;
+      mcpOauthRemove(name: string, url: string, dir: string): boolean;
+      mcpOauthReconnect(name: string): Promise<number>;
+    };
+  }
+
+  /** The stored MCP OAuth token state for one server (engine-decrypted). */
+  private async readMcpOAuthTokens(
     name: string,
     url: string,
-  ): {
+  ): Promise<{
     hasTokens: boolean;
     expired: boolean;
     hasRefreshToken: boolean;
     accessToken: string | undefined;
-  } {
+  }> {
     try {
-      const key = mcpOAuthStoreKey(name, url);
-      const raw = readFileSync(
-        join(this.homeDir, 'credentials', 'mcp', `${key}-tokens.json`),
-        'utf8',
-      );
+      const native = await this.engineMcpOAuth();
+      const raw = await native.mcpOauthTokenState(name, url, this.mcpOAuthDir());
       const parsed = JSON.parse(raw) as {
-        access_token?: string;
-        refresh_token?: string;
-        expires_at?: string;
+        hasTokens?: boolean;
+        expired?: boolean;
+        hasRefreshToken?: boolean;
+        accessToken?: string | null;
       };
-      const hasTokens = typeof parsed.access_token === 'string' && parsed.access_token.length > 0;
-      const expiresAt = parsed.expires_at !== undefined ? Date.parse(parsed.expires_at) : NaN;
       return {
-        hasTokens,
-        expired: Number.isFinite(expiresAt) && expiresAt <= Date.now(),
-        hasRefreshToken: typeof parsed.refresh_token === 'string' && parsed.refresh_token.length > 0,
-        accessToken: hasTokens ? parsed.access_token : undefined,
+        hasTokens: parsed.hasTokens === true,
+        expired: parsed.expired === true,
+        hasRefreshToken: parsed.hasRefreshToken === true,
+        accessToken: parsed.accessToken ?? undefined,
       };
     } catch {
       return { hasTokens: false, expired: false, hasRefreshToken: false, accessToken: undefined };
@@ -5389,12 +5367,65 @@ private renderProjectSkillPrompt(
         `MCP server "${name}" uses stdio transport and does not support OAuth authorization`,
       );
     }
-    return { status: 'already-authorized' };
+    const url = config?.url;
+    if (config === undefined || url === undefined) {
+      throw new KimiError(
+        ErrorCodes.MCP_SERVER_NOT_FOUND,
+        `MCP server "${name}" is not a configured remote server`,
+      );
+    }
+    // A stored grant that is still usable (or refreshable) needs no browser.
+    const state = await this.readMcpOAuthTokens(name, url);
+    if (state.hasTokens && (!state.expired || state.hasRefreshToken)) {
+      return { status: 'already-authorized' };
+    }
+    const started = await beginMcpOAuthFlow({
+      name,
+      serverUrl: url,
+      clientName: 'Kimi Code',
+      persist: async (tokens) => {
+        const native = await this.engineMcpOAuth();
+        native.mcpOauthStoreTokens(name, url, JSON.stringify(tokens), this.mcpOAuthDir());
+      },
+    });
+    return {
+      status: 'authorization-required',
+      flowId: started.flowId,
+      authorizationUrl: started.authorizationUrl,
+    };
   }
 
-  override async completeGlobalMcpServerAuth(): Promise<void> {}
-  override async cancelGlobalMcpServerAuth(): Promise<void> {}
-  override async resetGlobalMcpServerAuth(): Promise<void> {}
+  override async completeGlobalMcpServerAuth(
+    input: { readonly flowId: string; readonly timeoutMs?: number },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const { name } = await completeMcpOAuthFlow(input.flowId, {
+      timeoutMs: input.timeoutMs,
+      signal,
+    });
+    // The server was marked needs-auth by the failed connection; retry it in
+    // every live manager so the fresh grant takes effect without a new session.
+    try {
+      const native = await this.engineMcpOAuth();
+      await native.mcpOauthReconnect(name);
+    } catch {
+      // A host without live managers still completed the login.
+    }
+  }
+
+  override async cancelGlobalMcpServerAuth(flowId: string): Promise<void> {
+    await cancelMcpOAuthFlow(flowId);
+  }
+
+  override async resetGlobalMcpServerAuth(
+    name: string,
+    _options: { readonly cwd?: string } = {},
+  ): Promise<void> {
+    const config = this.loadGlobalMcpConfig()[name];
+    if (config?.url === undefined) return;
+    const native = await this.engineMcpOAuth();
+    native.mcpOauthRemove(name, config.url, this.mcpOAuthDir());
+  }
 
   override async completeMcpServerAuth(): Promise<void> {}
   override async cancelMcpServerAuth(): Promise<void> {}

@@ -50,6 +50,17 @@ pub struct ProviderConfig {
     pub custom_headers: Option<HashMap<String, String>>,
 }
 
+/// v2 `ModelUpgrade`: the model-migration metadata attached to a retiring
+/// alias (`llm-adapter/model/model.ts:9-14`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelUpgradeConfig {
+    pub model: String,
+    #[serde(default, alias = "migrationMarkdown")]
+    pub migration_markdown: String,
+    #[serde(default, alias = "retirementAt")]
+    pub retirement_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelAliasConfig {
     #[serde(default)]
@@ -117,6 +128,10 @@ pub struct ModelAliasConfig {
     /// instead of omitting the effort field.
     #[serde(rename = "off_effort", alias = "offEffort", default)]
     pub off_effort: Option<String>,
+    /// Model-retirement metadata (v2 `ModelRecord.upgrade`): the suggested
+    /// replacement alias, the migration note, and the retirement date.
+    #[serde(default)]
+    pub upgrade: Option<ModelUpgradeConfig>,
     /// Catalog fields overridden on top of the base record (v2
     /// `ModelRecord.overrides`): a provider-model refresh may rewrite the base
     /// fields, so a user override is the only value that survives it.
@@ -1952,6 +1967,30 @@ pattern = "Read(*)"
         assert_eq!(native_llm.provider_type, "anthropic");
         assert_eq!(native_llm.base_url, "https://api.anthropic.com/v1");
         assert_eq!(native_llm.api_key, "sk-ant-key");
+    }
+
+    /// v2 `ModelRecord.upgrade`: the model-retirement metadata the TUI's
+    /// migration prompt reads. It is catalog data, not transport config, so it
+    /// only has to parse and round-trip.
+    #[test]
+    fn test_model_upgrade_metadata_parses() {
+        let config = KimiConfig::from_str(
+            r#"
+[models.retiring]
+provider = "acme"
+model = "old-model"
+
+[models.retiring.upgrade]
+model = "new-model"
+migration_markdown = "Switch to new-model."
+retirement_at = "2026-12-01"
+"#,
+        )
+        .unwrap();
+        let upgrade = config.models["retiring"].upgrade.as_ref().unwrap();
+        assert_eq!(upgrade.model, "new-model");
+        assert_eq!(upgrade.migration_markdown, "Switch to new-model.");
+        assert_eq!(upgrade.retirement_at.as_deref(), Some("2026-12-01"));
     }
 
     /// The provider family travels with the resolved transport: protocol alone

@@ -525,6 +525,12 @@ export interface JsRunTurnParams {
   /** Native MCP servers configuration (P73). */
   mcpServers?: Array<JsMcpServerConfig>
   /**
+   * Directory of the MCP OAuth credential store (`<home>/credentials/mcp`).
+   * Installed on the session's MCP manager so stored tokens are injected
+   * and refreshed by the engine; `None` leaves OAuth uninstalled.
+   */
+  mcpOauthDir?: string
+  /**
    * Host-resolved `[services.moonshot_search]` / `KIMI_WEB_SEARCH_*`
    * backend (v2 `configSection.ts`). When set, the native WebSearch tool
    * calls this endpoint instead of scraping DuckDuckGo.
@@ -706,6 +712,33 @@ export interface ListDirectoryResult {
   output: string
   error?: string
 }
+
+/**
+ * Reconnect every live manager that knows `name`, so a server marked
+ * `needs-auth` retries with the grant the host just stored. Returns how many
+ * managers reconnected.
+ */
+export declare function mcpOauthReconnect(name: string): Promise<number>
+
+/**
+ * Drop a server's stored grant (`auth:reset`). `false` when nothing was
+ * stored.
+ */
+export declare function mcpOauthRemove(name: string, url: string, dir: string): boolean
+
+/**
+ * Persist tokens obtained by the host's browser flow. The engine owns the
+ * encryption/at-rest format; the host hands over the OAuth token response in
+ * `McpOAuthTokens` JSON shape. Returns the credential store key.
+ */
+export declare function mcpOauthStoreTokens(name: string, url: string, tokensJson: string, dir: string): string
+
+/**
+ * Stored-credential state for the host's auth-status classifier. Reads the
+ * same encrypted store the connection manager injects from; `accessToken` is
+ * the stored value even when expired (the engine refreshes on connect).
+ */
+export declare function mcpOauthTokenState(name: string, url: string, dir: string): Promise<string>
 
 /**
  * Drop a managed bash process handle, killing the tree first if it is still

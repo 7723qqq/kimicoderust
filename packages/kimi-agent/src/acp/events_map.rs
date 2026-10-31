@@ -353,6 +353,79 @@ fn tool_call_result(session_id: &str, event: &Value) -> Value {
     json!({ "sessionId": session_id, "update": update })
 }
 
+/// ACP `available_commands_update` (v2 `availableCommandsUpdateNotification`):
+/// the palette a client shows for the slash menu.
+pub fn available_commands_notification(session_id: &str, commands: &[Value]) -> Value {
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": commands,
+        },
+    })
+}
+
+/// ACP `session_info_update` for a title change (v2
+/// `sessionInfoUpdateNotification`): `title: null` clears it client-side.
+pub fn session_info_update_notification(session_id: &str, title: Option<&str>) -> Value {
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "session_info_update",
+            "title": title,
+        },
+    })
+}
+
+/// ACP `usage_update` after a turn settles (v2 `usageUpdateNotification`):
+/// `used` is the context the session now carries, `size` the bound model's
+/// window. `cost` stays omitted — the engine has no price data.
+pub fn usage_update_notification(session_id: &str, used: u64, size: u64) -> Value {
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "usage_update",
+            "used": used,
+            "size": size,
+        },
+    })
+}
+
+/// ACP `plan` from the session's todo list (v2 `todoListToSessionUpdate`):
+/// empty lists produce no notification, `done` maps to `completed`, and every
+/// entry carries the protocol's default `medium` priority.
+pub fn plan_notification(
+    session_id: &str,
+    items: &[crate::tools::todo_item::TodoItem],
+) -> Option<Value> {
+    use crate::tools::todo_item::TodoStatus;
+    if items.is_empty() {
+        return None;
+    }
+    let entries: Vec<Value> = items
+        .iter()
+        .map(|item| {
+            let status = match item.status {
+                TodoStatus::Pending => "pending",
+                TodoStatus::InProgress => "in_progress",
+                TodoStatus::Done => "completed",
+            };
+            json!({
+                "content": item.title,
+                "priority": "medium",
+                "status": status,
+            })
+        })
+        .collect();
+    Some(json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "plan",
+            "entries": entries,
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +661,55 @@ mod tests {
     }
 
     /// Every `LoopTurnStopReason` variant reaches a real ACP `StopReason`
+    /// v2 `usageUpdateNotification`: the post-turn context gauge. `cost` is
+    /// absent because the engine has no price data.
+    #[test]
+    fn test_usage_update_notification_shape() {
+        let note = usage_update_notification("s1", 1234, 200_000);
+        assert_eq!(note["sessionId"], "s1");
+        assert_eq!(note["update"]["sessionUpdate"], "usage_update");
+        assert_eq!(note["update"]["used"], 1234);
+        assert_eq!(note["update"]["size"], 200_000);
+        assert!(note["update"].get("cost").is_none());
+    }
+
+    /// v2 `todoListToSessionUpdate`: the todo status vocabulary maps onto the
+    /// ACP plan statuses, every entry gets `medium` priority, and an empty
+    /// list produces no notification at all.
+    #[test]
+    fn test_plan_notification_maps_todo_statuses() {
+        use crate::tools::todo_item::{TodoItem, TodoKind, TodoStatus};
+        let item = |id: &str, title: &str, status: TodoStatus| TodoItem {
+            id: id.into(),
+            parent_id: None,
+            kind: TodoKind::Task,
+            title: title.into(),
+            status,
+            progress: None,
+            description: None,
+        };
+        let note = plan_notification(
+            "s1",
+            &[
+                item("T1", "Read", TodoStatus::Pending),
+                item("T2", "Edit", TodoStatus::InProgress),
+                item("T3", "Test", TodoStatus::Done),
+            ],
+        )
+        .expect("a non-empty list renders a plan");
+        assert_eq!(note["sessionId"], "s1");
+        assert_eq!(note["update"]["sessionUpdate"], "plan");
+        assert_eq!(
+            note["update"]["entries"],
+            json!([
+                { "content": "Read", "priority": "medium", "status": "pending" },
+                { "content": "Edit", "priority": "medium", "status": "in_progress" },
+                { "content": "Test", "priority": "medium", "status": "completed" },
+            ])
+        );
+        assert!(plan_notification("s1", &[]).is_none());
+    }
+
     /// value — a strict client parses the response, so an unmapped name would
     /// fail the whole `session/prompt` call.
     #[test]

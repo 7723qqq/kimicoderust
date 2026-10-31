@@ -196,6 +196,9 @@ pub struct TurnReport {
     pub events_emitted: u32,
     pub llm_transport: String,
     pub native_tool_calls: u32,
+    /// The bound model's context window this turn ran against, when the
+    /// config declares it. `None` = unknown (the turn loop used its defaults).
+    pub context_window: Option<u32>,
 }
 
 /// Why a server-side turn could not run. Flattened to a message because the
@@ -468,7 +471,7 @@ impl ServerEngine {
     /// (v2 `detect()` `:102-103` substitutes a ratio of 1 for an undefined
     /// `maxContextTokens`) — so the usage gate never suppresses a pass the
     /// idle gate already allowed.
-    async fn model_context_window(&self, session_id: &str) -> Option<usize> {
+    pub async fn model_context_window(&self, session_id: &str) -> Option<usize> {
         let model = self
             .store
             .get_state("agent_config", session_id)
@@ -1258,6 +1261,119 @@ impl ServerEngine {
         crate::pipeline::build_llm_for_spec(&spec, &callbacks).ok()
     }
 
+    /// Manual compaction (the REST `:compact` route and ACP `/compact`):
+    /// resolve the session's model, summarize the prefix, persist the folded
+    /// history, and publish the compaction events. One owner so every entry
+    /// point produces the same summary and events.
+    pub async fn compact_session(
+        &self,
+        session_id: &str,
+        instruction: Option<&str>,
+    ) -> Result<crate::session::sqlite_store::CompactionReport, EngineError> {
+        self.hub
+            .bus_for(session_id)
+            .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
+                "type": "compaction.started",
+                "sessionId": session_id,
+                "instruction": instruction,
+            })));
+        let llm = self.session_llm(session_id).await.ok_or_else(|| {
+            EngineError::NoModel(
+                "no model is bound to this session; compact requires a model to write the summary"
+                    .into(),
+            )
+        })?;
+        let history = self
+            .store
+            .load_session_history(session_id)
+            .map_err(EngineError::Store)?;
+        let config = crate::compaction::CompactionConfig {
+            max_attempts: self.compaction_max_attempts(),
+            ..crate::compaction::CompactionConfig::default()
+        };
+        let count = crate::compaction::compute_compact_count_manual(&history, &config);
+        let summary = if count == 0 {
+            None
+        } else {
+            // v2 #3911: pre-shrink the summarizer's first request to the
+            // effective window — the configured `max_context_tokens` lowered
+            // by any overflow observed in this process.
+            let configured_window = self
+                .store
+                .get_state("metadata", session_id)
+                .ok()
+                .flatten()
+                .and_then(|metadata| {
+                    metadata
+                        .get("max_context_tokens")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| u32::try_from(value).ok())
+                });
+            let effective_window =
+                crate::compaction::effective_max_tokens(llm.model_name(), configured_window);
+            let summary = crate::compaction::summarize_with_llm_budgeted(
+                &history[1..count as usize],
+                llm.as_ref(),
+                instruction,
+                None,
+                config.max_attempts,
+                effective_window,
+            )
+            .await
+            .map_err(|error| EngineError::Turn(error.to_string()))?;
+            Some(crate::compaction::post_process_summary(
+                summary,
+                self.session_todo_summary(session_id),
+            ))
+        };
+        let report = self
+            .store
+            .compact_session_with_summary(session_id, instruction, summary)
+            .map_err(EngineError::Turn)?;
+        self.hub
+            .bus_for(session_id)
+            .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
+                "type": "compaction.completed",
+                "sessionId": session_id,
+                "compactedCount": report.compacted_count,
+                "removed": report.removed,
+                "tokensBefore": report.tokens_before,
+                "tokensAfter": report.tokens_after,
+                "keptUserMessageCount": report.kept_user_message_count,
+            })));
+        self.hub
+            .bus_for(session_id)
+            .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
+                "type": "event.session.history_compacted",
+                "before_seq": serde_json::Value::Null,
+                "reason": "manual",
+                "summary_message_id": serde_json::Value::Null,
+            })));
+        Ok(report)
+    }
+
+    /// Live MCP server entries for one session (v2 `agent.getMcpServers`), for
+    /// the ACP `/mcp` builtin. Session-injected servers win over the shared
+    /// manager, exactly as the turn's toolset resolves them.
+    pub async fn session_mcp_entries(
+        &self,
+        session_id: &str,
+    ) -> Vec<crate::mcp::manager::McpServerEntry> {
+        match self.mcp_manager_for(session_id) {
+            Some(manager) => manager.server_entries().await,
+            None => Vec::new(),
+        }
+    }
+
+    /// Background tasks from the process-wide runner, for the ACP `/tasks`
+    /// builtin. Empty when no pipeline has installed a runner.
+    pub async fn background_tasks(&self) -> Vec<serde_json::Value> {
+        match self.subagent_manager.get_task_runner().await {
+            Some(runner) => runner.list(),
+            None => Vec::new(),
+        }
+    }
+
     /// The session's todos rendered for the compaction summary (v2
     /// `postProcessSummary`, fullCompactionService.ts:844): `None` when the
     /// workspace has no todo list or it is empty. Resolves the workspace the
@@ -1265,6 +1381,28 @@ impl ServerEngine {
     /// store the way `StateStoreCallbacks` routes engine-owned domains, so
     /// the REST `:compact` route appends exactly what a turn's
     /// `host/state_read` would answer for this session.
+    /// The session's todo list, read from the same workspace state domain the
+    /// todo tools write. Used by hosts that project the list (ACP `plan`).
+    pub fn session_todos(&self, session_id: &str) -> Vec<crate::tools::todo_item::TodoItem> {
+        let ws_root = match self.store.get_session(session_id) {
+            Ok(Some(s)) if s.workspace_id.is_some() => {
+                let wid = s.workspace_id.unwrap();
+                self.store
+                    .get_workspace(&wid)
+                    .ok()
+                    .flatten()
+                    .map(|w| std::path::PathBuf::from(w.root))
+            }
+            _ => None,
+        };
+        let ws_ref = ws_root.as_deref().unwrap_or(std::path::Path::new("."));
+        let Ok(store) = crate::storage::StateStore::for_workspace(ws_ref) else {
+            return Vec::new();
+        };
+        let raw = store.read_domain("todo");
+        crate::tools::todo_item::read_todo_items(raw.as_ref().unwrap_or(&serde_json::Value::Null))
+    }
+
     pub fn session_todo_summary(&self, session_id: &str) -> Option<String> {
         let ws_root = match self.store.get_session(session_id) {
             Ok(Some(s)) if s.workspace_id.is_some() => {
@@ -1630,6 +1768,14 @@ impl ServerEngine {
         // results sit below `min_content_tokens`.
 
         let goal = callbacks.goal().await.ok().flatten();
+        // The model window the loop must compact against and the transport
+        // must cap completions by (v2 `maxContextTokens`). This was `None`
+        // here, so every standalone-server turn ran with the loop's default
+        // budget instead of the selected model's window.
+        let context_window = self
+            .model_context_window(session_id)
+            .await
+            .and_then(|value| u32::try_from(value).ok());
         // The interruption-reminder trigger: whether this session's last
         // finished turn ended aborted (read-and-clear, v2 filters `TurnEnded`
         // on the cancelled reason).
@@ -1643,7 +1789,7 @@ impl ServerEngine {
             tools: &[],
             tool_defs: vec![],
             max_steps: self.max_steps,
-            max_context_tokens: None,
+            max_context_tokens: context_window,
             compaction_max_attempts: self.compaction_max_attempts,
             permission_mode: self
                 .spec
@@ -1811,6 +1957,7 @@ impl ServerEngine {
             events_emitted: result.events_emitted,
             llm_transport: result.llm_transport,
             native_tool_calls: result.native_tool_calls,
+            context_window,
         })
     }
 }
@@ -2114,6 +2261,67 @@ mod tests {
             None,
             "no alias for the model means an unknown window, not a zero one"
         );
+    }
+
+    /// The configured model window reaches the turn loop (compaction and the
+    /// LLM completion budget) and comes back on the report for hosts that
+    /// render the context gauge.
+    #[tokio::test]
+    async fn a_turn_carries_the_configured_context_window() {
+        let engine = engine();
+        let mut config = crate::config::KimiConfig::default();
+        config.models.insert(
+            "test-model".into(),
+            crate::config::ModelAliasConfig {
+                max_context_size: Some(12_345),
+                ..Default::default()
+            },
+        );
+        engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(config))));
+        engine.store().create_session("sess-window", None).unwrap();
+
+        let report = engine
+            .run_turn_on(&ScriptedLlm, "sess-window", 1, Vec::new(), "hello")
+            .await
+            .expect("scripted turn completes");
+        assert_eq!(report.context_window, Some(12_345));
+    }
+
+    /// The todo list the ACP `plan` notification projects: read from the same
+    /// workspace state domain the todo tools write, empty for an unknown
+    /// session.
+    #[test]
+    fn session_todos_reads_the_workspace_todo_domain() {
+        use crate::tools::todo_item::TodoStatus;
+
+        let engine = engine();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = engine
+            .store()
+            .create_workspace(dir.path().to_str().unwrap(), None)
+            .unwrap();
+        engine
+            .store()
+            .create_session_with_workspace("sess-todos", None, Some(&workspace.id))
+            .unwrap();
+        let state = crate::storage::StateStore::for_workspace(dir.path()).unwrap();
+        state
+            .write_domain(
+                "todo",
+                &serde_json::json!([
+                    { "id": "T1", "title": "Read", "status": "in_progress", "progress": 40 },
+                    { "id": "T2", "title": "Write", "status": "done" }
+                ]),
+            )
+            .unwrap();
+
+        let todos = engine.session_todos("sess-todos");
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].title, "Read");
+        assert_eq!(todos[0].status, TodoStatus::InProgress);
+        assert_eq!(todos[1].title, "Write");
+        assert_eq!(todos[1].status, TodoStatus::Done);
+        assert!(engine.session_todos("missing").is_empty());
     }
 
     /// The `[experimental].micro_compaction` flag gates the wiring: off/unset

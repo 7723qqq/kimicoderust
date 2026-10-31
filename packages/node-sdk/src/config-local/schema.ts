@@ -112,6 +112,16 @@ const ModelAliasBaseSchema = z.object({
   // it when a gateway provider serves this model over a different endpoint
   // than the provider default.
   baseUrl: z.string().optional(),
+  // Model-retirement metadata (v2 `ModelRecord.upgrade`): the suggested
+  // replacement, its migration note, and when the model stops working. The
+  // TUI's model-migration prompt reads all three from here.
+  upgrade: z
+    .object({
+      model: z.string().min(1),
+      migrationMarkdown: z.string(),
+      retirementAt: z.string().optional(),
+    })
+    .optional(),
 });
 
 export const ModelAliasOverrideSchema = ModelAliasBaseSchema.omit({
@@ -128,6 +138,7 @@ export const ModelAliasOverrideSchema = ModelAliasBaseSchema.omit({
   name: true,
   aliases: true,
   systemPrompt: true,
+  upgrade: true,
 }).partial();
 
 export type ModelAliasOverrides = z.infer<typeof ModelAliasOverrideSchema>;

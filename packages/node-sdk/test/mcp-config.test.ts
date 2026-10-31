@@ -246,6 +246,59 @@ describe('standard MCP config shape (transport inferred)', () => {
   }, 15_000);
 });
 
+describe('project MCP config (trust gated)', () => {
+  const TRUST_ENV = 'KIMI_CODE_TRUST_WORKSPACE';
+
+  afterEach(() => {
+    delete process.env[TRUST_ENV];
+  });
+
+  async function setupProject(): Promise<{ homeDir: string; workDir: string }> {
+    const homeDir = await makeTempDir();
+    const root = await makeTempDir();
+    // Mark the root as a checkout so the loader walks up from the nested
+    // session workdir, exactly as v2's `findGitWorkTree` does.
+    await mkdir(join(root, '.git'), { recursive: true });
+    const workDir = join(root, 'packages', 'app');
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(root, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: { project: { command: process.execPath, args: [stdioFixture] } },
+      }),
+      'utf-8',
+    );
+    return { homeDir, workDir };
+  }
+
+  it('loads the worktree-root .mcp.json when the workspace is trusted', async () => {
+    process.env[TRUST_ENV] = 'true';
+    const { homeDir, workDir } = await setupProject();
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const session = await harness.createSession({ id: 'ses_project_mcp_trusted', workDir });
+      await expect(waitForMcpSettled(session)).resolves.toMatchObject([
+        { name: 'project', transport: 'stdio', status: 'connected' },
+      ]);
+    } finally {
+      await harness.close();
+    }
+  }, 15_000);
+
+  it('ignores project config on an untrusted workspace', async () => {
+    const { homeDir, workDir } = await setupProject();
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const session = await harness.createSession({ id: 'ses_project_mcp_untrusted', workDir });
+      await expect(waitForMcpSettled(session)).resolves.toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  }, 15_000);
+});
+
 describe('standalone MCP check (connection result)', () => {
   it('reports discovered tools when a stdio server connects', async () => {
     const homeDir = await makeTempDir();
@@ -391,6 +444,68 @@ describe('MCP OAuth facade (host-controlled browser flow)', () => {
       await harness.close();
     }
   });
+
+  it('completes the browser auth-code+PKCE flow and stores an encrypted grant', async () => {
+    const homeDir = await makeTempDir();
+    const workDir = await makeTempDir();
+    const statusServer = await startMcpAuthStatusServer();
+    await writeMcpConfig(homeDir, {
+      mcpServers: {
+        remote: { transport: 'http', url: statusServer.oauthUrl, auth: 'oauth' },
+      },
+    });
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const urls: string[] = [];
+      await harness.authenticateMcpServer('remote', {
+        onAuthorizationUrl: async (url) => {
+          urls.push(url);
+          // Stand-in for opening the browser: follow the AS redirect into the
+          // host's loopback callback listener.
+          const response = await fetch(url, { redirect: 'follow' });
+          expect(response.ok).toBe(true);
+        },
+      });
+
+      expect(urls).toHaveLength(1);
+      const authorizationUrl = new URL(urls[0]!);
+      expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe('S256');
+      expect(authorizationUrl.searchParams.get('code_challenge')).toBeTruthy();
+      expect(authorizationUrl.searchParams.get('state')).toBeTruthy();
+
+      await expect(harness.listMcpServerAuthStatuses()).resolves.toEqual([
+        { name: 'remote', authStatus: 'oauth-authorized' },
+      ]);
+
+      // The engine's at-rest record is the encrypted envelope, not the token.
+      const key = mcpOAuthStoreKey('remote', statusServer.oauthUrl);
+      const raw = await readFile(
+        join(homeDir, 'credentials', 'mcp', `${key}-tokens.json`),
+        'utf-8',
+      );
+      expect(raw).not.toContain(statusServer.authToken);
+      expect(JSON.parse(raw)).toMatchObject({
+        iv: expect.any(String),
+        tag: expect.any(String),
+        data: expect.any(String),
+      });
+
+      // A session built after login injects the grant and connects.
+      const session = await harness.createSession({ id: 'ses_sdk_mcp_oauth', workDir });
+      await expect(waitForMcpSettled(session)).resolves.toMatchObject([
+        { name: 'remote', status: 'connected' },
+      ]);
+
+      await harness.resetMcpServerAuth('remote');
+      await expect(harness.listMcpServerAuthStatuses()).resolves.toEqual([
+        { name: 'remote', authStatus: 'oauth-required' },
+      ]);
+    } finally {
+      await harness.close();
+      await statusServer.close();
+    }
+  }, 20_000);
 
   it('rejects authorization when the configured server uses stdio', async () => {
     const homeDir = await makeTempDir();

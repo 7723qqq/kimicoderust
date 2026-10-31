@@ -12,6 +12,15 @@ use super::store::McpOAuthFileStore;
 /// mid-request.
 const REFRESH_SKEW_MS: i64 = 60_000;
 
+/// File suffix of the token record (v2 `TOKENS_SUFFIX`, provider.ts:21). The
+/// same store also holds client/discovery/meta records, so tokens must not
+/// claim the bare key.
+const TOKENS_SUFFIX: &str = "-tokens";
+
+fn tokens_key(key: &str) -> String {
+    format!("{key}{TOKENS_SUFFIX}")
+}
+
 /// One server's OAuth credentials (v2 keeps the SDK `OAuthTokens` plus the
 /// provider it came from in the same document).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +35,14 @@ pub struct McpOAuthTokens {
     pub token_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Client secret issued by dynamic registration, when the authorization
+    /// server is confidential rather than a public PKCE client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// RFC 8707 resource indicator this grant was issued for; replayed on
+    /// refresh so the AS can keep the token audience.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
     /// When this grant was obtained, stamped on write. Two consumers: the
     /// concurrent-grant window ([`is_concurrent_grant`]) and the
     /// compare-and-clear in [`McpOAuthService::clear_tokens_if_current`]
@@ -51,6 +68,15 @@ impl McpOAuthTokens {
             && self.refresh_token == other.refresh_token
             && self.expires_at_ms == other.expires_at_ms
     }
+}
+
+/// The stored-grant state exposed to the host's auth-status surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpOAuthTokenState {
+    pub has_tokens: bool,
+    pub has_refresh_token: bool,
+    pub expired: bool,
+    pub access_token: Option<String>,
 }
 
 /// How recently a grant must have been obtained to count as a login landing
@@ -104,12 +130,46 @@ impl McpOAuthService {
 
     /// Whether the store holds credentials for this key.
     pub fn has_tokens(&self, key: &str) -> bool {
-        self.store.read::<McpOAuthTokens>(key).is_some()
+        self.read_tokens(key).is_some()
+    }
+
+    /// Tokens under the v2 name, falling back to the bare-key file this
+    /// engine wrote before the suffix port (so an existing login survives).
+    fn read_tokens(&self, key: &str) -> Option<McpOAuthTokens> {
+        self.store
+            .read::<McpOAuthTokens>(&tokens_key(key))
+            .or_else(|| self.store.read::<McpOAuthTokens>(key))
+    }
+
+    fn remove_tokens(&self, key: &str) -> Result<bool, String> {
+        let suffixed = self.store.remove(&tokens_key(key))?;
+        let legacy = self.store.remove(key)?;
+        Ok(suffixed || legacy)
     }
 
     /// Every credential key the store holds (the `auth-statuses` surface).
+    /// Non-token records (`-meta`, `-client`, `-discovery`) are not keys.
     pub fn list_keys(&self) -> Vec<String> {
-        self.store.list(None)
+        let mut keys: Vec<String> = self
+            .store
+            .list(None)
+            .into_iter()
+            .filter_map(|name| {
+                if let Some(base) = name.strip_suffix(TOKENS_SUFFIX) {
+                    return Some(base.to_string());
+                }
+                if name.ends_with("-meta")
+                    || name.ends_with("-client")
+                    || name.ends_with("-discovery")
+                {
+                    return None;
+                }
+                Some(name)
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
     /// Persist freshly obtained credentials (login completion). The grant is
@@ -119,7 +179,7 @@ impl McpOAuthService {
         if stamped.obtained_at_ms.is_none() {
             stamped.obtained_at_ms = Some(now_ms());
         }
-        self.store.write(key, &stamped)
+        self.store.write(&tokens_key(key), &stamped)
     }
 
     /// The clock the concurrent-grant window compares against (v2 `now()`,
@@ -136,7 +196,7 @@ impl McpOAuthService {
         key: &str,
         connected_at_ms: Option<i64>,
     ) -> Option<(McpOAuthTokens, bool)> {
-        let tokens = self.store.read::<McpOAuthTokens>(key)?;
+        let tokens = self.read_tokens(key)?;
         let concurrent = is_concurrent_grant(&tokens, now_ms(), connected_at_ms);
         Some((tokens, concurrent))
     }
@@ -150,24 +210,48 @@ impl McpOAuthService {
         key: &str,
         expected: &McpOAuthTokens,
     ) -> Result<bool, String> {
-        let Some(stored) = self.store.read::<McpOAuthTokens>(key) else {
+        let Some(stored) = self.read_tokens(key) else {
             return Ok(false);
         };
         if !stored.same_grant(expected) {
             return Ok(false);
         }
-        self.store.remove(key)
+        self.remove_tokens(key)
     }
 
     /// Drop one server's credentials (`auth:cancel` / `auth:reset`).
     pub fn remove(&self, key: &str) -> Result<bool, String> {
-        self.store.remove(key)
+        self.remove_tokens(key)
+    }
+
+    /// The stored grant's state without refreshing it (the host's auth-status
+    /// surface: `oauth-authorized` / `oauth-expired`). `access_token` is the
+    /// stored value even when expired; callers that need a usable token go
+    /// through [`Self::access_token`].
+    pub fn token_state(&self, key: &str) -> McpOAuthTokenState {
+        let Some(tokens) = self.read_tokens(key) else {
+            return McpOAuthTokenState {
+                has_tokens: false,
+                has_refresh_token: false,
+                expired: false,
+                access_token: None,
+            };
+        };
+        McpOAuthTokenState {
+            has_tokens: true,
+            has_refresh_token: tokens
+                .refresh_token
+                .as_deref()
+                .is_some_and(|v| !v.is_empty()),
+            expired: tokens.is_expired(now_ms()),
+            access_token: Some(tokens.access_token),
+        }
     }
 
     /// The access token for this key, refreshing it when expired. `None` means
     /// the server must be treated as needing authentication.
     pub async fn access_token(&self, key: &str) -> Option<String> {
-        let tokens = self.store.read::<McpOAuthTokens>(key)?;
+        let tokens = self.read_tokens(key)?;
         if !tokens.is_expired(now_ms()) {
             return Some(tokens.access_token);
         }
@@ -182,13 +266,13 @@ impl McpOAuthService {
         let _guard = lock.lock().await;
 
         // Another caller may have refreshed while we waited for the lock.
-        let tokens = self.store.read::<McpOAuthTokens>(key)?;
+        let tokens = self.read_tokens(key)?;
         if !tokens.is_expired(now_ms()) {
             return Some(tokens.access_token);
         }
 
         let refreshed = self.refresh(&tokens).await?;
-        let _ = self.store.write(key, &refreshed);
+        let _ = self.store_tokens(key, &refreshed);
         Some(refreshed.access_token)
     }
 
@@ -196,12 +280,20 @@ impl McpOAuthService {
         let endpoint = tokens.token_endpoint.as_deref()?;
         let refresh_token = tokens.refresh_token.as_deref()?;
         let client_id = tokens.client_id.clone().unwrap_or_default();
+        let client_secret = tokens.client_secret.clone().unwrap_or_default();
+        let resource = tokens.resource.clone().unwrap_or_default();
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
         ];
         if !client_id.is_empty() {
             form.push(("client_id", &client_id));
+        }
+        if !client_secret.is_empty() {
+            form.push(("client_secret", &client_secret));
+        }
+        if !resource.is_empty() {
+            form.push(("resource", &resource));
         }
 
         let response = self.client.post(endpoint).form(&form).send().await.ok()?;
@@ -221,6 +313,8 @@ impl McpOAuthService {
             expires_at_ms: expires_in.map(|secs| now_ms() + secs * 1000),
             token_endpoint: tokens.token_endpoint.clone(),
             client_id: tokens.client_id.clone(),
+            client_secret: tokens.client_secret.clone(),
+            resource: tokens.resource.clone(),
             obtained_at_ms: Some(now_ms()),
         })
     }
@@ -277,6 +371,8 @@ mod tests {
             expires_at_ms: Some(now_ms() - 1_000),
             token_endpoint: Some(endpoint.into()),
             client_id: Some("client-1".into()),
+            client_secret: None,
+            resource: None,
             obtained_at_ms: None,
         }
     }
@@ -295,6 +391,8 @@ mod tests {
                     expires_at_ms: Some(now_ms() + 3_600_000),
                     token_endpoint: None,
                     client_id: None,
+                    client_secret: None,
+                    resource: None,
                     obtained_at_ms: None,
                 },
             )
@@ -328,7 +426,7 @@ mod tests {
             Some("new-token")
         );
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        let stored = store.read::<McpOAuthTokens>("srv").unwrap();
+        let stored = store.read::<McpOAuthTokens>("srv-tokens").unwrap();
         assert_eq!(stored.access_token, "new-token");
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
     }
@@ -376,6 +474,8 @@ mod tests {
                     expires_at_ms: Some(now_ms() - 1_000),
                     token_endpoint: None,
                     client_id: None,
+                    client_secret: None,
+                    resource: None,
                     obtained_at_ms: None,
                 },
             )
@@ -391,6 +491,8 @@ mod tests {
             expires_at_ms: None,
             token_endpoint: None,
             client_id: None,
+            client_secret: None,
+            resource: None,
             obtained_at_ms,
         }
     }
@@ -404,7 +506,7 @@ mod tests {
         let service = McpOAuthService::new(store.clone());
 
         service.store_tokens("srv", &grant("a", None)).unwrap();
-        let stamped = store.read::<McpOAuthTokens>("srv").unwrap();
+        let stamped = store.read::<McpOAuthTokens>("srv-tokens").unwrap();
         let obtained = stamped.obtained_at_ms.expect("write must stamp a grant");
         assert!((now_ms() - obtained).abs() < 5_000);
 
@@ -415,9 +517,37 @@ mod tests {
             .store_tokens("srv", &grant("b", Some(earlier)))
             .unwrap();
         assert_eq!(
-            store.read::<McpOAuthTokens>("srv").unwrap().obtained_at_ms,
+            store
+                .read::<McpOAuthTokens>("srv-tokens")
+                .unwrap()
+                .obtained_at_ms,
             Some(earlier)
         );
+    }
+
+    /// The host's auth-status classifier reads the stored grant through this
+    /// view: presence, refreshability and expiry, without forcing a refresh.
+    #[test]
+    fn test_token_state_reports_stored_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(McpOAuthFileStore::new(dir.path()));
+        let service = McpOAuthService::new(store);
+
+        assert!(!service.token_state("missing").has_tokens);
+
+        let mut fresh = grant("fresh", None);
+        fresh.refresh_token = Some("refresh".into());
+        fresh.expires_at_ms = Some(now_ms() + 3_600_000);
+        service.store_tokens("fresh-key", &fresh).unwrap();
+        let state = service.token_state("fresh-key");
+        assert!(state.has_tokens && state.has_refresh_token && !state.expired);
+        assert_eq!(state.access_token.as_deref(), Some("fresh"));
+
+        let mut expired = grant("stale", None);
+        expired.expires_at_ms = Some(now_ms() - 1);
+        service.store_tokens("stale-key", &expired).unwrap();
+        let state = service.token_state("stale-key");
+        assert!(state.has_tokens && state.expired && !state.has_refresh_token);
     }
 
     /// v2 `isConcurrentGrant` (oauth/service.ts:683-688): a grant is
@@ -471,7 +601,7 @@ mod tests {
         service
             .store_tokens("srv", &grant("rejected", Some(now_ms() - 60_000)))
             .unwrap();
-        let rejected = store.read::<McpOAuthTokens>("srv").unwrap();
+        let rejected = store.read::<McpOAuthTokens>("srv-tokens").unwrap();
 
         // A newer login replaced the record between the 401 and the cleanup.
         service
@@ -479,13 +609,16 @@ mod tests {
             .unwrap();
         assert!(!service.clear_tokens_if_current("srv", &rejected).unwrap());
         assert_eq!(
-            store.read::<McpOAuthTokens>("srv").unwrap().access_token,
+            store
+                .read::<McpOAuthTokens>("srv-tokens")
+                .unwrap()
+                .access_token,
             "renewed"
         );
 
         // Matching the stored record drops it, and a second attempt is a no-op
         // rather than an error.
-        let stored = store.read::<McpOAuthTokens>("srv").unwrap();
+        let stored = store.read::<McpOAuthTokens>("srv-tokens").unwrap();
         assert!(service.clear_tokens_if_current("srv", &stored).unwrap());
         assert!(!service.has_tokens("srv"));
         assert!(!service.clear_tokens_if_current("srv", &stored).unwrap());
