@@ -2046,3 +2046,68 @@ fn goal_continuation_prompt_respects_status_and_budget() {
         "an exhausted turn budget must not buy another turn"
     );
 }
+
+/// v2 `loop.notify`: a background task that finishes while an interactive
+/// session is idle starts a turn of its own — the model sees the completion
+/// without the user typing anything.
+#[tokio::test]
+async fn test_interactive_session_wakes_on_a_background_task_completion() {
+    let runner = Arc::new(crate::storage::TaskRunner::new(None));
+    let server = Arc::new(RpcServer::new());
+    let llm = Arc::new(ScriptedLlm::simple(vec![text_response("noted")]));
+    let requests = llm.requests.clone();
+    let config = SessionConfig {
+        llm,
+        callbacks: rpc_callbacks(server),
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
+        goal: None,
+        on_before_turn: None,
+        agent_cancel_slot: None,
+        steer_slot: None,
+        hook_guard: None,
+        print_background: None,
+        session_id: Some("sess-wake".into()),
+        task_runner: Some(runner.clone()),
+        toolset: None,
+        telemetry: None,
+    };
+    let session = EngineSession::new(config).await;
+
+    // The pump is idle and parked when the task settles: the wake has to come
+    // from the runner's notification signal, not from a enqueued prompt.
+    runner
+        .spawn_task_with_meta(
+            crate::storage::TaskSpawnMeta {
+                session_id: Some("sess-wake"),
+                kind: "bash",
+                subagent_type: None,
+                agent_id: None,
+            },
+            "t-wake".into(),
+            "wake job".into(),
+            async { crate::storage::TaskOutcome::Completed("wake output".to_string()) },
+        )
+        .unwrap();
+
+    wait_until(|| !requests.lock().unwrap().is_empty()).await;
+    let call = requests.lock().unwrap()[0].clone();
+    assert!(
+        call.iter().any(|m| m
+            .content
+            .contains("Background task t-wake (completed) finished: wake job")),
+        "the wake turn must carry the completion: {call:?}"
+    );
+    assert!(
+        call.iter().any(|m| m.content.contains("wake output")),
+        "the wake turn must carry the output preview: {call:?}"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_millis(1000), session.settled())
+        .await
+        .expect("the notification turn settles the session again");
+}

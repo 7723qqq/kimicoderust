@@ -1002,6 +1002,39 @@ impl AcpServer {
                                 let result = engine
                                     .run_turn_with_media(sid, turn_number, history, &p, media, None)
                                     .await;
+                                // v2 `launchContinuationTurn` on this entry
+                                // point too: a goal still active after a
+                                // cleanly completed turn owns the next one.
+                                // The response below still reports the user's
+                                // turn; continuation turns stream as
+                                // `session/update`s like any other.
+                                let mut owed = result
+                                    .as_ref()
+                                    .is_ok_and(crate::server::prompt_queue::turn_completed);
+                                while owed {
+                                    let Some(text) = engine.pending_goal_continuation(sid).await
+                                    else {
+                                        break;
+                                    };
+                                    let history =
+                                        self.store.load_session_history(sid).unwrap_or_default();
+                                    let turn_number = self.store.next_turn_number(sid).unwrap_or(1);
+                                    owed = engine
+                                        .run_turn_with_media(
+                                            sid,
+                                            turn_number,
+                                            history,
+                                            &text,
+                                            Vec::new(),
+                                            Some(json!({
+                                                "kind": "system_trigger",
+                                                "name": "goal_continuation",
+                                            })),
+                                        )
+                                        .await
+                                        .as_ref()
+                                        .is_ok_and(crate::server::prompt_queue::turn_completed);
+                                }
                                 bus.unsubscribe(subscription);
                                 self.end_prompt(&request_key);
                                 match result {

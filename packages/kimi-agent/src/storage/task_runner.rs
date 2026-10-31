@@ -257,6 +257,12 @@ pub struct TaskRunner {
     /// Cap on concurrently running tasks
     /// (`[background].max_running_tasks`); `0` is unlimited.
     max_running: AtomicUsize,
+    /// Wakes idle session pumps when a completion notification is queued:
+    /// v2's `loop.notify` starts a turn in a session that is not running one.
+    /// A watch channel, not `Notify` — the runner is process-wide, and
+    /// `notify_one` would let one session's pump consume another session's
+    /// wakeup; a receiver created with the session sees every later bump.
+    notification_bell: tokio::sync::watch::Sender<u64>,
 }
 
 /// A host-injected liveness predicate: `Some(task session id) -> alive?`.
@@ -299,6 +305,7 @@ impl TaskRunner {
             hook_guard: Mutex::new(None),
             kill_grace: Mutex::new(STOP_GRACE),
             max_running: AtomicUsize::new(0),
+            notification_bell: tokio::sync::watch::channel(0).0,
         }
     }
 
@@ -692,6 +699,7 @@ impl TaskRunner {
         // takes the two in that order too), behind the same session-liveness
         // gate and deduped by `(task_id, status)` — a marker write that
         // failed re-reports the loss, but never re-queues its notification.
+        let mut queued = false;
         for notification in notifications {
             if !self.session_alive(notification.session_id.as_deref()) {
                 continue;
@@ -702,7 +710,11 @@ impl TaskRunner {
             });
             if !duplicate {
                 queue.push(notification);
+                queued = true;
             }
+        }
+        if queued {
+            self.ring_notification_bell();
         }
         if reported.is_empty() {
             return None;
@@ -1031,6 +1043,7 @@ impl TaskRunner {
                     ended_at,
                     session_id: session_id.clone(),
                 });
+            self.ring_notification_bell();
         }
         // Terminal facts, both vocabularies (mappers + projector). Same
         // liveness gate as v2's `recordTaskTerminated`: a session teardown
@@ -1105,6 +1118,37 @@ impl TaskRunner {
             .count()
     }
 
+    /// A receiver that fires whenever a completion notification is queued.
+    ///
+    /// Each idle session pump watches this to start the notification turn
+    /// v2's `loop.notify` would have started; the watch's version counter
+    /// means a bump that arrives while the pump is busy is still observed on
+    /// its next wait, and one session cannot consume another's wakeup.
+    pub fn notification_bell(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.notification_bell.subscribe()
+    }
+
+    /// The sessions with at least one queued completion notification. The
+    /// server's wake service drains each one into its own notification turn;
+    /// `None`-scoped (server-level) notifications are not listed.
+    pub fn sessions_with_pending_notifications(&self) -> Vec<String> {
+        let queue = self
+            .pending_notifications
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut sessions: Vec<String> = queue
+            .iter()
+            .filter_map(|notification| notification.session_id.clone())
+            .collect();
+        sessions.sort();
+        sessions.dedup();
+        sessions
+    }
+
+    fn ring_notification_bell(&self) {
+        self.notification_bell.send_modify(|version| *version += 1);
+    }
+
     /// Inject a synthetic wake notification for `session_id`, **coalesced**:
     /// a pending wake with the same task id is replaced in place (text and
     /// timestamp refreshed) so a burst of sends becomes one notification per
@@ -1146,6 +1190,7 @@ impl TaskRunner {
             }
         };
         drop(queue);
+        self.ring_notification_bell();
         self.fire_event(
             Some(session_id),
             serde_json::json!({

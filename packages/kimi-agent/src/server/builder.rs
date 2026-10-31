@@ -86,6 +86,7 @@ impl HttpServer {
                 chrono::Local::now().offset().local_minus_utc(),
             ))),
             task_runner: task_runner.clone(),
+            task_wake_started: false,
             server_id: format!("srv-{}", fastrand::u64(..)),
             started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             web_assets_dir: None,
@@ -411,7 +412,63 @@ impl HttpServer {
         self.subagent_manager
             .set_task_runner_sync(self.task_runner.clone());
         self.engine = Some(Arc::new(engine));
+        self.spawn_task_wake_service();
         self
+    }
+
+    /// Start the background-task wake service (v2 `taskService.notifyAgentTask`
+    /// → `loop.notify`): when a task settles, its session gets a notification
+    /// turn even if no prompt is waiting. The turn is admitted through the
+    /// prompt queue, so it serializes with user prompts exactly like any other
+    /// turn.
+    ///
+    /// Started from [`Self::with_engine`] — the turn driver is what the wake
+    /// queues into. A caller outside a runtime simply gets no service: there
+    /// is no turn driver to wake either.
+    fn spawn_task_wake_service(&mut self) {
+        if self.task_wake_started {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        self.task_wake_started = true;
+        let store = self.store_arc();
+        let queue = self.prompt_queue.clone();
+        let hub = self.hub.clone();
+        let runner = self.task_runner.clone();
+        handle.spawn(async move {
+            let mut bell = runner.notification_bell();
+            loop {
+                // Closed only when the runner itself is dropped (server gone).
+                if bell.changed().await.is_err() {
+                    return;
+                }
+                for session_id in runner.sessions_with_pending_notifications() {
+                    let Some((text, origin)) =
+                        crate::server::prompt_queue::take_task_wake_prompt(&runner, &session_id)
+                    else {
+                        continue;
+                    };
+                    let Some(run) = queue.admit_wake(&session_id, text, origin) else {
+                        // A turn is already active; the running driver promotes
+                        // this entry when it advances.
+                        continue;
+                    };
+                    tokio::spawn(crate::server::prompt_queue::run_prompt_loop(
+                        Some(engine.clone()),
+                        store.clone(),
+                        queue.clone(),
+                        hub.clone(),
+                        session_id,
+                        run,
+                    ));
+                }
+            }
+        });
     }
 
     pub fn engine(&self) -> Option<Arc<ServerEngine>> {

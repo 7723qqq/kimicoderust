@@ -2246,6 +2246,11 @@ async fn build_engine_pipeline(
         host_callbacks.clone(),
         PipelineHost {
             subagent_manager: SUBAGENT_MANAGER.clone(),
+            // The addon's runner is process-wide: sharing it between handle
+            // builds keeps a background task visible across a rebuild and lets
+            // the session pump watch the same notification queue its tools
+            // settle into.
+            task_runner: SUBAGENT_MANAGER.get_task_runner_sync(),
             parent_cancel,
             parent_cancel_slot,
             steer_slot,

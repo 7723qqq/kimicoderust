@@ -102,6 +102,11 @@ pub struct HttpServer {
     heartbeat: Duration,
     cron_scheduler: Arc<Mutex<CronScheduler>>,
     task_runner: Arc<TaskRunner>,
+    /// Whether the background-task wake service was spawned for this server.
+    /// `with_engine` starts it once; it turns a completed background task into
+    /// a notification turn through the prompt queue (v2
+    /// `taskService.notifyAgentTask`).
+    task_wake_started: bool,
     server_id: String,
     started_at: String,
     web_assets_dir: Option<PathBuf>,

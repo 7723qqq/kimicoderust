@@ -1173,6 +1173,7 @@ async fn build_engine_pipeline(
         Arc::new(RpcHostCallbacks { server }),
         PipelineHost {
             subagent_manager: subagent_manager.clone(),
+            task_runner: None,
             parent_cancel,
             parent_cancel_slot,
             steer_slot,

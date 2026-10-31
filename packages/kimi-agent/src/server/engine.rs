@@ -1564,6 +1564,10 @@ impl ServerEngine {
             host_callbacks,
             PipelineHost {
                 subagent_manager: self.subagent_manager.clone(),
+                // The server's process-wide runner: task routes and the wake
+                // service read it, so the tasks this pipeline spawns must
+                // register there instead of on a per-turn runner.
+                task_runner: self.subagent_manager.get_task_runner().await,
                 parent_cancel: None,
                 parent_cancel_slot: None,
                 steer_slot: Some(self.steer_slot(session_id)),
@@ -1571,9 +1575,7 @@ impl ServerEngine {
                 // This session's lane, so the turn's events carry its session id
                 // and its seq. Every connection still sees every lane.
                 event_bus: Some(self.hub.bus_for(session_id)),
-                // The server has its own server-scoped runner (with the hub
-                // sink) for subagent tasks; this pipeline's bash-task runner
-                // stays unsinked here.
+                // The server's runner already carries the hub sink.
                 task_event_sink: None,
             },
         )

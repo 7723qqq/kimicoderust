@@ -200,6 +200,12 @@ pub struct PipelineHost {
     /// choice: the stdio CLI builds one per pipeline, the addon shares a
     /// process-wide one.
     pub subagent_manager: Arc<SubagentManager>,
+    /// An existing background-task runner to run this pipeline's tasks on.
+    /// The server owns one process-wide runner (its task routes and the
+    /// session wake service read it), so a per-pipeline runner would leave
+    /// every background task invisible to them. `None` builds one from the
+    /// workspace store, the REPL and stdio behavior.
+    pub task_runner: Option<Arc<crate::storage::TaskRunner>>,
     pub parent_cancel: Option<ParentCancel>,
     /// Stdio session entry only: lets a newly spawned turn publish its cancel
     /// handle so `session/cancel` can reach the turn it replaced.
@@ -260,6 +266,7 @@ pub async fn build_engine_pipeline(
 ) -> Result<EnginePipeline, PipelineError> {
     let PipelineHost {
         subagent_manager,
+        task_runner: host_task_runner,
         parent_cancel,
         parent_cancel_slot,
         steer_slot,
@@ -359,11 +366,17 @@ pub async fn build_engine_pipeline(
                                 })
                                 .map(Arc::new)
                                 .unwrap_or_else(|| workspace_store.clone());
-                            let runner = crate::storage::TaskRunner::for_workspace(
-                                std::path::Path::new(root),
-                            )
-                            .ok()
-                            .map(Arc::new);
+                            // A host that owns a process-wide runner (the
+                            // standalone server) passes it, so its task routes
+                            // and wake service see every task this pipeline
+                            // spawns; otherwise the pipeline builds its own.
+                            let runner = host_task_runner.clone().or_else(|| {
+                                crate::storage::TaskRunner::for_workspace(std::path::Path::new(
+                                    root,
+                                ))
+                                .ok()
+                                .map(Arc::new)
+                            });
                             // The runner is per-pipeline, so its lifecycle
                             // events only exist if the entry wired a sink.
                             if let (Some(runner), Some(sink)) =
@@ -888,6 +901,7 @@ mod tests {
     fn host(manager: Arc<SubagentManager>) -> PipelineHost {
         PipelineHost {
             subagent_manager: manager,
+            task_runner: None,
             parent_cancel: None,
             parent_cancel_slot: None,
             steer_slot: None,

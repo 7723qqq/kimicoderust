@@ -513,6 +513,13 @@ impl EngineSession {
         initial_usage: crate::session::usage::UsageStatus,
     ) -> Self {
         let initial_clock = read_turn_clock(&config.callbacks).await;
+        // Subscribed before any turn runs: the watch version tracks ticks, so
+        // a completion that lands while the pump is busy still wakes its next
+        // idle wait — no lost wakeup between "checked" and "parked".
+        let notification_bell = config
+            .task_runner
+            .as_ref()
+            .map(|runner| runner.notification_bell());
         let core = Arc::new(Mutex::new(Core {
             next_turn_id: initial_clock,
             pending: Vec::new(),
@@ -565,6 +572,7 @@ impl EngineSession {
             ctx.clone(),
             wakeup.clone(),
             shutdown.clone(),
+            notification_bell,
         ));
         tokio::spawn(heartbeat(ctx, shutdown.clone()));
         Self {
@@ -1094,6 +1102,7 @@ async fn pump(
     ctx: Arc<SessionContext>,
     wakeup: Arc<Notify>,
     shutdown: Arc<AtomicBool>,
+    mut notification_bell: Option<tokio::sync::watch::Receiver<u64>>,
 ) {
     // Held for the pump's whole body: on any exit — the `return` below, an
     // early return added later, or a panic unwind — its `Drop` publishes
@@ -1145,9 +1154,33 @@ async fn pump(
         let (mut entry, history) = match next {
             Some(pair) => pair,
             None => {
+                // A completed background task is input the model must see
+                // (v2 `taskService.notifyAgentTask` → `loop.notify`): an
+                // interactive session turns it into a synthetic turn even
+                // though no user prompt is pending. Print runs keep their own
+                // settle loop — feeding these back here would surface a turn
+                // after `prompt()` already resolved.
+                if ctx.print_background.is_none() {
+                    let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
+                    if enqueue_task_notification_turn(&ctx, &mut core) {
+                        continue;
+                    }
+                }
                 // Idle: wait for the next enqueue. A stored permit (an
-                // enqueue that raced ahead of this await) wakes immediately.
-                wakeup.notified().await;
+                // enqueue that raced ahead of this await) wakes immediately;
+                // a queued task notification wakes it too, so a task that
+                // finishes while the session sits idle starts its own turn.
+                match &mut notification_bell {
+                    Some(bell) => {
+                        tokio::select! {
+                            _ = wakeup.notified() => {}
+                            changed = bell.changed() => {
+                                let _ = changed;
+                            }
+                        }
+                    }
+                    None => wakeup.notified().await,
+                }
                 continue;
             }
         };
@@ -1831,9 +1864,47 @@ fn enqueue_print_followup_turn(
     });
 }
 
+/// Queue this session's completed background tasks as a synthetic turn
+/// (v2 `taskService.notifyAgentTask` → `loop.notify`). Returns whether a turn
+/// was queued.
+///
+/// The turn is ordinary on the host side — `turn.started` with a `task`
+/// origin, a model response, the notification text in the transcript — but
+/// it has no prompt receipt: nothing is waiting on it, the way v2's
+/// `notify` never resolves a prompt.
+fn enqueue_task_notification_turn(ctx: &SessionContext, core: &mut Core) -> bool {
+    let Some(runner) = &ctx.task_runner else {
+        return false;
+    };
+    let session_id = ctx.session_id.as_deref();
+    if runner.pending_notification_count(session_id) == 0 {
+        return false;
+    }
+    let notifications = runner.take_pending_notifications(session_id);
+    let Some(first) = notifications.first() else {
+        return false;
+    };
+    let text = render_task_notifications(&notifications);
+    let mut no_receipt = None;
+    enqueue_print_followup_turn(
+        core,
+        &mut no_receipt,
+        text,
+        serde_json::json!({
+            "kind": "task",
+            "taskId": &first.task_id,
+            "status": first.status.as_str(),
+            "notificationId": format!("{}-{}", first.task_id, first.ended_at),
+        }),
+    );
+    true
+}
+
 /// The user-role text a steer turn hands the model: one block per completed
 /// background task, plus its output preview when the runner kept one.
-fn render_task_notifications(notifications: &[crate::storage::TaskNotification]) -> String {
+pub(crate) fn render_task_notifications(
+    notifications: &[crate::storage::TaskNotification],
+) -> String {
     notifications
         .iter()
         .map(|notification| {

@@ -23,6 +23,10 @@ pub struct RunInput {
     /// The request's `metadata` as `[metadata]` (v2 `clientMetadata`), `None`
     /// when the client sent none. Persisted as the turn's origin payload.
     pub origin: Option<Value>,
+    /// Whether this run settles a client-visible prompt. A task-notification
+    /// wake (v2 `loop.notify`) has no prompt behind it, so the driver must
+    /// not publish `prompt.completed` for it.
+    pub prompt_events: bool,
 }
 
 #[derive(Default)]
@@ -50,6 +54,8 @@ struct Entry {
     prompt: String,
     blocks: Vec<ContentBlock>,
     origin: Option<Value>,
+    /// See [`RunInput::prompt_events`].
+    prompt_events: bool,
     /// The turn number the live `event.message.created` id names
     /// (`msg-u{turn}`), stamped by the driver when the turn starts. `None`
     /// until then: a queued prompt has no turn yet.
@@ -90,6 +96,7 @@ impl PromptQueue {
                     prompt,
                     blocks,
                     origin,
+                    prompt_events: true,
                     turn_number: None,
                     cancelled: false,
                 });
@@ -101,6 +108,7 @@ impl PromptQueue {
                 prompt: prompt.clone(),
                 blocks: blocks.clone(),
                 origin: origin.clone(),
+                prompt_events: true,
             };
             state.active.insert(
                 session_id.to_string(),
@@ -109,12 +117,59 @@ impl PromptQueue {
                     prompt,
                     blocks,
                     origin,
+                    prompt_events: true,
                     turn_number: None,
                     cancelled: false,
                 },
             );
             (item, Some(run))
         }
+    }
+
+    /// Admit a synthetic task-notification turn (v2 `loop.notify`
+    /// `turnScoped: false`): the model sees a background task's completion as
+    /// input even though no user prompt is pending. The entry carries no
+    /// prompt events, and its origin is the task origin the transcript folds.
+    ///
+    /// Returns the run when this wake became the session's active turn;
+    /// `None` means it queued behind an active prompt and the running driver
+    /// promotes it through [`PromptQueue::advance`].
+    pub fn admit_wake(&self, session_id: &str, text: String, origin: Value) -> Option<RunInput> {
+        let mut state = self.lock();
+        let item = json!({
+            "prompt_id": format!("wake-{}", fastrand::u64(..)),
+            "status": "queued",
+            "kind": "notification",
+            "created_at": chrono::Utc::now().to_rfc3339(),
+        });
+        let entry = Entry {
+            item: item.clone(),
+            prompt: text.clone(),
+            blocks: Vec::new(),
+            origin: Some(origin),
+            prompt_events: false,
+            turn_number: None,
+            cancelled: false,
+        };
+        if state.active.contains_key(session_id) {
+            state
+                .queued
+                .entry(session_id.to_string())
+                .or_default()
+                .push(entry);
+            return None;
+        }
+        let run = RunInput {
+            prompt_id: item_id(&item),
+            prompt: text,
+            blocks: Vec::new(),
+            origin: entry.origin.clone(),
+            prompt_events: false,
+        };
+        let mut entry = entry;
+        entry.item["status"] = json!("running");
+        state.active.insert(session_id.to_string(), entry);
+        Some(run)
     }
 
     /// `(active, queued)` wire items for the list route.
@@ -151,6 +206,7 @@ impl PromptQueue {
             prompt: next.prompt.clone(),
             blocks: next.blocks.clone(),
             origin: next.origin.clone(),
+            prompt_events: next.prompt_events,
         };
         let mut next = next;
         next.item["status"] = json!("running");
@@ -371,7 +427,7 @@ pub async fn run_prompt_loop(
         // `RunTurnInput.agent_id` → `ToolExecuteRequest.agent_id` and a
         // task-local read would silently degrade to `main` across the
         // scheduler's `tokio::spawn`. Do not "fix" this into a lookup.
-        if !queue.active_is_cancelled(&session_id) {
+        if run.prompt_events && !queue.active_is_cancelled(&session_id) {
             publish_prompt_event(
                 &hub,
                 &session_id,
@@ -422,10 +478,28 @@ pub async fn run_prompt_loop(
     }
 }
 
+/// Drain one session's queued task notifications into the wake turn's prompt
+/// and origin, or `None` when nothing is queued.
+pub fn take_task_wake_prompt(
+    runner: &crate::storage::TaskRunner,
+    session_id: &str,
+) -> Option<(String, Value)> {
+    let notifications = runner.take_pending_notifications(Some(session_id));
+    let first = notifications.first()?;
+    let text = crate::session::render_task_notifications(&notifications);
+    let origin = json!({
+        "kind": "task",
+        "taskId": &first.task_id,
+        "status": first.status.as_str(),
+        "notificationId": format!("{}-{}", first.task_id, first.ended_at),
+    });
+    Some((text, origin))
+}
+
 /// Whether a turn ended cleanly enough to owe a goal continuation. v2
 /// continues on a completed turn (a max-tokens finish included); a
 /// cancelled, filtered, or step-capped turn settles the goal instead.
-fn turn_completed(report: &TurnReport) -> bool {
+pub(crate) fn turn_completed(report: &TurnReport) -> bool {
     matches!(
         report.stop_reason.as_str(),
         "EndTurn" | "MaxTokens" | "RepeatBreaker"
@@ -460,6 +534,44 @@ mod tests {
         assert_eq!(active.unwrap()["prompt_id"], "p1");
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0]["prompt_id"], "p2");
+    }
+
+    /// v2 `loop.notify` on the server: a task-notification wake is a queued
+    /// turn with no prompt behind it. It runs when the session is idle and
+    /// queues behind an active prompt otherwise, and the driver is told not to
+    /// settle a client prompt for it.
+    #[test]
+    fn a_task_wake_runs_when_idle_and_queues_behind_a_prompt() {
+        let queue = PromptQueue::new();
+        let origin = json!({
+            "kind": "task",
+            "taskId": "t1",
+            "status": "completed",
+            "notificationId": "t1-1",
+        });
+        let (_, run) = queue.admit("s1", item("p1"), "p1".into(), Vec::new(), None);
+        assert!(run.is_some());
+
+        assert!(
+            queue
+                .admit_wake("s1", "task done".into(), origin.clone())
+                .is_none(),
+            "a busy session queues the wake"
+        );
+        assert_eq!(queue.snapshot("s1").1.len(), 1);
+
+        let next = queue.advance("s1").expect("the queued wake is promoted");
+        assert_eq!(next.prompt, "task done");
+        assert!(!next.prompt_events, "a wake settles no client prompt");
+        assert_eq!(next.origin.unwrap()["kind"], "task");
+        queue.clear_active("s1");
+
+        let run = queue
+            .admit_wake("s1", "task done".into(), origin)
+            .expect("an idle session admits the wake immediately");
+        assert_eq!(run.prompt, "task done");
+        assert!(!run.prompt_events);
+        assert_eq!(queue.snapshot("s1").0.unwrap()["kind"], "notification");
     }
 
     /// ROADMAP §7.6: the web UI's abort button sends the live

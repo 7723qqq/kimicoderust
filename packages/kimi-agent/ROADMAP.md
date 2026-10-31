@@ -9147,3 +9147,40 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   续回合（SDK 的 `meta.goal` 只在 prompt receipt 上累加，续回合会漏计）；后台任务完成
   仍不唤醒交互会话；napi 的 plan 域归宿主所有，undo 只回滚 todo/goal 等引擎域；
   server 的 `[background]` 完成唤醒策略未定。
+
+## 31. 2026-10-31 后台任务唤醒交互会话 + ACP goal continuation
+
+### 31.1 交互式（napi/TUI）后台任务唤醒
+
+- `TaskRunner::notification_bell()`（watch 版本号，不是 `Notify`：runner 是进程级，
+  `notify_one` 会让一个会话的 pump 吃掉另一个会话的唤醒）在三个入队点统一 ring；
+  `sessions_with_pending_notifications()` 供服务器的唤醒服务枚举会话。
+- `EngineSession` 的 pump 空闲分支先 drain 本会话的通知并合成一个 `task` origin 回合
+  （无 receipt —— v2 `loop.notify` 也不结算 prompt），再在 `wakeup` 与 bell 上 select
+  等待；print 策略会话保持自己的 settle 循环，空闲分支不重复消费。
+- napi 的 pipeline 现在把进程级 runner 传给 `build_engine_pipeline`
+  （`PipelineHost.task_runner`），handle 重建后后台任务仍可见。
+
+### 31.2 server（REST）唤醒与共享 runner
+
+- `PipelineHost.task_runner`：server 传入自己的 runner，`/tasks` 路由与唤醒服务终于
+  看到 pipeline 里 spawn 的 bash / 子代理任务（此前每轮 pipeline 新建自己的 runner）。
+- `PromptQueue::admit_wake` + `RunInput.prompt_events`：通知回合走同一条队列串行，
+  但不发 `prompt.submitted` / `prompt.completed`（它背后没有客户端 prompt）。
+- `HttpServer::with_engine` 启动唤醒服务：bell 触发 → 枚举有待通知的会话 → 取渲染
+  文本与 `task` origin → `admit_wake`（忙则排队，闲则立即跑）。
+
+### 31.3 ACP goal continuation
+
+- ACP 的 `session/prompt` 直接调用 `run_turn_with_media`（不走 prompt queue），因此在
+  用户回合干净完成后按 `pending_goal_continuation` 串行续回合；response 仍报告用户
+  回合，续回合以 `session/update` 流式下发。REST 侧由 `run_prompt_loop` 承担同一职责，
+  两侧共用 `session::goal_continuation_prompt` 的判定。
+
+### 31.4 验证与剩余
+
+- `cargo test --lib` 3287 passed / 0 failed；`cargo clippy --all-targets`、`cargo fmt
+  --check` 通过。
+- **剩余**：ACP 没有后台任务唤醒服务（ACP 不使用 prompt queue，需要自己的空闲 gate）；
+  server 的通知回合会以 `kind: notification` 出现在 prompt 列表快照里，但没有对应的
+  `prompt.*` 事件；napi 交互式 goal continuation 仍未由 engine 驱动。
