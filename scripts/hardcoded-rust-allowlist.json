@@ -3624,6 +3624,36 @@
       "text": "\"source\": \"./official/kimi-webbridge\"",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/plugins.rs:\"systemPrompt\" is {} bytes, exceeding the {} KB limit; the field is ignored": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "\"systemPrompt\" is {} bytes, exceeding the {} KB limit; the field is ignored",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:\"systemPrompt\" must be a string": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "\"systemPrompt\" must be a string",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:\"systemPromptPath\" is not a file ({raw_path})": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "\"systemPromptPath\" is not a file ({raw_path})",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:\"systemPromptPath\" is {} bytes, exceeding the {} KB limit; the file is ignored ({raw_path})": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "\"systemPromptPath\" is {} bytes, exceeding the {} KB limit; the file is ignored ({raw_path})",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:\"systemPromptPath\" must be a string": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "\"systemPromptPath\" must be a string",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:\"systemPromptPath\" must not be blank": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "\"systemPromptPath\" must not be blank",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/plugins.rs:\"tier\": \"curated\",": {
       "file": "packages/kimi-agent/src/server/plugins.rs",
       "text": "\"tier\": \"curated\",",
@@ -3644,15 +3674,35 @@
       "text": "\"{field}\" path must start with \"./\" (got \"{entry}\")",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/plugins.rs:\"{field}\" path must start with \"./\" (got \"{value}\")": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "\"{field}\" path must start with \"./\" (got \"{value}\")",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/plugins.rs:\"{field}\" path resolves outside the plugin ({entry})": {
       "file": "packages/kimi-agent/src/server/plugins.rs",
       "text": "\"{field}\" path resolves outside the plugin ({entry})",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:\"{field}\" path resolves outside the plugin ({value})": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "\"{field}\" path resolves outside the plugin ({value})",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/server/plugins.rs:\"{trimmed}\" has no `name` in its kimi.plugin.json, so the plugin cannot be identified.": {
       "file": "packages/kimi-agent/src/server/plugins.rs",
       "text": "\"{trimmed}\" has no `name` in its kimi.plugin.json, so the plugin cannot be identified.",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:# Plugin Instructions {PLUGIN_SECTIONS_PROSE} {}": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "# Plugin Instructions {PLUGIN_SECTIONS_PROSE} {}",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:<!-- From: plugin {id} --> {content}": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "<!-- From: plugin {id} --> {content}",
+      "reason": "format-scaffolding"
     },
     "packages/kimi-agent/src/server/plugins.rs:Control your real browser from Kimi Code.": {
       "file": "packages/kimi-agent/src/server/plugins.rs",
@@ -3662,6 +3712,11 @@
     "packages/kimi-agent/src/server/plugins.rs:Failed to parse {}: {error}": {
       "file": "packages/kimi-agent/src/server/plugins.rs",
       "text": "Failed to parse {}: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:Failed to read \"systemPromptPath\" ({raw_path}): {error}": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "Failed to read \"systemPromptPath\" ({raw_path}): {error}",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/server/plugins.rs:Failed to read {}: {error}": {
@@ -3713,6 +3768,16 @@
       "file": "packages/kimi-agent/src/server/plugins.rs",
       "text": "This process has no Kimi home, so a remote plugin cannot be installed.",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:plugin hook entry has no event; skipped": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "plugin hook entry has no event; skipped",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:plugin system-prompt contributions skipped: the aggregate budget is exhausted": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "plugin system-prompt contributions skipped: the aggregate budget is exhausted",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/server/plugins.rs:{} is missing or is not valid JSON": {
       "file": "packages/kimi-agent/src/server/plugins.rs",

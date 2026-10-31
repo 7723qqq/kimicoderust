@@ -2241,11 +2241,14 @@ async fn build_engine_pipeline(
             desired.then_some(trigger),
         );
     }
+    let (plugin_sections, plugin_hooks) = plugin_contributions();
     let pipeline = pipeline::build_engine_pipeline(
         &spec,
         host_callbacks.clone(),
         PipelineHost {
             subagent_manager: SUBAGENT_MANAGER.clone(),
+            plugin_sections,
+            plugin_hooks,
             // The addon's runner is process-wide: sharing it between handle
             // builds keeps a background task visible across a rebuild and lets
             // the session pump watch the same notification queue its tools
@@ -3732,6 +3735,23 @@ pub fn init_plugin_store(
         *PLUGIN_MANAGER.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(manager));
         Ok(())
     })
+}
+
+/// The enabled plugins' prompt block and hooks when the host has opened the
+/// plugin store; an unopened store contributes nothing (the headless path must
+/// not force the registry open).
+fn plugin_contributions() -> (Option<String>, Vec<crate::permission::HookDef>) {
+    let manager = PLUGIN_MANAGER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    match manager {
+        Some(manager) => (
+            manager.plugin_system_prompt_block(),
+            manager.enabled_hooks(),
+        ),
+        None => (None, Vec::new()),
+    }
 }
 
 fn plugin_manager() -> napi::Result<Arc<crate::server::plugins::PluginManager>> {

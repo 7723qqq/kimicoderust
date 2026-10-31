@@ -408,6 +408,13 @@ impl HttpServer {
         // reflected in the next turn with no refresh bookkeeping to miss.
         let plugin_manager = self.plugin_manager.clone();
         engine.with_plugin_skill_roots(Arc::new(move || plugin_manager.plugin_skill_dirs()));
+        let contributions_manager = self.plugin_manager.clone();
+        engine.with_plugin_contributions(Arc::new(move || {
+            crate::server::engine::PluginContributionSet {
+                sections: contributions_manager.plugin_system_prompt_block(),
+                hooks: contributions_manager.enabled_hooks(),
+            }
+        }));
         self.subagent_manager = engine.subagent_manager();
         self.subagent_manager
             .set_task_runner_sync(self.task_runner.clone());

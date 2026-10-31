@@ -9307,3 +9307,33 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   → 第二回合请求体含渲染通知与输出预览、turn origin 为 `task`）。
 - **剩余**：ACP 会话空闲时若任务完成，只有 stdio server 会唤醒；HTTP-ACP 桥接
   连接没有空闲唤醒。
+
+## 37. 2026-10-31 插件 systemPrompt 与 hooks 导入
+
+- `server/plugins.rs`：`PluginManifest` 重新解析 `systemPrompt` 与
+  `systemPromptPath`（v2 `readSystemPrompt`）：两段以空行连接、各自 32 KB 上限
+  （`PLUGIN_SYSTEM_PROMPT_MAX_BYTES`）、文件去 BOM 后 trim、路径必须 `./` 开头且
+  落在插件目录内（v2 `resolvePluginPathField`），每次丢弃都带 warn 诊断。
+- `PluginManager::enabled_system_prompts` / `plugin_system_prompt_block`
+  （v2 `resolvePluginSections`）：仅 enabled + ok 的插件；每段包
+  `<!-- From: plugin id -->` 头、空行连接、整体 64 KB 预算
+  （`PLUGIN_SECTIONS_MAX_BYTES`，超出的整段跳过并记 warn）；输出完整
+  `# Plugin Instructions` 块（含 v2 `PLUGIN_SECTIONS_PROSE` 免责声明）。
+- `PluginManager::enabled_hooks`（v2 `enabledHooks`）：manifest `hooks[]` 解析为
+  `HookDef`，`cwd` 指向插件根、`env` 替换为 `KIMI_CODE_HOME` + `KIMI_PLUGIN_ROOT`
+  （与 v2 一致，覆盖条目自带 env）；缺 event 或格式错误的条目跳过并 warn。
+- 接线：`PipelineHost.plugin_sections/plugin_hooks` →
+  `build_engine_pipeline` 把块追加到每个 provider 的 system prompt 末尾
+  （`with_plugin_sections`），插件 hooks 追加在配置 hooks 之后构建 `HookGuard`
+  （即使会话没有 policy snapshot）；server 由 builder 安装
+  `with_plugin_contributions` 读取器（与 `with_plugin_skill_roots` 同款，每次
+  spec 现读，启用/禁用即时生效），napi 在每次 handle 构建时读取全局插件管理器
+  （未 `initPluginStore` 时不强制打开）。
+- 测试：`a_manifest_reads_inline_and_file_system_prompts`、
+  `enabled_plugins_contribute_prompt_sections_and_hooks`、
+  `plugin_prompt_sections_respect_the_aggregate_budget`、
+  `plugin_sections_and_hooks_reach_the_pipeline`、
+  `without_plugin_sections_the_prompt_is_unchanged`；`cargo test --lib` 3310 passed。
+- **剩余**：stdio CLI 入口没有插件管理器（不导入插件贡献）；插件 prompt 块在
+  napi 路径上按 handle 构建时冻结（与 v2 每 profile 冻结一致，但插件启用变化要等
+  下一次 handle 重建）；预算跳过只记日志，没有像 v2 那样向宿主发 WarningIssued 事件。

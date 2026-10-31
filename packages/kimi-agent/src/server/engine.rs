@@ -275,6 +275,12 @@ pub struct ServerEngine {
     /// mutation paths itself; a process with no plugins leaves it unset and
     /// scans exactly what it did before.
     plugin_skill_roots: Mutex<Option<PluginSkillRoots>>,
+    /// The enabled plugins' system-prompt block and hook definitions, asked
+    /// for fresh on every session spec (see
+    /// [`ServerEngine::with_plugin_contributions`]): an install / enable /
+    /// disable changes the next turn's prompt and hook guard without this
+    /// engine tracking the mutation paths itself.
+    plugin_contributions: Mutex<Option<PluginContributions>>,
     /// Optional per-session host factory; non-HTTP hosts (ACP) install one to
     /// answer permission checks through their own transport.
     host_factory: Mutex<Option<HostFactory>>,
@@ -319,11 +325,23 @@ pub type HostFactory = Arc<dyn Fn(&str) -> Arc<dyn crate::callbacks::HostCallbac
 /// [`ServerEngine::with_plugin_skill_roots`]).
 pub type PluginSkillRoots = Arc<dyn Fn() -> Vec<crate::skills::PluginSkillDir> + Send + Sync>;
 
+/// The two session-facing contributions of the enabled plugins: the rendered
+/// `# Plugin Instructions` block and the external hook definitions.
+#[derive(Clone, Default)]
+pub struct PluginContributionSet {
+    pub sections: Option<String>,
+    pub hooks: Vec<crate::permission::HookDef>,
+}
+
+/// Reads the enabled plugins' contributions for the turn about to be built.
+pub type PluginContributions = Arc<dyn Fn() -> PluginContributionSet + Send + Sync>;
+
 impl ServerEngine {
     pub fn new(spec: PipelineSpec, hub: Arc<EventHub>, store: Arc<SqliteSessionStore>) -> Self {
         Self {
             spec,
             plugin_skill_roots: Mutex::new(None),
+            plugin_contributions: Mutex::new(None),
             activity_registry: Arc::new(crate::server::activity::ActivityRegistry::new(
                 hub.clone(),
             )),
@@ -429,6 +447,26 @@ impl ServerEngine {
             .as_ref()
             .map(|roots| roots())
             .unwrap_or_default()
+    }
+
+    /// Install the reader for the enabled plugins' system-prompt block and
+    /// hooks (the server builder owns the plugin manager, mirroring
+    /// [`Self::with_plugin_skill_roots`]).
+    pub fn with_plugin_contributions(&self, contributions: PluginContributions) {
+        *self
+            .plugin_contributions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(contributions);
+    }
+
+    /// The enabled plugins' contributions for the turn about to be built.
+    fn plugin_contributions(&self) -> PluginContributionSet {
+        let reader = self
+            .plugin_contributions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        reader.map(|read| read()).unwrap_or_default()
     }
 
     fn config_source(&self) -> Option<Arc<tokio::sync::Mutex<Option<crate::config::KimiConfig>>>> {
@@ -1462,7 +1500,8 @@ impl ServerEngine {
         };
         let ws_ref = ws_root.as_deref().unwrap_or(std::path::Path::new("."));
         let callbacks = self.session_callbacks(session_id, ws_ref);
-        crate::pipeline::build_llm_for_spec(&spec, &callbacks).ok()
+        let sections = self.plugin_contributions().sections;
+        crate::pipeline::build_llm_for_spec(&spec, &callbacks, sections.as_deref()).ok()
     }
 
     /// Manual compaction (the REST `:compact` route and ACP `/compact`):
@@ -1672,7 +1711,8 @@ impl ServerEngine {
         spec.providers.clear();
         let callbacks: Arc<dyn HostCallbacks> =
             Arc::new(ServerHost::standalone().with_oauth(self.oauth_manager()));
-        crate::pipeline::build_llm_for_spec(&spec, &callbacks).ok()
+        let sections = self.plugin_contributions().sections;
+        crate::pipeline::build_llm_for_spec(&spec, &callbacks, sections.as_deref()).ok()
     }
 
     /// Build an engine context for one turn and run it.
@@ -1745,11 +1785,16 @@ impl ServerEngine {
             ),
         );
         let host_callbacks: Arc<dyn HostCallbacks> = message_callbacks.clone();
+        let contributions = self.plugin_contributions();
         let pipeline = build_engine_pipeline(
             &spec,
             host_callbacks,
             PipelineHost {
                 subagent_manager: self.subagent_manager.clone(),
+                // The enabled plugins' prompt block and hooks, read fresh so a
+                // plugin install / enable / disable reaches the next turn.
+                plugin_sections: contributions.sections,
+                plugin_hooks: contributions.hooks,
                 // The server's process-wide runner: task routes and the wake
                 // service read it, so the tasks this pipeline spawns must
                 // register there instead of on a per-turn runner.

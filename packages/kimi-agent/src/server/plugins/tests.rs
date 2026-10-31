@@ -1271,3 +1271,211 @@ fn managed_roots_refuse_ids_that_are_not_a_single_path_segment() {
         );
     }
 }
+
+/// v2 `readSystemPrompt`: the inline field and the `systemPromptPath` file are
+/// joined with a blank line; each is capped at 32 KB, a BOM is stripped from
+/// the file, and a path outside the plugin (or not `./`-relative) is dropped
+/// with a warning instead of being read.
+#[test]
+fn a_manifest_reads_inline_and_file_system_prompts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("plugin");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("PROMPT.md"),
+        "\u{feff}  File rule one.\n\nFile rule two.  \n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("kimi.plugin.json"),
+        r#"{
+              "name": "prompty",
+              "systemPrompt": "Inline rule.",
+              "systemPromptPath": "./PROMPT.md"
+            }"#,
+    )
+    .unwrap();
+    let parsed = parse_plugin_manifest(&root);
+    assert_eq!(
+        parsed.manifest.and_then(|m| m.system_prompt).as_deref(),
+        Some("Inline rule.\n\nFile rule one.\n\nFile rule two.")
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    // An oversized inline field is ignored as a whole; the valid file still
+    // contributes, and the warning names the limit.
+    std::fs::write(
+        root.join("kimi.plugin.json"),
+        format!(
+            r#"{{"name":"prompty","systemPrompt":"{}","systemPromptPath":"./PROMPT.md"}}"#,
+            "x".repeat(PLUGIN_SYSTEM_PROMPT_MAX_BYTES + 1)
+        ),
+    )
+    .unwrap();
+    let parsed = parse_plugin_manifest(&root);
+    assert_eq!(
+        parsed.manifest.and_then(|m| m.system_prompt).as_deref(),
+        Some("File rule one.\n\nFile rule two.")
+    );
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == "warn" && d.message.contains("exceeding the 32 KB limit")),
+        "{:?}",
+        parsed.diagnostics
+    );
+
+    // A path that leaves the plugin, and one that is not `./`-relative, are
+    // both refused before any read.
+    std::fs::write(temp.path().join("outside.md"), "Outside text").unwrap();
+    for (path, expected) in [
+        ("./../outside.md", "resolves outside the plugin"),
+        ("outside.md", "must start with \"./\""),
+        ("./missing.md", "is not a file"),
+    ] {
+        std::fs::write(
+            root.join("kimi.plugin.json"),
+            format!(r#"{{"name":"prompty","systemPromptPath":"{path}"}}"#),
+        )
+        .unwrap();
+        let parsed = parse_plugin_manifest(&root);
+        assert!(
+            parsed.manifest.and_then(|m| m.system_prompt).is_none(),
+            "{path} contributed text"
+        );
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains(expected)),
+            "{path}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+/// Enabled plugins contribute their prompt block and hooks; disabling one
+/// removes both. Hooks carry the plugin root as `cwd` and v2's environment,
+/// and a malformed entry is skipped instead of dropping the plugin.
+#[test]
+fn enabled_plugins_contribute_prompt_sections_and_hooks() {
+    let temp = tempfile::tempdir().unwrap();
+    let marketplace = temp.path();
+    let root = marketplace.join("official/demo");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        marketplace.join("marketplace.json"),
+        r#"{"version":"1","plugins":[{"id":"demo","tier":"official","displayName":"Demo","description":"A demo","source":"./official/demo"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("kimi.plugin.json"),
+        r#"{
+              "name": "demo",
+              "systemPrompt": "Always answer in the house voice.",
+              "hooks": [
+                { "event": "PreToolUse", "matcher": "Bash", "command": "echo guard" },
+                { "event": "", "command": "echo ignored" },
+                { "command": "echo no-event" }
+              ]
+            }"#,
+    )
+    .unwrap();
+
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let pm = PluginManager::new(store).with_marketplace_dir(Some(marketplace.to_path_buf()));
+
+    // Not installed yet: no contributions at all.
+    assert!(pm.plugin_system_prompt_block().is_none());
+    assert!(pm.enabled_hooks().is_empty());
+
+    pm.install_plugin("demo").unwrap().expect("catalogued");
+
+    let block = pm.plugin_system_prompt_block().expect("a prompt block");
+    assert!(block.contains("# Plugin Instructions"), "{block}");
+    assert!(block.contains(PLUGIN_SECTIONS_PROSE), "{block}");
+    assert!(block.contains("<!-- From: plugin demo -->"), "{block}");
+    assert!(
+        block.contains("Always answer in the house voice."),
+        "{block}"
+    );
+
+    let hooks = pm.enabled_hooks();
+    assert_eq!(
+        hooks.len(),
+        1,
+        "only the well-formed hook survives: {hooks:?}"
+    );
+    assert_eq!(hooks[0].event, "PreToolUse");
+    assert_eq!(hooks[0].matcher, "Bash");
+    assert_eq!(hooks[0].command, "echo guard");
+    let plugin_root = pm.plugin_root("demo").expect("install root");
+    assert_eq!(
+        hooks[0].cwd.as_deref(),
+        Some(plugin_root.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        hooks[0]
+            .env
+            .as_ref()
+            .and_then(|env| env.get("KIMI_PLUGIN_ROOT"))
+            .map(String::as_str),
+        Some(plugin_root.to_string_lossy().as_ref())
+    );
+
+    pm.set_plugin_enabled("demo", false).unwrap();
+    assert!(pm.plugin_system_prompt_block().is_none());
+    assert!(pm.enabled_hooks().is_empty());
+}
+
+/// v2 `PLUGIN_SECTIONS_MAX_BYTES`: the aggregate budget skips a contribution
+/// that does not fit, whole, instead of truncating it mid-sentence.
+#[test]
+fn plugin_prompt_sections_respect_the_aggregate_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let marketplace = temp.path();
+    let mut entries = Vec::new();
+    for id in ["big-one", "big-two"] {
+        let root = marketplace.join(format!("official/{id}"));
+        std::fs::create_dir_all(&root).unwrap();
+        // Each plugin contributes two 30 KB fields (inline + file), inside the
+        // 32 KB per-field cap: the first plugin's ~60 KB fits the 64 KB
+        // aggregate budget, the second's does not.
+        let content = "x".repeat(30 * 1024);
+        std::fs::write(root.join("PROMPT.md"), &content).unwrap();
+        std::fs::write(
+            root.join("kimi.plugin.json"),
+            serde_json::json!({
+                "name": id,
+                "systemPrompt": content,
+                "systemPromptPath": "./PROMPT.md"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        entries.push(format!(
+            r#"{{"id":"{id}","tier":"official","displayName":"{id}","description":"d","source":"./official/{id}"}}"#
+        ));
+    }
+    std::fs::write(
+        marketplace.join("marketplace.json"),
+        format!(r#"{{"version":"1","plugins":[{}]}}"#, entries.join(",")),
+    )
+    .unwrap();
+
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let pm = PluginManager::new(store).with_marketplace_dir(Some(marketplace.to_path_buf()));
+    pm.install_plugin("big-one").unwrap().expect("catalogued");
+    pm.install_plugin("big-two").unwrap().expect("catalogued");
+
+    let block = pm.plugin_system_prompt_block().expect("a prompt block");
+    assert!(
+        block.contains("<!-- From: plugin big-one -->"),
+        "the first contribution fits"
+    );
+    assert!(
+        !block.contains("<!-- From: plugin big-two -->"),
+        "the over-budget contribution is skipped whole, not truncated"
+    );
+}

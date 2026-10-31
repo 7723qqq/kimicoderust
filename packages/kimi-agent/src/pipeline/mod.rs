@@ -200,6 +200,12 @@ pub struct PipelineHost {
     /// choice: the stdio CLI builds one per pipeline, the addon shares a
     /// process-wide one.
     pub subagent_manager: Arc<SubagentManager>,
+    /// Enabled plugins' system-prompt block (`# Plugin Instructions`),
+    /// rendered by the plugin owner; appended to every provider prompt.
+    pub plugin_sections: Option<String>,
+    /// Enabled plugins' external hooks, merged after the snapshot's own hooks
+    /// (v2 `[...configured, ...pluginHooks]`).
+    pub plugin_hooks: Vec<crate::permission::HookDef>,
     /// An existing background-task runner to run this pipeline's tasks on.
     /// The server owns one process-wide runner (its task routes and the
     /// session wake service read it), so a per-pipeline runner would leave
@@ -266,6 +272,8 @@ pub async fn build_engine_pipeline(
 ) -> Result<EnginePipeline, PipelineError> {
     let PipelineHost {
         subagent_manager,
+        plugin_sections,
+        plugin_hooks,
         task_runner: host_task_runner,
         parent_cancel,
         parent_cancel_slot,
@@ -316,9 +324,18 @@ pub async fn build_engine_pipeline(
     // user-configured commands observe the turn (`UserPromptSubmit` /
     // `PreCompact`) and can veto a clean text stop (`Stop`). Built once
     // per pipeline; turn drivers clone it per turn, subagent turns skip it.
-    let hook_guard = policy_snapshot
-        .clone()
-        .map(|s| Arc::new(HookGuard::new(s.pre_tool_hooks)));
+    // Plugin-contributed hooks are appended after the configured ones (v2
+    // `[...configured, ...pluginHooks]`); a session with neither gets no guard.
+    let hook_guard = if policy_snapshot.is_none() && plugin_hooks.is_empty() {
+        None
+    } else {
+        let mut hooks = policy_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.pre_tool_hooks.clone())
+            .unwrap_or_default();
+        hooks.extend(plugin_hooks.iter().cloned());
+        Some(Arc::new(HookGuard::new(hooks)))
+    };
     // The pool's default model, hoisted out of the native-tool arm so the
     // engine can reach it without downcasting the callback chain.
     let mut secondary_llm: Option<Arc<dyn LLM>> = None;
@@ -474,7 +491,10 @@ pub async fn build_engine_pipeline(
                                 let llm: Arc<dyn crate::turn_loop::types::LLM> =
                                     Arc::from(build_native_llm(
                                         &entry.llm,
-                                        &spec.system_prompt,
+                                        &with_plugin_sections(
+                                            &spec.system_prompt,
+                                            plugin_sections.as_deref(),
+                                        ),
                                         &base_callbacks,
                                         spec.session_id.as_deref(),
                                     ));
@@ -587,7 +607,7 @@ pub async fn build_engine_pipeline(
             _ => base_callbacks.clone(),
         };
 
-    let llm = build_llm_for_spec(spec, &callbacks)?;
+    let llm = build_llm_for_spec(spec, &callbacks, plugin_sections.as_deref())?;
     // Subagent execution runtime (P46): spawned subagent turns run with this
     // pipeline's llm + callback chain.
     subagent_manager
@@ -673,7 +693,9 @@ fn effective_model_capabilities(spec: &PipelineSpec) -> Option<Vec<String>> {
 pub fn build_llm_for_spec(
     spec: &PipelineSpec,
     callbacks: &Arc<dyn HostCallbacks>,
+    plugin_sections: Option<&str>,
 ) -> Result<Arc<dyn LLM>, PipelineError> {
+    let system_prompt = with_plugin_sections(&spec.system_prompt, plugin_sections);
     let llm: Box<dyn LLM> = if !spec.providers.is_empty() {
         let providers: Vec<LlmProvider> = spec
             .providers
@@ -685,14 +707,14 @@ pub fn build_llm_for_spec(
                 // race could never produce a winner.
                 Some(config) => LlmProvider::native(
                     p.name.clone(),
-                    p.system_prompt.clone(),
+                    with_plugin_sections(&p.system_prompt, plugin_sections),
                     config,
                     callbacks.clone(),
                 ),
                 None => LlmProvider::host(
                     p.name.clone(),
                     p.model.clone(),
-                    p.system_prompt.clone(),
+                    with_plugin_sections(&p.system_prompt, plugin_sections),
                     callbacks.clone(),
                 ),
             })
@@ -700,12 +722,7 @@ pub fn build_llm_for_spec(
             .collect();
         Box::new(MultiLLM::new(providers))
     } else if let Some(cfg) = spec.native_llm.clone() {
-        build_native_llm(
-            &cfg,
-            &spec.system_prompt,
-            callbacks,
-            spec.session_id.as_deref(),
-        )
+        build_native_llm(&cfg, &system_prompt, callbacks, spec.session_id.as_deref())
     } else {
         if spec.rust_self_contained {
             return Err(PipelineError {
@@ -715,11 +732,21 @@ pub fn build_llm_for_spec(
             });
         }
         Box::new(
-            HostLlmProxy::new(spec.system_prompt.clone(), spec.model_name.clone())
+            HostLlmProxy::new(system_prompt, spec.model_name.clone())
                 .with_callbacks(callbacks.clone()),
         )
     };
     Ok(Arc::from(llm))
+}
+
+/// The session's system prompt with the enabled plugins' `# Plugin
+/// Instructions` block appended (v2's `plugin_sections` template var, which
+/// renders at the end of the prompt).
+pub fn with_plugin_sections(prompt: &str, sections: Option<&str>) -> String {
+    match sections.filter(|block| !block.is_empty()) {
+        Some(block) => format!("{prompt}{block}"),
+        None => prompt.to_string(),
+    }
 }
 
 /// Build a native HTTP LLM for one `NativeLlmConfig`: the single place the
@@ -901,6 +928,8 @@ mod tests {
     fn host(manager: Arc<SubagentManager>) -> PipelineHost {
         PipelineHost {
             subagent_manager: manager,
+            plugin_sections: None,
+            plugin_hooks: Vec::new(),
             task_runner: None,
             parent_cancel: None,
             parent_cancel_slot: None,
@@ -923,6 +952,69 @@ mod tests {
             tools: Vec::new(),
             request_id: None,
         }
+    }
+
+    /// Enabled plugins reach the pipeline through the host: their
+    /// `# Plugin Instructions` block is appended to the LLM's system prompt,
+    /// and their hooks build a guard even when the session carries no policy
+    /// snapshot of its own (v2 `[...configured, ...pluginHooks]`).
+    #[tokio::test]
+    async fn plugin_sections_and_hooks_reach_the_pipeline() {
+        let (inner, _calls) = InProcessHost::new();
+        let block = "
+
+# Plugin Instructions
+
+Reference only.
+
+From the plugin.
+
+"
+        .to_string();
+        let pipeline = build_engine_pipeline(
+            &spec(),
+            Arc::new(inner),
+            PipelineHost {
+                plugin_sections: Some(block.clone()),
+                plugin_hooks: vec![crate::permission::HookDef {
+                    event: "PreToolUse".into(),
+                    matcher: "Bash".into(),
+                    command: "echo guard".into(),
+                    ..Default::default()
+                }],
+                ..host(Arc::new(SubagentManager::new()))
+            },
+        )
+        .await
+        .expect("pipeline builds");
+        assert!(
+            pipeline.llm.system_prompt().ends_with(&block),
+            "the plugin block must close the prompt: {}",
+            pipeline.llm.system_prompt()
+        );
+        assert!(
+            pipeline.hook_guard.is_some(),
+            "plugin hooks alone must produce a guard"
+        );
+    }
+
+    #[test]
+    fn without_plugin_sections_the_prompt_is_unchanged() {
+        assert_eq!(with_plugin_sections("sys", None), "sys");
+        assert_eq!(with_plugin_sections("sys", Some("")), "sys");
+        assert_eq!(
+            with_plugin_sections(
+                "sys",
+                Some(
+                    "
+
+X"
+                )
+            ),
+            "sys
+
+X"
+        );
     }
 
     #[tokio::test]

@@ -1173,6 +1173,10 @@ async fn build_engine_pipeline(
         Arc::new(RpcHostCallbacks { server }),
         PipelineHost {
             subagent_manager: subagent_manager.clone(),
+            // The stdio entry has no plugin manager: plugins contribute only
+            // on hosts that own one (the server and the addon).
+            plugin_sections: None,
+            plugin_hooks: Vec::new(),
             task_runner: None,
             parent_cancel,
             parent_cancel_slot,
