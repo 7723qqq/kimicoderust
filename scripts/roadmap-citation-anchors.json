@@ -101,15 +101,6 @@
       "note": "§6.25/§6.43.1 — the watcher is a standalone service, not a capability. Abbreviated path."
     },
     {
-      "cited": "sqlite_store.rs:1042",
-      "origin": "worktree",
-      "path": "packages/kimi-agent/src/session/sqlite_store.rs",
-      "line": 1042,
-      "context": "sion` 现在 `",
-      "expect": "pub fn fork_session(",
-      "note": "§6.42.1/§10.23 — post-M1 pointer; M1 re-located this from :834-863. Bare basename: resolved path carried as data."
-    },
-    {
       "cited": "server/route_sessions.rs:459",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/server/route_sessions.rs",
@@ -117,15 +108,6 @@
       "context": "REST 解析在 `",
       "expect": "let turn_index = match body.get(\"turnIndex\") {",
       "note": "§10.23 REST turnIndex parse; M1 re-located this from :5165, then the mod.rs → dispatch.rs → route_sessions.rs splits moved it again."
-    },
-    {
-      "cited": "acp/mod.rs:1020",
-      "origin": "worktree",
-      "path": "packages/kimi-agent/src/acp/mod.rs",
-      "line": 1020,
-      "context": "；ACP 调用在 `",
-      "expect": "match self.store.fork_session(source, &forked, None, None) {",
-      "note": "§10.23 ACP fork call; M1 re-located this from :1015. Bare basename: resolved path carried as data."
     },
     {
       "cited": "compaction/micro.rs:132-155",
@@ -136,16 +118,6 @@
       "context": "见 §10.25（`",
       "expect": "pub fn detect_micro_compaction(",
       "note": "§10.25/§6.45.2 — the fork's own micro-compaction criterion (fork-original; upstream has no such module). Crate-relative sub-path form."
-    },
-    {
-      "cited": "server/engine.rs:1416-1429",
-      "origin": "worktree",
-      "path": "packages/kimi-agent/src/server/engine.rs",
-      "line": 1416,
-      "endLine": 1429,
-      "context": "ion`，调用点 `",
-      "expect": "crate::compaction::micro::detect_micro_compaction(",
-      "note": "§10.25 — the call site of the fork's micro-compaction gate. Crate-relative sub-path form."
     },
     {
       "cited": "packages/kimi-agent/src/server/route_session_io.rs:154",
@@ -205,10 +177,10 @@
       "note": "§12 — the pwsh → powershell → Git Bash → cmd chain"
     },
     {
-      "cited": "packages/kimi-agent/napi-contract.d.ts:1537",
+      "cited": "packages/kimi-agent/napi-contract.d.ts:1576",
       "origin": "worktree",
       "path": "packages/kimi-agent/napi-contract.d.ts",
-      "line": 1537,
+      "line": 1576,
       "context": "to stop」（`",
       "expect": "pump task is signalled to stop",
       "note": "§10.42 — the contract wording 'signalled' the dispose note cites"

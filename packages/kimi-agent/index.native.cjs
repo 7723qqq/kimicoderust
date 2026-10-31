@@ -962,6 +962,50 @@ function fsSuggest(workDir, query, limit) {
 }
 
 // ============================================================================
+// MCP OAuth — engine-owned encrypted storage, host-owned browser flow
+// ============================================================================
+
+/**
+ * Persist the tokens from a browser authorization-code exchange into the
+ * engine's encrypted MCP credential store.
+ * @param {string} name - MCP server name.
+ * @param {string} url - Server URL (part of the store key).
+ * @param {string} tokensJson - `McpOAuthTokens` JSON from the host flow.
+ * @param {string} dir - Credential directory (`<home>/credentials/mcp`).
+ * @returns {string} The store key.
+ */
+function mcpOauthStoreTokens(name, url, tokensJson, dir) {
+  return binding.mcpOauthStoreTokens(name, url, tokensJson, dir);
+}
+
+/**
+ * Stored-credential state for the host's auth-status classifier, decrypted.
+ * @param {string} name
+ * @param {string} url
+ * @param {string} dir
+ * @returns {Promise<string>} JSON `{hasTokens, hasRefreshToken, expired, accessToken}`.
+ */
+async function mcpOauthTokenState(name, url, dir) {
+  return binding.mcpOauthTokenState(name, url, dir);
+}
+
+/**
+ * Drop a stored grant.
+ * @returns {boolean} Whether a record existed.
+ */
+function mcpOauthRemove(name, url, dir) {
+  return binding.mcpOauthRemove(name, url, dir);
+}
+
+/**
+ * Reconnect every live MCP manager that knows `name`.
+ * @returns {Promise<number>} Managers reconnected.
+ */
+async function mcpOauthReconnect(name) {
+  return binding.mcpOauthReconnect(name);
+}
+
+// ============================================================================
 // Background tasks — the engine pipeline's task runner (process-global)
 // ============================================================================
 
@@ -1113,6 +1157,12 @@ module.exports = {
 
   // File suggestions
   fsSuggest,
+
+  // MCP OAuth
+  mcpOauthStoreTokens,
+  mcpOauthTokenState,
+  mcpOauthRemove,
+  mcpOauthReconnect,
 
   // Background tasks
   backgroundTaskList,

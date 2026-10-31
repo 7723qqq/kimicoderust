@@ -397,6 +397,8 @@ pub async fn start_repl(
     let llm: Arc<dyn crate::turn_loop::types::LLM> = Arc::new(NativeHttpLlm::new(
         NativeLlmConfig {
             protocol: native_llm_def.protocol,
+            provider_type: Some(native_llm_def.provider_type.clone())
+                .filter(|value| !value.is_empty()),
             base_url: native_llm_def.base_url,
             api_key: native_llm_def.api_key,
             // The env-bound credential channel survives resolution: the
@@ -404,7 +406,7 @@ pub async fn start_repl(
             // the CLI entry point (`main.rs`) passes it through.
             api_key_env: native_llm_def.api_key_env,
             model: native_llm_def.model.clone(),
-            max_tokens: native_llm_def.max_tokens,
+            max_tokens: native_llm_def.max_output_size.or(native_llm_def.max_tokens),
             custom_headers: native_llm_def.custom_headers,
             reasoning_effort: config.resolve_effort(native_llm_def.off_effort.as_deref()),
             thinking_budget: None,

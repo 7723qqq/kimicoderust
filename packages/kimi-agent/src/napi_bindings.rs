@@ -947,6 +947,10 @@ pub struct JsRunTurnParams {
     pub session_id: Option<String>,
     /// Native MCP servers configuration (P73).
     pub mcp_servers: Option<Vec<JsMcpServerConfig>>,
+    /// Directory of the MCP OAuth credential store (`<home>/credentials/mcp`).
+    /// Installed on the session's MCP manager so stored tokens are injected
+    /// and refreshed by the engine; `None` leaves OAuth uninstalled.
+    pub mcp_oauth_dir: Option<String>,
     /// Host-resolved `[services.moonshot_search]` / `KIMI_WEB_SEARCH_*`
     /// backend (v2 `configSection.ts`). When set, the native WebSearch tool
     /// calls this endpoint instead of scraping DuckDuckGo.
@@ -1116,6 +1120,10 @@ pub struct JsLlmProviderDef {
 pub struct JsNativeLlmConfig {
     /// "openai" (Chat Completions) or "anthropic" (Messages), or "google" / "openai_responses".
     pub protocol: String,
+    /// Declared provider family (`[providers.*].type`, e.g. "kimi"): the
+    /// transport encodes the Kimi `thinking` object instead of a top-level
+    /// `reasoning_effort` for it.
+    pub provider_type: Option<String>,
     /// API base URL including the version segment (e.g. `.../v1`).
     pub base_url: String,
     pub api_key: String,
@@ -1520,8 +1528,15 @@ static MCP_MANAGERS: LazyLock<Mutex<HashMap<String, Weak<crate::mcp::McpManager>
 /// workspace-scoped manager, workspaceMcpService.ts:61-83). A changed
 /// configuration hashes to a different key and gets its own manager; the old
 /// one is dropped once its sessions are gone.
-fn shared_mcp_manager(servers: Vec<McpServerSpec>) -> Arc<crate::mcp::McpManager> {
-    let key = mcp_servers_key(&servers);
+fn shared_mcp_manager(
+    servers: Vec<McpServerSpec>,
+    oauth_dir: Option<std::path::PathBuf>,
+) -> Arc<crate::mcp::McpManager> {
+    let mut key = mcp_servers_key(&servers);
+    if let Some(dir) = oauth_dir.as_deref() {
+        key.push_str("|oauth:");
+        key.push_str(&dir.display().to_string());
+    }
     let mut cache = MCP_MANAGERS.lock().unwrap_or_else(|e| e.into_inner());
     // Drop the entries whose sessions are gone before deciding, so a stale
     // entry can never shadow a fresh manager for the same configuration.
@@ -1530,6 +1545,11 @@ fn shared_mcp_manager(servers: Vec<McpServerSpec>) -> Arc<crate::mcp::McpManager
         return existing;
     }
     let manager = Arc::new(crate::mcp::McpManager::new());
+    if let Some(dir) = oauth_dir {
+        manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(Arc::new(
+            crate::mcp::oauth::McpOAuthFileStore::new(dir),
+        ))));
+    }
     manager.connect_all(servers);
     cache.insert(key, Arc::downgrade(&manager));
     manager
@@ -1951,7 +1971,15 @@ async fn build_engine_pipeline(
         };
         servers.push((cfg.name.clone(), recipe, McpServerOptions::default()));
     }
-    let mcp_manager = (!servers.is_empty()).then(|| shared_mcp_manager(servers));
+    let mcp_manager = (!servers.is_empty()).then(|| {
+        shared_mcp_manager(
+            servers,
+            params
+                .mcp_oauth_dir
+                .as_deref()
+                .map(std::path::PathBuf::from),
+        )
+    });
 
     // `[subagent]`/`[background]` print defaults (docs config-files.md): an
     // *unset* wall-clock timeout means "no timeout" in print mode — the
@@ -2020,6 +2048,7 @@ async fn build_engine_pipeline(
                         model: p.model.clone(),
                         native: p.native.as_ref().map(|cfg| NativeLlmConfig {
                             protocol: cfg.protocol.clone(),
+                            provider_type: cfg.provider_type.clone(),
                             base_url: cfg.base_url.clone(),
                             api_key: cfg.api_key.clone(),
                             api_key_env: cfg.api_key_env.clone(),
@@ -2044,6 +2073,7 @@ async fn build_engine_pipeline(
             .unwrap_or_default(),
         native_llm: params.native_llm.as_ref().map(|cfg| NativeLlmConfig {
             protocol: cfg.protocol.clone(),
+            provider_type: cfg.provider_type.clone(),
             base_url: cfg.base_url.clone(),
             api_key: cfg.api_key.clone(),
             api_key_env: cfg.api_key_env.clone(),
@@ -2975,6 +3005,90 @@ pub fn session_set_permission_mode(session_id: String, mode: String) -> napi::Re
         engine.set_mode(new_mode);
         Ok(true)
     })
+}
+
+// ── MCP OAuth (browser auth-code + PKCE flow) ─────────────────────────────
+
+fn mcp_oauth_store(dir: &str) -> napi::Result<Arc<crate::mcp::oauth::McpOAuthService>> {
+    if dir.trim().is_empty() {
+        return Err(napi::Error::from_reason(
+            "MCP OAuth credential directory is empty",
+        ));
+    }
+    Ok(Arc::new(crate::mcp::oauth::McpOAuthService::new(Arc::new(
+        crate::mcp::oauth::McpOAuthFileStore::new(std::path::PathBuf::from(dir)),
+    ))))
+}
+
+/// Persist tokens obtained by the host's browser flow. The engine owns the
+/// encryption/at-rest format; the host hands over the OAuth token response in
+/// `McpOAuthTokens` JSON shape. Returns the credential store key.
+#[napi]
+pub fn mcp_oauth_store_tokens(
+    name: String,
+    url: String,
+    tokens_json: String,
+    dir: String,
+) -> napi::Result<String> {
+    guard_sync_panic(|| {
+        let tokens: crate::mcp::oauth::McpOAuthTokens = serde_json::from_str(&tokens_json)
+            .map_err(|e| napi::Error::from_reason(format!("invalid MCP OAuth tokens: {e}")))?;
+        let key = crate::mcp::oauth::mcp_oauth_store_key(&name, &url)
+            .map_err(napi::Error::from_reason)?;
+        mcp_oauth_store(&dir)?
+            .store_tokens(&key, &tokens)
+            .map_err(napi::Error::from_reason)?;
+        Ok(key)
+    })
+}
+
+/// Stored-credential state for the host's auth-status classifier. Reads the
+/// same encrypted store the connection manager injects from; `accessToken` is
+/// the stored value even when expired (the engine refreshes on connect).
+#[napi]
+pub async fn mcp_oauth_token_state(name: String, url: String, dir: String) -> napi::Result<String> {
+    let key =
+        crate::mcp::oauth::mcp_oauth_store_key(&name, &url).map_err(napi::Error::from_reason)?;
+    let state = mcp_oauth_store(&dir)?.token_state(&key);
+    Ok(serde_json::json!({
+        "hasTokens": state.has_tokens,
+        "hasRefreshToken": state.has_refresh_token,
+        "expired": state.expired,
+        "accessToken": state.access_token,
+    })
+    .to_string())
+}
+
+/// Drop a server's stored grant (`auth:reset`). `false` when nothing was
+/// stored.
+#[napi]
+pub fn mcp_oauth_remove(name: String, url: String, dir: String) -> napi::Result<bool> {
+    guard_sync_panic(|| {
+        let key = crate::mcp::oauth::mcp_oauth_store_key(&name, &url)
+            .map_err(napi::Error::from_reason)?;
+        mcp_oauth_store(&dir)?
+            .remove(&key)
+            .map_err(napi::Error::from_reason)
+    })
+}
+
+/// Reconnect every live manager that knows `name`, so a server marked
+/// `needs-auth` retries with the grant the host just stored. Returns how many
+/// managers reconnected.
+#[napi]
+pub async fn mcp_oauth_reconnect(name: String) -> napi::Result<u32> {
+    let managers: Vec<Arc<crate::mcp::McpManager>> = {
+        let mut cache = MCP_MANAGERS.lock().unwrap_or_else(|e| e.into_inner());
+        cache.retain(|_, weak| weak.strong_count() > 0);
+        cache.values().filter_map(Weak::upgrade).collect()
+    };
+    let mut reconnected = 0u32;
+    for manager in managers {
+        if manager.reconnect(&name).await.is_ok() {
+            reconnected += 1;
+        }
+    }
+    Ok(reconnected)
 }
 
 /// Live session shape: the active turn id and the queued turn ids.
@@ -3928,6 +4042,7 @@ mod tests {
     fn js_native_llm() -> JsNativeLlmConfig {
         JsNativeLlmConfig {
             protocol: "openai".into(),
+            provider_type: None,
             base_url: "https://api.example.com/v1".into(),
             api_key: "test-key".into(),
             api_key_env: None,
@@ -3961,8 +4076,8 @@ mod tests {
             )]
         };
 
-        let first = shared_mcp_manager(demo());
-        let second = shared_mcp_manager(demo());
+        let first = shared_mcp_manager(demo(), None);
+        let second = shared_mcp_manager(demo(), None);
         assert!(
             Arc::ptr_eq(&first, &second),
             "one configuration, one manager"
@@ -3970,14 +4085,17 @@ mod tests {
 
         // The key covers the whole resolved server, not just its name: the
         // same name with different options is a different manager.
-        let other = shared_mcp_manager(vec![(
-            "demo".to_string(),
-            McpServerRecipe::Mock,
-            McpServerOptions {
-                enabled: false,
-                ..Default::default()
-            },
-        )]);
+        let other = shared_mcp_manager(
+            vec![(
+                "demo".to_string(),
+                McpServerRecipe::Mock,
+                McpServerOptions {
+                    enabled: false,
+                    ..Default::default()
+                },
+            )],
+            None,
+        );
         assert!(
             !Arc::ptr_eq(&first, &other),
             "the same name with different options must not share a manager"

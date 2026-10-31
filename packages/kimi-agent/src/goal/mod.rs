@@ -60,7 +60,7 @@ pub struct GoalBudgetLimits {
 
 /// Budget report, mirroring v2 `GoalBudgetReport` (camelCase wire fields;
 /// absent budgets serialize as `null`, like the v2 `number | null` fields).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalBudgetReport {
     pub token_budget: Option<u64>,
@@ -104,7 +104,7 @@ pub struct GoalState {
 
 /// Model-facing goal snapshot, mirroring v2 `GoalSnapshot` (camelCase wire
 /// fields; optional fields are omitted when absent).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalSnapshot {
     pub goal_id: String,

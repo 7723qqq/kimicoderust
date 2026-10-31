@@ -415,6 +415,25 @@ fn turn_is_user_visible(origin: Option<&Value>, opening_role_is_user: bool) -> b
     }
 }
 
+/// v2 `isUndoAnchorOrigin` applied to a persisted turn: a real user prompt
+/// (origin absent or `user`), a user-typed skill/plugin activation, and never
+/// an in-turn steer or a derived turn (goal/cron/task/shell).
+fn turn_origin_is_undo_anchor(origin: Option<&Value>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    if origin.get("inTurn").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    match origin.get("kind").and_then(Value::as_str) {
+        None | Some("user") => true,
+        Some("skill_activation") | Some("plugin_command") => {
+            origin.get("trigger").and_then(Value::as_str) == Some("user-slash")
+        }
+        _ => false,
+    }
+}
+
 pub struct SqliteSessionStore {
     /// One connection, guarded for the whole store — so this lock is the
     /// highest-blast-radius mutex in the engine.
@@ -1239,24 +1258,59 @@ impl SqliteSessionStore {
         session_id: &str,
         count: usize,
     ) -> Result<Vec<(String, i64)>, String> {
+        if count == 0 {
+            return Err("undo refused: count must be a positive integer".into());
+        }
+        // v2 undoes user anchors, not "the newest N turn rows": a derived turn
+        // (goal/cron/task) or an in-turn steer is not an anchor, and cutting at
+        // an anchor removes every turn after it as well.
         let mut stmt = conn
             .prepare(
-                "SELECT turn_id, turn_number FROM turns WHERE session_id = ?1
-                 ORDER BY turn_number DESC LIMIT ?2",
+                "SELECT t.turn_id, t.turn_number, t.origin,
+                        (SELECT m.role FROM messages m
+                          WHERE m.session_id = t.session_id AND m.turn_id = t.turn_id
+                          ORDER BY m.id ASC LIMIT 1) AS opening_role
+                 FROM turns t
+                 WHERE t.session_id = ?1
+                 ORDER BY t.turn_number DESC",
             )
             .map_err(|e| e.to_string())?;
-        let selected: Vec<(String, i64)> = stmt
-            .query_map(params![session_id, count as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
+        let mut rows = stmt.query(params![session_id]).map_err(|e| e.to_string())?;
 
-        if selected.iter().any(|(tid, _)| turn_is_compaction(tid)) {
-            return Err(format!(
-                "undo refused: crossing the compaction boundary turn '{COMPACT_TURN_ID}' would corrupt the session projection"
-            ));
+        let mut selected: Vec<(String, i64)> = Vec::new();
+        let mut anchors = 0usize;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let turn_id: String = row.get(0).map_err(|e| e.to_string())?;
+            let turn_number: i64 = row.get(1).map_err(|e| e.to_string())?;
+            let origin: Option<Value> = row
+                .get::<_, Option<String>>(2)
+                .map_err(|e| e.to_string())?
+                .and_then(|raw| serde_json::from_str(&raw).ok());
+            let opening_role: Option<String> = row.get(3).map_err(|e| e.to_string())?;
+            selected.push((turn_id.clone(), turn_number));
+
+            if turn_is_compaction(&turn_id) {
+                return Err(format!(
+                    "undo refused: crossing the compaction boundary turn '{COMPACT_TURN_ID}' would corrupt the session projection"
+                ));
+            }
+            if opening_role.as_deref() == Some("user")
+                && turn_origin_is_undo_anchor(origin.as_ref())
+            {
+                anchors += 1;
+                if anchors >= count {
+                    break;
+                }
+            }
+        }
+
+        if anchors < count {
+            let message = if anchors == 0 {
+                "undo refused: nothing to undo (no user turn)".to_string()
+            } else {
+                format!("undo refused: only {anchors} of {count} requested turn(s) available")
+            };
+            return Err(message);
         }
         Ok(selected)
     }
@@ -1334,7 +1388,7 @@ impl SqliteSessionStore {
         for item in rows {
             let (rel_path, before, status) = item.map_err(|e| e.to_string())?;
             let full_path = workspace_root.join(&rel_path);
-            if status == "added" || before.is_none() {
+            if status == "added" {
                 if full_path.exists() {
                     let _ = std::fs::remove_file(&full_path);
                 }
@@ -1344,6 +1398,16 @@ impl SqliteSessionStore {
                 }
                 std::fs::write(&full_path, text)
                     .map_err(|e| format!("Failed to restore {}: {e}", full_path.display()))?;
+            } else {
+                // The pre-image was not stored (a file over the history byte
+                // cap). Treating "no pre-image" as "the file was added" deleted
+                // the user's file; leave it untouched instead.
+                tracing::warn!(
+                    %session_id,
+                    path = %full_path.display(),
+                    "cannot revert a file change without a stored pre-image; leaving the file untouched"
+                );
+                continue;
             }
             reverted.push(rel_path);
         }

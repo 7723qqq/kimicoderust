@@ -45,9 +45,12 @@ import {
   applySessionLlmOverrides,
   isExperimentalFlagEnabled,
   engineSwarmTrigger,
-  resolveMcpServersForEngine,
 } from './helpers';
-import type { StoredMcpServerConfig, NativeSessionMeta } from './helpers';
+import type { NativeSessionMeta } from './helpers';
+import {
+  resolveMcpServersForEngine,
+  type StoredMcpServerConfig,
+} from '../mcp-config';
 
 /** The client surface the engine handle assembly needs, passed explicitly. */
 export interface BuildHandleDeps {
@@ -68,7 +71,10 @@ export interface BuildHandleDeps {
   refreshProjectRoots: (meta: NativeSessionMeta) => Promise<void>;
   resolveSessionAgentProfiles: (meta: NativeSessionMeta) => Promise<readonly AgentFileDefinition[]>;
   setPlanMode: (input: SetSessionPlanModeRpcInput) => Promise<void>;
-  loadGlobalMcpConfig: () => Record<string, StoredMcpServerConfig>;
+  /** User < project-root `.mcp.json` < project `.kimi-code/mcp.json` (trust-gated). */
+  loadSessionMcpConfig: (workDir: string) => Promise<Record<string, StoredMcpServerConfig>>;
+  /** Engine credential directory (`<home>/credentials/mcp`). */
+  mcpOAuthDir: string;
 }
 
 export async function buildSessionHandle(
@@ -908,7 +914,7 @@ export async function buildSessionHandle(
     policySnapshot.non_interactive = true;
   }
   const githubCreds = resolveGithubCredentials(config);
-  const mcpConfig = deps.loadGlobalMcpConfig();
+  const mcpConfig = await deps.loadSessionMcpConfig(workDir);
   const mcpServers = resolveMcpServersForEngine(mcpConfig);
   const subagentTimeoutMs = resolveSubagentTimeoutMs(config);
   const swarmTimeoutMs = resolveSwarmTimeoutMs(config);
@@ -1041,6 +1047,9 @@ export async function buildSessionHandle(
     ...(githubCreds.githubBaseUrl ? { githubBaseUrl: githubCreds.githubBaseUrl } : {}),
     ...(nativeLlm ? { nativeLlm } : {}),
     ...(mcpServers.length > 0 ? { mcpServers } : {}),
+    // The engine installs its OAuth service from this directory, so stored
+    // grants are injected and refreshed on the same connection.
+    mcpOauthDir: deps.mcpOAuthDir,
     // M1c turn telemetry: the host knows the model configuration, the
     // engine contributes the outcome fields and emits turn_started /
     // turn_ended / turn_interrupted through the telemetry callback (v2's

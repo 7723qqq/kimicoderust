@@ -4806,7 +4806,7 @@ fork 已处理 YAML 较易的部分（块列表 `skills/mod.rs:188+`、`-`/`_` �
 | §1 板块 2「Anthropic Messages」的 cache breakpoints | `anthropic-cache-breakpoints.ts` 上游**零命中**，且上游**根本没有** `agent-core-v2/src/kosong/`（无 vendored provider 树）。「两侧 4 处断点」与「Rust 缺 `CACHEABLE_TYPES` 守卫」两说均**未对上游证实** | 已改写并收窄：「上游无 `anthropic-cache-breakpoints.ts` 文件」成立；「4 vs 3」与「8 型集合同集合」经 2026-10-02 重核成立（内联逻辑，非独立文件） |
 | §1 板块 2 表末注 | `astron-models.ts` 上游已不在（`providers/` 17 文件无此项），台账称其「仍是活代码」——描述的是 fork 自己的树 | 已改写：该注现写「**上游不存在**……它是 **fork 自有**文件，活消费者在 fork 侧」 |
 | §1 板块 1「Turn 主循环驱动」/「后台异步任务」 | `agent/loop/stepRequestQueue.ts` 与 `nativeBackgroundAgentTask.ts` 上游均无（上游 `agent/loop/` 7 文件 + `machine/`），只存在于退役副本 | 已改写：两行均带「2026-10-02 重核订正出处」，并各自换为同族真实文件（`agent/task/`） |
-| §2.5「工具结果 stopTurn」/「重试遥测」/「max_steps 耗尽」三行 | 三处行号漂移到**结构性不同的代码**：`loopService.ts:2117-2119` 现是 `emitStepInterrupted` 的参数（真实位置 `:1729`/`:1876`）；`loop.ts:20-27` 现是 `AgentActivityTurnSnapshot`（真实位置 `:55-60`）。语义仍成立，但跟指针的人会落到错的机制上 | 已改写（2026-10-04）：三行行号改为 `:1729`/`:1876`、`turnEvents.ts:164-176`、`loop.ts:55-62`；同一张表另两行（`toolExecutorService.ts:380,450`、`:437`）的差一漂移一并订正 |
+| §2.5「工具结果 stopTurn」/「重试遥测」/「max_steps 耗尽」三行 | 三处行号漂移到**结构性不同的代码**：`loopService.ts:2117-2119` 现是 `emitStepInterrupted` 的参数（真实位置 `:1729`/`:2002`）；`loop.ts:20-27` 现是 `AgentActivityTurnSnapshot`（真实位置 `:55-60`）。语义仍成立，但跟指针的人会落到错的机制上 | 已改写（2026-10-04）：三行行号改为 `:1729`/`:2002`、`turnEvents.ts:164-176`、`loop.ts:55-62`；同一张表另两行（`toolExecutorService.ts:380,450`、`:437`）的差一漂移一并订正 |
 
 #### 6.44.4 抽样中**确认无误**的部分（占多数）
 
@@ -6455,7 +6455,7 @@ v2 侧四个构造函数（`acp-server/src/events-map.ts:398-537`）全是**纯�
 |---|---|
 | `session/sqlite_store.rs` `fork_session` | 增 `turn_index: Option<u64>`；按轮次逐条 `save_turn`，保留 `usage` / `origin`；新增 `ForkError`（`InvalidTurnIndex` / `TurnNotFound` / `Store`）与 `turn_is_user_visible` 判据 |
 | `src/server/mod.rs:5169` | fork 路由解析 body 的 `turnIndex`；非法值 400，越界 400（v2 两者都是 `REQUEST_INVALID`） |
-| `acp/mod.rs:1020` | 传 `None`——**这不是缺口**：v2 的 ACP `session/fork` 调 `klient.session(id).fork()` 不带任何 options（`acp-server/src/server.ts:276`），`ForkSessionRequest` 无此字段 |
+| `acp/mod.rs:1284` | 传 `None`——**这不是缺口**：v2 的 ACP `session/fork` 调 `klient.session(id).fork()` 不带任何 options（`acp-server/src/server.ts:276`），`ForkSessionRequest` 无此字段 |
 | `packages/protocol/src/session.ts` `sessionForkSchema` | 共享契约补 `turnIndex: z.number().int().nonnegative().optional()` |
 
 **实现中撞到并修掉的两个真 bug（都是主键陷阱，两层）**
@@ -8203,7 +8203,7 @@ EngineSessionHandle.dispose()          session-handle.ts:486-488   → Promise<v
   → Session::shutdown(&self)           session/mod.rs:530-536       → store(true) + notify_one()
 ```
 
-契约文档自己写的是「the pump task is **signalled** to stop」（`packages/kimi-agent/napi-contract.d.ts:1537`），
+契约文档自己写的是「the pump task is **signalled** to stop」（`packages/kimi-agent/napi-contract.d.ts:1576`），
 而 `shutdown` 的文档写明释放发生在「pump **在下一轮循环顶部、in-flight turn 结束后**」。
 **所以 `await handle.dispose()` 之后调用 `rmSync` 是在赌一个没人承诺的时序。**
 
@@ -8277,7 +8277,7 @@ D1 是契约问题，会让每个"close 之后删数据目录"的宿主动作都
 | 结论 | 位置／命令 |
 |---|---|
 | dispose 只发信号 | `packages/kimi-agent/session-handle.ts:486-488,729-731`；`src/napi_bindings.rs:3178-3193`；`src/session/mod.rs:530-536` |
-| 契约措辞是 signalled | `packages/kimi-agent/napi-contract.d.ts:1537` |
+| 契约措辞是 signalled | `packages/kimi-agent/napi-contract.d.ts:1576` |
 | 无"停全部任务"原语 | `git grep -n 'stop_all_on_exit\|stop_all_tasks\|terminate_all'` → 零命中 |
 | `stop` 只被单测调用 | `src/storage/task_runner.rs:2080,2094,2147,2157,2222,2306,2328,2364,2391,2402` |
 | runner 是进程级 | `src/storage/task_runner.rs:1007-1008` |
@@ -8636,3 +8636,465 @@ HRESULT -2147024891`、以及由它们级联的 `assertion left == right failed`
 `4bad441fef` / `a9e764db61` / `f8925ab95e` 等发布载体按「内容已被已记录条目覆盖」记
 not-applicable；24 条 n/a 的逐条理由见 allowlist 的 `note`。
 
+## 20. 2026-10-31 官方 2.1.1 逐模块审计后的第一批 P0 修复
+
+审计基线：官方 tag `@moonshot-ai/kimi-code@2.1.1`（f67e6398fb32），七组逐模块对照（循环/上下文、工具、权限、LLM/媒体、会话/持久化、features/app、服务端/ACP）。本批在独立 worktree `G:/kimirust-fix` 完成，未触碰主工作区里外部进行中的 server 拆分。
+
+### 20.1 修复
+
+- **Goal 提醒**：durable 域值是 `{goal: snapshot|null}`，`goal_injection_text` 之前按裸 `GoalState` 解析，永远失败。现在先解包再按 `GoalSnapshot` 解析（裸 `GoalState` 仍兼容）；`GoalSnapshot` / `GoalBudgetReport` 补 `Deserialize`。测试 `test_goal_injection_reads_the_wrapped_snapshot`。
+- **Undo 超限文件**：`revert_turn_file_changes` 之前把 `content_before=None` 当作“新增文件”删除；超 4 MiB 的修改/删除记录没有 pre-image，会误删用户文件。现在只有 `status == "added"` 才删除，其余无 pre-image 的记录跳过并告警。测试 `test_revert_skips_oversize_files_instead_of_deleting_them`。
+- **WS 默认广播**：未订阅的连接（`subscriptions=None`）不再收到任何会话事件；原先任何认证 socket 在首个 `client_hello`/`subscribe` 前可收到所有会话事件。测试改为先订阅并断言 `accepted_subscriptions`，读帧加 10s 超时；`server::ws` 34/34。
+- **Edit CRLF / UTF-8**：Read 给模型的是 LF 视图，Edit 现在按同一视图匹配，并按文件原换行风格写回（file history 保存原始字节）；非 UTF-8 文件拒绝编辑，不再 `from_utf8_lossy` 静默写回 U+FFFD。测试 `edit_matches_the_model_view_of_a_crlf_file`、`edit_refuses_invalid_utf8_instead_of_rewriting_it`。
+
+### 20.2 验证
+
+- 全量 `cargo test --lib --features cli`：3243 passed / 2 failed（`mcp::manager` 与 `native::bash_spawn` 的既有 Windows 进程型 flake，单独复跑均通过）。
+- 受影响套件：`injection::` 72/72、`session::` 106/106、`tools::` 778/778、`server::ws` 34/34。
+- `cargo fmt --check`、`cargo clippy --all-targets --features cli -- -D warnings` 通过。
+
+### 20.3 审计剩余（按严重度，未在本批修复）
+
+- 数据/安全：`/undo` 切错消息且不回滚 state；durable state 仍按 workspace 共享；危险命令解析漏 `$(...)`/`env`/`bash -lc`；权限规则匹配原始路径；session 批准过宽；`./config.toml` 优先可注入配置。
+- 核心循环：后台任务完成不唤醒交互会话；goal continuation 仅 print 模式；tokenCounting 无实测锚点。
+- 协议/宿主：MCP 缺 auth-code+PKCE 与 streamable HTTP 会话；项目级 MCP 配置未加载；插件不导入 `installed.json`；ACP thinking/update/slash 缺失；server 事件 seq/transcript 冷数据等。
+
+## 21. 2026-10-31 第二批 P0 修复：危险命令解析、权限规则规范化、配置发现
+
+### 21.1 修复
+
+- **危险命令解析**（`native/permission_engine/dangerous_command.rs`）：新增命令/进程替换递归
+  （`$(…)`、反引号、`<(…)`/`>(…)`，深度上限 4）、控制结构前缀（`if/then/else/for/while/do/
+  case/…`）剥离后分析、`env NAME=VALUE` 跳过、`bash -lc` 等短选项簇里的 `c` 载荷递归、
+  `dd of=/dev/*` 除安全白名单外一律 dangerous。测试
+  `test_control_structures_and_substitutions_are_analyzed`（11/11 通过）。
+- **权限规则规范化**（`permission/mod.rs`）：规则 subject 现在同时匹配原始拼写、词法绝对路径、
+  realpath（Windows 去 `\?\` 前缀）与 `/` 分隔形式；`/sub/../secret` 或符号链接目标不再绕过
+  deny/allow 规则。GitCwdWriteApprove 使用解析后的 subject。测试
+  `test_rule_subject_resolves_dot_dot_traversal`（permission 61/61）。
+- **配置发现**（`config/mod.rs`）：移除隐式 `./config.toml`。仓库提交的配置文件不再能在信任
+  提示前注入 providers/hooks/permission 默认值；`KIMI_CONFIG_PATH` 仍可显式指定工作区配置。
+  保留 `KIMI_CODE_HOME`、`~/.kimi-code/config.toml` 与遗留 `~/.kimi/config.toml`（config 63/63）。
+
+### 21.2 验证
+
+- `cargo test --lib --features cli permission::` 61/61、`native::permission_engine::dangerous_command`
+  11/11、`config::` 63/63；clippy/fmt 通过。
+- 全量 `cargo test --lib --features cli` 3247 passed / 0 failed（同机一次复跑；首次出现的 2 个失败为既有的 MCP / bash_spawn 进程型 flake，单独复跑通过）；clippy/fmt 通过。
+- 门禁：`scan:hardcoded:rust` 1767/1767、`check:rust-module-deps` 248/248、architecture、normify、`check:roadmap-refs` 全绿。
+
+## 22. 2026-10-31 undo 语义修复（官方 2.1.1 对照）
+
+### 22.1 引擎
+
+- 注入消息现在携带 `origin = { kind: "injection", variant }`（`injection_message_named`，
+  `build_injections_with_history_named`），持久化历史可把它与真实用户轮次区分开；测试
+  `test_named_injection_message_carries_origin`。
+- `SqliteSessionStore::select_undo_turns` 改为 v2 的锚点语义：只数真实用户轮次
+  （origin 缺失/`user`，或 `skill_activation`/`plugin_command` 且 `trigger=user-slash`），
+  跳过派生轮次（goal/cron/task）、`inTurn` steer 与无消息的折叠行；切在第 N 个锚点，
+  并连同其后的所有轮次一起删除。数量不足返回
+  `undo refused: only X of N requested turn(s) available`，空历史返回
+  `undo refused: nothing to undo (no user turn)`，压缩边界仍拒绝。测试
+  `test_undo_selects_user_anchors_not_derived_turns`、`test_undo_turns`、
+  `test_undo_turns_transactional_integrity`。
+- `POST /sessions/:id:undo` 按实际删除的轮次数回滚 workspace checkpoint（派生轮次也各有一个
+  checkpoint），响应/事件里的 `undone` 仍是请求的锚点数。测试
+  `undo_succeeds_when_no_checkpoint_was_ever_taken`、`undo_restores_state_domains_from_the_checkpoint_stack`。
+
+### 22.2 native 宿主
+
+- `computeUndoCut` / `isUndoAnchorPrompt` 复刻 v2：注入跳过、`inTurn` 与派生轮次不计锚点；
+  数量不足抛 `session.undo_unavailable`（details 带 reason/requestedCount/undoableCount/
+  stoppedAtCompaction），空历史同理。
+- 拿不到 quiescence 时抛 `session.busy`，不再一边失败一边截断历史；`forkSession` 的
+  `turnIndex` 也改用锚点计数。
+- TUI 的 undo 上限提示接受 v2 的 reason 词表（empty/insufficient/compaction_boundary）。
+- 端到端测试 `packages/node-sdk/test/session-undo.test.ts`：两轮对话 + 每轮注入，undo 1
+  保留第一轮、注入不计数，undo 2 报 `session.undo_unavailable`，清空后 undo 1 再报错。
+
+### 22.3 验证与剩余
+
+- 全量 `cargo test --lib --features cli` 3250 passed / 0 failed；clippy/fmt 通过；
+  node-sdk undo E2E 1/1；SDK 与 TUI `tsgo` 类型检查通过。
+- **剩余**：native 路径的宿主态（`meta.plan`/`meta.goal`）与引擎 workspace state 尚未随 undo
+  回滚——它依赖“状态按 session 隔离”这一更大的修复（§21 审计项），在状态作用域修正前
+  回滚会对同 workspace 的其他会话生效。服务端路径的 checkpoint 也仍是 workspace 全局栈。
+
+## 23. 2026-10-31 Node→Bun 残留扫描与修复（参考同 fork 的 TS 引擎仓库）
+
+### 23.1 扫描结论
+
+- 全仓 584 个文件导入 `node:*`；Bun 1.4.4 对这些模块是**原生实现**
+  （`bun源码参考/src/js/node/`），不是 polyfill。`worker_threads`、`AsyncLocalStorage`、
+  `perf_hooks`、`tls.rootCertificates` 的运行时探针均通过；minidb worker 34/35
+  （1 skip）、pi-tui `node:test` 19/19 在 Bun 下通过。因此 `node:fs`/`child_process`/
+  `worker_threads` 等不是迁移债，不需要改 `Bun.spawn`/`Bun.file`/`Bun.serve`。
+- 裸 `#/*` 的 `package.json imports` 在 Bun 下单独不解析（最小复现：`Cannot find module
+  '#/foo'`）；加上 tsconfig `paths` 后正常工作。本仓所有 package 都有 `#/*` paths，
+  因此当前无断裂；新 package 必须同时保留两份映射。
+- 真正残留：插件 MCP 的 `command: "node"`、遥测 runtime 标识、`apps/vis` 的
+  `node` 构建、`tsx/esm` loader、`vscode-publish.yml` 的 pnpm/Node（上游 owner 门控，
+  且 `.nvmrc` 不存在）、文档里的 npm 安装路径。
+- 有意保留的 Node 面：VS Code 扩展宿主/webview、Nix 构建沙箱（napi-rs 头文件）、
+  pi-tui 的 `node --test` 双跑。
+
+### 23.2 修复
+
+- 遥测：`packages/telemetry/src/sink.ts` 改用 `isBunRuntime()`/`runtimeVersion()`
+  （`process.versions.bun ?? process.versions.node`），Bun 下上报 `runtime: "bun"`；
+  与参考仓库的 `sink.ts` 一致。`telemetry.test.ts` 70/70。
+- 插件 node 回退：napi 路径原本已经通过 `pluginNodeRunnerPath()` 把
+  `process.execPath` 传给 `initPluginStore`；缺的是 Rust 独立 server。现在
+  `rust-server-runner.ts` 在打包 Bun 二进制运行 `kimi web` 时设置
+  `KIMI_NODE_RUNNER=<process.execPath>`，Rust `HttpServer::new` 与
+  `with_plugin_home` 都通过 `plugin_manager_with_env` 读取并调用
+  `with_node_runner`，插件 stdio server 的 `command: "node"` 改写为
+  `<runner> __plugin_run_node <entry>`，不再依赖系统 Node.js。
+  既有测试 `a_node_runner_rewrites_node_plugin_servers_onto_the_host_runtime`
+  覆盖改写本身；`server::plugins` 25/25。
+- 注意：主工作区里外部进行中的 `server/mod.rs` 拆分（`builder.rs`）需要把同样的
+  `plugin_manager_with_env` 接到拆分后的两处 `PluginManager` 构造点；本 worktree 基于
+  拆分前的 HEAD。
+
+### 23.3 剩余
+
+- `apps/vis` 构建仍是 `node scripts/copy-web-dist.mjs`（脚本 shebang 是 bun）；
+- `scripts/check-locale-keys.mjs` 仍加载 `tsx/esm`；
+- `vscode-publish.yml` 的 pnpm/setup-node/`.nvmrc` 属上游门控 workflow，且 `.nvmrc`
+  不存在；
+- `docs/*/guides/getting-started.md` 仍提供 `npm install -g` 路径（要求 PATH 有 Bun）；
+- `#/*` 的 tsconfig paths 依赖需要一个门禁，防止新 package 只写 `imports`。
+
+## 24. 2026-10-31 LLM wire 对齐（provider type / Kimi thinking / usage）
+
+### 24.1 provider type 贯通
+
+- `NativeLlmConfig`/`JsNativeLlmConfig`/`ResolvedNativeLlm` 新增 `provider_type`
+  （`rpc/types.rs:612`、`config/mod.rs:687`、`napi_bindings.rs:1122`）：
+  `extract_native_llm` 把 `[providers.*].type`（小写，缺省 `openai`）带进解析结果，
+  CLI/REPL/server/napi 四条构造路径全部透传（`main.rs:138`、`main.rs:1319`、
+  `repl/mod.rs:400`、`server/engine.rs:625`）。宿主 `nativeLlmWire` 同步写入
+  `provider_type`（`native-llm-resolver.ts:307`），`nllm` parity 19/17 字段通过。
+- 原因：protocol 只说明请求长什么样，`kimi` 与普通 OpenAI 兼容端共用 Chat Completions
+  但 thinking 编码不同（v2 `kimiOpenAITrait`）。
+
+### 24.2 Kimi thinking 对象
+
+- `llm/openai.rs::build_request_for_provider` + `apply_kimi_thinking`
+  （`openai.rs:71`、`openai.rs:144`）：`provider_type == "kimi"` 时不再发送顶层
+  `reasoning_effort`，改为 v2 的 `thinking` 对象 —— `{type:"disabled"}`（off/none）、
+  `{type:"enabled"}`（on/未给等级）、`{type:"enabled",effort}`（声明等级），`keep`
+  合并进同一对象。非 Kimi provider 维持 `reasoning_effort`；未解析 provider（`None`）
+  保留既有 Moonshot `thinking.keep` 透传。
+- `NativeHttpLlm::new` 按 v2 `resolveThinkingKeep` 在 thinking 开启时默认
+  `thinking_keep="all"`（`http.rs:173`），覆盖 Kimi 与 anthropic 两种真正消费它的
+  wire；普通 OpenAI 兼容端不再收到无编码意义的 `thinking` 字段。
+- `server/engine.rs::apply_session_overrides`（`engine.rs:2306`）补齐宿主
+  `applySessionLlmOverrides` 的方言转换：anthropic 写 budget（off 清空），其它协议写
+  effort 并清 budget；thinking off 同时清 `thinking_keep`，避免残留的 keep 把
+  “已关闭”的请求重新标成开启。
+- 测试：`test_build_request_kimi_thinking_object`（`openai.rs:1681`）、
+  `thinking_keep_defaults_to_all_where_the_wire_consumes_it`（`http.rs:1558`）、
+  `test_extract_native_llm_carries_the_provider_type`（`config/mod.rs:1957`）、
+  `session_thinking_off_clears_the_budget_and_the_keep`（`engine.rs:2306`）、
+  `session_thinking_maps_to_the_wire_dialect_of_the_protocol`（`engine.rs:2323`）。
+
+### 24.3 usage 语义
+
+- Anthropic（`llm/anthropic.rs:415`、`703`）：`input_tokens` 本来就是**不含** cache 的
+  未缓存段，原实现再减一次 cache 导致输入被少报；现在直接透传。`total_tokens` 与 v2
+  `grandTotal` 一致，按 `input + cache_read + cache_creation + output` 计算。
+- OpenAI（`llm/openai.rs:457`）：`total_tokens` 优先用 provider 返回值，缺失时按
+  `input + cached + output` 重建；此前只算 `input + output`，命中缓存时总数偏小。
+- Google（`llm/google_genai.rs:475`）：`promptTokenCount` 含缓存段，`input_tokens`
+  改为减去 `cachedContentTokenCount`（v2 `parseGoogleGenAIUsage`），total 回加。
+- OpenAI Responses（`llm/openai_responses.rs:346`）：total 重建同样补回 cached。
+- 测试更新：`parse_response_extracts_cache_usage`、`stream_accumulator_reports_uncached_input`、
+  `test_parse_usage_cache_variants`、`google_frame_decodes_into_a_text_part`。
+
+### 24.4 验证与剩余
+
+- `cargo test --lib` 3254 passed / 0 failed（另有 1 个 Windows 进程类 MCP 用例单跑通过）；
+  `cargo clippy --all-targets`、`cargo fmt --check` 通过；node-sdk `tsgo` 通过。
+- 门禁：`check:parity`、`check:architecture`（指纹已刷新）、`check:normify`（指纹已刷新）、
+  `scan:hardcoded:rust`、`check:rust-module-deps`、`check:roadmap-refs` 全绿。
+- **剩余**：Kimi 的 anthropic-protocol trait（`thinking:{type:enabled}` +
+  `output_config.effort`，无 budget）尚未单独编码——宿主对 anthropic 协议只解析出
+  budget，丢失了原始 effort；需要先把 effort 也带到 wire config 才能无损转换。
+  另：`prompt_cache_key`、`max_completion_tokens` 动态预算、adaptive thinking 仍未接入。
+
+## 25. 2026-10-31 LLM wire 补齐（Kimi anthropic trait / prompt cache key / 动态 completion budget）
+
+### 25.1 Kimi anthropic-protocol thinking
+
+- `anthropic.rs::build_request_for_provider`（`anthropic.rs:101`）新增 provider type 与
+  effort 入参：`provider_type == "kimi"` 时按 v2 `kimiAnthropicTrait.thinking` 编码 ——
+  off/none → `thinking:{type:"disabled"}`，on/未给等级 → `thinking:{type:"enabled"}`，
+  其余等级 → `thinking:{type:"enabled"}` + `output_config:{effort}`，绝不发送
+  `budget_tokens`（`anthropic.rs:264-274`）。标准 anthropic 仍走 budget + 原有
+  max_tokens 保护。
+- 宿主解析：`resolveNativeLlmForAlias` 对 kimi+anthropic 把 effort 放进
+  `reasoningEffort`、清空 `thinkingBudget`（`native-llm-resolver.ts:280`）；
+  `applySessionLlmOverrides` 与 Rust `apply_session_overrides` 同样按协议+provider
+  type 分派，thinking off 时清 keep（`sdk-rpc-client-native.ts`、
+  `server/engine.rs:1857`）。
+- 配置路径：`resolveEffort` 在 thinking 关闭且模型未声明 off_effort 时返回宿主级
+  `"off"`（`config/mod.rs:1481`），让 Kimi 两种 wire 都能发出协议级禁用；
+  generic OpenAI/Responses 由 `wire_reasoning_effort` 静默丢弃。
+- 测试：`test_build_request_kimi_anthropic_trait`（`anthropic.rs:1463`）、
+  `sends a Kimi anthropic alias its effort instead of a thinking budget`
+  （`packages/node-sdk/test/config.test.ts:1099`）、
+  `session_thinking_maps_to_the_wire_dialect_of_the_protocol`（`server/engine.rs`）。
+
+### 25.2 prompt cache key
+
+- v2 `cacheKey` 就是 session id：`NativeHttpLlm::with_cache_key`
+  （`http.rs:226`）在 pipeline 构建时注入 `spec.session_id`
+  （`pipeline/mod.rs:706`），multi-LLM 的每个 native racer 与 `[secondary_model]`
+  池同样携带（`pipeline/mod.rs:668`、`multi.rs:72`）。
+- wire 落点：OpenAI/Kimi `prompt_cache_key`（`openai.rs:104`）、Responses
+  `prompt_cache_key`（`openai_responses.rs:259`）、Anthropic `metadata.user_id`
+  （`anthropic.rs:261`）；Google 无对应字段。
+
+### 25.3 动态 max_completion_tokens
+
+- `LLMChatParams` 新增 `used_context_tokens` / `max_context_tokens`，由 run_turn 在
+  每次 step 前用 `estimate_messages_tokens(&request_messages)` 与宿主窗口填充
+  （`turn_loop/run_turn.rs`）；compaction/title 等无估计的调用保持 `None`。
+- `NativeHttpLlm::completion_cap`（`http.rs:235`）复刻 v2 `completionBudgetParams` +
+  `resolveMaxCompletionCap`：hard cap（配置的输出上限；anthropic 无声明时用模型
+  generation ceiling）→ 上下文窗口 → 32000；剩余窗口只降不升，下限 1。
+- 各 wire 编码：Kimi 恒用 `max_completion_tokens` 并按 v2 截到 128k；
+  o-series/gpt-5 用 `max_completion_tokens`、其余 Chat Completions 用 `max_tokens`
+  （`openai.rs:106-114`、`uses_max_completion_tokens` `openai.rs:162`）；
+  Responses `max_output_tokens`（`openai_responses.rs:259`）；Google
+  `generationConfig.maxOutputTokens`（`google_genai.rs:348`，与 thinkingConfig 合并）；
+  Anthropic 取 `min(配置/ceiling, cap)`。
+- 配置侧 `max_tokens` 统一取 `max_output_size.or(provider.maxTokens)`
+  （`config/mod.rs:1810`、`main.rs:144`、`repl/mod.rs:409`、`engine.rs:633`），
+  与宿主 resolver 的 `maxTokens` 对齐。
+- 测试：`test_build_request_cache_key_and_completion_budget`（`openai.rs:1774`）、
+  `completion_cap_follows_v2_budget_resolution`（`http.rs:1662`），以及两条真实
+  transport 抓包用例 `chat_puts_the_cache_key_and_completion_cap_on_the_openai_wire` /
+  `chat_puts_the_kimi_anthropic_trait_on_the_wire`（`http.rs`），它们从本地 mock
+  server 读回请求体，覆盖“builder 之外的最后一跳”。
+
+### 25.4 验证与剩余
+
+- `cargo test --lib` 3260 passed / 0 failed；clippy/fmt 通过；node-sdk 与 TUI `tsgo`
+  通过；node-sdk config/usage/undo 73/73；napi addon 已按新代码重建。
+- 门禁：parity / architecture / normify / hardcoded / module-deps / roadmap-refs
+  全部通过（architecture 与 normify 指纹已刷新；roadmap 的 napi-contract 锚点随
+  d.ts 行号漂移同步到 1543）。
+- **剩余**：v2 会在每个请求上按 tokenCounting 的实测值计算 usedContextTokens，
+  引擎目前用消息估算值；`prompt_cache_key` 依赖宿主传入 session_id，独立 CLI
+  无会话时不发送。adaptive thinking、tool-media 仍不在本批。
+
+## 26. 2026-10-31 项目级 MCP 配置分层加载（官方 2.1.1 对照）
+
+### 26.1 缺口
+
+审计 §20.3 的「项目级 MCP 配置未加载」：宿主只读 `<KIMI_CODE_HOME>/mcp.json`，
+v2 `app/mcpConfig/configLoader.ts` 还读两层项目配置，并按 trust 决定是否启用。
+同时宿主把 `transport: "http"` 一律降级成 `"sse"`，streamable HTTP 永远走不到；
+`cwd`、`bearerTokenEnvVar`、`enabledTools`/`disabledTools`、超时、`deferred`
+这些引擎已支持的字段也没透传。
+
+### 26.2 实现
+
+- 新增 `packages/node-sdk/src/native/mcp-config.ts`：
+  - `findWorkTreeRoot`（`mcp-config.ts:70`）：向上找 `.git`（clone 是目录、worktree
+    是文件），找不到时回退到起点——与 v2 `findGitWorkTree` 一致。
+  - `loadMcpServerLayers`（`mcp-config.ts:127`）：按 user < `<git-root>/.mcp.json` <
+    `<workDir>/.kimi-code/mcp.json` 顺序合并，后者覆盖同名条目；项目两层由调用方的
+    `includeProject`（workspace trust）门控。`.mcp.json` 层按 v2 规则给 stdio 条目
+    补默认 `cwd = worktree root`，并把相对 `cwd` 解析到 root 下；其他层保持声明值。
+  - `resolveMcpServersForEngine`（`mcp-config.ts:147`）：保留 transport 推断，
+    裸 `url` 编码为 `http`（streamable HTTP）、显式 `sse` 才走 SSE；跳过
+    `enabled=false`；透传 `cwd`、`bearerTokenEnvVar`、工具 allow/deny、启动/调用
+    超时与 `deferred`。
+  - 读取是容错的：缺失、空文件、坏 JSON、错误形状都只贡献空层。v2 的 workspace
+    服务会抛 `config.invalid`，但本 fork 的 print 路径与 user-global 读取一贯
+    best-effort，一个损坏的仓库文件不应让会话无法启动。
+- `SDKRpcClientNative.buildHandle`（`sdk-rpc-client-native.ts:2375`）在构建会话参数时
+  先取 `getWorkspaceTrustInfo(meta.workDir)`，再调用分层加载器；user-global 管理
+  接口（`listMcpServers` / CRUD）仍只读用户层，不受项目配置影响。
+
+### 26.3 测试
+
+- 纯单测 `packages/node-sdk/test/mcp-config-layers.test.ts`（8 个）：三层优先级、
+  trust 关闭只读用户层、`.mcp.json` 的 cwd 默认/相对解析、其他层 cwd 原样、
+  worktree root 查找与回退、坏 JSON 容错、http/sse 保留、禁用与字段透传。
+- 端到端 `packages/node-sdk/test/mcp-config.test.ts:274`：
+  `loads the worktree-root .mcp.json when the workspace is trusted`（从嵌套 workDir
+  向上发现根 `.mcp.json` 并真实连上 stdio fixture）；
+  `ignores project config on an untrusted workspace`（未信任时会话无 MCP 服务器）。
+  MCP 两个测试文件 23/23 通过。
+- node-sdk `tsgo` 通过，oxlint 0 error。
+
+### 26.4 剩余
+
+- ACP / 独立 HTTP server 仍只使用客户端在 `session/new` 或宿主参数里送入的
+  `mcpServers`，不自行读取 `<workDir>/.kimi-code/mcp.json`；引擎侧没有 workspace
+  trust 概念，接线前需要先决定信任来源。
+- MCP OAuth（auth-code+PKCE）与项目级 `auth: "oauth"` 条目仍未接入本批。
+
+## 27. 2026-10-31 MCP OAuth authorization-code + PKCE（官方 2.1.1 对照）
+
+### 27.1 缺口
+
+审计 §20.3 的「MCP 缺 auth-code+PKCE」：宿主 `beginGlobalMcpServerAuth` 是
+`already-authorized` 桩，`complete/cancel/reset` 全为空；引擎只有 RFC 8628 设备码
+（server 路由）与 token 存储/刷新，napi 会话的 MCP manager 甚至没有安装 OAuth
+service。此外引擎 token 文件用裸 `<key>.json`，与 v2 的 `<key>-tokens.json`
+（`provider.ts:21`）不一致，宿主的 legacy 明文记录也读不到。
+
+### 27.2 宿主浏览器流程
+
+- 新增 `packages/node-sdk/src/native/mcp-oauth.ts`：
+  - `discoverAuthorizationServer`（`mcp-oauth.ts:109`）：先取 RFC 9728
+    `/.well-known/oauth-protected-resource`（路径感知优先），再按 RFC 8414/OIDC
+    发现路径感知与原点的 authorization-server metadata；无依赖实现。
+  - `startCallbackServer`（`mcp-oauth.ts:220`）：只绑定 `127.0.0.1` 随机端口，
+    校验 `state`，返回可关闭的 `/callback` 监听器。
+  - `beginMcpOAuthFlow`（`mcp-oauth.ts:314`）：RFC 7591 动态注册公开 PKCE client，
+    生成 S256 challenge/verifier 与 state，授权 URL 带 `resource`（RFC 8707）。
+  - `completeMcpOAuthFlow`（`mcp-oauth.ts:368`）：等待回调、校验 state、以
+    `authorization_code` + `code_verifier` + `resource` 换取 token，并交给
+    `persist` 写入引擎存储；超时/取消/错误都会关闭监听器。
+- `sdk-rpc-client-native.ts`：`beginGlobalMcpServerAuth` 先查引擎 token 状态，
+  可用（未过期或有 refresh token）直接 `already-authorized`，否则返回
+  `{flowId, authorizationUrl}`（`:5378`）；`complete` 完成后调用
+  `mcpOauthReconnect` 让已标记 needs-auth 的 live manager 立即重连；`reset` 删除
+  加密记录。宿主 auth-status 分类改为读引擎解密后的 token 状态，不再自己解析文件。
+
+### 27.3 引擎存储与注入
+
+- `McpOAuthTokens` 新增 `client_secret` 与 `resource`（`service.rs:41`、`:45`）；
+  refresh 会回放 `resource` 与 `client_secret`。
+- token 记录改用 v2 的 `-tokens` 后缀（`service.rs:15`），并保留裸 key 的读/删
+  回退；`McpOAuthFileStore::read` 增加明文 legacy 回退
+  （`store.rs:136`），宿主测试与旧记录仍可读。
+- `McpOAuthService::token_state`（`service.rs:231`）：不触发刷新的
+  `{hasTokens, hasRefreshToken, expired, accessToken}`，供宿主状态分类。
+- napi：`mcp_oauth_store_tokens` / `mcp_oauth_token_state` / `mcp_oauth_remove` /
+  `mcp_oauth_reconnect`（`napi_bindings.rs:3027-3079`）；`JsRunTurnParams` 新增
+  `mcp_oauth_dir`（`napi_bindings.rs:953`），`shared_mcp_manager` 按该目录安装
+  OAuth service 并把目录计入 manager 缓存键（`:1531`），因此 TUI/napi 会话也会
+  注入 bearer 并在过期时刷新。
+- `McpManager.oauth` 由 tokio RwLock 改为 std RwLock，`set_oauth_service` 变成同步，
+  以便 manager 创建时立即安装（不再与 connect 竞争）。
+
+### 27.4 附带修复：v2 `ModelRecord.upgrade`
+
+上游 ref 恢复可解析后，`check:parity` 的 model 交叉校验发现 v2
+`ModelBaseSchema` 的 `upgrade` 缺失。现在 `ModelAliasBaseSchema` 与 Rust
+`ModelAliasConfig`/`ModelUpgradeConfig` 都声明 `upgrade`
+（`models.<alias>.upgrade`：`model` / `migration_markdown` / `retirement_at`），
+override 不可改写它；测试 `test_model_upgrade_metadata_parses`
+（`config/mod.rs:1976`）。parity 现为 23/37 model 字段、napi 104。
+
+### 27.5 验证
+
+- Rust：`cargo test --lib` 3263 passed / 0 failed；`cargo fmt --check`、clippy 通过。
+- 端到端 `packages/node-sdk/test/mcp-config.test.ts:448`：mock AS 完整走
+  discovery → DCR → PKCE → 302 回调 → token exchange → 引擎加密落盘；断言
+  `code_challenge_method=S256`、密文不含 access token、登录后新会话通过 bearer
+  真实连上 MCP server、reset 后回到 `oauth-required`。MCP 两文件 24/24。
+- surface-contract + config + MCP（含分层/端到端）+ usage/undo 共 104 个测试
+  （103 通过，1 skip）通过；node-sdk 与 TUI `tsgo`、oxlint（0 error）通过；
+  napi addon 已重建（napi 104 个导出）。
+- 门禁：parity / architecture / normify / hardcoded / module-deps / roadmap-refs
+  全绿。上游 ref 已从 2.1.1 推进到 `upstream a2afdbc7d`：四条 loopService 锚点与
+  napi-contract 锚点重新定位，`runtime/runtime.ts:8` 锚点随上游删除该文件而移除
+  （§6.25 的订正仍按 2.1.1 基线陈述）。
+
+### 27.6 剩余
+
+- app/plugin 作用域的 `beginMcpServerAuth`/`completeMcpServerAuth` 仍为空实现；
+  浏览器流程目前只覆盖 user-global MCP 条目。
+- 独立 Rust HTTP server 的 `/mcp/auth:*` 仍只支持设备码；尚未接 auth-code
+  （web UI 需要新的 begin/complete 路由语义）。
+- 动态注册的 client 元数据未持久化（v2 存 `<key>-client.json`），每次登录会重新
+  注册；多数 AS 允许，但频繁登录会留下多个 client。
+
+## 28. 2026-10-31 standalone server 上下文窗口 + ACP usage/plan
+
+### 28.1 上下文窗口缺口
+
+- `ServerEngine::execute` 构造 `RunTurnInput` 时把 `max_context_tokens` 固定成
+  `None`，独立 server（web/ACP）的每个 turn 因此用压缩器的默认预算，而不是所选模型
+  的窗口；上一批接入的 LLM 动态补全预算在这条路径上也只能退回配置值/32000。
+  现在先按会话模型解析窗口（`model_context_window`，`engine.rs:474`）并传入 turn
+  loop（`engine.rs:1662`），`TurnReport` 新增 `context_window`
+  （`engine.rs:201`）供宿主渲染。
+- 测试 `a_turn_carries_the_configured_context_window`（`engine.rs:2157`）：配置
+  `max_context_size = 12345` 的别名，报告回传同一窗口。
+
+### 28.2 ACP `usage_update` 与 `plan`
+
+- `TurnReport.context_window` 有值时，`session/prompt` 成功后按持久化历史估算
+  `used`，发出 v2 `usage_update`（`used`/`size`，无 cost）；同时从会话所属 workspace
+  的 `todo` state domain 读列表并发出 v2 `plan`（`done → completed`，priority
+  `medium`，空列表不发）。实现位于 `acp/mod.rs:801-812`，投影函数在
+  `acp/events_map.rs:359`、`:373`。
+- `ServerEngine::session_todos`（`engine.rs:1273`）读取与 todo 工具相同的
+  workspace 状态域；测试 `session_todos_reads_the_workspace_todo_domain`
+  （`engine.rs:2181`）。
+- 端到端 `test_real_turn_emits_usage_and_plan_updates`（`acp/mod.rs:3296`）：
+  配置 42k 窗口、预置 todo，驱动真实 mock LLM 的 `session/prompt`，断言收到
+  `usage_update.size = 42000`、`used > 0` 以及两条 plan entry。
+- 单测 `test_usage_update_notification_shape`、`test_plan_notification_maps_todo_statuses`
+  （`acp/events_map.rs:643`、`:656`）。
+
+### 28.3 验证与剩余
+
+- `cargo test --lib` 3268 passed / 0 failed；clippy/fmt 通过。
+- **剩余**：ACP 仍未映射 `available_commands_update`（引擎没有 slash 命令表）与
+  `session_info_update`（标题变更没有 feed）；HTTP 的 prompt/status 响应尚未暴露
+  `contextWindow` 字段（web UI 目前读 `agent.status.updated.contextTokens`）。
+
+## 29. 2026-10-31 ACP 命令面板与标题通知
+
+### 29.1 available_commands_update
+
+- 新增 `acp/builtin_commands.rs`：v2 `ACP_BUILTIN_SLASH_COMMANDS` 的六条命令
+  （`compact`/`status`/`usage`/`mcp`/`tasks`/`help`，`builtin_commands.rs:17`），
+  `palette()` 生成 ACP `AvailableCommand[]`（`:51`），`parse()` 识别
+  `/<builtin> [args]`（`:69`）。
+- `session/new`、`session/load`、`session/resume` 成功后立即推送
+  `available_commands_update`（`acp/mod.rs:891`、`:1198`、`:1240`），构建器在
+  `acp/events_map.rs:358`。
+- 命令在本地执行（`run_builtin_command`，`mod.rs:208`），不启动模型 turn：
+  - `/help` 列出全部命令；
+  - `/status` 输出 session id / 标题 / 模型与 thinking / 模式 / cwd；
+  - `/usage` 读持久化 usage 桶 + 当前上下文估算 + 模型窗口；
+  - `/mcp` 读会话的 MCP roster（新增 `ServerEngine::session_mcp_entries`，
+    `server/engine.rs:1358`）；
+  - `/tasks` 读全局任务运行器（新增 `ServerEngine::background_tasks`，`:1370`）；
+  - `/compact` 触发手动压缩，文本回传压缩前后 token。
+- 手动压缩逻辑从 HTTP 路由抽到 `ServerEngine::compact_session`
+  （`server/engine.rs:1268`），REST `:compact` 与 ACP `/compact` 共用同一摘要与
+  事件（`compaction.started` / `completed` / `history_compacted`）。
+- 提示词命中命令时以一条 `agent_message_chunk` 返回文本，`session/prompt` 以
+  `stopReason: end_turn` 结束（`mod.rs:962`）。
+
+### 29.2 session_info_update
+
+- 构建器 `events_map::session_info_update_notification`（`events_map.rs:370`）。
+- `session/new` / `session/load` / `session/resume` 后强制推送一次当前标题
+  （`null` 也会发送，用于清空客户端标题）；之后每次 prompt（含本地命令）比较
+  存储中的标题与上次广播值，变化时推送（`emit_session_info`，`mod.rs:187`）——
+  覆盖宿主生成标题或外部重命名后客户端在下一次交互时的同步。
+
+### 29.3 验证与剩余
+
+- 新增测试：`test_acp_new_session_emits_commands_and_info`（`mod.rs:3559`）、
+  `test_acp_builtin_commands_run_locally`（`:3613`，`/help` `/status` `/usage`
+  不经过模型）、`test_acp_session_info_update_follows_title_change`（`:3693`）；
+  既有 ACP 用例按新的附件通知调整计数。`cargo test --lib` 3274 passed / 0 failed；
+  clippy/fmt 通过。
+- **剩余**：未广告引擎 skill 命令（fork 的 ACP 没有 skill 执行面）；标题变化在
+  空闲时不会主动推送，要等下一次交互；ACP 没有 `session/set_title`，客户端不能
+  直接改名；`/mcp` `/tasks` 依赖会话/全局 MCP 与任务运行器，没有运行时返回空列表。

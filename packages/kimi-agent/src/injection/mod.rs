@@ -64,11 +64,28 @@ pub fn is_system_reminder(text: &str) -> bool {
 
 /// Build a `user`-role message carrying an injection text. v2 appends
 /// injections with role `user` and `origin.kind === 'injection'`; the Rust
-/// engine marks them by their `<system-reminder>` content instead.
+/// engine marks them by their `<system-reminder>` content instead. The turn
+/// loop uses [`injection_message_named`] so persisted history can distinguish
+/// them from real user prompts.
 pub fn injection_message(text: String) -> LLMMessage {
     LLMMessage {
         role: "user".into(),
         content: text,
+        ..Default::default()
+    }
+}
+
+/// Build an injection message carrying its variant in `origin`, the shape v2
+/// uses (`{ kind: 'injection', variant }`). Undo anchor selection and the
+/// replay renderer both key on it.
+pub fn injection_message_named(text: String, variant: &str) -> LLMMessage {
+    LLMMessage {
+        role: "user".into(),
+        content: text,
+        origin: Some(serde_json::json!({
+            "kind": "injection",
+            "variant": variant,
+        })),
         ..Default::default()
     }
 }
@@ -232,6 +249,20 @@ impl InjectionRegistry {
         access: &StepAccess,
         history: &[LLMMessage],
     ) -> Vec<String> {
+        self.build_injections_with_history_named(is_new_turn, access, history)
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    /// [`Self::build_injections_with_history`] plus each injection's variant
+    /// name, so the caller can stamp `origin.kind = "injection"` on the message.
+    pub fn build_injections_with_history_named(
+        &mut self,
+        is_new_turn: bool,
+        access: &StepAccess,
+        history: &[LLMMessage],
+    ) -> Vec<(String, String)> {
         let mut texts = Vec::new();
         for entry in &mut self.entries {
             let ctx = InjectionContext {
@@ -244,7 +275,7 @@ impl InjectionRegistry {
                 && !content.trim().is_empty()
             {
                 self.injected.push(entry.name.clone());
-                texts.push(wrap_system_reminder(&content));
+                texts.push((entry.name.clone(), wrap_system_reminder(&content)));
             }
         }
         texts
@@ -665,6 +696,26 @@ mod tests {
         assert!(message.blocks.is_empty());
         assert!(message.tool_calls.is_empty());
         assert!(message.tool_call_id.is_none());
+    }
+
+    /// Persisted history must be able to tell an injection from a real user
+    /// prompt; undo anchor selection keys on `origin.kind`.
+    #[test]
+    fn test_named_injection_message_carries_origin() {
+        let message = injection_message_named(wrap_system_reminder("x"), "todo_list_reminder");
+        let origin = message.origin.expect("origin");
+        assert_eq!(origin["kind"], "injection");
+        assert_eq!(origin["variant"], "todo_list_reminder");
+    }
+
+    #[test]
+    fn test_named_build_returns_the_variant() {
+        let mut registry = InjectionRegistry::new();
+        registry.register("date_change", Box::new(|_| Some("hello".into())));
+        let named = registry.build_injections_with_history_named(true, &StepAccess::default(), &[]);
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].0, "date_change");
+        assert!(named[0].1.contains("hello"));
     }
 
     #[test]

@@ -1,7 +1,11 @@
 //! Pure Rust configuration and credential manager for `kimi-agent` (P27 批 1).
 //!
 //! Loads and validates `config.toml` without depending on Node/Bun or any JS runtimes.
-//! Discovers configuration from standard locations (`./config.toml`, `~/.kimi-code/config.toml`).
+//! Discovers configuration from user-owned locations (`KIMI_CONFIG_PATH`,
+//! `KIMI_CODE_HOME`, `~/.kimi-code/config.toml`, legacy `~/.kimi/config.toml`).
+//! A `config.toml` in the current directory is deliberately not discovered: a
+//! checked-out repository could otherwise inject providers, hooks and
+//! permission defaults before any trust prompt.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,6 +48,17 @@ pub struct ProviderConfig {
     /// auth/routing headers here; without it those deployments 401.
     #[serde(rename = "custom_headers", alias = "customHeaders", default)]
     pub custom_headers: Option<HashMap<String, String>>,
+}
+
+/// v2 `ModelUpgrade`: the model-migration metadata attached to a retiring
+/// alias (`llm-adapter/model/model.ts:9-14`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelUpgradeConfig {
+    pub model: String,
+    #[serde(default, alias = "migrationMarkdown")]
+    pub migration_markdown: String,
+    #[serde(default, alias = "retirementAt")]
+    pub retirement_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -113,6 +128,10 @@ pub struct ModelAliasConfig {
     /// instead of omitting the effort field.
     #[serde(rename = "off_effort", alias = "offEffort", default)]
     pub off_effort: Option<String>,
+    /// Model-retirement metadata (v2 `ModelRecord.upgrade`): the suggested
+    /// replacement alias, the migration note, and the retirement date.
+    #[serde(default)]
+    pub upgrade: Option<ModelUpgradeConfig>,
     /// Catalog fields overridden on top of the base record (v2
     /// `ModelRecord.overrides`): a provider-model refresh may rewrite the base
     /// fields, so a user override is the only value that survives it.
@@ -681,6 +700,11 @@ pub struct KimiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedNativeLlm {
     pub protocol: String,
+    /// Declared provider family (`[providers.*].type`), lowercased. The
+    /// transport uses it for provider-specific wire encodings that the
+    /// protocol alone cannot express (the Kimi `thinking` object).
+    #[serde(default)]
+    pub provider_type: String,
     pub base_url: String,
     pub api_key: String,
     /// Name of the environment variable the credential is read from at
@@ -800,9 +824,12 @@ impl KimiConfig {
     /// 探测 `config.toml` 路径（严格支持环境变量隔离）：
     /// 1. `KIMI_CONFIG_PATH` 显式指定的文件路径
     /// 2. `KIMI_CODE_HOME/config.toml` 隔离目录
-    /// 3. `./config.toml` (当前工作区本地配置)
-    /// 4. `~/.kimi-code/config.toml` 全局配置
-    /// 5. `~/.kimi/config.toml` 遗留兼容配置
+    /// 3. `~/.kimi-code/config.toml` 全局配置
+    /// 4. `~/.kimi/config.toml` 遗留兼容配置
+    ///
+    /// `./config.toml` 不会被发现：仓库可以提交该文件来注入 providers/hooks/
+    /// permission 默认值，且在信任提示之前就会生效。需要工作区级配置时用
+    /// `KIMI_CONFIG_PATH` 显式指定。
     pub fn discover() -> Result<(Self, PathBuf), String> {
         // 1. 显式指定的配置文件路径
         if let Some(explicit) = std::env::var_os("KIMI_CONFIG_PATH") {
@@ -822,14 +849,7 @@ impl KimiConfig {
             }
         }
 
-        // 3. 当前工作区本地配置
-        let cwd_config = PathBuf::from("config.toml");
-        if cwd_config.is_file() {
-            let config = Self::from_file(&cwd_config)?;
-            return Ok((config, cwd_config));
-        }
-
-        // 4. 用户全局配置
+        // 3. 用户全局配置
         if let Some(home) = dirs_home() {
             let kimi_code_config = home.join(".kimi-code").join("config.toml");
             if kimi_code_config.is_file() {
@@ -844,7 +864,10 @@ impl KimiConfig {
             }
         }
 
-        Err("No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ./config.toml, or ~/.kimi-code/config.toml".into())
+        Err(
+            "No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ~/.kimi-code/config.toml, or ~/.kimi/config.toml"
+                .into(),
+        )
     }
 
     /// Extract the active Native LLM configuration for the given or default model.
@@ -991,6 +1014,7 @@ impl KimiConfig {
 
         Some(ResolvedNativeLlm {
             protocol: protocol.into(),
+            provider_type: p_type,
             base_url,
             api_key,
             api_key_env,
@@ -1469,11 +1493,15 @@ impl KimiConfig {
 
     /// Resolve the thinking effort for the wire (schema `thinking.effort`,
     /// stored globally rather than per model): the off-effort when the model
-    /// declares one and thinking is disabled, else the chosen effort.
+    /// declares one and thinking is disabled, else the chosen effort. With
+    /// thinking off and no declared off-effort, the host-level `"off"` token
+    /// travels so wires with a protocol-level disable (Kimi's `thinking`
+    /// object) can send it; generic wires drop it silently
+    /// (`llm::effort::wire_reasoning_effort`).
     pub fn resolve_effort(&self, model_off_effort: Option<&str>) -> Option<String> {
         let enabled = self.thinking.enabled.unwrap_or(true);
         if !enabled {
-            return model_off_effort.map(str::to_string);
+            return Some(model_off_effort.unwrap_or("off").to_string());
         }
         self.thinking
             .effort
@@ -1794,11 +1822,12 @@ fn native_llm_config(
 ) -> NativeLlmConfig {
     let mut llm = NativeLlmConfig {
         protocol: resolved.protocol,
+        provider_type: Some(resolved.provider_type).filter(|value| !value.is_empty()),
         base_url: resolved.base_url,
         api_key: resolved.api_key,
         api_key_env: None,
         model: resolved.model,
-        max_tokens: resolved.max_tokens,
+        max_tokens: resolved.max_output_size.or(resolved.max_tokens),
         custom_headers: Default::default(),
         reasoning_effort: None,
         thinking_budget: None,

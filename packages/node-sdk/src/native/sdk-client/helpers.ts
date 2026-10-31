@@ -287,6 +287,64 @@ export function shellCommandKey(
 }
 
 /**
+ * v2 `isUndoAnchor` (`conversationTime.ts`): a real user turn — a plain user
+ * prompt, or a user-typed skill/plugin activation. In-turn steers, injections
+ * and derived turns are not anchors.
+ */
+export function isUndoAnchorPrompt(message: SessionPrompt): boolean {
+  if (message.role !== 'user') return false;
+  const origin = message.origin as
+    | { readonly kind?: string; readonly inTurn?: boolean; readonly trigger?: string }
+    | undefined;
+  if (origin?.inTurn === true) return false;
+  if (origin === undefined || origin.kind === 'user') return true;
+  return (
+    (origin.kind === 'skill_activation' || origin.kind === 'plugin_command') &&
+    origin.trigger === 'user-slash'
+  );
+}
+
+export interface UndoCut {
+  readonly cutIndex: number;
+  readonly removedCount: number;
+  readonly stoppedAtCompaction: boolean;
+}
+
+/** v2 `computeUndoCut`: the cut at the Nth anchor from the end. */
+export function computeUndoCut(
+  history: readonly SessionPrompt[],
+  count: number,
+): UndoCut {
+  let remaining = count;
+  let cutIndex = -1;
+  let removedCount = 0;
+  let stoppedAtCompaction = false;
+  for (let i = history.length - 1; i >= 0 && remaining > 0; i--) {
+    const message = history[i];
+    if (message === undefined) continue;
+    const kind = (message.origin as { readonly kind?: string } | undefined)?.kind;
+    if (kind === 'injection') continue;
+    if (kind === 'compaction_summary') {
+      stoppedAtCompaction = true;
+      break;
+    }
+    if (isUndoAnchorPrompt(message)) {
+      remaining -= 1;
+      removedCount += 1;
+      cutIndex = i;
+    }
+  }
+  return { cutIndex, removedCount, stoppedAtCompaction };
+}
+
+/** v2 `formatUndoUnavailableMessage`. */
+export function formatUndoUnavailable(cut: UndoCut, requested: number): string {
+  if (cut.stoppedAtCompaction) return 'Nothing to undo: would cross a compaction boundary';
+  if (cut.removedCount === 0) return 'Nothing to undo: no user message to undo';
+  return `Nothing to undo: only ${cut.removedCount} of ${requested} requested turn(s) available`;
+}
+
+/**
  * The history cut index that removes the last `count` user turns: walking from
  * the end, the Nth-from-last user message starts the earliest turn to drop, so
  * everything from it onward is undone. Fewer than `count` user turns clears the
@@ -312,7 +370,8 @@ export function truncateHistoryByTurns(history: readonly SessionPrompt[], count:
 export function retainThroughTurn(history: readonly SessionPrompt[], turnIndex: number): number {
   let seen = 0;
   for (let i = 0; i < history.length; i++) {
-    if (history[i]?.role === 'user') {
+    const message = history[i];
+    if (message !== undefined && isUndoAnchorPrompt(message)) {
       if (seen === turnIndex) return i + 1;
       seen += 1;
     }

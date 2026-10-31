@@ -1185,9 +1185,7 @@ async fn test_oauth_token_injection_and_needs_auth_status() {
     let manager = McpManager::new();
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(crate::mcp::oauth::McpOAuthFileStore::new(dir.path()));
-    manager
-        .set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(store)))
-        .await;
+    manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(store)));
     manager
         .configure(
             "auth-srv",
@@ -1218,13 +1216,13 @@ async fn test_oauth_token_injection_and_needs_auth_status() {
                 expires_at_ms: None,
                 token_endpoint: None,
                 client_id: None,
+                client_secret: None,
+                resource: None,
                 obtained_at_ms: None,
             },
         )
         .unwrap();
-    manager
-        .set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(store)))
-        .await;
+    manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(store)));
     manager
         .configure(
             "oauth-srv",
@@ -1268,16 +1266,16 @@ async fn test_tool_call_401_flips_server_to_needs_auth() {
                 expires_at_ms: None,
                 token_endpoint: None,
                 client_id: None,
+                client_secret: None,
+                resource: None,
                 obtained_at_ms: Some(chrono::Utc::now().timestamp_millis() - 60_000),
             },
         )
         .unwrap();
     let manager = McpManager::new();
-    manager
-        .set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(
-            store.clone(),
-        )))
-        .await;
+    manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(
+        store.clone(),
+    )));
     manager
         .configure(
             "stale-srv",
@@ -1346,11 +1344,9 @@ async fn test_concurrent_grant_survives_a_call_401() {
     let store = Arc::new(crate::mcp::oauth::McpOAuthFileStore::new(dir.path()));
     let key = crate::mcp::oauth::mcp_oauth_store_key("racing-srv", &url).unwrap();
     let manager = McpManager::new();
-    manager
-        .set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(
-            store.clone(),
-        )))
-        .await;
+    manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(
+        store.clone(),
+    )));
     manager
         .configure(
             "racing-srv",
@@ -1375,6 +1371,8 @@ async fn test_concurrent_grant_survives_a_call_401() {
                 expires_at_ms: None,
                 token_endpoint: None,
                 client_id: None,
+                client_secret: None,
+                resource: None,
                 obtained_at_ms: Some(chrono::Utc::now().timestamp_millis()),
             },
         )

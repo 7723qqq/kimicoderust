@@ -62,6 +62,7 @@ fn test_parse_sample_config() {
 
     let native_llm = config.extract_native_llm(None).unwrap();
     assert_eq!(native_llm.protocol, "openai");
+    assert_eq!(native_llm.provider_type, "openai");
     assert_eq!(native_llm.base_url, "https://api.moonshot.cn/v1");
     assert_eq!(native_llm.api_key, "sk-kimi-key");
     assert_eq!(native_llm.model, "kimi-k2-0711");
@@ -77,8 +78,56 @@ fn test_extract_anthropic_llm() {
     let config = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
     let native_llm = config.extract_native_llm(Some("anthropic")).unwrap();
     assert_eq!(native_llm.protocol, "anthropic");
+    assert_eq!(native_llm.provider_type, "anthropic");
     assert_eq!(native_llm.base_url, "https://api.anthropic.com/v1");
     assert_eq!(native_llm.api_key, "sk-ant-key");
+}
+
+/// v2 `ModelRecord.upgrade`: the model-retirement metadata the TUI's
+/// migration prompt reads. It is catalog data, not transport config, so it
+/// only has to parse and round-trip.
+#[test]
+fn test_model_upgrade_metadata_parses() {
+    let config = KimiConfig::from_str(
+        r#"
+[models.retiring]
+provider = "acme"
+model = "old-model"
+
+[models.retiring.upgrade]
+model = "new-model"
+migration_markdown = "Switch to new-model."
+retirement_at = "2026-12-01"
+"#,
+    )
+    .unwrap();
+    let upgrade = config.models["retiring"].upgrade.as_ref().unwrap();
+    assert_eq!(upgrade.model, "new-model");
+    assert_eq!(upgrade.migration_markdown, "Switch to new-model.");
+    assert_eq!(upgrade.retirement_at.as_deref(), Some("2026-12-01"));
+}
+
+/// The provider family travels with the resolved transport: protocol alone
+/// cannot tell Kimi (thinking object) from any other OpenAI-compatible
+/// vendor (`reasoning_effort`).
+#[test]
+fn test_extract_native_llm_carries_the_provider_type() {
+    let config = KimiConfig::from_str(
+        r#"
+[providers.moonshot]
+type = "kimi"
+api_key = "sk-x"
+base_url = "https://api.moonshot.ai/v1"
+
+[models.moonshot-kimi]
+provider = "moonshot"
+model = "kimi-k3"
+"#,
+    )
+    .unwrap();
+    let native = config.extract_native_llm(Some("moonshot-kimi")).unwrap();
+    assert_eq!(native.provider_type, "kimi");
+    assert_eq!(native.protocol, "openai");
 }
 
 /// A one-provider config whose provider carries a credential but no
@@ -1472,7 +1521,9 @@ fn thinking_off_sends_the_model_off_effort() {
     // explicitly instead of an omitted field (schema `offEffort`).
     let config = KimiConfig::from_str("[thinking]\nenabled = false\n").unwrap();
     assert_eq!(config.resolve_effort(Some("none")).as_deref(), Some("none"));
-    assert_eq!(config.resolve_effort(None), None);
+    // No declared off-effort: the host-level off token still travels, so a
+    // Kimi transport can encode its protocol-level `thinking: disabled`.
+    assert_eq!(config.resolve_effort(None).as_deref(), Some("off"));
 
     let on = KimiConfig::from_str("[thinking]\nenabled = true\neffort = \"low\"\n").unwrap();
     assert_eq!(on.resolve_effort(Some("none")).as_deref(), Some("low"));

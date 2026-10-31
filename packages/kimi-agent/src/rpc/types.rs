@@ -603,6 +603,13 @@ pub enum ContentBlock {
 pub struct NativeLlmConfig {
     /// Wire protocol: `"openai"` (Chat Completions) or `"anthropic"` (Messages).
     pub protocol: String,
+    /// Declared provider family (`[providers.*].type`, e.g. `"openai"`,
+    /// `"kimi"`, `"anthropic"`). The protocol decides the request shape; this
+    /// distinguishes providers that share one but encode thinking differently
+    /// — v2's `kimiOpenAITrait` packs the effort into a `thinking` object
+    /// instead of a top-level `reasoning_effort`.
+    #[serde(default)]
+    pub provider_type: Option<String>,
     /// API base URL including the version segment (e.g. `https://api.example.com/v1`).
     pub base_url: String,
     /// Bearer token (OpenAI) or x-api-key (Anthropic).
@@ -731,6 +738,7 @@ impl std::fmt::Debug for NativeLlmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeLlmConfig")
             .field("protocol", &self.protocol)
+            .field("provider_type", &self.provider_type)
             .field("base_url", &self.base_url)
             .field("api_key", &"[redacted]")
             .field("api_key_env", &self.api_key_env)

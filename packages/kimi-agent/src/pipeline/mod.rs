@@ -445,6 +445,7 @@ pub async fn build_engine_pipeline(
                                         &entry.llm,
                                         &spec.system_prompt,
                                         &base_callbacks,
+                                        spec.session_id.as_deref(),
                                     ));
                                 (entry.alias.clone(), llm)
                             })
@@ -664,10 +665,16 @@ pub fn build_llm_for_spec(
                     callbacks.clone(),
                 ),
             })
+            .map(|provider| provider.with_cache_key(spec.session_id.clone()))
             .collect();
         Box::new(MultiLLM::new(providers))
     } else if let Some(cfg) = spec.native_llm.clone() {
-        build_native_llm(&cfg, &spec.system_prompt, callbacks)
+        build_native_llm(
+            &cfg,
+            &spec.system_prompt,
+            callbacks,
+            spec.session_id.as_deref(),
+        )
     } else {
         if spec.rust_self_contained {
             return Err(PipelineError {
@@ -691,10 +698,12 @@ fn build_native_llm(
     cfg: &NativeLlmConfig,
     system_prompt: &str,
     callbacks: &Arc<dyn HostCallbacks>,
+    session_id: Option<&str>,
 ) -> Box<dyn crate::turn_loop::types::LLM> {
     let sink_callbacks = callbacks.clone();
     let mut llm = NativeHttpLlm::new(cfg.clone(), system_prompt.to_string())
-        .with_sink(Arc::new(move |event| sink_callbacks.emit_event(event)));
+        .with_sink(Arc::new(move |event| sink_callbacks.emit_event(event)))
+        .with_cache_key(session_id.map(str::to_string));
     if cfg.auth_provider.is_some() {
         let auth_callbacks = callbacks.clone();
         let provider_name = cfg.auth_provider.clone().unwrap_or_default();

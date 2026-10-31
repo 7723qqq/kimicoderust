@@ -3938,3 +3938,50 @@ mod mode_mutex_dispatch {
         );
     }
 }
+
+/// Read shows a pure-CRLF file as LF, so Edit must match that same view and
+/// write the result back as CRLF. Matching the raw bytes made every
+/// multi-line edit on a Windows-checked-out file fail with "not found".
+#[tokio::test]
+async fn edit_matches_the_model_view_of_a_crlf_file() {
+    let (_dir, ts) = setup();
+    std::fs::write(_dir.path().join("crlf.txt"), "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+    let result = ts
+        .execute_mutating(
+            "Edit",
+            &json!({
+                "path": "crlf.txt",
+                "old_string": "alpha\nbeta",
+                "new_string": "alpha\nBETA",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "content: {}", result.content);
+    assert_eq!(
+        std::fs::read_to_string(_dir.path().join("crlf.txt")).unwrap(),
+        "alpha\r\nBETA\r\ngamma\r\n",
+        "the pure-CRLF style must be preserved"
+    );
+}
+
+/// Invalid UTF-8 must be refused, not silently rewritten as U+FFFD.
+#[tokio::test]
+async fn edit_refuses_invalid_utf8_instead_of_rewriting_it() {
+    let (_dir, ts) = setup();
+    let path = _dir.path().join("binary.txt");
+    std::fs::write(&path, [0xff, 0xfe, b'a']).unwrap();
+    let result = ts
+        .execute_mutating(
+            "Edit",
+            &json!({
+                "path": "binary.txt",
+                "old_string": "a",
+                "new_string": "b",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error, "content: {}", result.content);
+    assert_eq!(std::fs::read(&path).unwrap(), vec![0xff, 0xfe, b'a']);
+}

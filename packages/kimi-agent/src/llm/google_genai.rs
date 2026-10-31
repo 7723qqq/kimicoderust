@@ -378,6 +378,39 @@ pub fn build_request_for_model(
     req
 }
 
+/// [`build_request_for_model`] plus the per-request completion cap (v2
+/// `encodeGoogleGenAIMaxOutputTokens`: `generationConfig.maxOutputTokens`).
+/// Gemini has no prompt-cache key field for this purpose.
+pub fn build_request_for_model_with_budget(
+    messages: &[WireMessage],
+    tools: &[ToolInfo],
+    thinking_budget: Option<u32>,
+    include_thoughts: bool,
+    model_id: &str,
+    effort: Option<&str>,
+    max_output_tokens: Option<u32>,
+) -> Value {
+    let mut req = build_request_for_model(
+        messages,
+        tools,
+        thinking_budget,
+        include_thoughts,
+        model_id,
+        effort,
+    );
+    if let Some(cap) = max_output_tokens {
+        // The thinking pass may already have created `generationConfig`; the
+        // completion cap joins it rather than replacing the thinkingConfig.
+        let mut config = req
+            .get("generationConfig")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        config["maxOutputTokens"] = json!(cap.max(1));
+        req["generationConfig"] = config;
+    }
+    req
+}
+
 /// Convert a data URL or HTTP URL to a Google GenAI inline/file data part
 /// (v2 `convertMediaUrl`, google-genai.ts:153-191):
 /// - `data:` URLs are parsed into `{ inlineData: { mimeType, data } }`
@@ -509,7 +542,7 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
 }
 
 fn parse_usage(usage: Option<&Value>) -> TokenUsage {
-    let input_tokens = usage
+    let prompt_tokens = usage
         .and_then(|u| u.get("promptTokenCount"))
         .and_then(|x| x.as_u64())
         .unwrap_or(0) as u32;
@@ -517,15 +550,23 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
         .and_then(|u| u.get("candidatesTokenCount"))
         .and_then(|x| x.as_u64())
         .unwrap_or(0) as u32;
-    let total_tokens = usage
-        .and_then(|u| u.get("totalTokenCount"))
-        .and_then(|x| x.as_u64())
-        .map(|t| t as u32)
-        .unwrap_or(input_tokens + output_tokens);
     let input_cache_read = usage
         .and_then(|u| u.get("cachedContentTokenCount"))
         .and_then(|x| x.as_u64())
         .unwrap_or(0) as u32;
+    // `promptTokenCount` includes the cached prompt, and the host's
+    // `inputOther` must not: v2 `parseGoogleGenAIUsage` subtracts the cached
+    // count. The total reconstruction then adds it back.
+    let input_tokens = prompt_tokens.saturating_sub(input_cache_read);
+    let total_tokens = usage
+        .and_then(|u| u.get("totalTokenCount"))
+        .and_then(|x| x.as_u64())
+        .map(|t| t as u32)
+        .unwrap_or_else(|| {
+            input_tokens
+                .saturating_add(input_cache_read)
+                .saturating_add(output_tokens)
+        });
 
     TokenUsage {
         input_tokens,

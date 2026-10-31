@@ -32,8 +32,11 @@ import {
   fetchCustomRegistry,
 } from '@moonshot-ai/kimi-code-oauth';
 import { estimateTokensForMessages } from '@moonshot-ai/kosong/tokens';
-import type { GoalSnapshot as ProtocolGoalSnapshot, TurnEndReason } from '@moonshot-ai/protocol';
-import { mcpOAuthStoreKey } from '@moonshot-ai/protocol';
+import { effectiveModelAlias } from '#/model-alias';
+import type {
+  GoalSnapshot as ProtocolGoalSnapshot,
+  TurnEndReason,
+} from '@moonshot-ai/protocol';
 import { ZipFile } from 'yazl';
 
 import {
@@ -61,7 +64,6 @@ import { ErrorCodes, KimiError } from '#/error-protocol';
 import { ImageLimits } from '#/image-limits';
 import { KimiHarness } from '#/kimi-harness';
 import { flushDiagnosticLogs, getRootLogger, log, resolveLoggingConfig } from '#/logging';
-import { effectiveModelAlias } from '#/model-alias';
 import {
   appendAdditionalDir,
   readAdditionalDirs,
@@ -85,6 +87,16 @@ import {
   type SetSessionTowerModeRpcInput,
   type UpdateSessionMetadataRpcInput,
 } from '#/rpc';
+import {
+  loadMcpServerLayers,
+  resolveMcpServersForEngine,
+  type StoredMcpServerConfig,
+} from './mcp-config';
+import {
+  beginMcpOAuthFlow,
+  cancelMcpOAuthFlow,
+  completeMcpOAuthFlow,
+} from './mcp-oauth';
 import type {
   AgentContextData,
   AgentMeta,
@@ -162,13 +174,15 @@ import { buildSessionHandle, type BuildHandleDeps } from './sdk-client/build-han
 import {
   toTurnEndReason,
   toGoalSnapshot,
+  computeUndoCut,
+  formatUndoUnavailable,
+  isUndoAnchorPrompt,
   initialRuntimeState,
   isPlainObject,
   registryKeyFromExisting,
   truncateUpstreamMessage,
   assignOrDelete,
   shellCommandKey,
-  truncateHistoryByTurns,
   retainThroughTurn,
   deepMergeConfigValue,
   posixPath,
@@ -191,11 +205,9 @@ import {
   pluginNodeRunnerPath,
   manifestAgentPaths,
   discoverSubagentsFromToolResult,
-  resolveMcpServersForEngine,
 } from './sdk-client/helpers';
 import type {
   ResolvedSkillPrompt,
-  StoredMcpServerConfig,
   SDKRpcClientNativeOptions,
   NativeSessionMeta,
   EngineTaskWireEntry,
@@ -440,7 +452,8 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       refreshProjectRoots: (meta) => this.refreshProjectRoots(meta),
       resolveSessionAgentProfiles: (meta) => this.resolveSessionAgentProfiles(meta),
       setPlanMode: (input) => this.setPlanMode(input),
-      loadGlobalMcpConfig: () => this.loadGlobalMcpConfig(),
+      loadSessionMcpConfig: (workDir) => this.loadSessionMcpConfig(workDir),
+      mcpOAuthDir: this.mcpOAuthDir(),
     };
   }
 
@@ -1537,17 +1550,49 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
         `cannot undo history of session "${input.sessionId}" without a live engine handle`,
       );
     }
-    const history = await meta.handle.getHistory();
-    const cut = truncateHistoryByTurns(history, input.count);
-    if (cut >= history.length) return; // nothing to undo
-    // Exclusive window so no turn is admitted mid-truncation.
-    const acquired = await meta.handle.tryAcquireQuiescence();
-    try {
-      await meta.handle.setHistory(history.slice(0, cut));
-    } finally {
-      if (acquired) await meta.handle.releaseQuiescence();
+    if (!Number.isSafeInteger(input.count) || input.count <= 0) {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        'Undo count must be a positive safe integer',
+        { details: { field: 'count' } },
+      );
     }
-    meta.messageCount = Math.max(0, meta.messageCount - (history.length - cut));
+    const history = await meta.handle.getHistory();
+    const cut = computeUndoCut(history, input.count);
+    if (cut.cutIndex < 0 || cut.removedCount < input.count) {
+      throw new KimiError(
+        ErrorCodes.SESSION_UNDO_UNAVAILABLE,
+        formatUndoUnavailable(cut, input.count),
+        {
+          details: {
+            reason: cut.stoppedAtCompaction
+              ? 'compaction_boundary'
+              : cut.removedCount === 0
+                ? 'empty'
+                : 'insufficient',
+            requestedCount: input.count,
+            undoableCount: cut.removedCount,
+            stoppedAtCompaction: cut.stoppedAtCompaction,
+          },
+        },
+      );
+    }
+    // Exclusive window so no turn is admitted mid-truncation. Without it the
+    // cut raced an active or queued turn and spliced the history under it.
+    const acquired = await meta.handle.tryAcquireQuiescence();
+    if (!acquired) {
+      throw new KimiError(
+        ErrorCodes.SESSION_BUSY,
+        'Cannot undo while a turn is active or queued. Wait for it to finish, then retry.',
+        { details: { reason: 'loop' } },
+      );
+    }
+    try {
+      await meta.handle.setHistory(history.slice(0, cut.cutIndex));
+    } finally {
+      await meta.handle.releaseQuiescence();
+    }
+    meta.messageCount = Math.max(0, meta.messageCount - (history.length - cut.cutIndex));
     meta.contextTokens = 0;
     meta.updatedAt = Date.now();
     this.persistMeta(meta);
@@ -1575,7 +1620,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       // a negative index and falls through to `history.length`, which would
       // silently retain the whole session under a "truncate at this turn"
       // call. v2 gets this from the engine, which owns the rule there.
-      const availableTurns = history.filter((message) => message.role === 'user').length;
+      const availableTurns = history.filter(isUndoAnchorPrompt).length;
       if (input.turnIndex < 0 || input.turnIndex >= availableTurns) {
         throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Fork turn index is out of range', {
           details: { turnIndex: input.turnIndex, availableTurns },
@@ -2934,7 +2979,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     if (server.bearerTokenEnvVar !== undefined) return 'bearer-token';
     if (server.headers !== undefined && server.auth !== 'oauth') return 'not-applicable';
     if (server.transport !== 'http' && server.auth !== 'oauth') return 'not-applicable';
-    const tokens = this.readMcpOAuthTokens(name, server.url ?? '');
+    const tokens = await this.readMcpOAuthTokens(name, server.url ?? '');
     const offline = (): GlobalMcpServerAuthStatus['authStatus'] => {
       if (tokens.hasTokens) {
         return !tokens.expired || tokens.hasRefreshToken ? 'oauth-authorized' : 'oauth-expired';
@@ -2954,35 +2999,72 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     return offline();
   }
 
-  /** The stored MCP OAuth token state for one server (`<home>/credentials/mcp`). */
-  private readMcpOAuthTokens(
+  /** Directory holding the engine's encrypted MCP OAuth records. */
+  private mcpOAuthDir(): string {
+    return join(this.homeDir, 'credentials', 'mcp');
+  }
+
+  /** The session's merged MCP config; project layers require workspace trust. */
+  private async loadSessionMcpConfig(
+    workDir: string,
+  ): Promise<Record<string, StoredMcpServerConfig>> {
+    const { trusted } = await this.getWorkspaceTrustInfo(workDir);
+    return loadMcpServerLayers({
+      homeDir: this.homeDir,
+      workDir,
+      includeProject: trusted,
+    });
+  }
+
+  /** The engine stub: storage, decryption and refresh all live in Rust. */
+  private async engineMcpOAuth(): Promise<{
+    mcpOauthTokenState(name: string, url: string, dir: string): Promise<string>;
+    mcpOauthStoreTokens(
+      name: string,
+      url: string,
+      tokensJson: string,
+      dir: string,
+    ): string;
+    mcpOauthRemove(name: string, url: string, dir: string): boolean;
+    mcpOauthReconnect(name: string): Promise<number>;
+  }> {
+    return (await import('@moonshot-ai/kimi-agent/native')) as unknown as {
+      mcpOauthTokenState(name: string, url: string, dir: string): Promise<string>;
+      mcpOauthStoreTokens(
+        name: string,
+        url: string,
+        tokensJson: string,
+        dir: string,
+      ): string;
+      mcpOauthRemove(name: string, url: string, dir: string): boolean;
+      mcpOauthReconnect(name: string): Promise<number>;
+    };
+  }
+
+  /** The stored MCP OAuth token state for one server (engine-decrypted). */
+  private async readMcpOAuthTokens(
     name: string,
     url: string,
-  ): {
+  ): Promise<{
     hasTokens: boolean;
     expired: boolean;
     hasRefreshToken: boolean;
     accessToken: string | undefined;
-  } {
+  }> {
     try {
-      const key = mcpOAuthStoreKey(name, url);
-      const raw = readFileSync(
-        join(this.homeDir, 'credentials', 'mcp', `${key}-tokens.json`),
-        'utf8',
-      );
+      const native = await this.engineMcpOAuth();
+      const raw = await native.mcpOauthTokenState(name, url, this.mcpOAuthDir());
       const parsed = JSON.parse(raw) as {
-        access_token?: string;
-        refresh_token?: string;
-        expires_at?: string;
+        hasTokens?: boolean;
+        expired?: boolean;
+        hasRefreshToken?: boolean;
+        accessToken?: string | null;
       };
-      const hasTokens = typeof parsed.access_token === 'string' && parsed.access_token.length > 0;
-      const expiresAt = parsed.expires_at !== undefined ? Date.parse(parsed.expires_at) : NaN;
       return {
-        hasTokens,
-        expired: Number.isFinite(expiresAt) && expiresAt <= Date.now(),
-        hasRefreshToken:
-          typeof parsed.refresh_token === 'string' && parsed.refresh_token.length > 0,
-        accessToken: hasTokens ? parsed.access_token : undefined,
+        hasTokens: parsed.hasTokens === true,
+        expired: parsed.expired === true,
+        hasRefreshToken: parsed.hasRefreshToken === true,
+        accessToken: parsed.accessToken ?? undefined,
       };
     } catch {
       return { hasTokens: false, expired: false, hasRefreshToken: false, accessToken: undefined };
@@ -3206,12 +3288,65 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
         `MCP server "${name}" uses stdio transport and does not support OAuth authorization`,
       );
     }
-    return { status: 'already-authorized' };
+    const url = config?.url;
+    if (config === undefined || url === undefined) {
+      throw new KimiError(
+        ErrorCodes.MCP_SERVER_NOT_FOUND,
+        `MCP server "${name}" is not a configured remote server`,
+      );
+    }
+    // A stored grant that is still usable (or refreshable) needs no browser.
+    const state = await this.readMcpOAuthTokens(name, url);
+    if (state.hasTokens && (!state.expired || state.hasRefreshToken)) {
+      return { status: 'already-authorized' };
+    }
+    const started = await beginMcpOAuthFlow({
+      name,
+      serverUrl: url,
+      clientName: 'Kimi Code',
+      persist: async (tokens) => {
+        const native = await this.engineMcpOAuth();
+        native.mcpOauthStoreTokens(name, url, JSON.stringify(tokens), this.mcpOAuthDir());
+      },
+    });
+    return {
+      status: 'authorization-required',
+      flowId: started.flowId,
+      authorizationUrl: started.authorizationUrl,
+    };
   }
 
-  override async completeGlobalMcpServerAuth(): Promise<void> {}
-  override async cancelGlobalMcpServerAuth(): Promise<void> {}
-  override async resetGlobalMcpServerAuth(): Promise<void> {}
+  override async completeGlobalMcpServerAuth(
+    input: { readonly flowId: string; readonly timeoutMs?: number },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const { name } = await completeMcpOAuthFlow(input.flowId, {
+      timeoutMs: input.timeoutMs,
+      signal,
+    });
+    // The server was marked needs-auth by the failed connection; retry it in
+    // every live manager so the fresh grant takes effect without a new session.
+    try {
+      const native = await this.engineMcpOAuth();
+      await native.mcpOauthReconnect(name);
+    } catch {
+      // A host without live managers still completed the login.
+    }
+  }
+
+  override async cancelGlobalMcpServerAuth(flowId: string): Promise<void> {
+    await cancelMcpOAuthFlow(flowId);
+  }
+
+  override async resetGlobalMcpServerAuth(
+    name: string,
+    _options: { readonly cwd?: string } = {},
+  ): Promise<void> {
+    const config = this.loadGlobalMcpConfig()[name];
+    if (config?.url === undefined) return;
+    const native = await this.engineMcpOAuth();
+    native.mcpOauthRemove(name, config.url, this.mcpOAuthDir());
+  }
 
   override async completeMcpServerAuth(): Promise<void> {}
   override async cancelMcpServerAuth(): Promise<void> {}
@@ -4041,7 +4176,8 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       towerMode: meta.towerMode,
       contextTokens: meta.contextTokens,
       maxContextTokens: meta.maxContextTokens,
-      contextUsage: meta.maxContextTokens > 0 ? meta.contextTokens / meta.maxContextTokens : 0,
+      contextUsage:
+        meta.maxContextTokens > 0 ? meta.contextTokens / meta.maxContextTokens : 0,
       ...(Object.keys(usage).length > 0 ? { usage } : {}),
     });
   }

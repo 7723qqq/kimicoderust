@@ -10,9 +10,9 @@ description:
   en: >
       The host-side SDK: native RPC client, session facade, plugin/skill/MCP facades and config resolution.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T15:13:40.702Z"
-fingerprint: ba158e02c181dedd057c7324a06cf8fe834bec0500beac49fea4edffce8a0949
+revision: ee6b2dfd048b53644c61d727926f892fb647e812
+updated_at: "2026-10-31T15:46:26.789Z"
+fingerprint: 8dd39b1f4f4c6c5558aaff96040df8890c8149b47dca71de4a530e96f0cc6b2a
 source:
   - path: "packages/node-sdk/src/native/sdk-rpc-client-native.ts"
   - path: "packages/node-sdk/src/kimi-harness.ts"

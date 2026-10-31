@@ -1,5 +1,19 @@
 use super::*;
 
+/// The host executable recorded for plugin stdio servers declared with
+/// `command: "node"`: the packaged Bun binary can re-execute the entry itself
+/// (`<runner> __plugin_run_node <entry>`), so a Bun-only install needs no
+/// system Node.js. Unset keeps spawning `node` as declared.
+fn plugin_node_runner() -> Option<std::path::PathBuf> {
+    std::env::var_os("KIMI_NODE_RUNNER")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+fn plugin_manager_with_env(store: Arc<SqliteSessionStore>) -> plugins::PluginManager {
+    plugins::PluginManager::new(store).with_node_runner(plugin_node_runner())
+}
+
 impl HttpServer {
     /// A server over its own event hub.
     pub fn new(store: Arc<SqliteSessionStore>) -> Self {
@@ -80,7 +94,7 @@ impl HttpServer {
             interaction_manager: Arc::new(
                 interaction::InteractionManager::new().with_hub(hub.clone()),
             ),
-            plugin_manager: Arc::new(plugins::PluginManager::new(store)),
+            plugin_manager: Arc::new(plugin_manager_with_env(store)),
             oauth_manager: Arc::new(oauth::OAuthManager::new()),
             prompt_queue: Arc::new(prompt_queue::PromptQueue::new()),
             config_override: Arc::new(Mutex::new(None)),
@@ -327,7 +341,7 @@ impl HttpServer {
     #[must_use]
     pub fn with_plugin_home(mut self, home: PathBuf) -> Self {
         self.plugin_manager = Arc::new(
-            plugins::PluginManager::new(self.store.clone())
+            plugin_manager_with_env(self.store.clone())
                 .with_marketplace_dir(plugins::default_marketplace_dir())
                 .with_home_dir(Some(home)),
         );
@@ -340,7 +354,7 @@ impl HttpServer {
         self,
         service: Arc<crate::mcp::oauth::McpOAuthService>,
     ) -> Self {
-        self.mcp_manager.set_oauth_service(service.clone()).await;
+        self.mcp_manager.set_oauth_service(service.clone());
         *self.mcp_oauth.lock().await = Some(service);
         self
     }

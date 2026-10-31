@@ -129,6 +129,8 @@ pub async fn poll_device_login(
                     .map(|secs| now_ms() + secs * 1000),
                 token_endpoint: Some(token_endpoint.to_string()),
                 client_id: Some(client_id.to_string()),
+                client_secret: None,
+                resource: None,
                 obtained_at_ms: Some(now_ms()),
             });
         }

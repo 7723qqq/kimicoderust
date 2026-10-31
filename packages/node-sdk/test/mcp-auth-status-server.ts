@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   createServer,
   type IncomingMessage,
@@ -22,10 +23,13 @@ export async function startMcpAuthStatusServer(): Promise<McpAuthStatusServer> {
   const authToken = 'valid-test-access-token';
   let baseUrl = '';
   const requestCounts = new Map<string, number>();
+  // Authorization-code state for the browser flow: the challenge registered by
+  // `/authorize`, verified against `code_verifier` at `/token`.
+  const flow: { challenge?: string; redirectUri?: string } = {};
   const server = createServer((request, response) => {
     const pathname = new URL(request.url ?? '/', baseUrl).pathname;
     requestCounts.set(pathname, (requestCounts.get(pathname) ?? 0) + 1);
-    void handleRequest(request, response, baseUrl, authToken).catch((error: unknown) => {
+    void handleRequest(request, response, baseUrl, authToken, flow).catch((error: unknown) => {
       if (!response.headersSent) response.writeHead(500);
       response.end(String(error));
     });
@@ -58,10 +62,30 @@ async function handleRequest(
   response: ServerResponse,
   baseUrl: string,
   authToken: string,
+  flow: { challenge?: string; redirectUri?: string },
 ): Promise<void> {
   const url = new URL(request.url ?? '/', baseUrl);
   if (url.pathname === '/unavailable') {
     response.writeHead(503).end('Temporarily unavailable');
+    return;
+  }
+  if (url.pathname === '/authorize' && request.method === 'GET') {
+    // The browser leg: verify PKCE S256 and bounce back to the host's loopback
+    // listener with a one-time code.
+    const challenge = url.searchParams.get('code_challenge') ?? '';
+    const challengeMethod = url.searchParams.get('code_challenge_method');
+    const redirectUri = url.searchParams.get('redirect_uri');
+    if (challenge === '' || challengeMethod !== 'S256' || redirectUri === null) {
+      response.writeHead(400).end('invalid authorization request');
+      return;
+    }
+    flow.challenge = challenge;
+    flow.redirectUri = redirectUri;
+    const location = new URL(redirectUri);
+    location.searchParams.set('code', 'test-authorization-code');
+    location.searchParams.set('state', url.searchParams.get('state') ?? '');
+    response.writeHead(302, { location: location.toString() });
+    response.end();
     return;
   }
   if (url.pathname === '/token' && request.method === 'POST') {
@@ -70,6 +94,28 @@ async function handleRequest(
     // land on needs-auth.
     const rawBody = await readBody(request);
     const params = new URLSearchParams(rawBody);
+    if (params.get('grant_type') === 'authorization_code') {
+      const verifier = params.get('code_verifier') ?? '';
+      const computed = createHash('sha256').update(verifier).digest('base64url');
+      if (
+        params.get('code') !== 'test-authorization-code' ||
+        flow.challenge === undefined ||
+        computed !== flow.challenge ||
+        params.get('redirect_uri') !== flow.redirectUri
+      ) {
+        response.writeHead(400, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'invalid_grant' }));
+        return;
+      }
+      flow.challenge = undefined;
+      sendJson(response, {
+        access_token: authToken,
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token: REFRESH_TOKEN,
+      });
+      return;
+    }
     if (
       params.get('grant_type') === 'refresh_token' &&
       params.get('refresh_token') === REFRESH_TOKEN

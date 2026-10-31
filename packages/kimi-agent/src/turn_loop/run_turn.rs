@@ -1204,12 +1204,12 @@ pub fn run_turn<'a>(
                 // The AGENTS.md reminder additionally needs the directories the
                 // previous step's tool calls touched; without them it saw an
                 // empty world and only ever probed the workspace root.
-                for text in injection_registry.build_injections_with_history(
+                for (variant, text) in injection_registry.build_injections_with_history_named(
                     step_num == 0,
                     &step_access,
                     &messages,
                 ) {
-                    messages.push(crate::injection::injection_message(text));
+                    messages.push(crate::injection::injection_message_named(text, &variant));
                 }
             }
 
@@ -1274,6 +1274,10 @@ pub fn run_turn<'a>(
                     &retry_config,
                     Some(turn_cancel.token()),
                     Some(&telemetry),
+                    Some(crate::compaction::estimate_messages_tokens(
+                        &request_messages,
+                    )),
+                    input.max_context_tokens,
                 )
                 .await;
                 let e = match call {
@@ -2106,6 +2110,8 @@ Deliver your final response as text now. Further tool calls are refused.",
                             &retry_config,
                             Some(turn_cancel.token()),
                             Some(&telemetry),
+                            Some(crate::compaction::estimate_messages_tokens(&messages)),
+                            input.max_context_tokens,
                         )
                         .await;
 

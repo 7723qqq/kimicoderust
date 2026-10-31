@@ -6244,13 +6244,26 @@ async fn undo_succeeds_when_no_checkpoint_was_ever_taken() {
             path: format!("/api/v1/sessions/{sid}:undo"),
             query: None,
             headers: HashMap::new(),
-            body: serde_json::to_vec(&json!({ "count": 3 })).unwrap(),
+            body: serde_json::to_vec(&json!({ "count": 1 })).unwrap(),
         })
         .await;
     assert_eq!(
         res.status, 200,
-        "requesting more undos than checkpoints exist must not error"
+        "an undo inside the available anchors must not require a checkpoint"
     );
+
+    // Asking for more anchors than exist is unavailable, independent of
+    // the checkpoint stack.
+    let res = server
+        .handle_request(&HttpRequest {
+            method: "POST".into(),
+            path: format!("/api/v1/sessions/{sid}:undo"),
+            query: None,
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&json!({ "count": 3 })).unwrap(),
+        })
+        .await;
+    assert_eq!(res.status, 400, "insufficient undo count must be refused");
 }
 
 #[tokio::test]

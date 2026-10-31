@@ -1,6 +1,41 @@
 {
   "note": "Hardcoded prose literals in packages/kimi-agent that are allowed to stay English. Two-way ratchet: a new unrecorded literal fails, and so does a recorded one that is gone or has moved onto the catalog seam. Re-record with `bun run scan:hardcoded:rust -- --update`; re-seed categories with `-- --seed`. `reason` must be one of the CATEGORY values documented in scripts/scan-hardcoded-rust.mjs. `deferred` is the only category that means a real TODO.",
   "entries": {
+    "packages/kimi-agent/src/acp/builtin_commands.rs:<optional custom summarization instructions>": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "<optional custom summarization instructions>",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/acp/builtin_commands.rs:Available commands: {}": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "Available commands: {}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/acp/builtin_commands.rs:Compact the conversation context": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "Compact the conversation context",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/acp/builtin_commands.rs:Show MCP server status": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "Show MCP server status",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/acp/builtin_commands.rs:Show available ACP commands": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "Show available ACP commands",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/acp/builtin_commands.rs:Show current session status": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "Show current session status",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/acp/builtin_commands.rs:Show session token usage": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "Show session token usage",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/acp/channel.rs:ACP client error ({code}): {message}": {
       "file": "packages/kimi-agent/src/acp/channel.rs",
       "text": "ACP client error ({code}): {message}",
@@ -201,9 +236,9 @@
       "text": "Invalid TOML configuration: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/config/mod.rs:No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ./config.toml, or ~/.kimi-code/config.toml": {
+    "packages/kimi-agent/src/config/mod.rs:No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ~/.kimi-code/config.toml, or ~/.kimi/config.toml": {
       "file": "packages/kimi-agent/src/config/mod.rs",
-      "text": "No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ./config.toml, or ~/.kimi-code/config.toml",
+      "text": "No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ~/.kimi-code/config.toml, or ~/.kimi/config.toml",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/config/mod.rs:[agent].multi_llm entry \"{alias}\" could not be resolved: add it to [models] with a provider that has credentials.": {
@@ -1632,6 +1667,11 @@
       "file": "packages/kimi-agent/src/napi_bindings.rs",
       "text": "internal panic in sync napi export",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings.rs:invalid MCP OAuth tokens: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings.rs",
+      "text": "invalid MCP OAuth tokens: {e}",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/napi_bindings.rs:kimi-agent tracing smoke event": {
       "file": "packages/kimi-agent/src/napi_bindings.rs",
@@ -3109,6 +3149,11 @@
       "text": "no model configured: {why}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/engine.rs:no model is bound to this session; compact requires a model to write the summary": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "no model is bound to this session; compact requires a model to write the summary",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/server/engine.rs:session store error: {error}": {
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "session store error: {error}",
@@ -4524,6 +4569,11 @@
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
       "text": "Turn {turn_index} was not found in the session ({available_turns} available)",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/session/sqlite_store.rs:cannot revert a file change without a stored pre-image; leaving the file untouched": {
+      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
+      "text": "cannot revert a file change without a stored pre-image; leaving the file untouched",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/session/sqlite_store.rs:failed to apply patch to {domain}/{key}: {e}": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",

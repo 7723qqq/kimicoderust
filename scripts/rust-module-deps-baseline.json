@@ -1,6 +1,6 @@
 {
   "note": "Intra-crate module dependency graph of packages/kimi-agent, keyed `from -> to` at top-level-module granularity. Two-way ratchet: a new unrecorded pair fails, and so does a recorded one that is gone. Re-record with `bun run check:rust-module-deps -- --update`; see the script header for the extraction rules and the blind spots.",
-  "generatedAt": "2026-10-03",
+  "generatedAt": "2026-10-31",
   "source": "packages/kimi-agent/src",
   "extraction": {
     "granularity": "top-level module: first path segment under src/ (directory name or .rs file stem)",
@@ -15,12 +15,14 @@
       "the crate boundary: main.rs reaches the library through kimi_agent::… and contributes no edges today"
     ],
     "includesTestCode": true,
-    "files": 250,
+    "files": 251,
     "modules": 39,
-    "sites": 2516
+    "sites": 2570
   },
   "edges": [
     "acp -> callbacks",
+    "acp -> compaction",
+    "acp -> config",
     "acp -> events",
     "acp -> i18n",
     "acp -> mcp",

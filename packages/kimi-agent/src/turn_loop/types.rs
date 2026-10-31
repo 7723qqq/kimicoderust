@@ -146,7 +146,7 @@ pub trait LLM: Send + Sync {
 /// The history and tool table are shared behind `Arc` so the racing multi-LLM
 /// path and the retry loop can clone the params without deep-copying the whole
 /// conversation on every attempt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LLMChatParams {
     pub messages: Arc<[LLMMessage]>,
     pub tools: Arc<[ToolInfo]>,
@@ -156,6 +156,14 @@ pub struct LLMChatParams {
     /// read; the call fails with an `"llm cancelled …"` error that the
     /// retry layer never retries. `None` = uncancellable (test stubs).
     pub cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Estimated prompt tokens of this request (v2 `usedContextTokens`): the
+    /// transport subtracts it from the model window to cap the completion
+    /// budget. `None` for callers with no estimate (compaction, titles).
+    pub used_context_tokens: Option<u32>,
+    /// The model's resolved context window for this request (v2
+    /// `maxContextTokens`). `None` leaves the completion budget at the
+    /// model's output cap.
+    pub max_context_tokens: Option<u32>,
 }
 
 /// A message in the LLM conversation.

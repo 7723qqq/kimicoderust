@@ -50,6 +50,18 @@ export function findRustAgentBinary(): string | undefined {
 }
 
 /**
+ * The packaged Bun binary can host plugin `node` entries itself; source
+ * (`bun src/main.ts`) and node-dist runs cannot, so only the packed binary
+ * advertises itself as the plugin runner. Mirrors the SDK's
+ * `pluginNodeRunnerPath`.
+ */
+function pluginNodeRunnerPath(): string | undefined {
+  const view = globalThis as { Bun?: unknown; __KIMI_BUN_ASSETS__?: unknown };
+  if (view.Bun === undefined || view.__KIMI_BUN_ASSETS__ === undefined) return undefined;
+  return process.execPath;
+}
+
+/**
  * Build CLI arguments for `kimi-agent --serve`.
  */
 export function buildRustServerArgs(
@@ -152,9 +164,13 @@ export async function startRustServerForeground(
 
   const args = buildRustServerArgs(options, deps.webAssetsDir, deps.dataDir);
   const spawner = deps.spawnProcess ?? spawn;
+  const nodeRunner = pluginNodeRunnerPath();
   const child: ChildProcess = spawner(binary, args, {
     stdio: ['ignore', 'inherit', 'inherit'],
-    env: process.env,
+    env:
+      nodeRunner === undefined
+        ? process.env
+        : { ...process.env, KIMI_NODE_RUNNER: nodeRunner },
   });
 
   let exiting = false;

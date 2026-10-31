@@ -194,6 +194,7 @@ impl FilingPass {
             messages,
             tools: Arc::from(Vec::new()),
             cancel: None,
+            ..Default::default()
         });
         let response = match tokio::time::timeout(FILING_TIMEOUT, call).await {
             Ok(Ok(response)) => response,

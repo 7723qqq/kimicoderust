@@ -82,6 +82,29 @@ pub const RM_SAFE_TEMP_ROOTS: &[&str] = &["/tmp", "/temp"];
 /// no syntax metadata, so the same character set is applied to the operand.
 const UNSAFE_OPERAND_CHARS: &[char] = &['$', '`', '*', '?', '[', ']', '~'];
 
+/// Shell control keywords whose body is a separate command expression. The
+/// lexer cannot build a parse tree, so each split segment is stripped of these
+/// prefixes and its remainder is analyzed.
+const CONTROL_KEYWORDS: &[&str] = &[
+    "if", "then", "elif", "else", "while", "until", "for", "do", "case", "select", "function",
+    "time", "coproc",
+];
+
+/// `/dev` targets `dd` may write safely; every other `/dev` target is a
+/// physical device or a device-mapper node (v2 `DD_SAFE_DEVICE_TARGETS`).
+const DD_SAFE_DEVICE_TARGETS: &[&str] = &[
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+];
+
+const MAX_SUBSTITUTION_DEPTH: usize = 4;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DangerousVerdict {
     Dangerous(String),
@@ -99,10 +122,24 @@ pub enum DangerousVerdict {
 /// A `Dangerous` verdict anywhere wins; otherwise an unanalyzable shape
 /// anywhere makes the whole command unanalyzable (upstream #3869).
 pub fn analyze_bash_command(raw_command: &str) -> DangerousVerdict {
+    analyze_bash_command_depth(raw_command, 0)
+}
+
+fn analyze_bash_command_depth(raw_command: &str, depth: usize) -> DangerousVerdict {
+    // Command and process substitutions execute commands of their own; the
+    // lexer has no syntax tree, so analyze their bodies explicitly. A
+    // dangerous body wins; an unreadable one makes the outer command
+    // unanalyzable.
+    let substitution = analyze_substitutions(raw_command, depth);
+    let mut unanalyzable: Option<String> = match substitution {
+        DangerousVerdict::Dangerous(cmd) => return DangerousVerdict::Dangerous(cmd),
+        DangerousVerdict::Unanalyzable(cmd) => Some(cmd),
+        DangerousVerdict::Safe => None,
+    };
+
     let (sub_commands, balanced) = split_pipeline_commands(raw_command);
-    let mut unanalyzable: Option<String> = None;
     for sub_cmd in &sub_commands {
-        match check_single_command(sub_cmd) {
+        match check_single_command(sub_cmd, depth) {
             DangerousVerdict::Dangerous(cmd) => return DangerousVerdict::Dangerous(cmd),
             DangerousVerdict::Unanalyzable(cmd) => unanalyzable = Some(cmd),
             DangerousVerdict::Safe => {}
@@ -111,6 +148,84 @@ pub fn analyze_bash_command(raw_command: &str) -> DangerousVerdict {
     if !balanced {
         return DangerousVerdict::Unanalyzable(raw_command.to_string());
     }
+    unanalyzable.map_or(DangerousVerdict::Safe, DangerousVerdict::Unanalyzable)
+}
+
+/// Walk `$(...)`, backtick and `<(…)`/`>(…)` substitutions outside single
+/// quotes and analyze each body. Arithmetic `$((...))` carries no command.
+fn analyze_substitutions(raw: &str, depth: usize) -> DangerousVerdict {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut unanalyzable: Option<String> = None;
+
+    while index < chars.len() {
+        let current = chars[index];
+        if current == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            index += 1;
+            continue;
+        }
+        if current == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            index += 1;
+            continue;
+        }
+        if in_single_quote {
+            index += 1;
+            continue;
+        }
+
+        let inner_start = if current == '$' && chars.get(index + 1) == Some(&'(') {
+            if chars.get(index + 2) == Some(&'(') {
+                // `$((...))`: arithmetic, not a command substitution.
+                index += 3;
+                continue;
+            }
+            Some((index + 2, ')'))
+        } else if current == '`' {
+            Some((index + 1, '`'))
+        } else if (current == '<' || current == '>') && chars.get(index + 1) == Some(&'(') {
+            Some((index + 2, ')'))
+        } else {
+            None
+        };
+        let Some((start, closer)) = inner_start else {
+            index += 1;
+            continue;
+        };
+
+        let mut end = start;
+        let mut nesting = 0usize;
+        while end < chars.len() {
+            if chars[end] == closer && nesting == 0 {
+                break;
+            }
+            if closer == ')' {
+                if chars[end] == '(' {
+                    nesting += 1;
+                } else if chars[end] == ')' && nesting > 0 {
+                    nesting -= 1;
+                }
+            }
+            end += 1;
+        }
+        if end >= chars.len() {
+            return DangerousVerdict::Unanalyzable(raw.to_string());
+        }
+        if depth >= MAX_SUBSTITUTION_DEPTH {
+            return DangerousVerdict::Unanalyzable(raw.to_string());
+        }
+        let inner: String = chars[start..end].iter().collect();
+        match analyze_bash_command_depth(&inner, depth + 1) {
+            DangerousVerdict::Dangerous(cmd) => return DangerousVerdict::Dangerous(cmd),
+            DangerousVerdict::Unanalyzable(cmd) => unanalyzable = Some(cmd),
+            DangerousVerdict::Safe => {}
+        }
+        index = end + 1;
+    }
+
     unanalyzable.map_or(DangerousVerdict::Safe, DangerousVerdict::Unanalyzable)
 }
 
@@ -187,6 +302,19 @@ fn is_short_option_cluster(arg: &str) -> bool {
     !flags.is_empty() && flags.chars().all(|c| c.is_ascii_alphabetic())
 }
 
+/// `env NAME=VALUE` operands (v2 `dropLaunchWrapperOperands`).
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Whether a single `rm` operand is a literal path under one of
 /// [`RM_SAFE_TEMP_ROOTS`] (v2 `isSafeTempRmOperand` plus the literal-ness rule
 /// that upstream tracks separately via `dropped`).
@@ -204,8 +332,39 @@ fn is_safe_temp_rm_operand(operand: &str) -> bool {
     })
 }
 
-fn check_single_command(cmd: &str) -> DangerousVerdict {
-    let tokens = tokenize_command(cmd);
+fn check_single_command(cmd: &str, depth: usize) -> DangerousVerdict {
+    let mut tokens = tokenize_command(cmd);
+    // Control structures split into `if …`, `then …`, `do …` segments. Strip
+    // the keyword (and grouping parentheses) so the body is analyzed; a shape
+    // that cannot be reduced is unanalyzable rather than silently safe.
+    loop {
+        let Some(first) = tokens.first() else {
+            return DangerousVerdict::Safe;
+        };
+        if CONTROL_KEYWORDS.contains(&first.as_str()) {
+            tokens.remove(0);
+            continue;
+        }
+        if first == "(" || first == "{" {
+            tokens.remove(0);
+            continue;
+        }
+        if (first.starts_with('(') || first.starts_with('{')) && first.len() > 2 {
+            let closer = if first.starts_with('(') { ')' } else { '}' };
+            if first.ends_with(closer) {
+                let inner = &first[1..first.len() - 1];
+                if depth >= MAX_SUBSTITUTION_DEPTH {
+                    return DangerousVerdict::Unanalyzable(cmd.to_string());
+                }
+                return analyze_bash_command_depth(inner, depth + 1);
+            }
+            return DangerousVerdict::Unanalyzable(cmd.to_string());
+        }
+        break;
+    }
+    while matches!(tokens.last().map(String::as_str), Some(")") | Some("}")) {
+        tokens.pop();
+    }
     if tokens.is_empty() {
         return DangerousVerdict::Safe;
     }
@@ -241,14 +400,13 @@ fn check_single_command(cmd: &str) -> DangerousVerdict {
             }
         }
 
-        // 4. Block dd overwrites of physical storage devices
+        // 4. Block dd overwrites of physical storage devices (v2 treats every
+        //    `/dev/*` target outside the safe list as a device)
         if first == "dd" {
             for arg in &current_tokens[1..] {
                 if let Some(target) = arg.strip_prefix("of=")
-                    && (target.starts_with("/dev/sd")
-                        || target.starts_with("/dev/nvme")
-                        || target.starts_with("/dev/hd")
-                        || target == "/dev/sda")
+                    && target.starts_with("/dev/")
+                    && !DD_SAFE_DEVICE_TARGETS.contains(&target)
                 {
                     return DangerousVerdict::Dangerous(format!("dd of={}", target));
                 }
@@ -311,8 +469,11 @@ fn check_single_command(cmd: &str) -> DangerousVerdict {
 
         // 7. Recurse into eval
         if first == "eval" && current_tokens.len() > 1 {
+            if depth >= MAX_SUBSTITUTION_DEPTH {
+                return DangerousVerdict::Unanalyzable(cmd.to_string());
+            }
             let joined = current_tokens[1..].join(" ");
-            return analyze_bash_command(&joined);
+            return analyze_bash_command_depth(&joined, depth + 1);
         }
 
         // 8. Recursively strip wrappers (sudo, doas, env, nohup, nice)
@@ -337,18 +498,49 @@ fn check_single_command(cmd: &str) -> DangerousVerdict {
                     break;
                 }
             }
+            // `env NAME=VALUE …` assignments are not the command name.
+            if first == "env" {
+                if current_tokens
+                    .get(next_cmd_idx)
+                    .is_some_and(|token| token == "-")
+                {
+                    next_cmd_idx += 1;
+                }
+                while current_tokens
+                    .get(next_cmd_idx)
+                    .is_some_and(|token| is_env_assignment(token))
+                {
+                    next_cmd_idx += 1;
+                }
+            }
             if next_cmd_idx < current_tokens.len() {
                 current_tokens = &current_tokens[next_cmd_idx..];
                 continue;
             }
         }
 
-        // 9. Recurse into a nested shell (bash -c "...")
-        if NESTED_SHELLS.contains(&first.as_str())
-            && let Some(pos) = current_tokens.iter().position(|t| t == "-c")
-            && pos + 1 < current_tokens.len()
-        {
-            return analyze_bash_command(&current_tokens[pos + 1]);
+        // 9. Recurse into a nested shell (bash -c "…", bash -lc "…")
+        if NESTED_SHELLS.contains(&first.as_str()) {
+            let mut payload = None;
+            for (index, arg) in current_tokens.iter().enumerate().skip(1) {
+                if arg == "--" {
+                    break;
+                }
+                if is_short_option_cluster(arg) {
+                    if arg.contains('c') {
+                        payload = current_tokens.get(index + 1);
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if let Some(payload) = payload {
+                if depth >= MAX_SUBSTITUTION_DEPTH {
+                    return DangerousVerdict::Unanalyzable(cmd.to_string());
+                }
+                return analyze_bash_command_depth(payload, depth + 1);
+            }
         }
 
         break;
@@ -435,6 +627,45 @@ mod tests {
             analyze_bash_command("bash -c 'sudo dd if=/dev/zero of=/dev/sda bs=1M'"),
             DangerousVerdict::Dangerous("dd of=/dev/sda".into())
         );
+    }
+
+    #[test]
+    fn test_control_structures_and_substitutions_are_analyzed() {
+        for dangerous in [
+            "echo $(reboot)",
+            "echo `reboot`",
+            "(reboot)",
+            "if true; then reboot; fi",
+            "for x in a; do reboot; done",
+            "env FOO=1 reboot",
+            "bash -lc 'reboot'",
+            "sh -c 'if true; then reboot; fi'",
+            "sudo env FOO=1 reboot",
+            "dd of=/dev/vda",
+            "dd of=/dev/mapper/vg-root",
+        ] {
+            assert!(
+                matches!(
+                    analyze_bash_command(dangerous),
+                    DangerousVerdict::Dangerous(_)
+                ),
+                "expected dangerous: {dangerous}"
+            );
+        }
+        for safe in [
+            "echo $(date)",
+            "echo \"$(date)\"",
+            "dd of=/dev/null",
+            "dd of=/dev/zero",
+            "env FOO=1 echo hi",
+            "bash -lc 'echo hi'",
+        ] {
+            assert_eq!(
+                analyze_bash_command(safe),
+                DangerousVerdict::Safe,
+                "expected safe: {safe}"
+            );
+        }
     }
 
     #[test]

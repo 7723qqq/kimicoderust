@@ -253,6 +253,28 @@ pub fn build_request_full(
     req
 }
 
+/// [`build_request_full`] plus the session cache key and the per-request
+/// completion cap. v2's Responses trait sends the key as `prompt_cache_key`
+/// and the cap as `max_output_tokens` (`resolveMaxCompletionCap`).
+pub fn build_request_with_budget(
+    model: &str,
+    messages: &[WireMessage],
+    tools: &[ToolInfo],
+    stream: bool,
+    reasoning_effort: Option<&str>,
+    cache_key: Option<&str>,
+    max_output_tokens: Option<u32>,
+) -> Value {
+    let mut req = build_request_full(model, messages, tools, stream, reasoning_effort);
+    if let Some(cache_key) = cache_key.filter(|key| !key.is_empty()) {
+        req["prompt_cache_key"] = json!(cache_key);
+    }
+    if let Some(cap) = max_output_tokens {
+        req["max_output_tokens"] = json!(cap.max(1));
+    }
+    req
+}
+
 /// Parse an OpenAI `/v1/responses` non-streaming response.
 pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
     let mut content = String::new();
@@ -363,7 +385,13 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
         .get("total_tokens")
         .and_then(|x| x.as_u64())
         .map(|t| t as u32)
-        .unwrap_or(input_tokens + output_tokens);
+        .unwrap_or_else(|| {
+            // `input_tokens` is the uncached remainder; the provider total (or
+            // this reconstruction) includes the cached prompt.
+            input_tokens
+                .saturating_add(input_cache_read)
+                .saturating_add(output_tokens)
+        });
 
     TokenUsage {
         input_tokens,

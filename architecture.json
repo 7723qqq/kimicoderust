@@ -24,7 +24,7 @@
           "description": "ACP stdio protocol server"
         }
       ],
-      "fingerprint": "26a6bc06562a78c5"
+      "fingerprint": "72bf14c7028eb18e"
     },
     {
       "id": "node-sdk",
@@ -46,7 +46,7 @@
           "description": "Public SDK package"
         }
       ],
-      "fingerprint": "a0038123743acead"
+      "fingerprint": "571bfcf58b960fe6"
     },
     {
       "id": "kimi-code",
@@ -77,7 +77,7 @@
           "description": "Terminal UI"
         }
       ],
-      "fingerprint": "55272b4d4b0ab5e4"
+      "fingerprint": "4c797147b23de6d8"
     },
     {
       "id": "kosong",
@@ -167,7 +167,7 @@
       "source": "packages/telemetry/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "d0faf8d28e83f9c1"
+      "fingerprint": "1f66ce3ca2deb7f5"
     },
     {
       "id": "pi-tui",

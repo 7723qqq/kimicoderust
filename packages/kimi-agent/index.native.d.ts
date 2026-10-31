@@ -674,6 +674,31 @@ export function pluginCommands(): string;
 export function fsSuggest(workDir: string, query: string, limit?: number): string;
 
 // ============================================================================
+// MCP OAuth — engine-owned encrypted storage, host-owned browser flow
+// ============================================================================
+
+/** Persist browser-flow tokens; returns the credential store key. */
+export declare function mcpOauthStoreTokens(
+  name: string,
+  url: string,
+  tokensJson: string,
+  dir: string,
+): string;
+
+/** Stored-credential state as JSON `{hasTokens, hasRefreshToken, expired, accessToken}`. */
+export declare function mcpOauthTokenState(
+  name: string,
+  url: string,
+  dir: string,
+): Promise<string>;
+
+/** Drop a stored grant; whether a record existed. */
+export declare function mcpOauthRemove(name: string, url: string, dir: string): boolean;
+
+/** Reconnect every live MCP manager that knows this server. */
+export declare function mcpOauthReconnect(name: string): Promise<number>;
+
+// ============================================================================
 // Background tasks — the engine pipeline's task runner (process-global)
 // ============================================================================
 

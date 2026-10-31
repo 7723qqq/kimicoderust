@@ -270,6 +270,8 @@ pub fn execute_loop_step<'a>(
         &RetryConfig::default(),
         cancel,
         None,
+        None,
+        None,
     )
 }
 
@@ -302,6 +304,11 @@ pub fn execute_loop_step_with_retry<'a>(
     // retry backoff (the activity phase machine folds it into the `retrying`
     // phase; hosts forward it to their telemetry sink).
     telemetry: Option<&'a (dyn Fn(serde_json::Value) + Send + Sync)>,
+    // Prompt tokens this request is expected to carry and the model window
+    // they count against; the transport derives the completion budget from
+    // them (v2 `usedContextTokens` / `maxContextTokens`).
+    used_context_tokens: Option<u32>,
+    max_context_tokens: Option<u32>,
 ) -> BoxFuture<'a, Result<StepResult, Box<dyn std::error::Error + Send + Sync>>> {
     let retry_config = retry_config.clone();
     let cancel_token = cancel.cloned();
@@ -314,6 +321,8 @@ pub fn execute_loop_step_with_retry<'a>(
             messages: std::sync::Arc::clone(&messages),
             tools: std::sync::Arc::clone(&tools),
             cancel: cancel_token.clone(),
+            used_context_tokens,
+            max_context_tokens,
         };
         let mut params = Some(build_params());
 
@@ -593,8 +602,20 @@ mod tests {
             base_delay_ms: 1, // fast for tests
             max_delay_ms: 10,
         };
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None).await;
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "should succeed after retries: {:?}",
@@ -612,8 +633,20 @@ mod tests {
             base_delay_ms: 1,
             max_delay_ms: 10,
         };
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None).await;
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
         assert_eq!(llm.calls.load(Ordering::SeqCst), 2);
     }
@@ -627,8 +660,20 @@ mod tests {
             base_delay_ms: 1,
             max_delay_ms: 10,
         };
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None).await;
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
         assert_eq!(llm.calls.load(Ordering::SeqCst), 1);
     }
@@ -703,6 +748,8 @@ mod tests {
             &config,
             None,
             Some(&telemetry),
+            None,
+            None,
         )
         .await;
 
@@ -792,6 +839,8 @@ mod tests {
             &config,
             None,
             Some(&telemetry),
+            None,
+            None,
         )
         .await;
         // The claim is that nothing retried, not that nothing was recorded:
@@ -816,8 +865,20 @@ mod tests {
         // Succeeds on first try.
         let llm = FlakyLlm::new(0, true);
         let config = RetryConfig::default();
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None).await;
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_ok());
         assert_eq!(llm.calls.load(Ordering::SeqCst), 1);
     }
@@ -877,6 +938,8 @@ mod tests {
             &[],
             &[],
             &RetryConfig::default(),
+            None,
+            None,
             None,
             None,
         )
@@ -954,6 +1017,8 @@ mod tests {
             &RetryConfig::default(),
             None,
             None,
+            None,
+            None,
         )
         .await;
         assert!(result.is_ok());
@@ -972,8 +1037,20 @@ mod tests {
             base_delay_ms: 1,
             max_delay_ms: 10,
         };
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None).await;
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
         assert_eq!(llm.calls.load(Ordering::SeqCst), 1);
     }
@@ -986,8 +1063,20 @@ mod tests {
             base_delay_ms: 1,
             max_delay_ms: 10,
         };
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None).await;
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_ok());
         assert_eq!(llm.calls.load(Ordering::SeqCst), 2);
     }
@@ -1094,9 +1183,20 @@ mod tests {
             cancel.cancel();
         });
         let started = std::time::Instant::now();
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, Some(&token), None)
-                .await;
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            Some(&token),
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err(), "cancelled step must resolve with an error");
         assert_eq!(llm.calls.load(Ordering::SeqCst), 1, "no retry after cancel");
         assert!(
@@ -1257,10 +1357,21 @@ mod tests {
             base_delay_ms: 1,
             max_delay_ms: 2,
         };
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None)
-                .await
-                .expect("the third attempt carries a real answer");
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the third attempt carries a real answer");
         assert_eq!(llm.calls.load(Ordering::SeqCst), 3, "two empty retries");
         assert_eq!(result.content, "a real answer");
     }
@@ -1279,10 +1390,21 @@ mod tests {
                 base_delay_ms: 1,
                 max_delay_ms: 2,
             };
-            let result =
-                execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None)
-                    .await
-                    .expect("a filtered turn completes rather than erroring");
+            let result = execute_loop_step_with_retry(
+                "t1",
+                1,
+                &llm,
+                &[],
+                &[],
+                &[],
+                &config,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("a filtered turn completes rather than erroring");
             assert_eq!(
                 llm.calls.load(Ordering::SeqCst),
                 1,
@@ -1337,10 +1459,21 @@ mod tests {
             base_delay_ms: 1,
             max_delay_ms: 2,
         };
-        let result =
-            execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None)
-                .await
-                .expect("the proxy leg owns its own transcript");
+        let result = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the proxy leg owns its own transcript");
         assert_eq!(llm.calls.load(Ordering::SeqCst), 1, "no retry on the proxy");
         assert!(result.content.is_empty());
     }
@@ -1355,9 +1488,21 @@ mod tests {
             base_delay_ms: 1,
             max_delay_ms: 2,
         };
-        let err = execute_loop_step_with_retry("t1", 1, &llm, &[], &[], &[], &config, None, None)
-            .await
-            .expect_err("a permanently empty provider must not read as success");
+        let err = execute_loop_step_with_retry(
+            "t1",
+            1,
+            &llm,
+            &[],
+            &[],
+            &[],
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a permanently empty provider must not read as success");
         assert_eq!(llm.calls.load(Ordering::SeqCst), 3, "the budget is spent");
         assert!(
             err.to_string().contains("empty response"),
@@ -1434,6 +1579,8 @@ mod tests {
             &config,
             None,
             Some(&telemetry),
+            None,
+            None,
         )
         .await;
 

@@ -13,6 +13,7 @@
 //!
 //! Still missing: the auth gate.
 
+pub mod builtin_commands;
 pub mod channel;
 pub mod events_map;
 #[cfg(test)]
@@ -53,6 +54,10 @@ pub struct AcpServer {
     /// engine has no runtime auth state, so the gate is "authed iff an engine
     /// (model) is attached"; tests and the no-engine dev path set this true.
     disable_auth: bool,
+    /// Last title announced per session, so a `session_info_update` fires only
+    /// when the stored title actually changed (external rename / generated
+    /// title). `None` is a real value: a session with no title.
+    last_titles: Mutex<HashMap<String, Option<String>>>,
 }
 
 impl AcpServer {
@@ -71,6 +76,7 @@ impl AcpServer {
             in_flight_prompts: Mutex::new(HashMap::new()),
             client_capabilities: Arc::new(std::sync::Mutex::new(AcpClientCapabilities::default())),
             disable_auth: false,
+            last_titles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -94,6 +100,7 @@ impl AcpServer {
             in_flight_prompts: Mutex::new(HashMap::new()),
             client_capabilities: Arc::new(std::sync::Mutex::new(AcpClientCapabilities::default())),
             disable_auth: false,
+            last_titles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -130,6 +137,7 @@ impl AcpServer {
             in_flight_prompts: Mutex::new(HashMap::new()),
             client_capabilities: capabilities,
             disable_auth: false,
+            last_titles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -163,6 +171,190 @@ impl AcpServer {
                     .map(|engine| engine.model_name().to_string())
             })
             .unwrap_or_default()
+    }
+
+    /// Push the builtin command palette (v2 `emitAvailableCommandsUpdate`).
+    fn emit_available_commands(&self, session_id: &str) {
+        self.channel.notify(
+            "session/update",
+            events_map::available_commands_notification(session_id, &builtin_commands::palette()),
+        );
+    }
+
+    /// Push `session_info_update` when the stored title changed. `force` sends
+    /// it on attach (`session/new` / `load` / `resume`) even when it is `null`,
+    /// matching v2's "clear the client-side title" semantics.
+    fn emit_session_info(&self, session_id: &str, force: bool) {
+        let title = self
+            .store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|summary| summary.title);
+        {
+            let mut last = self.last_titles.lock().unwrap_or_else(|e| e.into_inner());
+            if !force && last.get(session_id) == Some(&title) {
+                return;
+            }
+            last.insert(session_id.to_string(), title.clone());
+        }
+        self.channel.notify(
+            "session/update",
+            events_map::session_info_update_notification(session_id, title.as_deref()),
+        );
+    }
+
+    /// Execute one advertised builtin locally. Never starts a model turn.
+    async fn run_builtin_command(&self, session_id: &str, name: &str, args: &str) -> String {
+        match name {
+            "help" => builtin_commands::help_text(),
+            "status" => {
+                let model = self.session_model(session_id);
+                let profile = self
+                    .store
+                    .get_state("agent_config", session_id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(serde_json::Value::Null);
+                let thinking = profile
+                    .get("thinking")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(|value| !matches!(value, "off" | "none"))
+                    .unwrap_or(false);
+                let cwd = self.session_cwd(session_id);
+                let title = self
+                    .store
+                    .get_session(session_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|summary| summary.title)
+                    .filter(|title| !title.is_empty());
+                let mut lines = vec![format!("Session: {session_id}")];
+                if let Some(title) = title {
+                    lines.push(format!("Title: {title}"));
+                }
+                lines.push(format!(
+                    "Model: {} (thinking: {})",
+                    if model.is_empty() {
+                        "(unbound)"
+                    } else {
+                        &model
+                    },
+                    if thinking { "on" } else { "off" }
+                ));
+                lines.push(format!("Mode: {}", self.current_mode(session_id)));
+                lines.push(format!(
+                    "Working directory: {}",
+                    if cwd.is_empty() { "(unknown)" } else { &cwd }
+                ));
+                lines.join("\n")
+            }
+            "usage" => {
+                let model = self.session_model(session_id);
+                let usage = crate::session::usage::status(&self.store, session_id, &model);
+                let used: u64 = self
+                    .store
+                    .load_session_history(session_id)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|message| crate::compaction::estimate_tokens(&message.content) as u64)
+                    .sum();
+                let size = match self.engine.as_ref() {
+                    Some(engine) => engine.model_context_window(session_id).await,
+                    None => None,
+                };
+                let mut lines = Vec::new();
+                match size {
+                    Some(size) if size > 0 => lines.push(format!(
+                        "Context: {used} / {size} tokens ({}%)",
+                        used.saturating_mul(100) / size as u64
+                    )),
+                    _ => lines.push(format!("Context: {used} tokens")),
+                }
+                let total = usage.total;
+                if total.input_other == 0
+                    && total.output == 0
+                    && total.input_cache_read == 0
+                    && total.input_cache_creation == 0
+                {
+                    lines.push("Session total: no LLM calls yet".to_string());
+                } else {
+                    let input =
+                        total.input_other + total.input_cache_read + total.input_cache_creation;
+                    lines.push(format!(
+                        "Session total: {input} input, {} output",
+                        total.output
+                    ));
+                }
+                lines.join("\n")
+            }
+            "mcp" => {
+                let Some(engine) = self.engine.as_ref() else {
+                    return "MCP status is unavailable without an engine.".to_string();
+                };
+                let servers = engine.session_mcp_entries(session_id).await;
+                if servers.is_empty() {
+                    return "No MCP servers configured for this session.".to_string();
+                }
+                let mut lines = vec![format!("MCP servers ({}):", servers.len())];
+                for server in servers {
+                    let mut line = format!(
+                        "- {} ({}): {}, {} tools",
+                        server.name, server.transport, server.status, server.tool_count
+                    );
+                    if let Some(error) = server.error.filter(|error| !error.is_empty()) {
+                        line.push_str(&format!(" — {error}"));
+                    }
+                    lines.push(line);
+                }
+                lines.join("\n")
+            }
+            "tasks" => {
+                let Some(engine) = self.engine.as_ref() else {
+                    return "Background tasks are unavailable without an engine.".to_string();
+                };
+                let tasks: Vec<serde_json::Value> = engine
+                    .background_tasks()
+                    .await
+                    .into_iter()
+                    .filter(|task| task.get("status").and_then(|v| v.as_str()) == Some("running"))
+                    .collect();
+                if tasks.is_empty() {
+                    return "No background tasks.".to_string();
+                }
+                let mut lines = vec![format!("Background tasks ({}):", tasks.len())];
+                for task in tasks {
+                    lines.push(format!(
+                        "- {}: {} ({})",
+                        task.get("taskId").and_then(|v| v.as_str()).unwrap_or("?"),
+                        task.get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
+                        task.get("status").and_then(|v| v.as_str()).unwrap_or("?"),
+                    ));
+                }
+                lines.join("\n")
+            }
+            "compact" => {
+                let Some(engine) = self.engine.as_ref() else {
+                    return "Compaction is unavailable without an engine.".to_string();
+                };
+                if engine.is_busy(session_id) {
+                    return "A turn is in flight; compaction refused.".to_string();
+                }
+                let instruction = (!args.is_empty()).then_some(args);
+                match engine.compact_session(session_id, instruction).await {
+                    Ok(report) if report.removed == 0 => "Nothing to compact.".to_string(),
+                    Ok(report) => format!(
+                        "Context compacted: {} → {} tokens ({} messages removed).",
+                        report.tokens_before, report.tokens_after, report.removed
+                    ),
+                    Err(error) => format!("/compact failed: {error}"),
+                }
+            }
+            _ => format!("Unknown ACP command: /{name}"),
+        }
     }
 
     /// Snapshot the ACP `SessionModeState` for a session.
@@ -696,6 +888,8 @@ impl AcpServer {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(session_id.clone(), "default".to_string());
+                        self.emit_available_commands(&session_id);
+                        self.emit_session_info(&session_id, true);
                         JsonRpcResponse::success(
                             req.id,
                             json!({
@@ -765,6 +959,38 @@ impl AcpServer {
                                     -32600,
                                     "another turn is already in progress",
                                 )
+                            } else if let Some((command, args)) = builtin_commands::parse(&p) {
+                                // ACP-owned commands answer locally and never
+                                // reach the model (v2 `runBuiltinSlashCommand`).
+                                let text = self.run_builtin_command(sid, command.name, &args).await;
+                                self.end_prompt(&request_key);
+                                self.channel.notify(
+                                    "session/update",
+                                    json!({
+                                        "sessionId": sid,
+                                        "update": {
+                                            "sessionUpdate": "agent_message_chunk",
+                                            "content": { "type": "text", "text": text.clone() },
+                                        },
+                                    }),
+                                );
+                                // `/compact` and external renames can change
+                                // the title; keep the client's header current.
+                                self.emit_session_info(sid, false);
+                                JsonRpcResponse::success(
+                                    req.id,
+                                    json!({
+                                        "sessionId": sid,
+                                        "stopReason": "end_turn",
+                                        "content": text,
+                                        "steps": 0,
+                                        "usage": {
+                                            "inputTokens": 0,
+                                            "outputTokens": 0,
+                                            "totalTokens": 0,
+                                        }
+                                    }),
+                                )
                             } else {
                                 let history =
                                     self.store.load_session_history(sid).unwrap_or_default();
@@ -779,23 +1005,57 @@ impl AcpServer {
                                 bus.unsubscribe(subscription);
                                 self.end_prompt(&request_key);
                                 match result {
-                                    Ok(report) => JsonRpcResponse::success(
-                                        req.id,
-                                        json!({
-                                            "sessionId": sid,
-                                            "turnId": report.turn_id,
-                                            "stopReason": events_map::turn_stop_reason_to_acp(
-                                                &report.stop_reason
-                                            ),
-                                            "content": report.reply,
-                                            "steps": report.steps,
-                                            "usage": {
-                                                "inputTokens": report.usage.input_tokens,
-                                                "outputTokens": report.usage.output_tokens,
-                                                "totalTokens": report.usage.total_tokens,
-                                            }
-                                        }),
-                                    ),
+                                    Ok(report) => {
+                                        // Post-turn visibility, v2's
+                                        // `usage_update` + `plan` builders: the
+                                        // context the session now carries
+                                        // against the model window, and the
+                                        // todo list the agent left behind.
+                                        if let Some(size) = report.context_window {
+                                            let used: u64 = self
+                                                .store
+                                                .load_session_history(sid)
+                                                .unwrap_or_default()
+                                                .iter()
+                                                .map(|m| {
+                                                    crate::compaction::estimate_tokens(&m.content)
+                                                        as u64
+                                                })
+                                                .sum();
+                                            self.channel.notify(
+                                                "session/update",
+                                                events_map::usage_update_notification(
+                                                    sid,
+                                                    used,
+                                                    size as u64,
+                                                ),
+                                            );
+                                        }
+                                        if let Some(plan) = events_map::plan_notification(
+                                            sid,
+                                            &engine.session_todos(sid),
+                                        ) {
+                                            self.channel.notify("session/update", plan);
+                                        }
+                                        self.emit_session_info(sid, false);
+                                        JsonRpcResponse::success(
+                                            req.id,
+                                            json!({
+                                                "sessionId": sid,
+                                                "turnId": report.turn_id,
+                                                "stopReason": events_map::turn_stop_reason_to_acp(
+                                                    &report.stop_reason
+                                                ),
+                                                "content": report.reply,
+                                                "steps": report.steps,
+                                                "usage": {
+                                                    "inputTokens": report.usage.input_tokens,
+                                                    "outputTokens": report.usage.output_tokens,
+                                                    "totalTokens": report.usage.total_tokens,
+                                                }
+                                            }),
+                                        )
+                                    }
                                     Err(err) => JsonRpcResponse::error(
                                         req.id,
                                         -32000,
@@ -935,6 +1195,8 @@ impl AcpServer {
                                     );
                                 }
                             }
+                            self.emit_available_commands(sid);
+                            self.emit_session_info(sid, true);
                             JsonRpcResponse::success(
                                 req.id,
                                 json!({
@@ -975,6 +1237,8 @@ impl AcpServer {
                                 format!("Unknown sessionId: {sid}"),
                             )
                         } else {
+                            self.emit_available_commands(sid);
+                            self.emit_session_info(sid, true);
                             JsonRpcResponse::success(
                                 req.id,
                                 json!({
@@ -1604,6 +1868,40 @@ mod tests {
         assert_eq!(resp.id, Some(json!(9)));
     }
 
+    /// The next session update that is not one of the two attach-time
+    /// notifications (`available_commands_update` / `session_info_update`),
+    /// which every new/load/resume now pushes.
+    fn next_non_attach_update(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AcpOutbound>,
+    ) -> serde_json::Value {
+        loop {
+            match rx.try_recv().expect("a session update") {
+                AcpOutbound::Notification(note) => {
+                    let params = note.params.unwrap_or_default();
+                    let kind = params["update"]["sessionUpdate"]
+                        .as_str()
+                        .unwrap_or_default();
+                    if kind == "available_commands_update" || kind == "session_info_update" {
+                        continue;
+                    }
+                    return params;
+                }
+                other => panic!("unexpected outbound message: {other:?}"),
+            }
+        }
+    }
+
+    /// Drop attach-time notifications from a drained batch.
+    fn drop_attach_updates(mut updates: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        updates.retain(|update| {
+            let kind = update["update"]["sessionUpdate"]
+                .as_str()
+                .unwrap_or_default();
+            kind != "available_commands_update" && kind != "session_info_update"
+        });
+        updates
+    }
+
     /// `session/new` advertises the canonical four modes (`modes.ts:24-46`).
     #[tokio::test]
     async fn test_acp_new_session_advertises_modes() {
@@ -2088,16 +2386,10 @@ mod tests {
         let metadata = server.store.get_state("metadata", &sid).unwrap().unwrap();
         assert_eq!(metadata["permission_mode"], "yolo");
 
-        match rx.try_recv().expect("current_mode_update") {
-            AcpOutbound::Notification(note) => {
-                assert_eq!(note.method, "session/update");
-                let params = note.params.unwrap();
-                assert_eq!(params["sessionId"], sid);
-                assert_eq!(params["update"]["sessionUpdate"], "current_mode_update");
-                assert_eq!(params["update"]["currentModeId"], "yolo");
-            }
-            other => panic!("unexpected outbound message: {other:?}"),
-        }
+        let params = next_non_attach_update(&mut rx);
+        assert_eq!(params["sessionId"], sid);
+        assert_eq!(params["update"]["sessionUpdate"], "current_mode_update");
+        assert_eq!(params["update"]["currentModeId"], "yolo");
     }
 
     /// v2 `acpModeToToggles`: `plan` applies BOTH toggles — the plan domain
@@ -2467,6 +2759,7 @@ mod tests {
                 replayed.push(note.params.unwrap());
             }
         }
+        let replayed = drop_attach_updates(replayed);
         // Nothing is replayed: the refused prompt persists no turn at all, where
         // it used to leave a fabricated user+assistant pair in the history.
         assert_eq!(
@@ -2554,6 +2847,7 @@ mod tests {
                 updates.push(note.params.unwrap());
             }
         }
+        let updates = drop_attach_updates(updates);
         // user chunk, assistant chunk, tool_call create, tool_call_update.
         assert_eq!(updates.len(), 4, "unexpected replay: {updates:?}");
         assert_eq!(updates[0]["update"]["sessionUpdate"], "user_message_chunk");
@@ -2668,6 +2962,9 @@ mod tests {
             .save_turn(&sid, "turn-1", 1, &[LLMMessage::user("hi")], None, None)
             .expect("the seed turn must persist");
 
+        // Drop the session/new attach notifications so the resume assertion
+        // below measures only what resume itself sends.
+        while rx.try_recv().is_ok() {}
         // resume: mode state only, no replayed chunks.
         let resume_req = json!({
             "jsonrpc": "2.0",
@@ -2680,8 +2977,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.result.unwrap()["modes"]["currentModeId"], "default");
+        let mut resumed = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let AcpOutbound::Notification(note) = message {
+                resumed.push(note.params.unwrap_or_default());
+            }
+        }
         assert!(
-            rx.try_recv().is_err(),
+            drop_attach_updates(resumed).is_empty(),
             "resume must not replay history (that is session/load)"
         );
 
@@ -2943,19 +3246,13 @@ mod tests {
         );
         assert_eq!(server.session_model(&sid), "kimi-k2");
 
-        match rx.try_recv().expect("config_option_update") {
-            AcpOutbound::Notification(note) => {
-                assert_eq!(note.method, "session/update");
-                let params = note.params.unwrap();
-                assert_eq!(params["update"]["sessionUpdate"], "config_option_update");
-                assert_eq!(params["update"]["configOptions"][0]["id"], "model");
-                assert_eq!(
-                    params["update"]["configOptions"][0]["currentValue"],
-                    "kimi-k2"
-                );
-            }
-            other => panic!("unexpected outbound message: {other:?}"),
-        }
+        let params = next_non_attach_update(&mut rx);
+        assert_eq!(params["update"]["sessionUpdate"], "config_option_update");
+        assert_eq!(params["update"]["configOptions"][0]["id"], "model");
+        assert_eq!(
+            params["update"]["configOptions"][0]["currentValue"],
+            "kimi-k2"
+        );
 
         // The config-option route reaches the same state and answers with the
         // refreshed option surface.
@@ -3251,6 +3548,293 @@ mod tests {
                     && update["update"]["content"]["text"] == "hi"
             ),
             "the model's text must reach the client as agent_message_chunk: {updates:?}"
+        );
+
+        mock.abort();
+    }
+
+    /// `session/new` advertises the builtin command palette and the initial
+    /// title (v2 `emitAvailableCommandsUpdate` + `session_info_update`).
+    #[tokio::test]
+    async fn test_acp_new_session_emits_commands_and_info() {
+        let server = AcpServer::in_memory().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpOutbound>();
+        server.set_notification_sink(tx);
+
+        let new_req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": { "title": "My Session" }
+        });
+        let sid = server
+            .handle_message(&new_req.to_string())
+            .await
+            .unwrap()
+            .result
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut updates = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let AcpOutbound::Notification(note) = message {
+                updates.push(note.params.unwrap_or_default());
+            }
+        }
+        let commands = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "available_commands_update")
+            .unwrap_or_else(|| panic!("missing available_commands_update: {updates:?}"));
+        let names: Vec<&str> = commands["update"]["availableCommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["compact", "status", "usage", "mcp", "tasks", "help"]
+        );
+        assert_eq!(commands["sessionId"], sid);
+
+        let info = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "session_info_update")
+            .unwrap_or_else(|| panic!("missing session_info_update: {updates:?}"));
+        assert_eq!(info["update"]["title"], "My Session");
+    }
+
+    /// The advertised builtins answer locally: no model turn runs, the text
+    /// comes back as one `agent_message_chunk`, and `/usage` reads the
+    /// session's durable counters.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_acp_builtin_commands_run_locally() {
+        let (base_url, mock) = spawn_completing_openai_server().await;
+        let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+        let engine = engine_with_native_llm(&store, &base_url);
+        let server = AcpServer::with_engine(store.clone(), engine);
+
+        let new_req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {}
+        });
+        let sid = server
+            .handle_message(&new_req.to_string())
+            .await
+            .unwrap()
+            .result
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        crate::session::usage::record_turn(
+            &store,
+            &sid,
+            "mock-model",
+            &crate::rpc::types::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let prompt = |id: u64, text: &str| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/prompt",
+                "params": { "sessionId": sid, "prompt": text }
+            })
+        };
+
+        let help = server
+            .handle_message(&prompt(2, "/help").to_string())
+            .await
+            .unwrap();
+        let help = help.result.expect("help answers");
+        assert_eq!(help["stopReason"], "end_turn");
+        assert!(help["content"].as_str().unwrap().contains("/status"));
+
+        let status = server
+            .handle_message(&prompt(3, "/status").to_string())
+            .await
+            .unwrap()
+            .result
+            .expect("status answers");
+        let status_text = status["content"].as_str().unwrap();
+        assert!(
+            status_text.contains(&format!("Session: {sid}")),
+            "{status_text}"
+        );
+        assert!(status_text.contains("Model: mock-model"), "{status_text}");
+
+        let usage = server
+            .handle_message(&prompt(4, "/usage").to_string())
+            .await
+            .unwrap()
+            .result
+            .expect("usage answers");
+        let usage_text = usage["content"].as_str().unwrap();
+        assert!(
+            usage_text.contains("Session total: 10 input, 5 output"),
+            "{usage_text}"
+        );
+
+        mock.abort();
+    }
+
+    /// A title change outside ACP (a generated or host-renamed title) reaches
+    /// the client as `session_info_update` at the next prompt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_acp_session_info_update_follows_title_change() {
+        let (base_url, mock) = spawn_completing_openai_server().await;
+        let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+        let engine = engine_with_native_llm(&store, &base_url);
+        let server = AcpServer::with_engine(store.clone(), engine);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpOutbound>();
+        server.set_notification_sink(tx);
+
+        let new_req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": { "title": "First" }
+        });
+        let sid = server
+            .handle_message(&new_req.to_string())
+            .await
+            .unwrap()
+            .result
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        while rx.try_recv().is_ok() {}
+
+        server
+            .store
+            .update_session_title(&sid, Some("Second"))
+            .unwrap();
+        let prompt = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/prompt",
+            "params": { "sessionId": sid, "prompt": "/status" }
+        });
+        server.handle_message(&prompt.to_string()).await.unwrap();
+
+        let mut updates = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let AcpOutbound::Notification(note) = message {
+                updates.push(note.params.unwrap_or_default());
+            }
+        }
+        let info = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "session_info_update")
+            .unwrap_or_else(|| panic!("missing title update: {updates:?}"));
+        assert_eq!(info["update"]["title"], "Second");
+
+        mock.abort();
+    }
+
+    /// After a turn the client gets the v2 `usage_update` (context used against
+    /// the configured model window) and `plan` (the todo list the agent left)
+    /// notifications, not just the final response.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_real_turn_emits_usage_and_plan_updates() {
+        let (base_url, mock) = spawn_completing_openai_server().await;
+        let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+        let engine = engine_with_native_llm(&store, &base_url);
+        let mut config = crate::config::KimiConfig::default();
+        config.models.insert(
+            "mock-model".into(),
+            crate::config::ModelAliasConfig {
+                max_context_size: Some(42_000),
+                ..Default::default()
+            },
+        );
+        engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(config))));
+        let server = Arc::new(AcpServer::with_engine(store, engine));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpOutbound>();
+        server.set_notification_sink(tx);
+
+        let workspace = tempfile::tempdir().unwrap();
+        let new_req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": { "cwd": workspace.path().to_str().unwrap() }
+        });
+        let sid = server
+            .handle_message(&new_req.to_string())
+            .await
+            .unwrap()
+            .result
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The todo tools write this domain; the ACP server reads the same one.
+        let state = crate::storage::StateStore::for_workspace(workspace.path()).unwrap();
+        state
+            .write_domain(
+                "todo",
+                &json!([
+                    { "id": "T1", "title": "Read the code", "status": "pending" },
+                    { "id": "T2", "title": "Apply the fix", "status": "done" }
+                ]),
+            )
+            .unwrap();
+
+        let prompt = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/prompt",
+            "params": { "sessionId": sid, "prompt": "hello" }
+        });
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            server.handle_message(&prompt.to_string()),
+        )
+        .await
+        .expect("the turn must settle")
+        .unwrap();
+        assert!(resp.error.is_none(), "unexpected error: {resp:?}");
+
+        let mut updates = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let AcpOutbound::Notification(note) = message {
+                updates.push(note.params.unwrap_or_default());
+            }
+        }
+        let usage = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "usage_update")
+            .unwrap_or_else(|| panic!("missing usage_update: {updates:?}"));
+        assert_eq!(usage["sessionId"], sid);
+        assert_eq!(usage["update"]["size"], 42_000);
+        assert!(
+            usage["update"]["used"].as_u64().unwrap_or(0) > 0,
+            "used must reflect the persisted conversation: {usage:?}"
+        );
+
+        let plan = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "plan")
+            .unwrap_or_else(|| panic!("missing plan: {updates:?}"));
+        assert_eq!(
+            plan["update"]["entries"],
+            json!([
+                { "content": "Read the code", "priority": "medium", "status": "pending" },
+                { "content": "Apply the fix", "priority": "medium", "status": "completed" },
+            ])
         );
 
         mock.abort();

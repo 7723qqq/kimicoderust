@@ -224,7 +224,7 @@ pub struct McpManager {
     /// running one via its Notify instead of double-spawning.
     in_flight: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
     /// OAuth credentials for remote servers (v2 `McpOAuthService`).
-    oauth: Arc<RwLock<Option<Arc<crate::mcp::oauth::McpOAuthService>>>>,
+    oauth: std::sync::RwLock<Option<Arc<crate::mcp::oauth::McpOAuthService>>>,
     /// Where media an MCP server returns is preserved (v2
     /// `McpConnectionManagerOptions.attachmentStore`, upstream #3688). The
     /// default store is the daemon's own blob store, which is what the request
@@ -263,7 +263,7 @@ impl McpManager {
             timeouts: Arc::new(RwLock::new(HashMap::new())),
             defaults: Arc::new(RwLock::new(crate::config::McpConfig::default())),
             in_flight: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            oauth: Arc::new(RwLock::new(None)),
+            oauth: std::sync::RwLock::new(None),
             attachments: Arc::new(RwLock::new(FileStore::new())),
             status_listeners: Arc::new(Mutex::new(Vec::new())),
             next_status_id: std::sync::atomic::AtomicU64::new(1),
@@ -362,8 +362,11 @@ impl McpManager {
 
     /// Install the OAuth credential service used for remote servers
     /// (v2 `McpConnectionManagerOptions.oauthService`).
-    pub async fn set_oauth_service(&self, service: Arc<crate::mcp::oauth::McpOAuthService>) {
-        *self.oauth.write().await = Some(service);
+    pub fn set_oauth_service(&self, service: Arc<crate::mcp::oauth::McpOAuthService>) {
+        *self
+            .oauth
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(service);
     }
 
     /// Point attachment preservation at an explicit store (tests, or a host
@@ -372,15 +375,18 @@ impl McpManager {
         *self.attachments.write().await = store;
     }
 
-    async fn oauth_service(&self) -> Option<Arc<crate::mcp::oauth::McpOAuthService>> {
-        self.oauth.read().await.clone()
+    fn oauth_service(&self) -> Option<Arc<crate::mcp::oauth::McpOAuthService>> {
+        self.oauth
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// The clock status transitions compare against: the OAuth service's when
     /// one is installed, system time otherwise (v2
     /// `this.oauthService?.now() ?? Date.now()`, connection-manager.ts:382).
     async fn oauth_clock(&self) -> i64 {
-        match self.oauth_service().await {
+        match self.oauth_service() {
             Some(service) => service.now(),
             None => chrono::Utc::now().timestamp_millis(),
         }
@@ -403,7 +409,7 @@ impl McpManager {
         error: &McpError,
         client: Option<&Arc<McpClient>>,
     ) -> bool {
-        let oauth = self.oauth_service().await;
+        let oauth = self.oauth_service();
         let (recipe, status, connected_at_ms) = {
             let servers = self.servers.read().await;
             let Some(state) = servers.get(name) else {
@@ -490,7 +496,7 @@ impl McpManager {
         {
             return;
         }
-        let Some(service) = self.oauth_service().await else {
+        let Some(service) = self.oauth_service() else {
             return;
         };
         let Ok(key) = crate::mcp::oauth::mcp_oauth_store_key(name, url) else {
@@ -1056,7 +1062,7 @@ impl McpManager {
     /// (v2 `connectOne` catch branch + `shouldMarkNeedsAuth`). `display` is
     /// the (possibly stderr-augmented) text stored on the entry.
     async fn mark_connect_failure(&self, name: &str, error: &McpError, display: &str) {
-        let oauth_installed = self.oauth_service().await.is_some();
+        let oauth_installed = self.oauth_service().is_some();
         let recipe = self
             .servers
             .read()

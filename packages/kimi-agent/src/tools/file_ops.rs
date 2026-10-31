@@ -838,8 +838,22 @@ impl NativeToolset {
                 .render(),
             ));
         }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        let occurrence_count = text.matches(old).count();
+        let Ok(text) = String::from_utf8(bytes) else {
+            return Some(err_result(
+                LocalizedText::with_params(
+                    "engine.tools.edit.notUtf8",
+                    i18n_params!["path" => path],
+                )
+                .render(),
+            ));
+        };
+        // The model reads a pure-CRLF file as LF (Read strips the carriage
+        // returns for display); Edit must match that same view, then write the
+        // result back in the file's original line-ending style.
+        let view = crate::native::line_endings::to_model_text_view(&text);
+        let line_ending_style = view.line_ending_style;
+        let model_text = view.text;
+        let occurrence_count = model_text.matches(old).count();
         let updated = if replace_all {
             if occurrence_count == 0 {
                 return Some(err_result(
@@ -850,7 +864,7 @@ impl NativeToolset {
                     .render(),
                 ));
             }
-            text.replace(old, new)
+            model_text.replace(old, new)
         } else {
             if occurrence_count != 1 {
                 return Some(err_result(
@@ -861,11 +875,14 @@ impl NativeToolset {
                     .render(),
                 ));
             }
-            text.replacen(old, new, 1)
+            model_text.replacen(old, new, 1)
         };
-        // `text` is the pre-image; capture the diff before writing.
-        Self::record_file_history(&resolved, Some(text.as_str()), Some(updated.as_str()));
-        if let Err(error) = std::fs::write(&resolved, updated) {
+        let updated_raw =
+            crate::native::line_endings::materialize_model_text(&updated, line_ending_style);
+        // The file history stores raw bytes, so undo restores the original
+        // line endings rather than the model view.
+        Self::record_file_history(&resolved, Some(text.as_str()), Some(updated_raw.as_str()));
+        if let Err(error) = std::fs::write(&resolved, updated_raw) {
             return Some(err_result(
                 LocalizedText::with_params(
                     "engine.tools.edit.cannotWrite",

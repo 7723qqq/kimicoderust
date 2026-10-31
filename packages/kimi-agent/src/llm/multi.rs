@@ -24,6 +24,8 @@ pub struct LlmProvider {
     /// (`host/llm_chat`), which is the original behaviour and the only option
     /// when the caller has no provider credentials.
     pub native: Option<NativeLlmConfig>,
+    /// Session prompt-cache key for a native racer (v2 `cacheKey`).
+    pub cache_key: Option<String>,
 }
 
 impl LlmProvider {
@@ -40,6 +42,7 @@ impl LlmProvider {
             model: model.into(),
             callbacks,
             native: None,
+            cache_key: None,
         }
     }
 
@@ -60,7 +63,15 @@ impl LlmProvider {
             model: config.model.clone(),
             callbacks,
             native: Some(config),
+            cache_key: None,
         }
+    }
+
+    /// Attach the session prompt-cache key a native racer sends on every
+    /// request.
+    pub fn with_cache_key(mut self, key: Option<String>) -> Self {
+        self.cache_key = key.filter(|value| !value.is_empty());
+        self
     }
 
     /// The transport this racer runs on, built fresh per race.
@@ -72,10 +83,10 @@ impl LlmProvider {
     /// [`Self::to_llm_with_request_id`] is for.
     fn build_transport(&self, request_id: Option<String>) -> Arc<dyn LLM> {
         match &self.native {
-            Some(config) => Arc::new(NativeHttpLlm::new(
-                config.clone(),
-                self.system_prompt.clone(),
-            )),
+            Some(config) => Arc::new(
+                NativeHttpLlm::new(config.clone(), self.system_prompt.clone())
+                    .with_cache_key(self.cache_key.clone()),
+            ),
             None => {
                 let proxy = HostLlmProxy::new(self.system_prompt.clone(), self.model.clone())
                     .with_callbacks(self.callbacks.clone());
@@ -452,6 +463,7 @@ mod tests {
             cancel: None,
             messages: Arc::from(Vec::new()),
             tools: Arc::from(Vec::new()),
+            ..Default::default()
         };
         let result = mock.chat(params).await;
         assert!(result.is_ok());
@@ -465,6 +477,7 @@ mod tests {
             cancel: None,
             messages: Arc::from(Vec::new()),
             tools: Arc::from(Vec::new()),
+            ..Default::default()
         };
         let result = mock.chat(params).await;
         assert!(result.is_err());
@@ -635,6 +648,7 @@ mod tests {
                 cancel: None,
                 messages: Arc::from(Vec::new()),
                 tools: Arc::from(Vec::new()),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -814,6 +828,7 @@ mod tests {
             cancel: None,
             messages: Arc::from(Vec::new()),
             tools: Arc::from(Vec::new()),
+            ..Default::default()
         };
 
         let (r1, r2) = tokio::join!(p1.chat(params.clone()), p2.chat(params));
@@ -911,6 +926,7 @@ mod tests {
             cancel: None,
             messages: Arc::from(Vec::new()),
             tools: Arc::from(Vec::new()),
+            ..Default::default()
         }
     }
 

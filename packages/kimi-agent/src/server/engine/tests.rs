@@ -990,3 +990,128 @@ async fn a_finished_turn_records_usage_per_model_and_the_status_carries_it() {
     assert_eq!(usage["total"]["inputOther"], 10);
     assert_eq!(usage["currentTurn"]["output"], 5);
 }
+
+/// The configured model window reaches the turn loop (compaction and the
+/// LLM completion budget) and comes back on the report for hosts that
+/// render the context gauge.
+#[tokio::test]
+async fn a_turn_carries_the_configured_context_window() {
+    let engine = engine();
+    let mut config = crate::config::KimiConfig::default();
+    config.models.insert(
+        "test-model".into(),
+        crate::config::ModelAliasConfig {
+            max_context_size: Some(12_345),
+            ..Default::default()
+        },
+    );
+    engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(config))));
+    engine.store().create_session("sess-window", None).unwrap();
+
+    let report = engine
+        .run_turn_on(&ScriptedLlm, "sess-window", 1, Vec::new(), "hello")
+        .await
+        .expect("scripted turn completes");
+    assert_eq!(report.context_window, Some(12_345));
+}
+
+/// The todo list the ACP `plan` notification projects: read from the same
+/// workspace state domain the todo tools write, empty for an unknown
+/// session.
+#[test]
+fn session_todos_reads_the_workspace_todo_domain() {
+    use crate::tools::todo_item::TodoStatus;
+
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = engine
+        .store()
+        .create_workspace(dir.path().to_str().unwrap(), None)
+        .unwrap();
+    engine
+        .store()
+        .create_session_with_workspace("sess-todos", None, Some(&workspace.id))
+        .unwrap();
+    let state = crate::storage::StateStore::for_workspace(dir.path()).unwrap();
+    state
+        .write_domain(
+            "todo",
+            &serde_json::json!([
+                { "id": "T1", "title": "Read", "status": "in_progress", "progress": 40 },
+                { "id": "T2", "title": "Write", "status": "done" }
+            ]),
+        )
+        .unwrap();
+
+    let todos = engine.session_todos("sess-todos");
+    assert_eq!(todos.len(), 2);
+    assert_eq!(todos[0].title, "Read");
+    assert_eq!(todos[0].status, TodoStatus::InProgress);
+    assert_eq!(todos[1].title, "Write");
+    assert_eq!(todos[1].status, TodoStatus::Done);
+    assert!(engine.session_todos("missing").is_empty());
+}
+
+#[test]
+fn session_thinking_maps_to_the_wire_dialect_of_the_protocol() {
+    let mut anthropic = spec();
+    anthropic.native_llm = Some(crate::rpc::types::NativeLlmConfig {
+        protocol: "anthropic".into(),
+        model: "base".into(),
+        ..Default::default()
+    });
+    apply_session_overrides(&mut anthropic, &serde_json::json!({ "thinking": "high" }));
+    let native = anthropic.native_llm.as_ref().unwrap();
+    assert_eq!(native.thinking_budget, Some(32_000));
+    assert_eq!(native.reasoning_effort, None);
+
+    let mut openai = spec();
+    openai.native_llm = Some(crate::rpc::types::NativeLlmConfig {
+        protocol: "openai".into(),
+        model: "base".into(),
+        thinking_budget: Some(1024),
+        ..Default::default()
+    });
+    apply_session_overrides(&mut openai, &serde_json::json!({ "thinking": "medium" }));
+    let native = openai.native_llm.as_ref().unwrap();
+    assert_eq!(native.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(native.thinking_budget, None);
+
+    // Kimi's anthropic wire takes the effort itself, and off must be
+    // explicit so the transport can send its protocol-level disable.
+    let mut kimi = spec();
+    kimi.native_llm = Some(crate::rpc::types::NativeLlmConfig {
+        protocol: "anthropic".into(),
+        provider_type: Some("kimi".into()),
+        model: "base".into(),
+        thinking_keep: Some("all".into()),
+        ..Default::default()
+    });
+    apply_session_overrides(&mut kimi, &serde_json::json!({ "thinking": "high" }));
+    let native = kimi.native_llm.as_ref().unwrap();
+    assert_eq!(native.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(native.thinking_budget, None);
+    assert_eq!(native.thinking_keep.as_deref(), Some("all"));
+
+    apply_session_overrides(&mut kimi, &serde_json::json!({ "thinking": "off" }));
+    let native = kimi.native_llm.as_ref().unwrap();
+    assert_eq!(native.reasoning_effort.as_deref(), Some("off"));
+    assert_eq!(native.thinking_keep, None);
+}
+
+#[test]
+fn session_thinking_off_clears_the_budget_and_the_keep() {
+    let mut spec = spec();
+    spec.native_llm = Some(crate::rpc::types::NativeLlmConfig {
+        protocol: "anthropic".into(),
+        model: "base".into(),
+        thinking_budget: Some(32_000),
+        thinking_keep: Some("all".into()),
+        ..Default::default()
+    });
+    apply_session_overrides(&mut spec, &serde_json::json!({ "thinking": "off" }));
+    let native = spec.native_llm.as_ref().unwrap();
+    assert_eq!(native.thinking_budget, None);
+    assert_eq!(native.thinking_keep, None);
+    assert_ne!(native.reasoning_effort.as_deref(), Some("off"));
+}

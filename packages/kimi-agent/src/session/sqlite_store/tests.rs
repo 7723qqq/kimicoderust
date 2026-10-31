@@ -1393,7 +1393,9 @@ fn test_plan_undo_turns_newest_first_and_boundary_refusal() {
         .unwrap();
 
     assert_eq!(store.plan_undo_turns("sess-plan", 1).unwrap(), vec![2]);
-    assert_eq!(store.plan_undo_turns("sess-plan", 5).unwrap(), vec![2, 1]);
+    assert_eq!(store.plan_undo_turns("sess-plan", 2).unwrap(), vec![2, 1]);
+    let err = store.plan_undo_turns("sess-plan", 5).unwrap_err();
+    assert!(err.contains("only 2 of 5"), "unexpected error: {err}");
 
     store
         .save_turn("sess-plan", COMPACT_TURN_ID, 3, &msgs, None, None)
@@ -1517,13 +1519,16 @@ fn test_undo_turns() {
     assert_eq!(history[0].content, "1");
     assert_eq!(history[1].content, "2");
 
-    // Undo 10 turns when only 2 remain -> undoes 2 turns
-    let undone_all = store.undo_turns("sess-undo", 10).unwrap();
+    // Undo 10 turns when only 2 remain -> an error, not a short undo
+    let err = store.undo_turns("sess-undo", 10).unwrap_err();
+    assert!(err.contains("only 2 of 10"), "unexpected error: {err}");
+    let undone_all = store.undo_turns("sess-undo", 2).unwrap();
     assert_eq!(undone_all, 2);
     assert!(store.load_session_history("sess-undo").unwrap().is_empty());
 
-    // Undo on empty session returns 0
-    assert_eq!(store.undo_turns("sess-undo", 1).unwrap(), 0);
+    // Undo on an empty session is unavailable
+    let err = store.undo_turns("sess-undo", 1).unwrap_err();
+    assert!(err.contains("nothing to undo"), "unexpected error: {err}");
 }
 
 #[test]
@@ -1618,7 +1623,23 @@ fn test_compact_session() {
         "the report counts the user messages that survived"
     );
 
-    // Undoing a normal post-compaction turn still works…
+    // A normal turn recorded after the compaction is a user anchor and
+    // undoes cleanly; the trailing-pre-compaction row above has no
+    // messages of its own (the fold re-saved them under the compact turn),
+    // so it is not an anchor.
+    store
+        .save_turn(
+            "sess-compact",
+            "t-post",
+            17,
+            &[
+                LLMMessage::user("Post-compaction question"),
+                LLMMessage::assistant("ok"),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
     let undone = store.undo_turns("sess-compact", 1).unwrap();
     assert_eq!(undone, 1);
 
@@ -1842,8 +1863,13 @@ fn test_undo_turns_transactional_integrity() {
     // Next turn number must be 3
     assert_eq!(store.next_turn_number("sess-undo").unwrap(), 3);
 
-    // Undo remaining 2 turns
-    let undone_all = store.undo_turns("sess-undo", 10).unwrap();
+    // Asking for more anchors than exist is an error, not a silent short
+    // undo: v2 reports SESSION_UNDO_UNAVAILABLE.
+    let err = store.undo_turns("sess-undo", 10).unwrap_err();
+    assert!(err.contains("only 2 of 10"), "unexpected error: {err}");
+
+    // Undo the remaining 2 anchors.
+    let undone_all = store.undo_turns("sess-undo", 2).unwrap();
     assert_eq!(undone_all, 2);
     let history_empty = store.load_session_history("sess-undo").unwrap();
     assert_eq!(history_empty.len(), 0);
@@ -2305,5 +2331,73 @@ fn workspace_root_key_is_lexical_and_folds_by_path_shape() {
     assert_eq!(
         workspace_root_key("D:/Case/"),
         workspace_root_key("d:/case")
+    );
+}
+
+/// Derived turns (goal/cron/task) and in-turn steers are not undo anchors;
+/// cutting at the Nth real user turn removes every turn after it too.
+#[test]
+fn test_undo_selects_user_anchors_not_derived_turns() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-anchor", None).unwrap();
+    let msgs = vec![crate::turn_loop::types::LLMMessage::user("hi")];
+    let user_origin = serde_json::json!({ "kind": "user" });
+    let goal_origin = serde_json::json!({ "kind": "goal" });
+    let cron_origin = serde_json::json!({ "kind": "cron" });
+    store
+        .save_turn("sess-anchor", "t1", 1, &msgs, None, Some(&user_origin))
+        .unwrap();
+    store
+        .save_turn("sess-anchor", "t2", 2, &msgs, None, Some(&goal_origin))
+        .unwrap();
+    store
+        .save_turn("sess-anchor", "t3", 3, &msgs, None, Some(&user_origin))
+        .unwrap();
+    store
+        .save_turn("sess-anchor", "t4", 4, &msgs, None, Some(&cron_origin))
+        .unwrap();
+
+    // The newest anchor is t3; the cut also removes the newer derived t4.
+    assert_eq!(store.plan_undo_turns("sess-anchor", 1).unwrap(), vec![4, 3]);
+    assert_eq!(store.undo_turns("sess-anchor", 1).unwrap(), 2);
+    assert_eq!(store.load_session_history("sess-anchor").unwrap().len(), 2);
+
+    // Only t1 remains as an anchor; t2 is derived and does not count.
+    let err = store.undo_turns("sess-anchor", 2).unwrap_err();
+    assert!(
+        err.contains("only 1 of 2"),
+        "a derived turn must not count as an anchor: {err}"
+    );
+}
+
+/// A file over the history byte cap has no stored pre-image. Treating that
+/// as "the file was added" deleted the user's file on undo; the revert must
+/// leave it untouched and not report it as reverted.
+#[test]
+fn test_revert_skips_oversize_files_instead_of_deleting_them() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-revert-big", None).unwrap();
+    let temp_ws = tempfile::tempdir().unwrap();
+    let file_path = temp_ws.path().join("big.bin");
+    std::fs::write(&file_path, "current contents").unwrap();
+    let before = "x".repeat(FILE_HISTORY_MAX_CONTENT_BYTES + 1);
+    store
+        .record_file_change(
+            "sess-revert-big",
+            1,
+            "big.bin",
+            Some(&before),
+            Some("current contents"),
+        )
+        .unwrap();
+
+    let reverted = store
+        .revert_turn_file_changes("sess-revert-big", 1, temp_ws.path())
+        .unwrap();
+    assert!(reverted.is_empty(), "oversize changes are not revertible");
+    assert_eq!(
+        std::fs::read_to_string(&file_path).unwrap(),
+        "current contents",
+        "the file must not be deleted when its pre-image was not stored"
     );
 }
