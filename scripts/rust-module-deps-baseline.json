@@ -15,9 +15,9 @@
       "the crate boundary: main.rs reaches the library through kimi_agent::… and contributes no edges today"
     ],
     "includesTestCode": true,
-    "files": 251,
+    "files": 290,
     "modules": 39,
-    "sites": 2570
+    "sites": 2631
   },
   "edges": [
     "acp -> callbacks",
@@ -31,6 +31,7 @@
     "acp -> rpc",
     "acp -> server",
     "acp -> session",
+    "acp -> skills",
     "acp -> storage",
     "acp -> tool_input_display",
     "acp -> tools",

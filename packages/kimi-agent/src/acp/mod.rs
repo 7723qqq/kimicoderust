@@ -173,12 +173,43 @@ impl AcpServer {
             .unwrap_or_default()
     }
 
-    /// Push the builtin command palette (v2 `emitAvailableCommandsUpdate`).
-    fn emit_available_commands(&self, session_id: &str) {
+    /// The merged slash palette: ACP builtins first (they always win), then
+    /// the session's user-activatable skills (v2 `resolveCommands`).
+    async fn available_commands(&self, session_id: &str) -> Vec<serde_json::Value> {
+        let mut commands = builtin_commands::palette();
+        if let Some(engine) = &self.engine {
+            for command in
+                builtin_commands::skill_commands(&engine.session_skills(session_id).await)
+            {
+                commands.push(json!({
+                    "name": command.name,
+                    "description": command.description,
+                }));
+            }
+        }
+        commands
+    }
+
+    /// Push the merged command palette (v2 `emitAvailableCommandsUpdate`).
+    async fn emit_available_commands(&self, session_id: &str) {
+        let commands = self.available_commands(session_id).await;
         self.channel.notify(
             "session/update",
-            events_map::available_commands_notification(session_id, &builtin_commands::palette()),
+            events_map::available_commands_notification(session_id, &commands),
         );
+    }
+
+    /// The skill a slash command activates for this session, resolved against
+    /// the same catalog the palette advertises (v2 `resolveSkillCommand`:
+    /// both the bare name and the `skill:`-prefixed spelling resolve).
+    async fn resolve_skill_command(&self, session_id: &str, command_name: &str) -> Option<String> {
+        let engine = self.engine.as_ref()?;
+        let commands = builtin_commands::skill_commands(&engine.session_skills(session_id).await);
+        let prefixed = format!("skill:{command_name}");
+        commands
+            .iter()
+            .find(|command| command.name == command_name || command.name == prefixed)
+            .map(|command| command.skill.clone())
     }
 
     /// Push `session_info_update` when the stored title changed. `force` sends
@@ -357,6 +388,125 @@ impl AcpServer {
         }
     }
 
+    /// One model turn with the session's event stream forwarded as ACP
+    /// `session/update`s, plus the goal continuations it may owe (v2
+    /// `launchContinuationTurn`). The returned report is the first turn's; a
+    /// continuation turn's events have already streamed to the client.
+    async fn run_model_turn(
+        &self,
+        engine: &Arc<crate::server::engine::ServerEngine>,
+        session_id: &str,
+        prompt: &str,
+        media: Vec<crate::rpc::types::ContentBlock>,
+        origin: Option<serde_json::Value>,
+    ) -> Result<crate::server::engine::TurnReport, crate::server::engine::EngineError> {
+        let history = self
+            .store
+            .load_session_history(session_id)
+            .unwrap_or_default();
+        let turn_number = self.store.next_turn_number(session_id).unwrap_or(1);
+        let bus = engine.hub().bus_for(session_id);
+        let subscription = self.forward_session_events(session_id, &bus);
+        let result = engine
+            .run_turn_with_media(session_id, turn_number, history, prompt, media, origin)
+            .await;
+        // v2 `launchContinuationTurn` on this entry point too: a goal still
+        // active after a cleanly completed turn owns the next one. The
+        // response reports the user's turn; continuation turns stream as
+        // `session/update`s like any other.
+        let mut owed = result
+            .as_ref()
+            .is_ok_and(crate::server::prompt_queue::turn_completed);
+        while owed {
+            let Some(text) = engine.pending_goal_continuation(session_id).await else {
+                break;
+            };
+            let history = self
+                .store
+                .load_session_history(session_id)
+                .unwrap_or_default();
+            let turn_number = self.store.next_turn_number(session_id).unwrap_or(1);
+            owed = engine
+                .run_turn_with_media(
+                    session_id,
+                    turn_number,
+                    history,
+                    &text,
+                    Vec::new(),
+                    Some(json!({ "kind": "system_trigger", "name": "goal_continuation" })),
+                )
+                .await
+                .as_ref()
+                .is_ok_and(crate::server::prompt_queue::turn_completed);
+        }
+        bus.unsubscribe(subscription);
+        result
+    }
+
+    /// Post-turn visibility (v2's `usage_update` + `plan` builders): the
+    /// context the session now carries against the model window, and the todo
+    /// list the agent left behind.
+    async fn emit_turn_visibility(
+        &self,
+        engine: &Arc<crate::server::engine::ServerEngine>,
+        session_id: &str,
+        report: &crate::server::engine::TurnReport,
+    ) {
+        if let Some(size) = report.context_window {
+            let used: u64 = self
+                .store
+                .load_session_history(session_id)
+                .unwrap_or_default()
+                .iter()
+                .map(|message| crate::compaction::estimate_tokens(&message.content) as u64)
+                .sum();
+            self.channel.notify(
+                "session/update",
+                events_map::usage_update_notification(session_id, used, size as u64),
+            );
+        }
+        if let Some(plan) =
+            events_map::plan_notification(session_id, &engine.session_todos(session_id))
+        {
+            self.channel.notify("session/update", plan);
+        }
+    }
+
+    /// The `session/prompt` response for a finished turn (or its failure), with
+    /// the turn's post-visibility published first.
+    async fn prompt_outcome(
+        &self,
+        engine: &Arc<crate::server::engine::ServerEngine>,
+        session_id: &str,
+        req_id: Option<serde_json::Value>,
+        result: Result<crate::server::engine::TurnReport, crate::server::engine::EngineError>,
+    ) -> JsonRpcResponse {
+        match result {
+            Ok(report) => {
+                self.emit_turn_visibility(engine, session_id, &report).await;
+                self.emit_session_info(session_id, false);
+                JsonRpcResponse::success(
+                    req_id,
+                    json!({
+                        "sessionId": session_id,
+                        "turnId": report.turn_id,
+                        "stopReason": events_map::turn_stop_reason_to_acp(&report.stop_reason),
+                        "content": report.reply,
+                        "steps": report.steps,
+                        "usage": {
+                            "inputTokens": report.usage.input_tokens,
+                            "outputTokens": report.usage.output_tokens,
+                            "totalTokens": report.usage.total_tokens,
+                        }
+                    }),
+                )
+            }
+            Err(err) => {
+                JsonRpcResponse::error(req_id, -32000, format!("Turn execution failed: {err}"))
+            }
+        }
+    }
+
     /// Snapshot the ACP `SessionModeState` for a session.
     fn mode_state(&self, session_id: &str) -> serde_json::Value {
         json!({
@@ -367,14 +517,11 @@ impl AcpServer {
 
     /// Build the ACP `SessionConfigOption[]` surface advertised on
     /// `session/new` / `session/load` / `session/resume` / `session/fork`
-    /// (v2 `buildSessionConfigOptions`, config-options.ts). This host has no
-    /// model catalog, so the `model` arm is a single row for the session's
-    /// model — the `agent_config` override when one was set, else the engine's
-    /// (empty when no engine is attached) — and the `thinking` arm is omitted:
-    /// its presence depends on a catalog row we do not have, and v2 omits it
-    /// when the model is not `thinkingSupported`. The `mode` arm projects the
-    /// canonical four modes.
-    fn config_options(&self, session_id: &str) -> serde_json::Value {
+    /// (v2 `buildSessionConfigOptions`, config-options.ts): the session's
+    /// model row, the `thinking` select when the bound model declares a
+    /// thinking axis, then the canonical four modes. Order is part of the
+    /// contract — clients render options top-to-bottom.
+    async fn config_options(&self, session_id: &str) -> serde_json::Value {
         let model_name = self.session_model(session_id);
         let model_option = json!({
             "type": "select",
@@ -388,6 +535,10 @@ impl AcpServer {
                 json!([{ "value": model_name, "name": model_name }])
             },
         });
+        let thinking = match self.engine.as_ref() {
+            Some(engine) => engine.model_thinking(&model_name).await,
+            None => None,
+        };
         let mode_option = json!({
             "type": "select",
             "id": "mode",
@@ -410,7 +561,15 @@ impl AcpServer {
                 })
                 .unwrap_or_default(),
         });
-        json!([model_option, mode_option])
+        let mut options = vec![model_option];
+        if let Some(row) = thinking {
+            options.push(thinking_option(
+                &current_thinking_level(self.store.as_ref(), session_id, &row),
+                &row,
+            ));
+        }
+        options.push(mode_option);
+        json!(options)
     }
 
     /// Auth gate (v2 `ensureAuthed`, server.ts:625-646): throws `auth_required`
@@ -716,17 +875,76 @@ impl AcpServer {
         let _ = self
             .store
             .put_session_state("agent_config", session_id, session_id, &profile);
+        Ok(())
+    }
 
+    /// Push the refreshed `configOptions` after a `model` / `thinking` switch
+    /// (v2 `config_option_update`).
+    async fn notify_config_options(&self, session_id: &str) {
+        let options = self.config_options(session_id).await;
         self.channel.notify(
             "session/update",
             json!({
                 "sessionId": session_id,
                 "update": {
                     "sessionUpdate": "config_option_update",
-                    "configOptions": self.config_options(session_id),
+                    "configOptions": options,
                 },
             }),
         );
+    }
+
+    /// Apply an ACP thinking-level switch (v2 `buildSessionConfigOptions`
+    /// `thinking` arm + `setSessionConfigOption`): validate the level against
+    /// the model's declared axis, persist the override the engine reads at
+    /// turn start, and push the refreshed option set. An always-thinking model
+    /// clamps `off` to `on` — v2 renders those locked-on.
+    async fn apply_session_thinking(
+        &self,
+        session_id: Option<&str>,
+        value: Option<&str>,
+    ) -> Result<(), (i64, String)> {
+        let Some(session_id) = session_id else {
+            return Err((-32602, "Invalid params: sessionId is required".to_string()));
+        };
+        let Some(value) = value.filter(|value| !value.is_empty()) else {
+            return Err((-32602, "Invalid params: value is required".to_string()));
+        };
+        if self.store.get_session(session_id).ok().flatten().is_none() {
+            return Err((-32602, format!("Unknown sessionId: {session_id}")));
+        }
+        let Some(engine) = self.engine.as_ref() else {
+            return Err((-32602, "Unsupported configId: thinking".to_string()));
+        };
+        let model = self.session_model(session_id);
+        let Some(row) = engine.model_thinking(&model).await else {
+            return Err((-32602, format!("Model {model} does not support thinking")));
+        };
+        let level = if row.always_thinking && value == "off" {
+            "on"
+        } else {
+            value
+        };
+        let allowed = level == "on"
+            || level == "off"
+            || row.support_efforts.iter().any(|effort| effort == level);
+        if !allowed {
+            return Err((-32602, format!("Invalid thinking level: {level}")));
+        }
+        let mut profile = self
+            .store
+            .get_state("agent_config", session_id)
+            .ok()
+            .flatten()
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| json!({}));
+        if let Some(object) = profile.as_object_mut() {
+            object.insert("thinking".into(), json!(level));
+        }
+        let _ = self
+            .store
+            .put_session_state("agent_config", session_id, session_id, &profile);
+        self.notify_config_options(session_id).await;
         Ok(())
     }
 
@@ -888,13 +1106,14 @@ impl AcpServer {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(session_id.clone(), "default".to_string());
-                        self.emit_available_commands(&session_id);
+                        self.emit_available_commands(&session_id).await;
                         self.emit_session_info(&session_id, true);
+                        let config_options = self.config_options(&session_id).await;
                         JsonRpcResponse::success(
                             req.id,
                             json!({
                                 "sessionId": session_id,
-                                "configOptions": self.config_options(&session_id),
+                                "configOptions": config_options,
                                 "modes": self.mode_state(&session_id),
                             }),
                         )
@@ -959,142 +1178,103 @@ impl AcpServer {
                                     -32600,
                                     "another turn is already in progress",
                                 )
-                            } else if let Some((command, args)) = builtin_commands::parse(&p) {
-                                // ACP-owned commands answer locally and never
-                                // reach the model (v2 `runBuiltinSlashCommand`).
-                                let text = self.run_builtin_command(sid, command.name, &args).await;
-                                self.end_prompt(&request_key);
-                                self.channel.notify(
-                                    "session/update",
-                                    json!({
-                                        "sessionId": sid,
-                                        "update": {
-                                            "sessionUpdate": "agent_message_chunk",
-                                            "content": { "type": "text", "text": text.clone() },
-                                        },
-                                    }),
-                                );
-                                // `/compact` and external renames can change
-                                // the title; keep the client's header current.
-                                self.emit_session_info(sid, false);
-                                JsonRpcResponse::success(
-                                    req.id,
-                                    json!({
-                                        "sessionId": sid,
-                                        "stopReason": "end_turn",
-                                        "content": text,
-                                        "steps": 0,
-                                        "usage": {
-                                            "inputTokens": 0,
-                                            "outputTokens": 0,
-                                            "totalTokens": 0,
-                                        }
-                                    }),
-                                )
-                            } else {
-                                let history =
-                                    self.store.load_session_history(sid).unwrap_or_default();
-                                let turn_number = self.store.next_turn_number(sid).unwrap_or(1);
-                                // Stream this session's events as ACP
-                                // `session/update` notifications while the turn runs.
-                                let bus = engine.hub().bus_for(sid);
-                                let subscription = self.forward_session_events(sid, &bus);
-                                let result = engine
-                                    .run_turn_with_media(sid, turn_number, history, &p, media, None)
-                                    .await;
-                                // v2 `launchContinuationTurn` on this entry
-                                // point too: a goal still active after a
-                                // cleanly completed turn owns the next one.
-                                // The response below still reports the user's
-                                // turn; continuation turns stream as
-                                // `session/update`s like any other.
-                                let mut owed = result
-                                    .as_ref()
-                                    .is_ok_and(crate::server::prompt_queue::turn_completed);
-                                while owed {
-                                    let Some(text) = engine.pending_goal_continuation(sid).await
-                                    else {
-                                        break;
-                                    };
-                                    let history =
-                                        self.store.load_session_history(sid).unwrap_or_default();
-                                    let turn_number = self.store.next_turn_number(sid).unwrap_or(1);
-                                    owed = engine
-                                        .run_turn_with_media(
-                                            sid,
-                                            turn_number,
-                                            history,
-                                            &text,
-                                            Vec::new(),
-                                            Some(json!({
-                                                "kind": "system_trigger",
-                                                "name": "goal_continuation",
-                                            })),
-                                        )
+                            } else if let Some((name, args)) = builtin_commands::parse_slash(&p) {
+                                // Slash input the host answers itself: an ACP
+                                // builtin, an engine skill activation, or an
+                                // unknown command (v2 `detectSlashIntent`).
+                                // Unknown slash text is answered locally —
+                                // sending it to the model would let it invent a
+                                // command that does not exist.
+                                if let Some((command, args)) = builtin_commands::parse(&p) {
+                                    // ACP-owned commands answer locally and
+                                    // never reach the model (v2
+                                    // `runBuiltinSlashCommand`).
+                                    let text =
+                                        self.run_builtin_command(sid, command.name, &args).await;
+                                    self.end_prompt(&request_key);
+                                    self.channel
+                                        .notify("session/update", local_command_update(sid, &text));
+                                    // `/compact` and external renames can
+                                    // change the title; keep the client's
+                                    // header current.
+                                    self.emit_session_info(sid, false);
+                                    JsonRpcResponse::success(
+                                        req.id,
+                                        local_command_response(sid, &text),
+                                    )
+                                } else if let Some(skill_name) =
+                                    self.resolve_skill_command(sid, name).await
+                                {
+                                    // v2 `driveSkillActivation`: the engine
+                                    // renders the activation prompt and drives
+                                    // it as a normal turn, so its events stream
+                                    // like any other prompt.
+                                    match engine
+                                        .render_session_skill_prompt(sid, &skill_name, &args)
                                         .await
-                                        .as_ref()
-                                        .is_ok_and(crate::server::prompt_queue::turn_completed);
-                                }
-                                bus.unsubscribe(subscription);
-                                self.end_prompt(&request_key);
-                                match result {
-                                    Ok(report) => {
-                                        // Post-turn visibility, v2's
-                                        // `usage_update` + `plan` builders: the
-                                        // context the session now carries
-                                        // against the model window, and the
-                                        // todo list the agent left behind.
-                                        if let Some(size) = report.context_window {
-                                            let used: u64 = self
-                                                .store
-                                                .load_session_history(sid)
-                                                .unwrap_or_default()
-                                                .iter()
-                                                .map(|m| {
-                                                    crate::compaction::estimate_tokens(&m.content)
-                                                        as u64
-                                                })
-                                                .sum();
+                                    {
+                                        Ok(rendered) => {
+                                            let mut origin = json!({
+                                                "kind": "skill_activation",
+                                                "activationId": format!(
+                                                    "skill-{}",
+                                                    fastrand::u64(..)
+                                                ),
+                                                "skillName": rendered.name,
+                                                "trigger": "user-slash",
+                                            });
+                                            if let Some(path) = rendered.path.as_deref() {
+                                                origin["skillPath"] = json!(path);
+                                            }
+                                            if let Some(source) = rendered.source.as_deref() {
+                                                origin["skillSource"] = json!(source);
+                                            }
+                                            if let Some(kind) = rendered.skill_type.as_deref() {
+                                                origin["skillType"] = json!(kind);
+                                            }
+                                            let result = self
+                                                .run_model_turn(
+                                                    engine,
+                                                    sid,
+                                                    &rendered.text,
+                                                    Vec::new(),
+                                                    Some(origin),
+                                                )
+                                                .await;
+                                            self.end_prompt(&request_key);
+                                            self.prompt_outcome(engine, sid, req.id, result).await
+                                        }
+                                        Err(error) => {
+                                            self.end_prompt(&request_key);
+                                            let text =
+                                                builtin_commands::skill_error_text(name, &error);
                                             self.channel.notify(
                                                 "session/update",
-                                                events_map::usage_update_notification(
-                                                    sid,
-                                                    used,
-                                                    size as u64,
-                                                ),
+                                                local_command_update(sid, &text),
                                             );
+                                            JsonRpcResponse::success(
+                                                req.id,
+                                                local_command_response(sid, &text),
+                                            )
                                         }
-                                        if let Some(plan) = events_map::plan_notification(
-                                            sid,
-                                            &engine.session_todos(sid),
-                                        ) {
-                                            self.channel.notify("session/update", plan);
-                                        }
-                                        self.emit_session_info(sid, false);
-                                        JsonRpcResponse::success(
-                                            req.id,
-                                            json!({
-                                                "sessionId": sid,
-                                                "turnId": report.turn_id,
-                                                "stopReason": events_map::turn_stop_reason_to_acp(
-                                                    &report.stop_reason
-                                                ),
-                                                "content": report.reply,
-                                                "steps": report.steps,
-                                                "usage": {
-                                                    "inputTokens": report.usage.input_tokens,
-                                                    "outputTokens": report.usage.output_tokens,
-                                                    "totalTokens": report.usage.total_tokens,
-                                                }
-                                            }),
-                                        )
                                     }
-                                    Err(err) => JsonRpcResponse::error(
+                                } else {
+                                    self.end_prompt(&request_key);
+                                    let text = format!(
+                                        "Unknown ACP command: /{name}. Use /help to see available commands."
+                                    );
+                                    self.channel
+                                        .notify("session/update", local_command_update(sid, &text));
+                                    JsonRpcResponse::success(
                                         req.id,
-                                        -32000,
-                                        format!("Turn execution failed: {err}"),
-                                    ),
+                                        local_command_response(sid, &text),
+                                    )
                                 }
+                            } else {
+                                let result =
+                                    self.run_model_turn(engine, sid, &p, media, None).await;
+                                self.end_prompt(&request_key);
+                                self.prompt_outcome(engine, sid, req.id, result).await
                             }
                         } else {
                             // No engine is wired (e.g. no model could be
@@ -1228,12 +1408,42 @@ impl AcpServer {
                                     );
                                 }
                             }
-                            self.emit_available_commands(sid);
+                            if let Some(engine) = &self.engine {
+                                // A reattached client also gets the session's
+                                // carried state (v2's `usage_update` + `plan`
+                                // builders): the todo list and the context
+                                // gauge the replayed transcript cannot show.
+                                if let Some(plan) =
+                                    events_map::plan_notification(sid, &engine.session_todos(sid))
+                                {
+                                    self.channel.notify("session/update", plan);
+                                }
+                                if let Some(size) = engine.model_context_window(sid).await {
+                                    let used: u64 = history
+                                        .iter()
+                                        .map(|stored| {
+                                            crate::compaction::estimate_tokens(
+                                                &stored.message.content,
+                                            ) as u64
+                                        })
+                                        .sum();
+                                    self.channel.notify(
+                                        "session/update",
+                                        events_map::usage_update_notification(
+                                            sid,
+                                            used,
+                                            size as u64,
+                                        ),
+                                    );
+                                }
+                            }
+                            self.emit_available_commands(sid).await;
                             self.emit_session_info(sid, true);
+                            let config_options = self.config_options(sid).await;
                             JsonRpcResponse::success(
                                 req.id,
                                 json!({
-                                    "configOptions": self.config_options(sid),
+                                    "configOptions": config_options,
                                     "modes": self.mode_state(sid),
                                 }),
                             )
@@ -1270,12 +1480,13 @@ impl AcpServer {
                                 format!("Unknown sessionId: {sid}"),
                             )
                         } else {
-                            self.emit_available_commands(sid);
+                            self.emit_available_commands(sid).await;
                             self.emit_session_info(sid, true);
+                            let config_options = self.config_options(sid).await;
                             JsonRpcResponse::success(
                                 req.id,
                                 json!({
-                                    "configOptions": self.config_options(sid),
+                                    "configOptions": config_options,
                                     "modes": self.mode_state(sid),
                                 }),
                             )
@@ -1320,11 +1531,12 @@ impl AcpServer {
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner())
                                         .insert(forked.clone(), "default".to_string());
+                                    let config_options = self.config_options(&forked).await;
                                     JsonRpcResponse::success(
                                         req.id,
                                         json!({
                                             "sessionId": forked,
-                                            "configOptions": self.config_options(&forked),
+                                            "configOptions": config_options,
                                             "modes": self.mode_state(&forked),
                                         }),
                                     )
@@ -1467,13 +1679,18 @@ impl AcpServer {
                     .and_then(|p| p.get("modelId"))
                     .and_then(|v| v.as_str());
                 match self.apply_session_model(session_id, model_id) {
-                    Ok(()) => JsonRpcResponse::success(req.id, json!({})),
+                    Ok(()) => {
+                        if let Some(session_id) = session_id {
+                            self.notify_config_options(session_id).await;
+                        }
+                        JsonRpcResponse::success(req.id, json!({}))
+                    }
                     Err((code, message)) => JsonRpcResponse::error(req.id, code, message),
                 }
             }
-            // The `mode` / `model` arms of `session/set_config_option` funnel
-            // into the same paths (v2 `setSessionConfigOption`,
-            // server.ts:471-513).
+            // The `mode` / `model` / `thinking` arms of
+            // `session/set_config_option` funnel into the same paths (v2
+            // `setSessionConfigOption`, server.ts:471-513).
             "session/set_config_option" => {
                 let params = req.params.as_ref();
                 let session_id = params
@@ -1487,23 +1704,33 @@ impl AcpServer {
                     Some("mode") => match self.apply_session_mode(session_id, value) {
                         Ok(_) => {
                             let session_id = session_id.unwrap_or_default();
-                            JsonRpcResponse::success(
-                                req.id,
-                                json!({ "configOptions": self.config_options(session_id) }),
-                            )
+                            let options = self.config_options(session_id).await;
+                            JsonRpcResponse::success(req.id, json!({ "configOptions": options }))
                         }
                         Err((code, message)) => JsonRpcResponse::error(req.id, code, message),
                     },
                     Some("model") => match self.apply_session_model(session_id, value) {
                         Ok(()) => {
                             let session_id = session_id.unwrap_or_default();
-                            JsonRpcResponse::success(
-                                req.id,
-                                json!({ "configOptions": self.config_options(session_id) }),
-                            )
+                            self.notify_config_options(session_id).await;
+                            let options = self.config_options(session_id).await;
+                            JsonRpcResponse::success(req.id, json!({ "configOptions": options }))
                         }
                         Err((code, message)) => JsonRpcResponse::error(req.id, code, message),
                     },
+                    Some("thinking") => {
+                        match self.apply_session_thinking(session_id, value).await {
+                            Ok(()) => {
+                                let session_id = session_id.unwrap_or_default();
+                                let options = self.config_options(session_id).await;
+                                JsonRpcResponse::success(
+                                    req.id,
+                                    json!({ "configOptions": options }),
+                                )
+                            }
+                            Err((code, message)) => JsonRpcResponse::error(req.id, code, message),
+                        }
+                    }
                     _ => JsonRpcResponse::error(
                         req.id,
                         -32602,
@@ -1619,23 +1846,34 @@ fn acp_mode_plan(mode: &str) -> bool {
     mode == "plan"
 }
 
-/// Apply the plan half of v2 `setMode` through the workspace state store,
-/// the same `plan` domain `tools/plan_mode.rs` reads. Best effort: a
-/// host-owned domain that cannot be reached must not fail the mode
+/// Apply the plan half of v2 `setMode` through the session state store (v2
+/// agent scope — the same `plan` domain `tools/plan_mode.rs` reads and writes),
+/// so a mode switch and a native `EnterPlanMode` cannot shadow each other.
+/// Best effort: a domain that cannot be reached must not fail the mode
 /// switch, because the permission half still has to land.
 fn apply_plan_toggle(store: &SqliteSessionStore, session_id: &str, plan: bool) {
     let root = session_cwd_of(store, session_id);
     if root.is_empty() {
         return;
     }
-    let Ok(state) =
-        crate::storage::state_store::StateStore::for_workspace(std::path::Path::new(&root))
-    else {
+    let root = std::path::Path::new(&root);
+    let state = crate::storage::state_store::StateStore::for_session(root, session_id)
+        .or_else(|_| crate::storage::state_store::StateStore::for_workspace(root));
+    let Ok(state) = state else {
         return;
     };
+    // `apply_write` is the domain's own semantics: entering plan mode mints
+    // the plan id/path and the empty plan file, exactly like `EnterPlanMode`.
     let value = serde_json::json!({ "active": plan });
-    if let Err(error) = state.write_domain("plan", &value) {
-        tracing::warn!(session_id, plan, %error, "acp set_mode could not toggle plan state");
+    match state.apply_write("plan", &value) {
+        Ok(outcome) => {
+            if let Err(error) = state.write_domain("plan", &outcome.stored) {
+                tracing::warn!(session_id, plan, %error, "acp set_mode could not persist plan state");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(session_id, plan, %error, "acp set_mode could not toggle plan state");
+        }
     }
 }
 
@@ -1804,6 +2042,112 @@ fn acp_mcp_recipe(server: &serde_json::Value) -> Option<McpServerRecipe> {
             .and_then(|value| value.as_str())
             .map(str::to_string),
     })
+}
+
+/// One locally answered command's `agent_message_chunk` (v2
+/// `driveBuiltinCommand` / `driveUnknownCommand` push the rendered text before
+/// settling the prompt).
+fn local_command_update(session_id: &str, text: &str) -> serde_json::Value {
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": text },
+        },
+    })
+}
+
+/// The `session/prompt` response for a locally answered command: no turn ran.
+fn local_command_response(session_id: &str, text: &str) -> serde_json::Value {
+    json!({
+        "sessionId": session_id,
+        "stopReason": "end_turn",
+        "content": text,
+        "steps": 0,
+        "usage": { "inputTokens": 0, "outputTokens": 0, "totalTokens": 0 },
+    })
+}
+
+/// The level a session's thinking toggle shows: the stored override, the
+/// model's declared default, else `on` for an always-thinking model and `off`
+/// otherwise. An always-thinking model never shows `off` (v2 clamps the same
+/// way at render time).
+fn current_thinking_level(
+    store: &SqliteSessionStore,
+    session_id: &str,
+    row: &crate::server::engine::ModelThinking,
+) -> String {
+    let stored = store
+        .get_state("agent_config", session_id)
+        .ok()
+        .flatten()
+        .and_then(|profile| {
+            profile
+                .get("thinking")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    let level = stored
+        .or_else(|| row.default_effort.clone())
+        .unwrap_or_else(|| {
+            if row.always_thinking {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }
+        });
+    if row.always_thinking && level == "off" {
+        "on".to_string()
+    } else {
+        level
+    }
+}
+
+/// The v2 `thinking` select (config-options.ts `buildThinkingOption`): `off`
+/// plus every declared effort (the boolean off/on pair when none are), `off`
+/// dropped for always-thinking models, and an undeclared current level appended
+/// so `currentValue` is always selectable.
+fn thinking_option(current: &str, row: &crate::server::engine::ModelThinking) -> serde_json::Value {
+    let mut values: Vec<String> = if row.support_efforts.is_empty() {
+        vec!["off".to_string(), "on".to_string()]
+    } else {
+        std::iter::once("off".to_string())
+            .chain(row.support_efforts.iter().cloned())
+            .collect()
+    };
+    if row.always_thinking {
+        values.retain(|value| value != "off");
+    }
+    if !values.iter().any(|value| value == current) {
+        values.push(current.to_string());
+    }
+    let options: Vec<serde_json::Value> = values
+        .iter()
+        .map(|value| {
+            json!({
+                "value": value,
+                "name": thinking_option_name(value),
+            })
+        })
+        .collect();
+    json!({
+        "type": "select",
+        "id": "thinking",
+        "name": "Thinking",
+        "category": "thought_level",
+        "currentValue": current,
+        "options": options,
+    })
+}
+
+/// Display name for a thinking select entry (`off` → `Thinking Off`).
+fn thinking_option_name(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => format!("Thinking {}{}", first.to_uppercase(), chars.as_str()),
+        None => "Thinking".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -2464,9 +2808,11 @@ mod tests {
         let metadata = server.store.get_state("metadata", &sid).unwrap().unwrap();
         assert_eq!(metadata["permission_mode"], "manual");
 
-        // Plan half: the `plan` domain the engine reads is now active.
+        // Plan half: the `plan` domain the engine reads is now active. The
+        // domain is session-scoped (v2 agent scope), like the native
+        // `EnterPlanMode` write it must not shadow.
         let state =
-            crate::storage::state_store::StateStore::for_workspace(workspace.path()).unwrap();
+            crate::storage::state_store::StateStore::for_session(workspace.path(), &sid).unwrap();
         assert_eq!(
             state.read_domain("plan").unwrap()["active"],
             true,
@@ -3436,6 +3782,16 @@ mod tests {
         store: &Arc<SqliteSessionStore>,
         base_url: &str,
     ) -> Arc<crate::server::engine::ServerEngine> {
+        engine_with_native_llm_and_skills(store, base_url, Vec::new())
+    }
+
+    /// [`engine_with_native_llm`] with extra skill roots (the engine's
+    /// `extra_skill_dirs`, which the session catalog and the `Skill` tool scan).
+    fn engine_with_native_llm_and_skills(
+        store: &Arc<SqliteSessionStore>,
+        base_url: &str,
+        skill_dirs: Vec<std::path::PathBuf>,
+    ) -> Arc<crate::server::engine::ServerEngine> {
         use crate::pipeline::PipelineSpec;
         use crate::server::engine::ServerEngine;
 
@@ -3474,7 +3830,7 @@ mod tests {
                 image_read_byte_budget: None,
                 image_max_edge_px: None,
                 model_capabilities: None,
-                skill_dirs: Vec::new(),
+                skill_dirs,
                 plugin_skill_dirs: Vec::new(),
                 merge_all_available_skills: true,
                 background: crate::storage::BackgroundLimits::default(),
@@ -3942,5 +4298,356 @@ mod tests {
         assert_eq!(resp.result.unwrap()["stopReason"], "cancelled");
 
         mock.abort();
+    }
+
+    /// v2 `driveSkillActivation` + `driveUnknownCommand`: a `/skill:` command
+    /// renders through the engine's own scan and drives a normal turn with the
+    /// activation origin, while an unknown slash command is answered locally
+    /// and never reaches the model.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_acp_skill_commands_activate_and_unknown_commands_answer_locally() {
+        let (base_url, mock) = spawn_completing_openai_server().await;
+        let skills_root = tempfile::tempdir().unwrap();
+        let skill_dir = skills_root.path().join("demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill for ACP\n---\n\nDo the demo: $ARGUMENTS\n",
+        )
+        .unwrap();
+
+        let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+        let engine = engine_with_native_llm_and_skills(
+            &store,
+            &base_url,
+            vec![skills_root.path().to_path_buf()],
+        );
+        let server = AcpServer::with_engine(store.clone(), engine);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpOutbound>();
+        server.set_notification_sink(tx);
+
+        let new_req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {}
+        });
+        let sid = server
+            .handle_message(&new_req.to_string())
+            .await
+            .unwrap()
+            .result
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut updates = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let AcpOutbound::Notification(note) = message {
+                updates.push(note.params.unwrap_or_default());
+            }
+        }
+        let commands = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "available_commands_update")
+            .expect("session/new advertises commands");
+        let names: Vec<&str> = commands["update"]["availableCommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"skill:demo"),
+            "the project skill must be advertised: {names:?}"
+        );
+
+        let prompt = |id: u64, text: &str| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/prompt",
+                "params": { "sessionId": sid, "prompt": text }
+            })
+        };
+
+        // Unknown slash commands never reach the model.
+        let unknown = server
+            .handle_message(&prompt(2, "/nope now").to_string())
+            .await
+            .unwrap()
+            .result
+            .expect("an unknown command answers");
+        assert_eq!(unknown["stopReason"], "end_turn");
+        assert!(
+            unknown["content"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown ACP command: /nope"),
+            "{unknown}"
+        );
+
+        // The skill activation runs a normal turn against the engine.
+        let activated = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            server.handle_message(&prompt(3, "/skill:demo hello world").to_string()),
+        )
+        .await
+        .expect("the skill turn must settle")
+        .unwrap()
+        .result
+        .expect("the skill activation answers");
+        assert_eq!(activated["stopReason"], "end_turn");
+
+        let history = store.load_session_history(&sid).unwrap_or_default();
+        let activation = history
+            .iter()
+            .find(|message| message.content.contains("<skill-loaded"))
+            .expect("the rendered skill prompt is part of the turn");
+        assert!(
+            activation.content.contains("Do the demo: hello world"),
+            "the activation must expand $ARGUMENTS: {}",
+            activation.content
+        );
+        let turns = store.list_turns(&sid).unwrap();
+        let origin = turns
+            .iter()
+            .find_map(|turn| turn.origin.as_ref())
+            .expect("the turn carries an origin");
+        assert_eq!(
+            origin.get("kind").and_then(|kind| kind.as_str()),
+            Some("skill_activation"),
+            "the turn carries the v2 skill activation origin"
+        );
+
+        mock.abort();
+    }
+
+    /// The `thinking` config option (v2 `buildThinkingOption`): it appears only
+    /// for a model that declares a thinking axis, follows the model's declared
+    /// efforts, clamps always-thinking models to `on`, and disappears when the
+    /// session switches to a model without the axis.
+    #[tokio::test]
+    async fn test_acp_thinking_option_follows_the_model_catalog() {
+        let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+        let engine = engine_with_native_llm(&store, "http://127.0.0.1:1/v1");
+        let config: crate::config::KimiConfig = r#"
+[providers.acme]
+type = "openai"
+api_key = "k"
+
+[models.thinky]
+provider = "acme"
+model = "thinky"
+capabilities = ["thinking", "tool_use"]
+support_efforts = ["low", "high"]
+default_effort = "high"
+
+[models.always]
+provider = "acme"
+model = "always"
+capabilities = ["always_thinking"]
+support_efforts = ["low", "high"]
+
+[models.plain]
+provider = "acme"
+model = "plain"
+"#
+        .parse()
+        .expect("parse config");
+        engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(config))));
+        let server = AcpServer::with_engine(store.clone(), engine);
+
+        let new_req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {}
+        });
+        let sid = server
+            .handle_message(&new_req.to_string())
+            .await
+            .unwrap()
+            .result
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let options = |response: &JsonRpcResponse| -> Vec<serde_json::Value> {
+            response.result.clone().unwrap()["configOptions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        };
+        let thinking = |options: &[serde_json::Value]| -> Option<serde_json::Value> {
+            options
+                .iter()
+                .find(|option| option["id"] == "thinking")
+                .cloned()
+        };
+
+        // The engine's default model has no catalog row: no thinking option.
+        let set_model = |id: u64, model: &str| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/set_config_option",
+                "params": { "sessionId": sid, "configId": "model", "value": model }
+            })
+        };
+        let initial = server
+            .handle_message(&set_model(2, "thinky").to_string())
+            .await
+            .unwrap();
+        let options_now = options(&initial);
+        let option =
+            thinking(&options_now).expect("a thinking-capable model advertises the toggle");
+        assert_eq!(option["category"], "thought_level");
+        assert_eq!(option["currentValue"], "high", "the declared default wins");
+        let values: Vec<&str> = option["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(values, vec!["off", "low", "high"]);
+
+        let set_thinking = |id: u64, value: &str| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/set_config_option",
+                "params": { "sessionId": sid, "configId": "thinking", "value": value }
+            })
+        };
+        let chosen = server
+            .handle_message(&set_thinking(3, "low").to_string())
+            .await
+            .unwrap();
+        let option = thinking(&options(&chosen)).expect("the toggle stays advertised");
+        assert_eq!(option["currentValue"], "low");
+        assert_eq!(
+            store.get_state("agent_config", &sid).unwrap().unwrap()["thinking"],
+            "low"
+        );
+
+        let invalid = server
+            .handle_message(&set_thinking(4, "turbo").to_string())
+            .await
+            .unwrap();
+        assert!(
+            invalid
+                .error
+                .unwrap()
+                .message
+                .contains("Invalid thinking level"),
+            "unknown levels are refused"
+        );
+
+        // Always-thinking: `off` is not offered and a request for it clamps.
+        // The stored effort level carries over while the new model accepts it.
+        let always = server
+            .handle_message(&set_model(5, "always").to_string())
+            .await
+            .unwrap();
+        let option = thinking(&options(&always)).expect("always-thinking still advertises");
+        assert_eq!(option["currentValue"], "low");
+        let values: Vec<&str> = option["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["value"].as_str().unwrap())
+            .collect();
+        assert!(!values.contains(&"off"), "{values:?}");
+        let clamped = server
+            .handle_message(&set_thinking(6, "off").to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            thinking(&options(&clamped)).unwrap()["currentValue"],
+            "on",
+            "an always-thinking model clamps off to on"
+        );
+
+        // A model without the axis drops the option again.
+        let plain = server
+            .handle_message(&set_model(7, "plain").to_string())
+            .await
+            .unwrap();
+        assert!(
+            thinking(&options(&plain)).is_none(),
+            "a non-thinking model advertises no toggle"
+        );
+    }
+
+    /// `session/load` replays the transcript and the session's carried state:
+    /// the todo list behind the ACP `plan` notification and the context usage
+    /// the reattached client cannot derive from messages alone.
+    #[tokio::test]
+    async fn test_acp_session_load_replays_plan_and_usage() {
+        let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let engine = engine_with_native_llm(&store, "http://127.0.0.1:1/v1");
+        let config: crate::config::KimiConfig = r#"
+[providers.acme]
+type = "openai"
+api_key = "k"
+
+[models.mock-model]
+provider = "acme"
+model = "mock-model"
+max_context_size = 100000
+"#
+        .parse()
+        .expect("parse config");
+        engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(config))));
+        let server = AcpServer::with_engine(store.clone(), engine);
+
+        let new_req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": { "cwd": workspace.path().to_str().unwrap() }
+        });
+        let sid = server
+            .handle_message(&new_req.to_string())
+            .await
+            .unwrap()
+            .result
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let state = crate::storage::StateStore::for_session(workspace.path(), &sid).unwrap();
+        state
+            .write_domain(
+                "todo",
+                &json!([{ "id": "T1", "title": "Replay me", "status": "in_progress" }]),
+            )
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpOutbound>();
+        server.set_notification_sink(tx);
+        let load_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/load",
+            "params": { "sessionId": sid }
+        });
+        let resp = server.handle_message(&load_req.to_string()).await.unwrap();
+        assert!(resp.error.is_none(), "unexpected error: {resp:?}");
+
+        let mut updates = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let AcpOutbound::Notification(note) = message {
+                updates.push(note.params.unwrap_or_default());
+            }
+        }
+        let plan = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "plan")
+            .unwrap_or_else(|| panic!("missing replayed plan: {updates:?}"));
+        assert_eq!(plan["update"]["entries"][0]["content"], "Replay me");
+        let usage = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "usage_update")
+            .unwrap_or_else(|| panic!("missing replayed usage: {updates:?}"));
+        assert_eq!(usage["update"]["size"], 100000);
     }
 }

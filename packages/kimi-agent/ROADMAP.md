@@ -9184,3 +9184,51 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
 - **剩余**：ACP 没有后台任务唤醒服务（ACP 不使用 prompt queue，需要自己的空闲 gate）；
   server 的通知回合会以 `kind: notification` 出现在 prompt 列表快照里，但没有对应的
   `prompt.*` 事件；napi 交互式 goal continuation 仍未由 engine 驱动。
+
+## 32. 2026-10-31 ACP 剩余项：skill 命令、thinking 选项、load 回放
+
+### 32.1 skill 斜杠命令
+
+- `ServerEngine::session_skills` / `render_session_skill_prompt`：直接读会话自己那份
+  `SkillScanRoots`（project / user / extra / plugin / builtin，含 merge 策略），
+  渲染走与 `Skill` 工具相同的 `render_user_slash_skill_prompt`
+  （`$ARGUMENTS` / `${KIMI_SKILL_DIR}` / plugin 指令前缀）。
+- `builtin_commands::skill_commands`（v2 `buildAcpSkillSlashCommands`）：仅
+  user-activatable；builtin 源与 sub-skill 用裸名，其余 `skill:<name>`；
+  `scopes` 有值的不广告；与 ACP 内建同名的裸命令丢弃；内建优先、按 skill 名排序。
+- `available_commands_update` = 内建 + skill 命令（内建在前）。
+- `/skill:name args` 激活：引擎渲染激活文本，以 `skill_activation` origin 跑普通回合
+  （v2 `driveSkillActivation`），事件照常流式下发。
+- 未知斜杠命令本地回答「Unknown ACP command: /x. Use /help to see available commands.」
+  并 `end_turn`，不再把斜杠文本发给模型（v2 `driveUnknownCommand`）；技能渲染失败
+  （不存在 / 类型不可激活）同样本地回答。
+
+### 32.2 thinking 配置项
+
+- `ServerEngine::model_thinking`：模型 alias 的 `capabilities` 含 `thinking` /
+  `always_thinking`，或声明了 `support_efforts`，即视为有 thinking 轴，返回
+  `support_efforts` / `default_effort` / `always_thinking`。
+- `config_options`（async）在 model 与 mode 之间插入 `thinking` select
+  （category `thought_level`）：`off` + 声明 efforts（未声明则 off/on）；
+  always_thinking 去掉 `off`；当前值取 `agent_config.thinking` → `default_effort` →
+  on/off，always_thinking 的 `off` 渲染为 `on`。
+- `session/set_config_option {configId:"thinking"}` 校验等级、持久化
+  `agent_config.thinking` 并推 `config_option_update`；切模型走同一条刷新路径。
+
+### 32.3 session/load 回放 plan + usage
+
+- 回放 transcript 之后补发 `plan`（`session_todos`）与 `usage_update`
+  （当前上下文估算 / 模型窗口），重连客户端能看到 transcript 之外的状态。
+
+### 32.4 顺带修复
+
+- ACP `/mode` 的 plan 半件改走会话级 `plan` 域并用 `apply_write` 语义
+  （v2 `PlanModeEnter` 生成 id / 路径与空计划文件），与原生 `EnterPlanMode` 不再互相遮蔽。
+- server 回合的开场 user 消息带上 origin（与会话 pump 一致），回合内可见激活/触发来源。
+
+### 32.5 验证与剩余
+
+- `cargo test --lib` 3293 passed / 0 failed；`cargo clippy --all-targets`、`cargo fmt
+  --check` 通过。
+- **剩余**：标题仍只在交互时推送（自动标题生成本身未接线）；ACP 没有后台任务唤醒；
+  消息级 origin 不持久化（只在 `turns` 行），重放以 turn origin 为准。

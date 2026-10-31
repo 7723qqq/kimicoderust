@@ -36,6 +36,16 @@
       "text": "Show session token usage",
       "reason": "tool-protocol"
     },
+    "packages/kimi-agent/src/acp/builtin_commands.rs:Skill \"{skill}\" cannot be activated from a slash command.": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "Skill \"{skill}\" cannot be activated from a slash command.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/acp/builtin_commands.rs:Unknown ACP command: /{name}. Use /help to see available commands.": {
+      "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
+      "text": "Unknown ACP command: /{name}. Use /help to see available commands.",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/acp/channel.rs:ACP client error ({code}): {message}": {
       "file": "packages/kimi-agent/src/acp/channel.rs",
       "text": "ACP client error ({code}): {message}",

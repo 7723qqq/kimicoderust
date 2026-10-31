@@ -201,6 +201,16 @@ pub struct TurnReport {
     pub context_window: Option<u32>,
 }
 
+/// The thinking axes a model alias declares: whether reasoning is always on,
+/// which effort levels it accepts (empty = the boolean off/on pair), and the
+/// level a fresh session starts at.
+#[derive(Debug, Clone, Default)]
+pub struct ModelThinking {
+    pub always_thinking: bool,
+    pub support_efforts: Vec<String>,
+    pub default_effort: Option<String>,
+}
+
 /// Why a server-side turn could not run. Flattened to a message because the
 /// turn loop's own error is a boxed trait object; a server reports this as
 /// JSON, and keeping the chain of causes in a type buys nothing there.
@@ -492,6 +502,36 @@ impl ServerEngine {
         let alias = config.models.get(&model)?;
         let size = alias.max_context_size?;
         (size > 0).then_some(size as usize)
+    }
+
+    /// The thinking capability a model alias declares (v2 catalog
+    /// `thinkingSupported` / `alwaysThinking` / `supportEfforts`), or `None`
+    /// when the model is unknown or declares no thinking axis at all.
+    ///
+    /// Declared values only: a declared `support_efforts` list is itself
+    /// evidence of a thinking axis, the same way the docs treat it.
+    pub async fn model_thinking(&self, model: &str) -> Option<ModelThinking> {
+        let source = self.config_source()?;
+        let config = {
+            let guard = source.lock().await;
+            guard.clone()
+        }?;
+        let alias = config.models.get(model)?;
+        let capabilities = alias.capabilities.clone().unwrap_or_default();
+        let always_thinking = capabilities
+            .iter()
+            .any(|capability| capability == "always_thinking");
+        let support_efforts = alias.support_efforts.clone().unwrap_or_default();
+        let thinking = always_thinking
+            || capabilities
+                .iter()
+                .any(|capability| capability == "thinking")
+            || !support_efforts.is_empty();
+        thinking.then(|| ModelThinking {
+            always_thinking,
+            support_efforts,
+            default_effort: alias.default_effort.clone(),
+        })
     }
 
     /// Record that this session just produced assistant output, which resets
@@ -1279,6 +1319,42 @@ impl ServerEngine {
         }
     }
 
+    /// The skill catalog this session's prompt was rendered with — the same
+    /// scan the `Skill` tool resolves from. The engine serves it because the
+    /// builtin, plugin and `extra_skill_dirs` skills exist only here (v2
+    /// `session.skills.list`).
+    pub async fn session_skills(&self, session_id: &str) -> Vec<crate::skills::SkillDescriptor> {
+        let spec = self.session_spec(session_id).await;
+        crate::skills::SkillScanRoots {
+            root: spec.workspace_root.as_deref().map(std::path::PathBuf::from),
+            extra_dirs: spec.skill_dirs.clone(),
+            plugin_dirs: spec.plugin_skill_dirs.clone(),
+            merge_all_available_skills: spec.merge_all_available_skills,
+        }
+        .catalog()
+    }
+
+    /// Render a user-slash skill activation against this session's own scan
+    /// (v2 `AgentSkillService.prepareBundled` + `renderUserSlashSkillPrompt`),
+    /// so an ACP `/skill:` command expands `$ARGUMENTS` / `${KIMI_SKILL_DIR}`
+    /// and plugin instructions exactly like the native host's activation.
+    pub async fn render_session_skill_prompt(
+        &self,
+        session_id: &str,
+        name: &str,
+        args: &str,
+    ) -> Result<crate::tools::skill::UserSlashSkillPrompt, crate::tools::skill::SkillPromptError>
+    {
+        let spec = self.session_spec(session_id).await;
+        let scan = crate::tools::skill::SkillScan {
+            root: spec.workspace_root.as_deref().map(std::path::Path::new),
+            extra_dirs: &spec.skill_dirs,
+            plugin_dirs: &spec.plugin_skill_dirs,
+            merge_all_available_skills: spec.merge_all_available_skills,
+        };
+        crate::tools::skill::render_user_slash_skill_prompt(&scan, name, args, session_id)
+    }
+
     /// The LLM one session's turns run on, without building a pipeline.
     ///
     /// `None` when the session's spec selects no model the engine can reach —
@@ -1821,7 +1897,10 @@ impl ServerEngine {
             tool_call_id: None,
 
             prompt_id: None,
-            origin: None,
+            // The turn origin rides the opening message, the way the session
+            // pump stamps it: a replayed transcript can then tell a skill
+            // activation or a goal continuation from a typed prompt.
+            origin: origin.clone(),
         };
         messages.push(user_message.clone());
         let input_len = messages.len();
