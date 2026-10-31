@@ -100,6 +100,10 @@ impl HostCallbacks for ImagePreviewCallbacks {
         self.inner.checkpoint(request)
     }
 
+    fn checkpoint_state(&self) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.checkpoint_state()
+    }
+
     fn list_tools(&self) -> BoxFuture<'static, Result<ListToolsResponse, String>> {
         self.inner.list_tools()
     }

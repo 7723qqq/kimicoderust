@@ -1231,10 +1231,18 @@ impl ServerEngine {
             }
         };
         match crate::storage::StateStore::for_workspace(ws_ref) {
-            Ok(store) => Arc::new(crate::callbacks::StateStoreCallbacks {
-                inner: host_callbacks,
-                store: Arc::new(store),
-            }),
+            Ok(workspace_store) => {
+                let workspace_store = Arc::new(workspace_store);
+                let session_store = crate::storage::StateStore::for_session(ws_ref, session_id)
+                    .ok()
+                    .map(Arc::new)
+                    .unwrap_or_else(|| workspace_store.clone());
+                Arc::new(crate::callbacks::StateStoreCallbacks {
+                    inner: host_callbacks,
+                    store: session_store,
+                    cron_store: workspace_store,
+                })
+            }
             Err(_) => host_callbacks,
         }
     }
@@ -1396,10 +1404,14 @@ impl ServerEngine {
             _ => None,
         };
         let ws_ref = ws_root.as_deref().unwrap_or(std::path::Path::new("."));
-        let Ok(store) = crate::storage::StateStore::for_workspace(ws_ref) else {
-            return Vec::new();
-        };
-        let raw = store.read_domain("todo");
+        let session_domain = crate::storage::StateStore::for_session(ws_ref, session_id)
+            .ok()
+            .and_then(|store| store.read_domain("todo"));
+        let raw = session_domain.or_else(|| {
+            crate::storage::StateStore::for_workspace(ws_ref)
+                .ok()
+                .and_then(|store| store.read_domain("todo"))
+        });
         crate::tools::todo_item::read_todo_items(raw.as_ref().unwrap_or(&serde_json::Value::Null))
     }
 
@@ -1416,8 +1428,15 @@ impl ServerEngine {
             _ => None,
         };
         let ws_ref = ws_root.as_deref().unwrap_or(std::path::Path::new("."));
-        let store = crate::storage::StateStore::for_workspace(ws_ref).ok()?;
-        crate::compaction::todo_list_for_summary(store.read_domain("todo").as_ref())
+        let session_domain = crate::storage::StateStore::for_session(ws_ref, session_id)
+            .ok()
+            .and_then(|store| store.read_domain("todo"));
+        let raw = session_domain.or_else(|| {
+            crate::storage::StateStore::for_workspace(ws_ref)
+                .ok()
+                .and_then(|store| store.read_domain("todo"))
+        });
+        crate::compaction::todo_list_for_summary(raw.as_ref())
     }
 
     /// The LLM one model alias resolves to, without a session or a pipeline.
@@ -1698,6 +1717,16 @@ impl ServerEngine {
         // ended or interrupted.
         let activity = self.activity_registry.tracker(session_id);
         activity.turn_started(turn_number);
+        // The undo anchor for this turn: snapshot the session's durable state
+        // before the turn can change it, so a later undo (REST `:undo` /
+        // native `undoHistory`) restores the state the cut turn started from.
+        // A turn without an origin is a user prompt — the v2 default.
+        let undo_anchor = origin
+            .as_ref()
+            .is_none_or(crate::session::origin_is_undo_anchor);
+        if undo_anchor && let Err(error) = callbacks.checkpoint_state().await {
+            tracing::warn!(%session_id, %error, "state checkpoint failed; undo cannot restore this turn's state");
+        }
         // The prompt's message identity lands here: after the busy/status/phase
         // flips and before the first step, the order the turn-boundary contract
         // pins (a client must know the turn started before it sees the prompt).

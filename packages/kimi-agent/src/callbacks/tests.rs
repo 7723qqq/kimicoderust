@@ -1764,6 +1764,7 @@ async fn test_state_write_reports_a_failed_persist() {
         inner: Arc::new(RecordingCallbacks {
             events: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
+        cron_store: store.clone(),
         store,
     };
     let request = StateWriteRequest {
@@ -1861,6 +1862,7 @@ async fn test_state_store_callbacks_local_bridge() {
     let adapter = StateStoreCallbacks {
         inner: dummy.clone(),
         store: store.clone(),
+        cron_store: store.clone(),
     };
 
     // 1. Initial read of todo domain returns default empty array
@@ -1929,6 +1931,7 @@ async fn test_unowned_domain_surfaces_the_host_error() {
             events: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         store: store.clone(),
+        cron_store: store.clone(),
     };
 
     let err = adapter
@@ -1994,6 +1997,7 @@ async fn test_state_store_checkpoint_surfaces_real_host_failure() {
     let adapter = StateStoreCallbacks {
         inner: Arc::new(CheckpointFailingCallbacks),
         store: store.clone(),
+        cron_store: store.clone(),
     };
     let err = adapter
         .checkpoint(CheckpointRequest {
@@ -2066,6 +2070,7 @@ async fn test_state_read_plan_prefers_host_over_stale_local() {
             plan: serde_json::json!({ "active": true }),
         }),
         store: store.clone(),
+        cron_store: store.clone(),
     };
     let resp = adapter
         .state_read(StateReadRequest {
@@ -2097,6 +2102,7 @@ async fn test_state_read_plan_falls_back_to_local_when_host_silent() {
             events: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         store: store.clone(),
+        cron_store: store.clone(),
     };
     let resp = adapter
         .state_read(StateReadRequest {

@@ -123,6 +123,15 @@ pub trait HostCallbacks: Send + Sync {
         Box::pin(async { Err(CHECKPOINT_UNSUPPORTED.into()) })
     }
 
+    /// Push the durable-state snapshot an undo of the turn about to run
+    /// restores (v2 undo anchor). Implemented by [`StateStoreCallbacks`] for
+    /// sessions whose state lives in the engine's local store; the default
+    /// is a no-op so hosts that own their state (stdio RPC, ACP) are
+    /// unaffected.
+    fn checkpoint_state(&self) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Fetch the host's current tool table (M1d: `host/list_tools`). Called
     /// before each LLM call on native transports so mid-turn registry
     /// changes (feature tools, MCP reconnects) reach the model — the
@@ -1227,6 +1236,10 @@ impl HostCallbacks for NativeToolCallbacks {
         self.inner.state_write(request)
     }
 
+    fn checkpoint_state(&self) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.checkpoint_state()
+    }
+
     /// The tool table the model is offered: the engine-owned native
     /// definitions (the toolset executes those calls in-process) merged with
     /// the host's own table and MCP-discovered tools. A missing host table is
@@ -1397,6 +1410,10 @@ impl HostCallbacks for CountingCallbacks {
         self.inner.checkpoint(request)
     }
 
+    fn checkpoint_state(&self) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.checkpoint_state()
+    }
+
     fn list_tools(&self) -> BoxFuture<'static, Result<ListToolsResponse, String>> {
         self.inner.list_tools()
     }
@@ -1453,7 +1470,11 @@ impl HostCallbacks for CountingCallbacks {
 /// using a local [`crate::storage::StateStore`].
 pub struct StateStoreCallbacks {
     pub inner: Arc<dyn HostCallbacks>,
+    /// The session's state store (v2 agent scope): todo / plan / goal /
+    /// task / turn. Checkpoints and goal context read from it.
     pub store: Arc<crate::storage::StateStore>,
+    /// The workspace store, kept for the one workspace-level domain: `cron`.
+    pub cron_store: Arc<crate::storage::StateStore>,
 }
 
 impl HostCallbacks for StateStoreCallbacks {
@@ -1497,9 +1518,16 @@ impl HostCallbacks for StateStoreCallbacks {
         &self,
         request: StateReadRequest,
     ) -> BoxFuture<'static, Result<StateReadResponse, String>> {
-        let store = self.store.clone();
+        let session_store = self.store.clone();
+        let workspace_store = self.cron_store.clone();
+        let legacy_store = workspace_store.clone();
         let inner = self.inner.clone();
         Box::pin(async move {
+            let store = if request.domain == "cron" {
+                workspace_store
+            } else {
+                session_store
+            };
             // Plan mode and goal are host-owned live session state. Consult
             // the host first; fall back to the local store only when the host
             // cannot answer (standalone REPL, or a host that has not wired the
@@ -1520,6 +1548,17 @@ impl HostCallbacks for StateStoreCallbacks {
             if let Some(value) = (request.domain != "task" || request.key == "task")
                 .then(|| store.read_domain(&request.domain))
                 .flatten()
+            {
+                return Ok(StateReadResponse { value });
+            }
+            // Pre-scope installs kept every domain in the workspace store; a
+            // session that has not written the domain yet still sees that
+            // value (the next write moves it into the session store). Cron is
+            // already the workspace store above.
+            if request.domain != "cron"
+                && let Some(value) = (request.domain != "task" || request.key == "task")
+                    .then(|| legacy_store.read_domain(&request.domain))
+                    .flatten()
             {
                 return Ok(StateReadResponse { value });
             }
@@ -1553,9 +1592,15 @@ impl HostCallbacks for StateStoreCallbacks {
         &self,
         request: StateWriteRequest,
     ) -> BoxFuture<'static, Result<StateWriteResponse, String>> {
-        let store = self.store.clone();
+        let session_store = self.store.clone();
+        let cron_store = self.cron_store.clone();
         let inner = self.inner.clone();
         Box::pin(async move {
+            let store = if request.domain == "cron" {
+                cron_store
+            } else {
+                session_store
+            };
             // Plan and goal domains are host-owned: route to host inner first,
             // falling back to local store when the host does not implement it.
             if request.domain == "plan" || request.domain == "goal" {
@@ -1625,12 +1670,18 @@ impl HostCallbacks for StateStoreCallbacks {
         })
     }
 
+    fn checkpoint_state(&self) -> BoxFuture<'static, Result<(), String>> {
+        let store = self.store.clone();
+        Box::pin(async move { store.checkpoint() })
+    }
+
     fn list_tools(&self) -> BoxFuture<'static, Result<ListToolsResponse, String>> {
         self.inner.list_tools()
     }
 
     fn goal(&self) -> BoxFuture<'static, Result<Option<GoalContext>, String>> {
         let store = self.store.clone();
+        let legacy_store = self.cron_store.clone();
         let inner = self.inner.clone();
         Box::pin(async move {
             // The host owns the live goal on host-proxied transports; when it
@@ -1639,7 +1690,7 @@ impl HostCallbacks for StateStoreCallbacks {
             if let Ok(Some(goal)) = inner.goal().await {
                 return Ok(Some(goal));
             }
-            Ok(store.goal_context())
+            Ok(store.goal_context().or_else(|| legacy_store.goal_context()))
         })
     }
 

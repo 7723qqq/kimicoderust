@@ -654,6 +654,10 @@ impl HostCallbacks for ActivityCallbacks {
         self.inner.checkpoint(request)
     }
 
+    fn checkpoint_state(&self) -> crate::rpc::types::BoxFuture<'static, Result<(), String>> {
+        self.inner.checkpoint_state()
+    }
+
     fn list_tools(
         &self,
     ) -> crate::rpc::types::BoxFuture<'static, Result<ListToolsResponse, String>> {

@@ -255,7 +255,8 @@ impl HttpServer {
                 "session {session_id} has no resolvable working directory, so its state domains cannot be located"
             ));
         };
-        let store = crate::storage::StateStore::for_workspace(&workdir)
+        let store = crate::storage::StateStore::for_session(&workdir, session_id)
+            .or_else(|_| crate::storage::StateStore::for_workspace(&workdir))
             .map_err(|e| format!("state store for {}: {e}", workdir.display()))?;
         for turn in 1..=count {
             match store.rollback() {

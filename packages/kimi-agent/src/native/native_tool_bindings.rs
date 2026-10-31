@@ -1124,11 +1124,32 @@ pub fn native_goal_render_objective_updated(
 /// instead of guessing a path — the previous host-side guess read
 /// `<sessionDir>/todo.json`, which nothing ever writes.
 #[napi]
-pub fn native_read_engine_state(workspace_root: String, domain: String) -> Option<String> {
-    crate::storage::state_store::read_workspace_state(
+pub fn native_read_engine_state(
+    workspace_root: String,
+    domain: String,
+    session_id: Option<String>,
+) -> Option<String> {
+    crate::storage::state_store::read_scoped_state(
         std::path::Path::new(&workspace_root),
+        session_id.as_deref(),
         &domain,
     )
+}
+
+/// Pop the newest `count` state checkpoints of one session (native undo).
+///
+/// The engine pushes one snapshot per undo-anchor turn; `undoHistory` cuts the
+/// same number of turns from the transcript, so it asks the owner of the
+/// checkpoint stack to unwind them. Returns how many snapshots were consumed
+/// — an exhausted stack (a session that never checkpointed, or a fork that
+/// only copied history) is normal and simply stops early.
+#[napi]
+pub fn native_rollback_engine_state(workspace_root: String, session_id: String, count: u32) -> u32 {
+    crate::storage::state_store::rollback_scoped_state(
+        std::path::Path::new(&workspace_root),
+        &session_id,
+        count as usize,
+    ) as u32
 }
 
 /// The post-jitter next fire (epoch ms) for one stored cron entry, or `null`

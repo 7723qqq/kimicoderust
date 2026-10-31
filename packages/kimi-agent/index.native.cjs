@@ -813,8 +813,19 @@ function nativeParsePermissionPattern(pattern) {
  * @param {string} domain - one of todo / plan / goal / cron / task / turn
  * @returns {string | null} the stored JSON, or null when the domain is empty
  */
-function nativeReadEngineState(workspaceRoot, domain) {
-  return binding.nativeReadEngineState(workspaceRoot, domain);
+function nativeReadEngineState(workspaceRoot, domain, sessionId) {
+  return binding.nativeReadEngineState(workspaceRoot, domain, sessionId);
+}
+
+/**
+ * Pop the newest `count` state checkpoints of one session (native undo).
+ * @param {string} workspaceRoot - the workspace the state belongs to
+ * @param {string} sessionId - the session whose checkpoints to unwind
+ * @param {number} count - how many turn snapshots to restore
+ * @returns {number} how many snapshots were consumed
+ */
+function nativeRollbackEngineState(workspaceRoot, sessionId, count) {
+  return binding.nativeRollbackEngineState(workspaceRoot, sessionId, count);
 }
 
 /**
@@ -1122,6 +1133,7 @@ module.exports = {
 
   // Engine state store
   nativeReadEngineState,
+  nativeRollbackEngineState,
   nativeCronNextFire,
 
   // Engine locale

@@ -313,7 +313,29 @@ export function nativeParsePermissionPattern(pattern: string): PermissionPattern
  * @param domain - one of `todo` / `plan` / `goal` / `cron` / `task` / `turn`
  * @returns the stored JSON, or `null` when the domain is empty or unknown
  */
-export function nativeReadEngineState(workspaceRoot: string, domain: string): string | null;
+export function nativeReadEngineState(
+  workspaceRoot: string,
+  domain: string,
+  sessionId?: string,
+): string | null;
+
+/**
+ * Pop the newest `count` state checkpoints of one session (native undo).
+ *
+ * The engine pushes one snapshot per undo-anchor turn; undo cuts the same
+ * number of turns from the transcript, so it asks the owner of the checkpoint
+ * stack to unwind them.
+ *
+ * @param workspaceRoot - the workspace the state belongs to
+ * @param sessionId - the session whose checkpoints to unwind
+ * @param count - how many turn snapshots to restore
+ * @returns how many snapshots were consumed
+ */
+export function nativeRollbackEngineState(
+  workspaceRoot: string,
+  sessionId: string,
+  count: number,
+): number;
 
 /**
  * The post-jitter next fire (epoch ms) for one stored cron entry, or `null`

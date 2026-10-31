@@ -4800,6 +4800,11 @@
       "text": "state domain file is unreadable; reporting it as unset",
       "reason": "diagnostic"
     },
+    "packages/kimi-agent/src/storage/state_store.rs:state rollback stopped early": {
+      "file": "packages/kimi-agent/src/storage/state_store.rs",
+      "text": "state rollback stopped early",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/storage/state_store.rs:unknown state domain: {domain}": {
       "file": "packages/kimi-agent/src/storage/state_store.rs",
       "text": "unknown state domain: {domain}",

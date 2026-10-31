@@ -1015,6 +1015,93 @@ async fn a_turn_carries_the_configured_context_window() {
     assert_eq!(report.context_window, Some(12_345));
 }
 
+/// v2 scopes todo / plan / goal / task / turn to the agent, not the
+/// workspace: two sessions of one checkout must not see each other's todo.
+/// A workspace value written before the scope change remains readable as a
+/// legacy fallback for a session that has not written the domain yet.
+#[test]
+fn session_state_is_isolated_between_sessions_of_one_workspace() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = engine
+        .store()
+        .create_workspace(dir.path().to_str().unwrap(), None)
+        .unwrap();
+    for sid in ["sess-a", "sess-b"] {
+        engine
+            .store()
+            .create_session_with_workspace(sid, None, Some(&workspace.id))
+            .unwrap();
+    }
+    crate::storage::StateStore::for_session(dir.path(), "sess-a")
+        .unwrap()
+        .write_domain(
+            "todo",
+            &serde_json::json!([{ "id": "T1", "title": "only-a", "status": "pending" }]),
+        )
+        .unwrap();
+
+    assert_eq!(engine.session_todos("sess-a").len(), 1);
+    assert!(
+        engine.session_todos("sess-b").is_empty(),
+        "another session's todo must not leak through the workspace"
+    );
+
+    // Legacy (pre-scope) workspace data stays readable until the session
+    // writes its own value, then the session store wins.
+    crate::storage::StateStore::for_workspace(dir.path())
+        .unwrap()
+        .write_domain(
+            "todo",
+            &serde_json::json!([{ "id": "T9", "title": "legacy", "status": "pending" }]),
+        )
+        .unwrap();
+    let legacy = engine.session_todos("sess-b");
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(legacy[0].title, "legacy");
+}
+
+/// The callbacks a session's turns run with own that session's state store,
+/// so a turn-head checkpoint snapshots exactly this session — the anchor a
+/// later undo restores (and never another session's stack).
+#[tokio::test]
+async fn a_session_checkpoint_snapshots_only_that_sessions_state() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = engine
+        .store()
+        .create_workspace(dir.path().to_str().unwrap(), None)
+        .unwrap();
+    for sid in ["sess-cp-a", "sess-cp-b"] {
+        engine
+            .store()
+            .create_session_with_workspace(sid, None, Some(&workspace.id))
+            .unwrap();
+    }
+    let session_store = crate::storage::StateStore::for_session(dir.path(), "sess-cp-a").unwrap();
+    session_store
+        .write_domain(
+            "todo",
+            &serde_json::json!([{ "id": "T1", "title": "work", "status": "pending" }]),
+        )
+        .unwrap();
+
+    let callbacks = engine.session_callbacks("sess-cp-a", dir.path());
+    callbacks
+        .checkpoint_state()
+        .await
+        .expect("the session's callbacks checkpoint its state store");
+
+    assert_eq!(session_store.checkpoint_depth(), 1);
+    assert_eq!(
+        crate::storage::StateStore::for_session(dir.path(), "sess-cp-b")
+            .unwrap()
+            .checkpoint_depth(),
+        0,
+        "another session's checkpoint stack must stay untouched"
+    );
+}
+
 /// The todo list the ACP `plan` notification projects: read from the same
 /// workspace state domain the todo tools write, empty for an unknown
 /// session.

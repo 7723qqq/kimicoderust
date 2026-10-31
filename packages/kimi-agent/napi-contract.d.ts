@@ -1255,7 +1255,7 @@ export declare function nativeRead(path: string, lineOffset?: number | undefined
  * instead of guessing a path — the previous host-side guess read
  * `<sessionDir>/todo.json`, which nothing ever writes.
  */
-export declare function nativeReadEngineState(workspaceRoot: string, domain: string): string | null
+export declare function nativeReadEngineState(workspaceRoot: string, domain: string, sessionId?: string | undefined | null): string | null
 
 /** Result of a prediction. */
 export interface NativeReadPrediction {
@@ -1277,6 +1277,17 @@ export interface NativeReadPrediction {
  * @returns Split index (number of messages to keep in the tail).
  */
 export declare function nativeReduceCompactOnOverflow(messages: Array<CompactionMessageMeta>, config: CompactionConfigMeta): number
+
+/**
+ * Pop the newest `count` state checkpoints of one session (native undo).
+ *
+ * The engine pushes one snapshot per undo-anchor turn; `undoHistory` cuts the
+ * same number of turns from the transcript, so it asks the owner of the
+ * checkpoint stack to unwind them. Returns how many snapshots were consumed
+ * — an exhausted stack (a session that never checkpointed, or a fork that
+ * only copied history) is normal and simply stops early.
+ */
+export declare function nativeRollbackEngineState(workspaceRoot: string, sessionId: string, count: number): number
 
 /**
  * Sanitize a string for use as part of an MCP tool name.

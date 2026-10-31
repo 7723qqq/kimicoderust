@@ -1902,3 +1902,115 @@ async fn usage_is_folded_per_model_and_reported_by_status() {
     assert_eq!(status.usage.total.output, 5);
     assert_eq!(status.usage.current_turn.map(|turn| turn.output), Some(5));
 }
+
+/// v2 undo anchors: a user turn snapshots durable state, a continuation
+/// (goal follow-up / cron fire / task wake) does not. The host's undo can
+/// only cut user turns, so a continuation checkpoint would shift the stack
+/// against the history and restore the wrong state.
+#[tokio::test]
+async fn user_turns_checkpoint_state_and_continuations_do_not() {
+    struct CountingCallbacks {
+        inner: Arc<dyn HostCallbacks>,
+        checkpoints: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl HostCallbacks for CountingCallbacks {
+        fn llm_chat(
+            &self,
+            request: LlmChatRequest,
+        ) -> futures_util::future::BoxFuture<'static, Result<LlmChatResponse, String>> {
+            self.inner.llm_chat(request)
+        }
+
+        fn execute_tool(
+            &self,
+            request: ToolExecuteRequest,
+        ) -> futures_util::future::BoxFuture<'static, Result<ToolExecuteResponse, String>> {
+            self.inner.execute_tool(request)
+        }
+
+        fn check_permission(
+            &self,
+            request: PermissionCheckRequest,
+        ) -> futures_util::future::BoxFuture<'static, Result<PermissionDecision, String>> {
+            self.inner.check_permission(request)
+        }
+
+        fn checkpoint_state(&self) -> futures_util::future::BoxFuture<'static, Result<(), String>> {
+            self.checkpoints
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    let server = Arc::new(RpcServer::new());
+    let checkpoints = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(CountingCallbacks {
+        inner: rpc_callbacks(server),
+        checkpoints: checkpoints.clone(),
+    });
+    let session = make_session(
+        Arc::new(ScriptedLlm::simple(vec![
+            text_response("one"),
+            text_response("two"),
+        ])),
+        callbacks,
+    )
+    .await;
+
+    let mut user = session
+        .enqueue_turn(TurnRequest::user(msg("user", "hello"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(user.outcome().await.unwrap(), TurnOutcome::Ran(_)));
+    assert_eq!(
+        checkpoints.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a user turn is an undo anchor"
+    );
+
+    let mut continuation = session
+        .enqueue_turn(TurnRequest {
+            prompt: msg("user", "keep going"),
+            input: serde_json::json!([]),
+            origin: serde_json::json!({ "kind": "system_trigger", "name": "goal_continuation" }),
+            admission: Admission::NewTurn,
+        })
+        .unwrap();
+    assert!(matches!(
+        continuation.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    assert_eq!(
+        checkpoints.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a continuation is not an undo anchor, so it must not push a checkpoint"
+    );
+}
+
+/// The undo-anchor rule mirrors the host's `isUndoAnchorPrompt`
+/// (`sdk-client/helpers.ts`): plain user prompts and user-slash skill /
+/// plugin commands anchor, everything else — including the user prompt a
+/// steer folds into a running turn — does not.
+#[test]
+fn undo_anchor_origins_match_the_host_predicate() {
+    for anchor in [
+        serde_json::json!({ "kind": "user" }),
+        serde_json::json!({ "kind": "skill_activation", "trigger": "user-slash" }),
+        serde_json::json!({ "kind": "plugin_command", "trigger": "user-slash" }),
+        serde_json::json!({}),
+    ] {
+        assert!(origin_is_undo_anchor(&anchor), "should anchor: {anchor}");
+    }
+    for non_anchor in [
+        serde_json::json!({ "kind": "user", "inTurn": true }),
+        serde_json::json!({ "kind": "system_trigger", "name": "goal_continuation" }),
+        serde_json::json!({ "kind": "cron_fire" }),
+        serde_json::json!({ "kind": "skill_activation", "trigger": "model" }),
+        serde_json::json!({ "kind": "plugin_command", "trigger": "model" }),
+    ] {
+        assert!(
+            !origin_is_undo_anchor(&non_anchor),
+            "must not anchor: {non_anchor}"
+        );
+    }
+}

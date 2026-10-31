@@ -1942,6 +1942,26 @@ fn turn_failure_payload(message: &str) -> serde_json::Value {
     error_payload(turn_failure_code(message), message.to_string())
 }
 
+/// Whether a turn's origin is one an undo may cut back to (v2 undo anchor).
+///
+/// Mirrors the host's `isUndoAnchorPrompt` (`sdk-client/helpers.ts`): a plain
+/// user prompt or a user-slash skill activation / plugin command, and never
+/// an in-turn prompt. Only these turns push a durable-state checkpoint, so
+/// the engine's stack stays one-to-one with the turns the host's
+/// `computeUndoCut` removes.
+pub(crate) fn origin_is_undo_anchor(origin: &serde_json::Value) -> bool {
+    if origin.get("inTurn").and_then(|v| v.as_bool()) == Some(true) {
+        return false;
+    }
+    match origin.get("kind").and_then(|v| v.as_str()) {
+        None | Some("user") => true,
+        Some("skill_activation") | Some("plugin_command") => {
+            origin.get("trigger").and_then(|v| v.as_str()) == Some("user-slash")
+        }
+        Some(_) => false,
+    }
+}
+
 async fn run_session_turn(
     ctx: &Arc<SessionContext>,
     turn_id: u64,
@@ -1952,6 +1972,15 @@ async fn run_session_turn(
 ) -> Result<TurnOutcome, String> {
     if let Some(hook) = &ctx.on_before_turn {
         hook();
+    }
+    // The undo anchor for this turn: snapshot todo/plan/goal before the model
+    // can change them, so undo can restore the state the turn started from.
+    // Continuations (goal follow-up, cron fire, task wake) are not anchors —
+    // the host's undo never cuts there.
+    if origin_is_undo_anchor(&origin)
+        && let Err(error) = ctx.callbacks.checkpoint_state().await
+    {
+        tracing::warn!(%error, "state checkpoint failed; undo cannot restore this turn's state");
     }
     let tool_defs = (ctx.tool_defs)().await;
     // Read-and-clear the previous turn's abort outcome for the interruption
@@ -2093,6 +2122,10 @@ impl HostCallbacks for SteerQueueCallbacks {
         request: StateWriteRequest,
     ) -> futures_util::future::BoxFuture<'static, Result<StateWriteResponse, String>> {
         self.inner.state_write(request)
+    }
+
+    fn checkpoint_state(&self) -> futures_util::future::BoxFuture<'static, Result<(), String>> {
+        self.inner.checkpoint_state()
     }
 
     fn drain_steers(

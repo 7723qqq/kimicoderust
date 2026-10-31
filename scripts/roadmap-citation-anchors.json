@@ -177,10 +177,10 @@
       "note": "§12 — the pwsh → powershell → Git Bash → cmd chain"
     },
     {
-      "cited": "packages/kimi-agent/napi-contract.d.ts:1576",
+      "cited": "packages/kimi-agent/napi-contract.d.ts:1587",
       "origin": "worktree",
       "path": "packages/kimi-agent/napi-contract.d.ts",
-      "line": 1576,
+      "line": 1587,
       "context": "to stop」（`",
       "expect": "pump task is signalled to stop",
       "note": "§10.42 — the contract wording 'signalled' the dispose note cites"

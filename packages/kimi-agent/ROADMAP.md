@@ -8203,7 +8203,7 @@ EngineSessionHandle.dispose()          session-handle.ts:486-488   → Promise<v
   → Session::shutdown(&self)           session/mod.rs:530-536       → store(true) + notify_one()
 ```
 
-契约文档自己写的是「the pump task is **signalled** to stop」（`packages/kimi-agent/napi-contract.d.ts:1576`），
+契约文档自己写的是「the pump task is **signalled** to stop」（`packages/kimi-agent/napi-contract.d.ts:1587`），
 而 `shutdown` 的文档写明释放发生在「pump **在下一轮循环顶部、in-flight turn 结束后**」。
 **所以 `await handle.dispose()` 之后调用 `rmSync` 是在赌一个没人承诺的时序。**
 
@@ -8277,7 +8277,7 @@ D1 是契约问题，会让每个"close 之后删数据目录"的宿主动作都
 | 结论 | 位置／命令 |
 |---|---|
 | dispose 只发信号 | `packages/kimi-agent/session-handle.ts:486-488,729-731`；`src/napi_bindings.rs:3178-3193`；`src/session/mod.rs:530-536` |
-| 契约措辞是 signalled | `packages/kimi-agent/napi-contract.d.ts:1576` |
+| 契约措辞是 signalled | `packages/kimi-agent/napi-contract.d.ts:1587` |
 | 无"停全部任务"原语 | `git grep -n 'stop_all_on_exit\|stop_all_tasks\|terminate_all'` → 零命中 |
 | `stop` 只被单测调用 | `src/storage/task_runner.rs:2080,2094,2147,2157,2222,2306,2328,2364,2391,2402` |
 | runner 是进程级 | `src/storage/task_runner.rs:1007-1008` |

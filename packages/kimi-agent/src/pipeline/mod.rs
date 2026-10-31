@@ -341,7 +341,24 @@ pub async fn build_engine_pipeline(
                         Option<Arc<crate::storage::TaskRunner>>,
                     ) = match crate::storage::StateStore::for_workspace(std::path::Path::new(root))
                     {
-                        Ok(store) => {
+                        Ok(workspace_store) => {
+                            let workspace_store = Arc::new(workspace_store);
+                            // v2 scopes todo/plan/goal/task/turn to the agent;
+                            // only cron is workspace-level. A session store
+                            // that cannot be created degrades to the workspace
+                            // store, exactly like the pre-scope layout.
+                            let session_store = spec
+                                .session_id
+                                .as_deref()
+                                .and_then(|session_id| {
+                                    crate::storage::StateStore::for_session(
+                                        std::path::Path::new(root),
+                                        session_id,
+                                    )
+                                    .ok()
+                                })
+                                .map(Arc::new)
+                                .unwrap_or_else(|| workspace_store.clone());
                             let runner = crate::storage::TaskRunner::for_workspace(
                                 std::path::Path::new(root),
                             )
@@ -364,7 +381,8 @@ pub async fn build_engine_pipeline(
                             (
                                 Arc::new(crate::callbacks::StateStoreCallbacks {
                                     inner: base_callbacks.clone(),
-                                    store: Arc::new(store),
+                                    store: session_store,
+                                    cron_store: workspace_store,
                                 }),
                                 runner,
                             )

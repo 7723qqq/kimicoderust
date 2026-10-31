@@ -35,6 +35,28 @@ pub fn engine_state_dir(workspace_root: &Path) -> std::io::Result<PathBuf> {
     Ok(home.join(ENGINE_STATE_ROOT).join(workspace_key(&canonical)))
 }
 
+/// Per-session state root:
+/// `~/.kimi-code/engine-state/<workspace-key>/sessions/<session-key>/`.
+///
+/// v2 scopes todo / plan / goal / task / turn state to the agent, not the
+/// workspace; the host session id is the stable key this engine has for that
+/// scope.
+pub fn engine_session_dir(workspace_root: &Path, session_id: &str) -> std::io::Result<PathBuf> {
+    Ok(engine_state_dir(workspace_root)?
+        .join("sessions")
+        .join(session_key(session_id)))
+}
+
+/// 16-hex FNV-1a digest of the session id (host ids are arbitrary strings).
+pub fn session_key(session_id: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in session_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 /// 16-hex FNV-1a digest of the workspace path.
 fn workspace_key(canonical: &Path) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;

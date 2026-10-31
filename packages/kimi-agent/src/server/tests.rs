@@ -6170,8 +6170,10 @@ async fn undo_restores_state_domains_from_the_checkpoint_stack() {
         )
         .unwrap();
 
-    // Turn 1 pushes the anchor, then mutates the domain.
-    let state = crate::storage::StateStore::for_workspace(temp.path()).unwrap();
+    // Turn 1 pushes the anchor, then mutates the domain. Undo state is
+    // session-scoped now (v2 agent scope), so the checkpoints live in the
+    // session store.
+    let state = crate::storage::StateStore::for_session(temp.path(), sid).unwrap();
     state
         .write_domain("todo", &json!([{ "id": "T1" }]))
         .unwrap();

@@ -166,6 +166,18 @@ impl StateStore {
         Self::for_dir(super::paths::engine_state_dir(workspace_root)?.join("state"))
     }
 
+    /// Create (or open) the state store for one session inside a workspace:
+    /// `~/.kimi-code/engine-state/<workspace-key>/sessions/<session-key>/state/`.
+    ///
+    /// v2 scopes the agent domains to the agent (`todo` / `plan` / `goal` /
+    /// `task` / `turn`); one workspace-level store shared them across every
+    /// session of the checkout. `cron` stays workspace-level — a schedule is
+    /// created for the workspace and fires regardless of which session made it
+    /// — so callers route that domain to [`Self::for_workspace`].
+    pub fn for_session(workspace_root: &Path, session_id: &str) -> std::io::Result<Self> {
+        Self::for_dir(super::paths::engine_session_dir(workspace_root, session_id)?.join("state"))
+    }
+
     /// Snapshot every domain (v2 undo-anchor checkpoint). The snapshot is
     /// persisted to a numbered file under `checkpoints/`, so undo survives
     /// a restart. A file that exists but fails to read/parse is an error,
@@ -1078,6 +1090,59 @@ fn next_checkpoint_seq(dir: &Path) -> Result<u64, String> {
 /// so a caller outside this crate cannot locate the file itself. The napi
 /// export and the host both go through here rather than re-deriving the path —
 /// the host used to guess `<sessionDir>/todo.json`, which nothing ever writes.
+/// Read a domain with the v2 scope rule: `cron` is workspace-level, every
+/// other engine domain is session-level. A missing session store falls back to
+/// the workspace store, which is also how a pre-scope install keeps its data
+/// readable after this change.
+pub fn read_scoped_state(
+    workspace_root: &Path,
+    session_id: Option<&str>,
+    domain: &str,
+) -> Option<String> {
+    let workspace = || {
+        let store = StateStore::for_workspace(workspace_root).ok()?;
+        store.read_domain(domain)
+    };
+    let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+        return serde_json::to_string(&workspace()?).ok();
+    };
+    if domain == "cron" {
+        return serde_json::to_string(&workspace()?).ok();
+    }
+    let session = StateStore::for_session(workspace_root, session_id)
+        .ok()
+        .and_then(|store| store.read_domain(domain));
+    serde_json::to_string(&session.or_else(workspace)?).ok()
+}
+
+/// Pop the newest `count` session-state checkpoints (native undo).
+///
+/// Undo restores the state of the turns it cuts, so the caller pops one
+/// snapshot per removed turn. The stack is LIFO; an exhausted stack stops the
+/// loop quietly — a session that never checkpointed (or one whose history was
+/// rebuilt by a fork) is normal, not a failure. Returns how many snapshots
+/// were consumed.
+pub fn rollback_scoped_state(workspace_root: &Path, session_id: &str, count: usize) -> usize {
+    if count == 0 || session_id.is_empty() {
+        return 0;
+    }
+    let Ok(store) = StateStore::for_session(workspace_root, session_id) else {
+        return 0;
+    };
+    let mut rolled_back = 0;
+    for _ in 0..count {
+        match store.rollback() {
+            Ok(true) => rolled_back += 1,
+            Ok(false) => break,
+            Err(error) => {
+                tracing::warn!(%error, "state rollback stopped early");
+                break;
+            }
+        }
+    }
+    rolled_back
+}
+
 pub fn read_workspace_state(workspace_root: &Path, domain: &str) -> Option<String> {
     let store = StateStore::for_workspace(workspace_root).ok()?;
     let value = store.read_domain(domain)?;
@@ -2030,5 +2095,32 @@ mod tests {
         // Undo using inverse patch
         let (reverted, _) = store.patch_domain("plan", &inverse).unwrap();
         assert_eq!(reverted["active"], true);
+    }
+
+    /// Native undo unwinds one snapshot per removed turn and never touches
+    /// another session's stack.
+    #[test]
+    fn rollback_scoped_state_unwinds_only_the_given_sessions_stack() {
+        let workspace = TempDir::new().unwrap();
+        let store = StateStore::for_session(workspace.path(), "session-a").unwrap();
+        let first = json!([{ "id": "T1", "title": "first" }]);
+        store.write_domain("todo", &first).unwrap();
+        store.checkpoint().unwrap();
+        let second = json!([{ "id": "T2", "title": "second" }]);
+        store.write_domain("todo", &second).unwrap();
+        store.checkpoint().unwrap();
+        store
+            .write_domain("todo", &json!([{ "id": "T3", "title": "third" }]))
+            .unwrap();
+
+        // One undone turn restores the second snapshot, not the first.
+        assert_eq!(rollback_scoped_state(workspace.path(), "session-a", 1), 1);
+        assert_eq!(store.read_domain("todo"), Some(second.clone()));
+        assert_eq!(rollback_scoped_state(workspace.path(), "session-a", 1), 1);
+        assert_eq!(store.read_domain("todo"), Some(first));
+        // The stack is exhausted now: an over-deep undo stops quietly.
+        assert_eq!(rollback_scoped_state(workspace.path(), "session-a", 5), 0);
+        // Another session of the same workspace has its own stack.
+        assert_eq!(rollback_scoped_state(workspace.path(), "session-b", 1), 0);
     }
 }

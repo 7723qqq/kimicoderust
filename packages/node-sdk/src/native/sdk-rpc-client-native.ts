@@ -1589,6 +1589,13 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     }
     try {
       await meta.handle.setHistory(history.slice(0, cut.cutIndex));
+      // Engine state follows the transcript: the engine pushes one checkpoint
+      // at each undo-anchor turn's head, so unwinding the same number of
+      // snapshots restores todo/plan/goal to the state the earliest cut turn
+      // started from. An exhausted stack (a fork copied history only) is
+      // normal and stops early without failing the undo.
+      const { nativeRollbackEngineState } = await import('@moonshot-ai/kimi-agent/native');
+      nativeRollbackEngineState(meta.workDir, meta.id, cut.removedCount);
     } finally {
       await meta.handle.releaseQuiescence();
     }
@@ -2066,7 +2073,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     // writes, so this always answered `[]` and `/undo` could not restore the
     // panel it had just cleared.
     const { nativeReadEngineState } = await import('@moonshot-ai/kimi-agent/native');
-    const raw = nativeReadEngineState(meta.workDir, 'todo');
+    const raw = nativeReadEngineState(meta.workDir, 'todo', meta.id);
     if (raw === null) return [];
     let parsed: unknown;
     try {
@@ -2509,7 +2516,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     // layout of the workspace state directory.
     const { nativeCronNextFire, nativeReadEngineState } =
       await import('@moonshot-ai/kimi-agent/native');
-    const raw = nativeReadEngineState(meta.workDir, 'cron');
+    const raw = nativeReadEngineState(meta.workDir, 'cron', meta.id);
     if (raw === null) return { tasks: [] };
     let parsed: unknown;
     try {
