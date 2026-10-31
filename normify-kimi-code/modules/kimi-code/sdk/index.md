@@ -10,8 +10,8 @@ description:
   en: >
       The boundary between host and engine: typed RPC client, protocol definitions and transport abstractions.
       
-revision: 18c71cdd8583b337dd80efc94225c9033f341f42
-updated_at: "2026-10-03T16:26:56.353Z"
+revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
+updated_at: "2026-10-31T15:13:40.700Z"
 fingerprint: 1559777ca63746a5cb4b58ef373fa157a5ca567bf521c281a5187608dddd702b
 source:
   - path: "packages/node-sdk/src/index.ts"

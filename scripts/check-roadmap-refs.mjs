@@ -544,9 +544,22 @@ export function findMissingTests(text, { fnNames, testNames }) {
 }
 
 function corpus() {
+  // `--untracked` is load-bearing: a module split moves tests into files that
+  // are not committed yet, and a plain `git grep` silently reports every test
+  // they hold as missing. Untracked-but-ignored build output stays out of the
+  // corpus because git grep still honours .gitignore.
   let rustCorpus = '';
   try {
-    rustCorpus = git('grep', '-h', '-E', '(#\\[(tokio::)?test\\]|fn )', '--', 'packages/kimi-agent/src', 'packages/kimi-agent/tests');
+    rustCorpus = git(
+      'grep',
+      '--untracked',
+      '-h',
+      '-E',
+      '(#\\[(tokio::)?test\\]|fn )',
+      '--',
+      'packages/kimi-agent/src',
+      'packages/kimi-agent/tests',
+    );
   } catch {
     rustCorpus = '';
   }
@@ -555,7 +568,16 @@ function corpus() {
 
   const testNames = new Set();
   try {
-    const ts = git('grep', '-h', '-E', '(it|test|describe)\\s*\\(', '--', 'packages/kimi-agent', 'packages/node-sdk');
+    const ts = git(
+      'grep',
+      '--untracked',
+      '-h',
+      '-E',
+      '(it|test|describe)\\s*\\(',
+      '--',
+      'packages/kimi-agent',
+      'packages/node-sdk',
+    );
     for (const m of ts.matchAll(/(?:it|test)\s*\(\s*['"`]([^'"`]+)['"`]/g)) testNames.add(m[1]);
   } catch {
     /* no TS tests matched */

@@ -10,8 +10,8 @@ description:
   en: >
       Embedded retrieval store: SQLite with a text index (worker-accelerated).
       
-revision: 18c71cdd8583b337dd80efc94225c9033f341f42
-updated_at: "2026-10-03T16:26:56.349Z"
+revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
+updated_at: "2026-10-31T15:13:40.697Z"
 fingerprint: 84afb46fe5d98a081edb58c26148bd6ccb78b341c03c13cc90a0356d67c8e859
 source:
   - path: "packages/minidb/src/index.ts"

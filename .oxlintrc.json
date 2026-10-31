@@ -246,6 +246,11 @@
     // bundle and its source is covered by
     // packages/normify/test/plugin-bundle.test.ts instead.
     "plugins/official/normify/bin/",
+    // Local reference checkouts (upstream sources consulted by hand, not
+    // tracked): linting them is both pointless and fatal — oxlint panics with a
+    // stack overflow on the Bun source tree, which took `bun run lint` down
+    // with no diagnostics.
+    "bun源码参考/",
     "参考目录/"
   ]
 }

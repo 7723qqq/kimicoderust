@@ -6,6 +6,7 @@
  * VS Code host APIs are the only stubbed boundary.
  * Run: cd apps/vscode && bunx vitest run --config vitest.config.ts test/workspace-paths.test.ts
  */
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +23,21 @@ import { FileManager } from '../src/managers/file.manager';
 import { SessionRuntime } from '../src/runtime/session-runtime';
 import { areSameFsPath, isFsPathInsideOrEqual } from '../src/utils/fs-path';
 import { relativeWorkspacePath } from '../src/utils/workspace-path';
+
+/** Windows without Developer Mode denies `symlink` with EPERM. */
+function canCreateSymlink(): boolean {
+  const dir = mkdtempSync(join(tmpdir(), 'kimi-vscode-symlink-probe-'));
+  try {
+    writeFileSync(join(dir, 'target'), '');
+    symlinkSync(join(dir, 'target'), join(dir, 'link'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const symlinkSupported = canCreateSymlink();
 
 const vscodeHost = vi.hoisted(() => {
   function normalizeUriPath(value: string): string {
@@ -236,7 +252,9 @@ describe('Webview workspace paths (selected-directory containment)', () => {
     expect(vscodeHost.findFiles).not.toHaveBeenCalled();
   });
 
-  it('refuses to open a symlink whose target lies outside the selected working directory', async () => {
+  it.skipIf(!symlinkSupported)(
+    'refuses to open a symlink whose target lies outside the selected working directory',
+    async () => {
     const workDir = join(root, 'project');
     const outside = join(root, 'outside.txt');
     await mkdir(workDir);
@@ -250,7 +268,9 @@ describe('Webview workspace paths (selected-directory containment)', () => {
     expect(vscodeHost.executeCommand).not.toHaveBeenCalled();
   });
 
-  it('omits an outside symlink when an SDK Write event requests baseline capture', async () => {
+  it.skipIf(!symlinkSupported)(
+    'omits an outside symlink when an SDK Write event requests baseline capture',
+    async () => {
     const workDir = join(root, 'project');
     const outsideRoot = await mkdtemp(join(tmpdir(), 'kimi-vscode-baseline-outside-'));
     extraRoots.push(outsideRoot);
@@ -395,7 +415,9 @@ describe('Webview workspace paths (selected-directory containment)', () => {
     expect(mention).toBeNull();
   });
 
-  it('rejects a selected working directory whose symlink target leaves the workspace', async () => {
+  it.skipIf(!symlinkSupported)(
+    'rejects a selected working directory whose symlink target leaves the workspace',
+    async () => {
     const outside = await mkdtemp(join(tmpdir(), 'kimi-vscode-outside-'));
     extraRoots.push(outside);
     const linkedWorkDir = join(root, 'linked-project');

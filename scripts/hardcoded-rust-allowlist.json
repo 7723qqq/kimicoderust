@@ -11,66 +11,6 @@
       "text": "Unknown client error",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:Compact the conversation context": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "Compact the conversation context",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:Show available ACP commands": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "Show available ACP commands",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:case `{key}` diverges from v2": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "case `{key}` diverges from v2",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:golden `{key}` is not a string": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "golden `{key}` is not a string",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:golden file is valid JSON": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "golden file is valid JSON",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:golden has no case `{key}`": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "golden has no case `{key}`",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:kind() agrees with the wire tag": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "kind() agrees with the wire tag",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:the namespacing separator must survive": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "the namespacing separator must survive",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:tool kind for {name}": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "tool kind for {name}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:v2's union has 12 variants, plus this guard": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "v2's union has 12 variants, plus this guard",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:variant tag for {kind}": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "variant tag for {kind}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/acp/events_map_golden.rs:{kind} round-trips losslessly": {
-      "file": "packages/kimi-agent/src/acp/events_map_golden.rs",
-      "text": "{kind} round-trips losslessly",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/acp/permission.rs:Command killed by timeout ({timeout_s}s)": {
       "file": "packages/kimi-agent/src/acp/permission.rs",
       "text": "Command killed by timeout ({timeout_s}s)",
@@ -724,6 +664,16 @@
     "packages/kimi-agent/src/injection/swarm_mode.rs:## Swarm Mode Ended": {
       "file": "packages/kimi-agent/src/injection/swarm_mode.rs",
       "text": "## Swarm Mode Ended",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/injection/todo_reminder.rs:Current todo list:": {
+      "file": "packages/kimi-agent/src/injection/todo_reminder.rs",
+      "text": "Current todo list:",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/injection/todo_reminder.rs:The TodoList tool has not been updated recently.": {
+      "file": "packages/kimi-agent/src/injection/todo_reminder.rs",
+      "text": "The TodoList tool has not been updated recently.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/knowledge/mod.rs:DB lock: {e}": {
@@ -2908,6 +2858,86 @@
       "text": "Parse error",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/builder.rs:Failed to persist wire event to sqlite store": {
+      "file": "packages/kimi-agent/src/server/builder.rs",
+      "text": "Failed to persist wire event to sqlite store",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/server/builder.rs:no engine configured for this server": {
+      "file": "packages/kimi-agent/src/server/builder.rs",
+      "text": "no engine configured for this server",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/builder.rs:persisting cron entries failed": {
+      "file": "packages/kimi-agent/src/server/builder.rs",
+      "text": "persisting cron entries failed",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/server/builder.rs:prompt content is empty": {
+      "file": "packages/kimi-agent/src/server/builder.rs",
+      "text": "prompt content is empty",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/builder.rs:server usage telemetry": {
+      "file": "packages/kimi-agent/src/server/builder.rs",
+      "text": "server usage telemetry",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:catalog entry id {target_id} cannot be used as a provider id": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "catalog entry id {target_id} cannot be used as a provider id",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:catalog entry {catalog_id} cannot be imported: {reason}": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "catalog entry {catalog_id} cannot be imported: {reason}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:catalog entry {catalog_id} does not exist": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "catalog entry {catalog_id} does not exist",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:catalog entry {catalog_id} has no importable models": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "catalog entry {catalog_id} has no importable models",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:catalog entry {catalog_id} requires a base_url": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "catalog entry {catalog_id} requires a base_url",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:catalog_id is required for :import_catalog": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "catalog_id is required for :import_catalog",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:custom registry at {url} cannot be imported: {error}": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "custom registry at {url} cannot be imported: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:custom registry at {url} has no importable providers": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "custom registry at {url} has no importable providers",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:provider {target_id} is managed by OAuth login; use POST /oauth/logout instead": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "provider {target_id} is managed by OAuth login; use POST /oauth/logout instead",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:provider {} is managed by OAuth login; use POST /oauth/logout instead": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "provider {} is managed by OAuth login; use POST /oauth/logout instead",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/catalog_routes.rs:url is required for :import_registry": {
+      "file": "packages/kimi-agent/src/server/catalog_routes.rs",
+      "text": "url is required for :import_registry",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/custom_registry.rs:HTTP {status}": {
       "file": "packages/kimi-agent/src/server/custom_registry.rs",
       "text": "HTTP {status}",
@@ -2983,6 +3013,66 @@
       "text": "workspace not found: {ws_id}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/dispatch.rs:Failed to apply patch: {e}": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "Failed to apply patch: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:Failed to parse inverse patch: {e}": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "Failed to parse inverse patch: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:Failed to revert patch: {e}": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "Failed to revert patch: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:Invalid RFC 6902 patch operations: {e}": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "Invalid RFC 6902 patch operations: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:Invalid patch operations in ops field: {e}": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "Invalid patch operations in ops field: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:Invalid patch payload: expected RFC 6902 array or object": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "Invalid patch payload: expected RFC 6902 array or object",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:Session patch could not be persisted ({}). The stored session does not match the requested patch.": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "Session patch could not be persisted ({}). The stored session does not match the requested patch.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:The patch undo could not be persisted ({}). The stored session does not match the returned state.": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "The patch undo could not be persisted ({}). The stored session does not match the returned state.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:agent config: {e}": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "agent config: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:session title: {e}": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "session title: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/dispatch.rs:state store for {}: {e}": {
+      "file": "packages/kimi-agent/src/server/dispatch.rs",
+      "text": "state store for {}: {e}",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/engine.rs:Interaction channel closed": {
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "Interaction channel closed",
@@ -2993,6 +3083,11 @@
       "text": "could not persist the turn outcome",
       "reason": "diagnostic",
       "manual": true
+    },
+    "packages/kimi-agent/src/server/engine.rs:could not persist turn usage": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "could not persist turn usage",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/server/engine.rs:host does not support oauth token fetch": {
       "file": "packages/kimi-agent/src/server/engine.rs",
@@ -3314,131 +3409,6 @@
       "text": "Built-in {id} capability of the native engine.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/server/mod.rs:CAPABILITY_UNSUPPORTED: this standalone engine ships every capability built in; there is no installer to run": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "CAPABILITY_UNSUPPORTED: this standalone engine ships every capability built in; there is no installer to run",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Cancelled by client": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Cancelled by client",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Cannot undo across compaction boundary": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Cannot undo across compaction boundary",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Compaction error: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Compaction error: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Context compaction boundary": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Context compaction boundary",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Database error: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Database error: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to apply patch: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to apply patch: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to build the export archive: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to build the export archive: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to parse inverse patch: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to parse inverse patch: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to persist the agent config: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to persist the agent config: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to persist the session title: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to persist the session title: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to persist wire event to sqlite store": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to persist wire event to sqlite store",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to read file: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to read file: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to revert patch: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to revert patch: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Failed to start btw: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Failed to start btw: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'cron' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'cron' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'data' must be a string": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'data' must be a string",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'key' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'key' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'name' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'name' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'prompt' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'prompt' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'query' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'query' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'refresh_token' is required: remote control authenticates to the relay with the Kimi login credential": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'refresh_token' is required: remote control authenticates to the relay with the Kimi login credential",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'root' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'root' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'value' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'value' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Field 'workspace' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Field 'workspace' is required",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/server/mod.rs:Field '{label}' must be a non-negative integer": {
       "file": "packages/kimi-agent/src/server/mod.rs",
       "text": "Field '{label}' must be a non-negative integer",
@@ -3454,219 +3424,9 @@
       "text": "Field '{label}' must be greater than 0",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/server/mod.rs:Invalid JSON payload": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid JSON payload",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid JSON payload for approval resolution: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid JSON payload for approval resolution: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid JSON payload for question resolution: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid JSON payload for question resolution: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid RFC 6902 patch operations: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid RFC 6902 patch operations: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid UTF-8 payload": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid UTF-8 payload",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid [experimental] section: {error}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid [experimental] section: {error}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid [hooks] section: {error}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid [hooks] section: {error}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid [loop_control] section: {error}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid [loop_control] section: {error}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid [services] section: {error}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid [services] section: {error}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid cron expression": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid cron expression",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid extra_skill_dirs: {error}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid extra_skill_dirs: {error}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid patch operations in ops field: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid patch operations in ops field: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Invalid patch payload: expected RFC 6902 array or object": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Invalid patch payload: expected RFC 6902 array or object",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Kimi agent native server is shutting down": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Kimi agent native server is shutting down",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:MCP OAuth is not configured": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "MCP OAuth is not configured",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Missing 'enabled' field": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Missing 'enabled' field",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Missing 'prompt' field in payload": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Missing 'prompt' field in payload",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Missing ids": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Missing ids",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Missing plugin id": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Missing plugin id",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Projection error: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Projection error: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Query parameter 'key' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Query parameter 'key' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Query parameter 'path' is required": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Query parameter 'path' is required",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Query parameter 'turn_id' is required and must be an integer": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Query parameter 'turn_id' is required and must be an integer",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:SESSION_TITLE_UNAVAILABLE: the session has no user prompts to derive a title from": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "SESSION_TITLE_UNAVAILABLE: the session has no user prompts to derive a title from",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Session patch could not be persisted ({}). The stored session does not match the requested patch.": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Session patch could not be persisted ({}). The stored session does not match the requested patch.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:The patch undo could not be persisted ({}). The stored session does not match the returned state.": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "The patch undo could not be persisted ({}). The stored session does not match the returned state.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Undo error: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Undo error: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Unknown MCP auth action: {other}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Unknown MCP auth action: {other}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Unsupported filesystem action: {action}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Unsupported filesystem action: {action}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:Unsupported plugin action": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "Unsupported plugin action",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/server/mod.rs:[Attached file: {file_name} ({resolved_type}, {} bytes)]": {
       "file": "packages/kimi-agent/src/server/mod.rs",
       "text": "[Attached file: {file_name} ({resolved_type}, {} bytes)]",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:agent config: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "agent config: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:bytes {start}-{end}/{total}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "bytes {start}-{end}/{total}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:cannot read {}: {error}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "cannot read {}: {error}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:catalog entry id {target_id} cannot be used as a provider id": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "catalog entry id {target_id} cannot be used as a provider id",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:catalog entry {catalog_id} cannot be imported: {reason}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "catalog entry {catalog_id} cannot be imported: {reason}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:catalog entry {catalog_id} does not exist": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "catalog entry {catalog_id} does not exist",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:catalog entry {catalog_id} has no importable models": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "catalog entry {catalog_id} has no importable models",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:catalog entry {catalog_id} requires a base_url": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "catalog entry {catalog_id} requires a base_url",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:catalog_id is required for :import_catalog": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "catalog_id is required for :import_catalog",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:compaction refused: a turn is in flight": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "compaction refused: a turn is in flight",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:custom registry at {url} cannot be imported: {error}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "custom registry at {url} cannot be imported: {error}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:custom registry at {url} has no importable providers": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "custom registry at {url} has no importable providers",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/server/mod.rs:failed to open the workspace state store for plan mode: {e}": {
@@ -3684,104 +3444,9 @@
       "text": "failed to persist the agent config: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/server/mod.rs:forkSession turnIndex must be a non-negative safe integer": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "forkSession turnIndex must be a non-negative safe integer",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:ids exceeds 5000": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "ids exceeds 5000",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:no active turn to steer": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "no active turn to steer",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:no engine configured for this server": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "no engine configured for this server",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:no model is bound to this session; compact requires a model to write the summary": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "no model is bound to this session; compact requires a model to write the summary",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:no prompt with the requested id": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "no prompt with the requested id",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:no queued prompt with the requested id": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "no queued prompt with the requested id",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:persisting cron entries failed": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "persisting cron entries failed",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/server/mod.rs:prompt content is empty": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "prompt content is empty",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:provider {target_id} is managed by OAuth login; use POST /oauth/logout instead": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "provider {target_id} is managed by OAuth login; use POST /oauth/logout instead",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:provider {} is managed by OAuth login; use POST /oauth/logout instead": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "provider {} is managed by OAuth login; use POST /oauth/logout instead",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/server/mod.rs:remote-control is not running: the runtime exists (device registration, relay channel, heartbeat) but no session started it — POST /api/v1/remote-control with enabled=true and the Kimi login refresh_token to start one": {
       "file": "packages/kimi-agent/src/server/mod.rs",
       "text": "remote-control is not running: the runtime exists (device registration, relay channel, heartbeat) but no session started it — POST /api/v1/remote-control with enabled=true and the Kimi login refresh_token to start one",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:server usage telemetry": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "server usage telemetry",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/server/mod.rs:session is already running a turn": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "session is already running a turn",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:session not found": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "session not found",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:session title: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "session title: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:state store for {}: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "state store for {}: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:turn {turn_number}: {e}": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "turn {turn_number}: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/mod.rs:url is required for :import_registry": {
-      "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "url is required for :import_registry",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/server/oauth.rs:Device authorization failed (HTTP {status}): {}": {
@@ -4217,6 +3882,406 @@
     "packages/kimi-agent/src/server/remote_control.rs:socket error: {e}": {
       "file": "packages/kimi-agent/src/server/remote_control.rs",
       "text": "socket error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_interaction.rs:Invalid JSON payload for approval resolution: {e}": {
+      "file": "packages/kimi-agent/src/server/route_interaction.rs",
+      "text": "Invalid JSON payload for approval resolution: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_interaction.rs:Invalid JSON payload for question resolution: {e}": {
+      "file": "packages/kimi-agent/src/server/route_interaction.rs",
+      "text": "Invalid JSON payload for question resolution: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_models_providers.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_models_providers.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_plugins_oauth.rs:Database error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_plugins_oauth.rs",
+      "text": "Database error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_plugins_oauth.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_plugins_oauth.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_plugins_oauth.rs:Invalid UTF-8 payload": {
+      "file": "packages/kimi-agent/src/server/route_plugins_oauth.rs",
+      "text": "Invalid UTF-8 payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_plugins_oauth.rs:Missing plugin id": {
+      "file": "packages/kimi-agent/src/server/route_plugins_oauth.rs",
+      "text": "Missing plugin id",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_plugins_oauth.rs:Unsupported plugin action": {
+      "file": "packages/kimi-agent/src/server/route_plugins_oauth.rs",
+      "text": "Unsupported plugin action",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts.rs:Database error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_prompts.rs",
+      "text": "Database error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_prompts.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts.rs:Missing 'prompt' field in payload": {
+      "file": "packages/kimi-agent/src/server/route_prompts.rs",
+      "text": "Missing 'prompt' field in payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts.rs:no active turn to steer": {
+      "file": "packages/kimi-agent/src/server/route_prompts.rs",
+      "text": "no active turn to steer",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts.rs:no engine configured for this server": {
+      "file": "packages/kimi-agent/src/server/route_prompts.rs",
+      "text": "no engine configured for this server",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts.rs:no prompt with the requested id": {
+      "file": "packages/kimi-agent/src/server/route_prompts.rs",
+      "text": "no prompt with the requested id",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts.rs:no queued prompt with the requested id": {
+      "file": "packages/kimi-agent/src/server/route_prompts.rs",
+      "text": "no queued prompt with the requested id",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts.rs:session is already running a turn": {
+      "file": "packages/kimi-agent/src/server/route_prompts.rs",
+      "text": "session is already running a turn",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts_files.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_prompts_files.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts_files.rs:bytes {start}-{end}/{total}": {
+      "file": "packages/kimi-agent/src/server/route_prompts_files.rs",
+      "text": "bytes {start}-{end}/{total}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_prompts_files.rs:cannot read {}: {error}": {
+      "file": "packages/kimi-agent/src/server/route_prompts_files.rs",
+      "text": "cannot read {}: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_io.rs:Database error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_io.rs",
+      "text": "Database error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_io.rs:Failed to build the export archive: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_io.rs",
+      "text": "Failed to build the export archive: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_io.rs:Failed to persist the agent config: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_io.rs",
+      "text": "Failed to persist the agent config: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_io.rs:Failed to persist the session title: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_io.rs",
+      "text": "Failed to persist the session title: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_io.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_session_io.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_io.rs:Unsupported filesystem action: {action}": {
+      "file": "packages/kimi-agent/src/server/route_session_io.rs",
+      "text": "Unsupported filesystem action: {action}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Cannot undo across compaction boundary": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Cannot undo across compaction boundary",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Compaction error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Compaction error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Context compaction boundary": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Context compaction boundary",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Database error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Database error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Failed to read file: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Failed to read file: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Field 'data' must be a string": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Field 'data' must be a string",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Projection error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Projection error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Query parameter 'path' is required": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Query parameter 'path' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Query parameter 'turn_id' is required and must be an integer": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Query parameter 'turn_id' is required and must be an integer",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_session_ops.rs:Undo error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_session_ops.rs",
+      "text": "Undo error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:Database error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "Database error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:Failed to start btw: {e}": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "Failed to start btw: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:SESSION_TITLE_UNAVAILABLE: the session has no user prompts to derive a title from": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "SESSION_TITLE_UNAVAILABLE: the session has no user prompts to derive a title from",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:compaction refused: a turn is in flight": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "compaction refused: a turn is in flight",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:forkSession turnIndex must be a non-negative safe integer": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "forkSession turnIndex must be a non-negative safe integer",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:no engine configured for this server": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "no engine configured for this server",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:no model is bound to this session; compact requires a model to write the summary": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "no model is bound to this session; compact requires a model to write the summary",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:turn {turn_number}: {e}": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "turn {turn_number}: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions.rs:undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.": {
+      "file": "packages/kimi-agent/src/server/route_sessions.rs",
+      "text": "undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions_v2.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_sessions_v2.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions_v2.rs:Missing ids": {
+      "file": "packages/kimi-agent/src/server/route_sessions_v2.rs",
+      "text": "Missing ids",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions_v2.rs:ids exceeds 5000": {
+      "file": "packages/kimi-agent/src/server/route_sessions_v2.rs",
+      "text": "ids exceeds 5000",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_sessions_v2.rs:session not found": {
+      "file": "packages/kimi-agent/src/server/route_sessions_v2.rs",
+      "text": "session not found",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_subagents_gui.rs:Database error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_subagents_gui.rs",
+      "text": "Database error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_subagents_gui.rs:Field 'key' is required": {
+      "file": "packages/kimi-agent/src/server/route_subagents_gui.rs",
+      "text": "Field 'key' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_subagents_gui.rs:Field 'value' is required": {
+      "file": "packages/kimi-agent/src/server/route_subagents_gui.rs",
+      "text": "Field 'value' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_subagents_gui.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_subagents_gui.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_subagents_gui.rs:Query parameter 'key' is required": {
+      "file": "packages/kimi-agent/src/server/route_subagents_gui.rs",
+      "text": "Query parameter 'key' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_system.rs:CAPABILITY_UNSUPPORTED: this standalone engine ships every capability built in; there is no installer to run": {
+      "file": "packages/kimi-agent/src/server/route_system.rs",
+      "text": "CAPABILITY_UNSUPPORTED: this standalone engine ships every capability built in; there is no installer to run",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_system.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_system.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_system.rs:Invalid [experimental] section: {error}": {
+      "file": "packages/kimi-agent/src/server/route_system.rs",
+      "text": "Invalid [experimental] section: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_system.rs:Invalid [hooks] section: {error}": {
+      "file": "packages/kimi-agent/src/server/route_system.rs",
+      "text": "Invalid [hooks] section: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_system.rs:Invalid [loop_control] section: {error}": {
+      "file": "packages/kimi-agent/src/server/route_system.rs",
+      "text": "Invalid [loop_control] section: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_system.rs:Invalid [services] section: {error}": {
+      "file": "packages/kimi-agent/src/server/route_system.rs",
+      "text": "Invalid [services] section: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_system.rs:Invalid extra_skill_dirs: {error}": {
+      "file": "packages/kimi-agent/src/server/route_system.rs",
+      "text": "Invalid extra_skill_dirs: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_system.rs:Kimi agent native server is shutting down": {
+      "file": "packages/kimi-agent/src/server/route_system.rs",
+      "text": "Kimi agent native server is shutting down",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:Field 'refresh_token' is required: remote control authenticates to the relay with the Kimi login credential": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "Field 'refresh_token' is required: remote control authenticates to the relay with the Kimi login credential",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:MCP OAuth is not configured": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "MCP OAuth is not configured",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:Missing 'enabled' field": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "Missing 'enabled' field",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:Unknown MCP auth action: {other}": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "Unknown MCP auth action: {other}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces.rs:Cancelled by client": {
+      "file": "packages/kimi-agent/src/server/route_workspaces.rs",
+      "text": "Cancelled by client",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces.rs:Database error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_workspaces.rs",
+      "text": "Database error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces.rs:Field 'cron' is required": {
+      "file": "packages/kimi-agent/src/server/route_workspaces.rs",
+      "text": "Field 'cron' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces.rs:Field 'name' is required": {
+      "file": "packages/kimi-agent/src/server/route_workspaces.rs",
+      "text": "Field 'name' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces.rs:Field 'prompt' is required": {
+      "file": "packages/kimi-agent/src/server/route_workspaces.rs",
+      "text": "Field 'prompt' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces.rs:Field 'root' is required": {
+      "file": "packages/kimi-agent/src/server/route_workspaces.rs",
+      "text": "Field 'root' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_workspaces.rs",
+      "text": "Invalid JSON payload",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces.rs:Invalid cron expression": {
+      "file": "packages/kimi-agent/src/server/route_workspaces.rs",
+      "text": "Invalid cron expression",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces_fs.rs:Database error: {e}": {
+      "file": "packages/kimi-agent/src/server/route_workspaces_fs.rs",
+      "text": "Database error: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces_fs.rs:Field 'query' is required": {
+      "file": "packages/kimi-agent/src/server/route_workspaces_fs.rs",
+      "text": "Field 'query' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces_fs.rs:Field 'workspace' is required": {
+      "file": "packages/kimi-agent/src/server/route_workspaces_fs.rs",
+      "text": "Field 'workspace' is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_workspaces_fs.rs:Invalid JSON payload": {
+      "file": "packages/kimi-agent/src/server/route_workspaces_fs.rs",
+      "text": "Invalid JSON payload",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/server/router.rs:Bearer realm=\"{DEFAULT_AUTH_REALM}\"": {
@@ -5451,6 +5516,31 @@
       "text": "User dismissed the question without answering.",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/bash_exec.rs:Background command execution finished": {
+      "file": "packages/kimi-agent/src/tools/bash_exec.rs",
+      "text": "Background command execution finished",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/bash_exec.rs:Background task started (task_id: {task_id}). command: {command} description: {desc} Use TaskList or TaskOutput to inspect progress.": {
+      "file": "packages/kimi-agent/src/tools/bash_exec.rs",
+      "text": "Background task started (task_id: {task_id}). command: {command} description: {desc} Use TaskList or TaskOutput to inspect progress.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/bash_exec.rs:Command executed successfully (no output).": {
+      "file": "packages/kimi-agent/src/tools/bash_exec.rs",
+      "text": "Command executed successfully (no output).",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/bash_exec.rs:[output truncated]": {
+      "file": "packages/kimi-agent/src/tools/bash_exec.rs",
+      "text": "[output truncated]",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/bash_exec.rs:{text} Command failed with exit code: {exit_code}.": {
+      "file": "packages/kimi-agent/src/tools/bash_exec.rs",
+      "text": "{text} Command failed with exit code: {exit_code}.",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:**Commands available:**": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "**Commands available:**",
@@ -6346,6 +6436,11 @@
       "text": "{header} No cron jobs scheduled.",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/dispatch.rs:plan mode entered": {
+      "file": "packages/kimi-agent/src/tools/dispatch.rs",
+      "text": "plan mode entered",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/tools/exit_plan_mode.rs:Approve the plan (plan file: {path}) and exit plan mode?": {
       "file": "packages/kimi-agent/src/tools/exit_plan_mode.rs",
       "text": "Approve the plan (plan file: {path}) and exit plan mode?",
@@ -6525,6 +6620,86 @@
       "file": "packages/kimi-agent/src/tools/fetch_url.rs",
       "text": "moonshot fetch skipped (missing API key), falling back to direct fetch",
       "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:\"{path}\" is {} text but too large to transcode ({} bytes > {}). Convert it to UTF-8 first (e.g. with `iconv`).": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "\"{path}\" is {} text but too large to transcode ({} bytes > {}). Convert it to UTF-8 first (e.g. with `iconv`).",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:Detected file encoding: {}; content transcoded to UTF-8 for display. Edit and Write expect UTF-8 — convert the file's encoding first (e.g. `iconv` via Bash).": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Detected file encoding: {}; content transcoded to UTF-8 for display. Edit and Write expect UTF-8 — convert the file's encoding first (e.g. `iconv` via Bash).",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:End of file reached.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "End of file reached.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:Lines [{list}] were truncated to {READ_MAX_LINE_LENGTH} characters; use Bash (e.g. cut or sed) to read the elided content of those lines.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Lines [{list}] were truncated to {READ_MAX_LINE_LENGTH} characters; use Bash (e.g. cut or sed) to read the elided content of those lines.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:Max {READ_MAX_LINES} lines reached.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Max {READ_MAX_LINES} lines reached.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:Max {READ_MAX_OUTPUT_BYTES} bytes reached.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Max {READ_MAX_OUTPUT_BYTES} bytes reached.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:Max {max_chars} characters reached.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Max {max_chars} characters reached.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:Mixed or lone carriage-return line endings are shown as \\\\r. Use exact \\\\r\\ or \\\\r escapes in Edit.old_string for those lines.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Mixed or lone carriage-return line endings are shown as \\\\r. Use exact \\\\r\\ or \\\\r escapes in Edit.old_string for those lines.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:No lines read from file.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "No lines read from file.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:To resume reading, call Read with line_offset={next_line}, column_offset={next_col}.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "To resume reading, call Read with line_offset={next_line}, column_offset={next_col}.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:Total lines in file: {total_lines}.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Total lines in file: {total_lines}.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:file-history record failed": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "file-history record failed",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:mode is validated against the schema enum": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "mode is validated against the schema enum",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:{rendered_count} {} read from file starting from line {offset}, column {column_offset}.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "{rendered_count} {} read from file starting from line {offset}, column {column_offset}.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:{rendered_count} {} read from file starting from line {offset}.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "{rendered_count} {} read from file starting from line {offset}.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:{} {bytes_written} bytes to {path}": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "{} {bytes_written} bytes to {path}",
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/get_goal.rs:Failed to render goal state.": {
       "file": "packages/kimi-agent/src/tools/get_goal.rs",
@@ -6961,149 +7136,9 @@
       "text": "{path} (version: {version}) {content}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/mod.rs:\"{path}\" is {} text but too large to transcode ({} bytes > {}). Convert it to UTF-8 first (e.g. with `iconv`).": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "\"{path}\" is {} text but too large to transcode ({} bytes > {}). Convert it to UTF-8 first (e.g. with `iconv`).",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Background command execution finished": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Background command execution finished",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Background task started (task_id: {task_id}). command: {command} description: {desc} Use TaskList or TaskOutput to inspect progress.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Background task started (task_id: {task_id}). command: {command} description: {desc} Use TaskList or TaskOutput to inspect progress.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Command executed successfully (no output).": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Command executed successfully (no output).",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Continue with the same search arguments and offset={}.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Continue with the same search arguments and offset={}.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Detected file encoding: {}; content transcoded to UTF-8 for display. Edit and Write expect UTF-8 — convert the file's encoding first (e.g. `iconv` via Bash).": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Detected file encoding: {}; content transcoded to UTF-8 for display. Edit and Write expect UTF-8 — convert the file's encoding first (e.g. `iconv` via Bash).",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:End of file reached.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "End of file reached.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Lines [{list}] were truncated to {READ_MAX_LINE_LENGTH} characters; use Bash (e.g. cut or sed) to read the elided content of those lines.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Lines [{list}] were truncated to {READ_MAX_LINE_LENGTH} characters; use Bash (e.g. cut or sed) to read the elided content of those lines.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Max {READ_MAX_LINES} lines reached.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Max {READ_MAX_LINES} lines reached.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Max {READ_MAX_OUTPUT_BYTES} bytes reached.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Max {READ_MAX_OUTPUT_BYTES} bytes reached.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Max {max_chars} characters reached.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Max {max_chars} characters reached.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Mixed or lone carriage-return line endings are shown as \\\\r. Use exact \\\\r\\ or \\\\r escapes in Edit.old_string for those lines.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Mixed or lone carriage-return line endings are shown as \\\\r. Use exact \\\\r\\ or \\\\r escapes in Edit.old_string for those lines.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:No lines read from file.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "No lines read from file.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Results truncated to {head_limit} lines (total: {total}). Use offset={next_offset} to see more.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Results truncated to {head_limit} lines (total: {total}). Use offset={next_offset} to see more.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:To remove the match-count limit, omit offset and use head_limit=0.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "To remove the match-count limit, omit offset and use head_limit=0.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:To resume reading, call Read with line_offset={next_line}, column_offset={next_col}.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "To resume reading, call Read with line_offset={next_line}, column_offset={next_col}.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:Total lines in file: {total_lines}.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "Total lines in file: {total_lines}.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:[output truncated]": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "[output truncated]",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:[truncated — refine the pattern or scope to see more]": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "[truncated — refine the pattern or scope to see more]",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:file-history record failed": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "file-history record failed",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:invalid glob pattern: {pattern}": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "invalid glob pattern: {pattern}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:mode is validated against the schema enum": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "mode is validated against the schema enum",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/tools/mod.rs:native tool task failed: {message}": {
       "file": "packages/kimi-agent/src/tools/mod.rs",
       "text": "native tool task failed: {message}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:plan mode entered": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "plan mode entered",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:total non-sensitive": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "total non-sensitive",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:{rendered_count} {} read from file starting from line {offset}, column {column_offset}.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "{rendered_count} {} read from file starting from line {offset}, column {column_offset}.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:{rendered_count} {} read from file starting from line {offset}.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "{rendered_count} {} read from file starting from line {offset}.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:{text} Command failed with exit code: {exit_code}.": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "{text} Command failed with exit code: {exit_code}.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/mod.rs:{} {bytes_written} bytes to {path}": {
-      "file": "packages/kimi-agent/src/tools/mod.rs",
-      "text": "{} {bytes_written} bytes to {path}",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/mode_mutex.rs:AgentSwarm is not available while tower mode is active — swarm and tower modes are mutually exclusive, and the tower fleet runs through TowerSpawn, one mission per worker in its own worktree. Open mission(s): {}. Finish them (merge or abandon with TowerMission) before dispatching a swarm.": {
@@ -7330,6 +7365,36 @@
       "file": "packages/kimi-agent/src/tools/sandbox.rs",
       "text": "{error}; using the most restrictive mode instead",
       "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/tools/search.rs:Continue with the same search arguments and offset={}.": {
+      "file": "packages/kimi-agent/src/tools/search.rs",
+      "text": "Continue with the same search arguments and offset={}.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/search.rs:Results truncated to {head_limit} lines (total: {total}). Use offset={next_offset} to see more.": {
+      "file": "packages/kimi-agent/src/tools/search.rs",
+      "text": "Results truncated to {head_limit} lines (total: {total}). Use offset={next_offset} to see more.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/search.rs:To remove the match-count limit, omit offset and use head_limit=0.": {
+      "file": "packages/kimi-agent/src/tools/search.rs",
+      "text": "To remove the match-count limit, omit offset and use head_limit=0.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/search.rs:[truncated — refine the pattern or scope to see more]": {
+      "file": "packages/kimi-agent/src/tools/search.rs",
+      "text": "[truncated — refine the pattern or scope to see more]",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/search.rs:invalid glob pattern: {pattern}": {
+      "file": "packages/kimi-agent/src/tools/search.rs",
+      "text": "invalid glob pattern: {pattern}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/search.rs:total non-sensitive": {
+      "file": "packages/kimi-agent/src/tools/search.rs",
+      "text": "total non-sensitive",
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/select_tools.rs:<tools_added> {} </tools_added>": {
       "file": "packages/kimi-agent/src/tools/select_tools.rs",

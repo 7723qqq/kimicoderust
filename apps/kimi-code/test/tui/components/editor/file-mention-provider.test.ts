@@ -11,6 +11,21 @@ function ctrl(): AbortSignal {
   return new AbortController().signal;
 }
 
+/** Windows without Developer Mode denies `symlink` with EPERM. */
+function canCreateSymlink(): boolean {
+  const dir = mkdtempSync(join(tmpdir(), 'mention-symlink-probe-'));
+  try {
+    writeFileSync(join(dir, 'target'), '');
+    symlinkSync(join(dir, 'target'), join(dir, 'link'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const symlinkSupported = canCreateSymlink();
+
 const NO_FD = null;
 
 function resolveFdPath(): string | null {
@@ -453,7 +468,9 @@ describe('FileMentionProvider', () => {
     expect(result!.items.map((item) => item.value)).toContain('@"my folder/"');
   });
 
-  it('filesystem fallback does not recurse into symlinked directories', async () => {
+  it.skipIf(!symlinkSupported)(
+    'filesystem fallback does not recurse into symlinked directories',
+    async () => {
     writeFileSync(join(workDir, 'target.txt'), 'target');
     symlinkSync('.', join(workDir, 'current'), 'dir');
     const provider = new FileMentionProvider([], workDir, NO_FD);

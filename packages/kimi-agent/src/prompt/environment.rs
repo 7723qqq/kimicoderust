@@ -122,7 +122,19 @@ fn which_binary(name: &str) -> Option<String> {
 /// Detect the JavaScript runtimes installed on PATH (v2 `jsRuntimes`): bun,
 /// node and deno, in that order. Each probe is best-effort and ignores
 /// failures — a runtime that cannot be versioned is simply absent.
+///
+/// The answer is computed once per process. `collect_environment` runs on
+/// every session-handle build (session creation and each `setModel` /
+/// `setThinking` / `setPermission` rebuild), and every probe is a `where` plus
+/// a `<binary> --version` subprocess — ~470 ms per build on Windows, more than
+/// the rest of the prompt costs together. PATH cannot change under a running
+/// process, so the first answer is the answer.
 pub fn detect_js_runtimes() -> Vec<JsRuntimeInfo> {
+    static RUNTIMES: std::sync::OnceLock<Vec<JsRuntimeInfo>> = std::sync::OnceLock::new();
+    RUNTIMES.get_or_init(probe_js_runtimes).clone()
+}
+
+fn probe_js_runtimes() -> Vec<JsRuntimeInfo> {
     ["bun", "node", "deno"]
         .into_iter()
         .filter_map(runtime_on_path)

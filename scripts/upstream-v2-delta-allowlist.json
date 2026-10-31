@@ -2,8 +2,672 @@
   "note": "Verdicts for upstream commits touching packages this fork deleted. Regenerate with `bun scripts/check-upstream-v2-delta.mjs --update`; see scripts/check-upstream-v2-delta.mjs for the gate itself. `tracked` = accepted debt recorded in packages/kimi-agent/ROADMAP.md §6; `not-applicable` = internal refactor with no observable engine behavior to port.",
   "upstreamRef": "upstream/main",
   "recordedMergeBase": "52437299ff78de3d0aff7f38f054e5eb20c512e5",
-  "recordedAt": "2026-10-01",
+  "recordedAt": "2026-10-31",
   "entries": [
+    {
+      "sha": "a2afdbc7d1fa0737d45d5780cc6c2bd38e477b55",
+      "date": "2026-10-30",
+      "subject": "test: adjust compaction budgets for slimmer prompts (#4558)",
+      "verdict": "not-applicable",
+      "note": "仅测试压缩预算调整"
+    },
+    {
+      "sha": "cca9bae3d7a4c0eba95aec76e1b7aef912238973",
+      "date": "2026-10-30",
+      "subject": "chore: sync release 2026-10-30 back to main (#4557)",
+      "verdict": "tracked",
+      "note": "2.4.0 sync 载体：prompt/工具描述成批改写（wait-for.md 等），需按 prompt 政策裁决",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "d37f9ccc256fc594aac4bc513916cd73e68e4199",
+      "date": "2026-10-30",
+      "subject": "refactor(agent-core-v2): decouple tool disclosure from execution (#4538)",
+      "verdict": "not-applicable",
+      "note": "loop/toolSelect/media 内部解耦重构，无新增可观察行为"
+    },
+    {
+      "sha": "1853dae4ff54b36da878a08c86a7088bde0114a8",
+      "date": "2026-10-30",
+      "subject": "feat: support folder-scoped git status (#4527)",
+      "verdict": "tracked",
+      "note": "按目录范围查询 git status（本仓仅 work_dir 全量）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "4b58a0cda232a638a2ae9290990511ae7a95b2fe",
+      "date": "2026-10-30",
+      "subject": "fix(agent-core-v2): keep archived sessions out of session lists before the index flush (#4540)",
+      "verdict": "not-applicable",
+      "note": "归档会话索引竞态；本仓 SQLite 写穿，无索引镜像"
+    },
+    {
+      "sha": "3ed0e68f3bbfb3d9ef5bfad0e7b0de2c497e3d00",
+      "date": "2026-10-30",
+      "subject": "feat: merge skills across workspace directories (#4520)",
+      "verdict": "tracked",
+      "note": "跨工作区目录合并 skill 根（extra_roots 未进 skill 扫描）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "3a0b86ea06e7983d0c6313b969be7e5c91a5288e",
+      "date": "2026-10-30",
+      "subject": "fix: queue ACP requests until startup completes (#4541)",
+      "verdict": "not-applicable",
+      "note": "ACP 启动完成前排队请求；本仓引擎先于 stdin 构建，无启动窗口"
+    },
+    {
+      "sha": "5f3ab5fac81e050fc2fa10787dd560655f377d16",
+      "date": "2026-10-29",
+      "subject": "feat: remote environments for SSH and Docker execution targets (phase 1: creation-time binding) (#4062)",
+      "verdict": "tracked",
+      "note": "SSH/Docker 远程执行环境 phase1（创建时绑定）；与仍保留的 kaos 冲突，待裁决",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "8a5a4307cbc49da3355ed54240ae4dd6982481c3",
+      "date": "2026-10-29",
+      "subject": "fix(core): refresh tool catalog within the current turn (#4526)",
+      "verdict": "ported",
+      "note": "工具目录同轮内刷新：tool_select 注入每步执行（run_turn.rs:1207-1213）"
+    },
+    {
+      "sha": "da4e2f57a3d37d93e0dec13513e9764beaab746e",
+      "date": "2026-10-29",
+      "subject": "fix(oauth): restore global telemetry endpoint (#4523)",
+      "verdict": "tracked",
+      "note": "global 区 telemetry endpoint 缺失（packages/oauth/src/region.ts:70）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "47a518ed4e1912c0682596f882b1b6c5431b7ccb",
+      "date": "2026-10-29",
+      "subject": "fix(agent-core-v2): remind the agent to update its todo list less often (#4524)",
+      "verdict": "tracked",
+      "note": "待办提醒改按步骤计数并放宽文案；本仓 todo_reminder.rs:28-34 仍按 10 条 assistant 消息",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "7d72ae396586ad82f48ca4335956235d3c38f0d8",
+      "date": "2026-10-29",
+      "subject": "feat(agent-core-v2): make workspace trust configurable (#4517)",
+      "verdict": "tracked",
+      "note": "工作区信任可配置（require_trust）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "be89803bc6db08ff8335c1dc12ade79e3bbed56e",
+      "date": "2026-10-29",
+      "subject": "fix(kap-server): turn the global search index off by default (#4516)",
+      "verdict": "not-applicable",
+      "note": "全局搜索索引默认关闭；本仓无索引/worker，搜索走 LIKE"
+    },
+    {
+      "sha": "67045e5ec536e4aa70e39ab32658bd6ce755b72d",
+      "date": "2026-10-29",
+      "subject": "fix: handle duplicate workspace source folders and fs roots (#4513)",
+      "verdict": "tracked",
+      "note": "重复 source folder / fs roots 去重与错误码",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "1ada329b113f14419d701e54322c946ee65e7bde",
+      "date": "2026-10-29",
+      "subject": "chore: remove kimi-inspect (#4514)",
+      "verdict": "not-applicable",
+      "note": "上游删除 kimi-inspect 应用；本仓保留，非引擎行为"
+    },
+    {
+      "sha": "bfdfde1e20674c184547fd1c9c8bc24396db8079",
+      "date": "2026-10-29",
+      "subject": "fix(kap-server): search all workspace source folders (#4511)",
+      "verdict": "tracked",
+      "note": "fs 搜索覆盖全部 workspace source folders",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "89e07b81df8500b135e40b74b4f5a59748448e33",
+      "date": "2026-10-29",
+      "subject": "fix(agent-core-v2): show task notifications in live transcript (#4465)",
+      "verdict": "ported",
+      "note": "任务通知进实时 transcript（TaskUpsert，project.rs:468-492）"
+    },
+    {
+      "sha": "0c63065fbd7386132b3b8c914de37adfff4c8daf",
+      "date": "2026-10-28",
+      "subject": "chore: sync release/2026-10-28 (2.4.0) back to main (#4497)",
+      "verdict": "tracked",
+      "note": "2.4.0 sync 载体：夹带 #4492 抑制 MCP 自动重连状态重复等发布分支行为",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "88c3becefc56d3093009892bae6d7b7eab0d237b",
+      "date": "2026-10-28",
+      "subject": "fix(agent-core-v2): preserve llm reasoning and usage compatibility (#4485)",
+      "verdict": "tracked",
+      "note": "OpenAI 历史思考键应按当前模型探测方言；Responses 普通事件回退顶层 usage（openai.rs:159 只读 config 声明键，openai_responses.rs:483 只在 completed/incomplete 读 usage）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "180b7f81e7b8ec0e5913d639d4df76c3b7f373fe",
+      "date": "2026-10-28",
+      "subject": "fix(agent-core-v2): recover append log writes after disk-full failures (#4486)",
+      "verdict": "not-applicable",
+      "note": "append log 磁盘满恢复；本仓 wire 事件走 SQLite WAL"
+    },
+    {
+      "sha": "b12d13e53cf63ee37bc367793acaf6631312d4c3",
+      "date": "2026-10-28",
+      "subject": "refactor(agent-core-v2): port the agent-core llm core into human/llm (#4352)",
+      "verdict": "not-applicable",
+      "note": "v2 LLM core 重组进 human/llm（搬文件/拆 requester），无新外部行为"
+    },
+    {
+      "sha": "093e8f46c4a44ff22f02fa5b8d7a4df4a7f47737",
+      "date": "2026-10-28",
+      "subject": "feat: multi-root workspace registry and source-folder management (#4336)",
+      "verdict": "tracked",
+      "note": "多根工作区注册表 + source folder 增删/REST（架构级）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "e3efbb9d3b2241412edfe9b704fc33b09a4c2054",
+      "date": "2026-10-28",
+      "subject": "feat(agent-core-v2): limit subagents to the configured model pool (#4418)",
+      "verdict": "tracked",
+      "note": "子代理限定在配置的 model pool 内",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "8535bd79b8d7a42f1c30221a4dc0fa1933e2e340",
+      "date": "2026-10-27",
+      "subject": "refactor(kap-server): merge WebSocket session subscriptions into subscribe_v2 (#4470)",
+      "verdict": "not-applicable",
+      "note": "WS 订阅合并为内部重构；本仓两套订阅行为齐全（ws.rs:645-774）"
+    },
+    {
+      "sha": "68a283894163204e93b072cef20db164015a5cad",
+      "date": "2026-10-27",
+      "subject": "fix(agent-core-v2): keep the prompt cache through auto compaction (#4456)",
+      "verdict": "tracked",
+      "note": "自动压缩保住 prompt cache：仅超 input limit 才预缩、413 锁定降级、压缩请求带 usedContextTokens",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "e2ad1dcf214337ecfb5ca160fa36d5ef73560ab6",
+      "date": "2026-10-27",
+      "subject": "feat: support symlinked directories in file tree (#4457)",
+      "verdict": "tracked",
+      "note": "文件树符号链接：缺 allow_external_symlinks、扩张预算与根前缀检测（metadata() 已跟随链接）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "78b72fe456ac730a1970ded9bb0d28f8b584ab95",
+      "date": "2026-10-27",
+      "subject": "fix(kap-server): apply swarm mode from prompt submissions (#4460)",
+      "verdict": "ported",
+      "note": "prompt 携带的 swarm_mode 生效（server/mod.rs:387-470）"
+    },
+    {
+      "sha": "39d149eb64e2126e7873f00758abc07c20b88c1e",
+      "date": "2026-10-27",
+      "subject": "fix(agent-core-v2): answer questions without edits and clean up test leftovers (#4450)",
+      "verdict": "tracked",
+      "note": "系统提示按请求类型决定交付物、诊断先查因、清理测试产物（prompt/system.md）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "3154ec41f008d22f22379fa08686693470334a70",
+      "date": "2026-10-27",
+      "subject": "fix(agent-core-v2): scope verification to the change and stop repeating passed checks (#4451)",
+      "verdict": "tracked",
+      "note": "验证范围限定本次改动、不重复已过检查（system.md 与压缩摘要前缀）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "461c6e92d53cd4ff473fbe63fd1d238df819ef3f",
+      "date": "2026-10-26",
+      "subject": "feat(kap-server): push approvals and questions as interaction frames (#4428)",
+      "verdict": "ported",
+      "note": "审批/问题经 transcript ops 推送并在重订阅时回填（project.rs:520-585）"
+    },
+    {
+      "sha": "d18a7bcd319dcc166df031b9c7e32113a58a70b5",
+      "date": "2026-10-27",
+      "subject": "chore: sync release/2026-10-26 (2.3.3) back to main (#4453)",
+      "verdict": "tracked",
+      "note": "2.3.3 sync 载体：跨进程会话锁/接管/模型切换确认/effort 提示//compact 排队等发布分支行为",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "4be3f0b741e13677f441c84eee40795ccc1df1db",
+      "date": "2026-10-27",
+      "subject": "fix(agent-core-v2): reconnect MCP servers automatically after transient failures (#4283)",
+      "verdict": "tracked",
+      "note": "MCP 瞬时失败自动重连（退避/状态迁移）；与 AGENTS.md「刻意无重连」政策冲突，待裁决",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "8dabf4a10eaec7302344ba3060b7b3c69a5a76dc",
+      "date": "2026-10-26",
+      "subject": "fix(agent-core-v2): keep media recovery across turns and compaction (#4413)",
+      "verdict": "tracked",
+      "note": "媒体降级/剥离状态应跨轮、跨压缩保留；本仓仅本轮局部变量（run_turn.rs:860-863）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "93137cad204eed4a6a66196e85cafbaf722a1d65",
+      "date": "2026-10-26",
+      "subject": "fix(agent-core-v2): return a stopped subagent's partial output to the parent agent (#4430)",
+      "verdict": "tracked",
+      "note": "TaskStop/前台 Agent 失败时回传子代理已产出的部分输出与 resume 提示",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "2e539f2f68c872d79a747655cb1962d5f0b596bd",
+      "date": "2026-10-26",
+      "subject": "fix(workspace): reclaim instances when last owner releases (#4422)",
+      "verdict": "not-applicable",
+      "note": "workspace 实例在最后 owner 释放时回收；本仓无实例层"
+    },
+    {
+      "sha": "70a661c873bfc30f0f0de954e0d13ad0a0ed3855",
+      "date": "2026-10-26",
+      "subject": "fix(server): allow Shiki WASM in CSP (#4435)",
+      "verdict": "not-applicable",
+      "note": "CSP 放行 Shiki WASM；本仓静态服务不发 CSP"
+    },
+    {
+      "sha": "f47400a4187c8296d3cc879172d97c8f1e8cfe24",
+      "date": "2026-10-26",
+      "subject": "fix(server): allow data and blob media fetches in CSP (#4434)",
+      "verdict": "not-applicable",
+      "note": "CSP 放行 data/blob 媒体；同上"
+    },
+    {
+      "sha": "98c1cfbfbd397d2ebf7b4cf154296ed324e6e7cf",
+      "date": "2026-10-26",
+      "subject": "fix(agent-core-v2): close idle MCP OAuth callback connections (#4431)",
+      "verdict": "not-applicable",
+      "note": "关闭空闲 OAuth 回调连接；本仓只有 device grant（mcp/oauth/device.rs），无回调服务器"
+    },
+    {
+      "sha": "f7d28cd26863d7b1422b24eb1d341a1cac555dc2",
+      "date": "2026-10-26",
+      "subject": "fix(agent-core-v2): drop empty OpenAI tool declaration messages (#4421)",
+      "verdict": "not-applicable",
+      "note": "丢弃 OpenAI 消息级 tools 声明；本仓工具只走顶层 tools 字段（openai.rs:80-95）"
+    },
+    {
+      "sha": "a9dc3a9af466a769a6dc93776c61ed89a0e653df",
+      "date": "2026-10-26",
+      "subject": "fix(agent-core-v2): stop stripping dynamic tool context from compaction requests (#4410)",
+      "verdict": "tracked",
+      "note": "压缩请求不得剥离动态工具上下文；本仓 compaction/mod.rs:750-753 发空 tools",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "eb1205c4023a5ed719bf62f2257c67cbe56a0aba",
+      "date": "2026-10-26",
+      "subject": "fix(agent-core-v2): truncate tool results on code point boundaries (#4365)",
+      "verdict": "ported",
+      "note": "工具结果按码点边界截断（tool_result_truncation.rs:118-122 char_indices）"
+    },
+    {
+      "sha": "1011d8b63fcc150998a4710641563cd0f73369c9",
+      "date": "2026-10-26",
+      "subject": "chore: sync release/2026-10-25 (2.3.2) back to main (#4387)",
+      "verdict": "tracked",
+      "note": "2.3.2 sync 载体：swarm 交还用户、子代理仅显式启动（#4384/#4386）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "7ccac2b45b8a3481c76f771bb99c043b562de2c5",
+      "date": "2026-10-23",
+      "subject": "fix(agent-core-v2): wait for MCP discovery before tool announcements (#4364)",
+      "verdict": "tracked",
+      "note": "工具公告前应等 MCP 首次发现完成；本仓注入先于 list_tools（run_turn.rs:1207/1221）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "273ddb077ae3c5b16555cb083088fda972e965f5",
+      "date": "2026-10-23",
+      "subject": "feat(oauth): infer region for logged-out installs (#4311)",
+      "verdict": "tracked",
+      "note": "未登录安装区域推断；引擎/CLI 已有，缺 VS Code 登录区域",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "f8925ab95e7c9fe78d4ede4dd3af92252d9d246c",
+      "date": "2026-10-23",
+      "subject": "chore: sync release/2026-10-23 (2.3.1) back to main (#4361)",
+      "verdict": "not-applicable",
+      "note": "2.3.1 sync：内容由 d18a7bcd31 与已记录条目覆盖"
+    },
+    {
+      "sha": "0325b755db46f865f2dc0bca0d6c3d95ad817fcb",
+      "date": "2026-10-22",
+      "subject": "feat(agent-core-v2): leave Plan mode to the user and review every plan (#4247)",
+      "verdict": "tracked",
+      "note": "Plan 模式交还用户、每个 plan 都审阅（删 EnterPlanMode，属工具/协议面改动）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "01ef64ea926c3f939da5ecc7361e504f6f519060",
+      "date": "2026-10-23",
+      "subject": "feat(tower): improve concurrency, locking, and per-spawn model selection (#4312)",
+      "verdict": "tracked",
+      "note": "tower 并发/锁/per-spawn 模型选择（并入既有 tower 集群）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "759958afdfeb0f8c7d09cb03cbc2cf85b6255e9e",
+      "date": "2026-10-22",
+      "subject": "fix(agent-core-v2): update import-from-cc-codex for current Claude Code and Codex layouts (#4331)",
+      "verdict": "tracked",
+      "note": "import-from-cc-codex 内置技能未适配新布局",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "79a76ea2da0d4dd6e81501155454e646b909c695",
+      "date": "2026-10-22",
+      "subject": "refactor: remove unused session terminal service (#4333)",
+      "verdict": "not-applicable",
+      "note": "上游删除未用的 session terminal 服务；本仓另有 server/terminal.rs，非引擎行为"
+    },
+    {
+      "sha": "e7f1a99fc52e68d8e8a2d99d59deba38e4272754",
+      "date": "2026-10-22",
+      "subject": "feat: let users take over a session lock left by an exited process (#4328)",
+      "verdict": "not-applicable",
+      "note": "接管已退出进程的会话锁；同上"
+    },
+    {
+      "sha": "0a90e2e8a2672c5c1d7e266b721f2853fe86a5ff",
+      "date": "2026-10-21",
+      "subject": "fix(agent-core-v2): reclaim session locks from zombie processes (#4320)",
+      "verdict": "not-applicable",
+      "note": "回收僵尸进程会话锁；本仓无跨进程锁载体（补 3079 后重新适用）"
+    },
+    {
+      "sha": "366fafbf921bb121d3906aa6b685f1045be4e54d",
+      "date": "2026-10-21",
+      "subject": "feat(kap-server): reclaim idle sessions (#4284)",
+      "verdict": "tracked",
+      "note": "空闲会话回收（超时/环境变量可配）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "256ce61f0c1c6512d84b21e18814df60bc1f530a",
+      "date": "2026-10-21",
+      "subject": "perf(agent-core-v2): speed up large session resume (#4313)",
+      "verdict": "tracked",
+      "note": "大会话恢复性能对等未验证（本仓仅压缩锚点，无基准）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "4bad441fef34a6733f5c065ddea6c1a9c1c28e50",
+      "date": "2026-10-21",
+      "subject": "chore: sync release/2026-10-21 (2.3.0) back to main (#4306)",
+      "verdict": "not-applicable",
+      "note": "2.3.0 sync：版本/changelog + #4295 revert（被 47002256a0/e5e56bc5fe 取代）"
+    },
+    {
+      "sha": "67325c1b25e46b2fc66043bceab059221b719fa9",
+      "date": "2026-10-20",
+      "subject": "fix(transcript): realign rebuilt turn ordinals to wire ids and mark wedged turns (#4280)",
+      "verdict": "tracked",
+      "note": "冷重建 turn ordinal 对齐 wire id + wedged 标记 + 循环看门狗诊断",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "3079e9515f05f097a3f34afdc8ebe2b9b377bf0d",
+      "date": "2026-10-20",
+      "subject": "feat(agent-core-v2): add cross-process session occupancy lock (#4246)",
+      "verdict": "tracked",
+      "note": "跨进程会话占用锁，防两个进程写同一会话",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "ce0834a8f301b89cc4523499a3e074c36851de8f",
+      "date": "2026-10-20",
+      "subject": "feat: share session rating rules across CLI and server (#4272)",
+      "verdict": "tracked",
+      "note": "会话评分规则共享 + 服务端路由（新增产品包）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "5710c5496a213742ca0687f69dd8eeb5bde52dbf",
+      "date": "2026-10-19",
+      "subject": "fix(kap-server): evict session event state on session close and archive (#4281)",
+      "verdict": "tracked",
+      "note": "会话 close/archive 时驱逐广播事件状态；本仓仅空闲+容量驱逐（hub.rs:541）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "e5e56bc5fe93458575c027a9abf0d17747ca4a6d",
+      "date": "2026-10-19",
+      "subject": "feat(server): place the default workspace under the home folder (#4277)",
+      "verdict": "tracked",
+      "note": "默认工作区置于 home 下",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "47002256a05fbeb2c73a7a7a7f80bb61feebbb36",
+      "date": "2026-10-18",
+      "subject": "feat: add a default workspace for chats without a project (#4224)",
+      "verdict": "tracked",
+      "note": "无项目会话的默认工作区",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "18c6d64272952503baccf706bff455bb6a2c488e",
+      "date": "2026-10-16",
+      "subject": "feat: notify the agent of external changes after /reload (#4019)",
+      "verdict": "tracked",
+      "note": "/reload 后通知代理外部变更（changeNotifier 服务与变更快照）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "6e7cc909da9084a424f822dd5a9aae5b98070b73",
+      "date": "2026-10-16",
+      "subject": "feat(agent-core-v2): let dangerous_command_guard=false disable all built-in guard ask policies (#4250)",
+      "verdict": "ported",
+      "note": "dangerous_command_guard=false 现同时关闭 DangerousCommandAsk / SensitiveFileAccessAsk / GitControlPathAccessAsk（permission/mod.rs:648-687），硬阻断不受影响；测试 test_guard_off_disables_sensitive_and_git_path_asks"
+    },
+    {
+      "sha": "c1459a61845056832b85a0a220ee11a2bc5132f8",
+      "date": "2026-10-15",
+      "subject": "fix(server): run agent hooks in the session's working directory (#4242)",
+      "verdict": "tracked",
+      "note": "外部钩子应在会话工作目录运行；本仓用进程 cwd（external_hooks.rs:718）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "85077a419001285e49ede3574924f001935aed62",
+      "date": "2026-10-15",
+      "subject": "fix: align subagent tool descriptions with availability (#4066)",
+      "verdict": "tracked",
+      "note": "子代理描述的 Tools 列表按运行时真实可用性过滤",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "da5918c0c861a1d670f4523a9f9dd968647fe4cb",
+      "date": "2026-10-15",
+      "subject": "fix(agent-core-v2): nudge the agent to keep its todo list current (#4239)",
+      "verdict": "tracked",
+      "note": "待办提醒整套重写（进度/最后一项/下一步提示）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "9f0693becb63a329cbf764325688448e76f40922",
+      "date": "2026-10-15",
+      "subject": "feat(oauth): parse unified /models schema for managed Kimi Code models (#4209)",
+      "verdict": "tracked",
+      "note": "统一 /models schema（limit.context、modalities.input、reasoning、tools.dynamic_load）；宿主 packages/oauth 仍读扁平字段",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "b2603264ec4687cee766cf5d5e6d4976e432961c",
+      "date": "2026-10-15",
+      "subject": "fix(google-genai): map thinking effort off to LOW for Gemini 4 models (#4230)",
+      "verdict": "ported",
+      "note": "Gemini 4 的 effort=off 在请求构建前被拒（thinking_off_rejection + http.rs:312-323），文案同上游 thinking-cannot-disable"
+    },
+    {
+      "sha": "20b59915bb11fc56ec389aa96720f1b7daac0862",
+      "date": "2026-10-15",
+      "subject": "fix(google-genai): use thinking level for Gemini 4 models (#4208)",
+      "verdict": "ported",
+      "note": "Gemini 4 现走 thinkingLevel（google_genai.rs:49-64 takes_thinking_level；测试 gemini_4_uses_thinking_level_and_rejects_off）"
+    },
+    {
+      "sha": "a9e764db61560648e2cb7470ffce4e89c0d7c6c7",
+      "date": "2026-10-15",
+      "subject": "chore: sync release 2.2.0 back to main (#4222)",
+      "verdict": "not-applicable",
+      "note": "2.2.0 sync：内容由 b510fa9aec 等已记录条目覆盖"
+    },
+    {
+      "sha": "d1c3b048fd1efe6dcc3d159916104e9b31679022",
+      "date": "2026-10-14",
+      "subject": "ci: publish core releases from isolated release branches (#4217)",
+      "verdict": "not-applicable",
+      "note": "CI 发布分支与触发脚本"
+    },
+    {
+      "sha": "f28c51c01f025bba9f0d0f58f6309e7517a8cd02",
+      "date": "2026-10-14",
+      "subject": "feat(agent-core-v2): add global default for deferred MCP tool disclosure (#4210)",
+      "verdict": "tracked",
+      "note": "引擎侧已实现（McpConfig.defaultDeferred + configure 的 逐 server > 全局 > false 解析，manager.rs:1005-1008；配置解析与优先级测试已加），但 napi/SDK 路径尚未把 [mcp] 段送进引擎（与全局超时同一缺口），TUI/SDK 会话仍只能靠 per-server deferred",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "0327e8e9a875949fd40141ef79f902d756dfd3db",
+      "date": "2026-10-14",
+      "subject": "feat: support model migration metadata (#4171)",
+      "verdict": "tracked",
+      "note": "模型迁移元数据 + TUI 迁移向导；本仓宿主无任何 migration 字段",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "b510fa9aec85f02849f64121550be2c3fbd4294d",
+      "date": "2026-10-13",
+      "subject": "feat(kap-server): add remote control device deletion (#4192)",
+      "verdict": "tracked",
+      "note": "remote control 设备删除",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "3f0857eb7d612c4890c45dfa6acc8381f1e761c2",
+      "date": "2026-10-13",
+      "subject": "feat(agent-core-v2): register plugin skills under qualified names and relax plugin name validation (#4188)",
+      "verdict": "tracked",
+      "note": "插件技能以 pluginId:skill 注册、放宽插件名校验、插件命令优先",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "e4c99a3bad19b00bd1939b1cf254f427b50061f0",
+      "date": "2026-10-13",
+      "subject": "feat(agent-core-v2): distinguish session-unavailable tools and explain select_tools failures (#4190)",
+      "verdict": "tracked",
+      "note": "select_tools 区分会话失效/策略禁用/未知并解释连续失败",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "c69bd6c5a0dc47b89c1316b85e78557a2346fce1",
+      "date": "2026-10-13",
+      "subject": "feat(kap-server): add remote control device management (#4169)",
+      "verdict": "tracked",
+      "note": "remote control 设备管理（列表）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "afd95f64a5444b649a4cc33504513bf88e4c54ba",
+      "date": "2026-10-13",
+      "subject": "feat(tui): unify skill prompts and steering (#4165)",
+      "verdict": "ported",
+      "note": "技能提示与 steering 已统一（commands/dispatch.ts、message-dispatch.ts）"
+    },
+    {
+      "sha": "fed19d24f00203205b1fa4d23e60afce0609cc00",
+      "date": "2026-10-13",
+      "subject": "feat(agent-core-v2): report fork request prefix parity in the prompt cache probe (#4179)",
+      "verdict": "tracked",
+      "note": "prompt cache 探针上报 fork 前缀一致性遥测（ROADMAP §19 曾建议跳过遥测）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "cbd754049a114ee36d1b27675c82819e4963c692",
+      "date": "2026-10-12",
+      "subject": "chore: remove unused kaos package and MCP kaos executor option (#4184)",
+      "verdict": "not-applicable",
+      "note": "上游删除 kaos 包与 MCP kaos executor；本仓仍依赖，动作不适用（另需裁决）"
+    },
+    {
+      "sha": "c15638b0a1234e5aa97659fbc625d7dc4d60d93f",
+      "date": "2026-10-12",
+      "subject": "fix: cancel in-flight video uploads when media reads are interrupted (#4183)",
+      "verdict": "tracked",
+      "note": "媒体读取被中断时取消在途视频上传；本仓上传 await 不在 cancel select 内",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "0a3a2fbafab473df9e9f6609f825af78d2c1ce6d",
+      "date": "2026-10-12",
+      "subject": "feat: add NotifyUser progress display to desktop and web (#4159)",
+      "verdict": "tracked",
+      "note": "NotifyUser 增加单行 title 并展示进度标题（TUI/桌面/Web 显示层）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "c151d5a3d03ed6e9d05c27a0d3b302538ea6e7b9",
+      "date": "2026-10-12",
+      "subject": "feat(agent-core-v2): add KIMI_CODE_LLM_HEADERS_TIMEOUT_MS for llm headers timeout (#4092)",
+      "verdict": "tracked",
+      "note": "新增 KIMI_CODE_LLM_HEADERS_TIMEOUT_MS（响应头/代理超时）；本仓仅整体与连接超时",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "c9f01f07388abc2cdca40c9c5267f58c65086710",
+      "date": "2026-10-10",
+      "subject": "refactor(tower): coordinate missions with deterministic orchestration (#4074)",
+      "verdict": "tracked",
+      "note": "tower mission 确定性编排重构（并入既有 tower 集群）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "f0bc988bbc7db08d650f37ae0eaa69bcc6e90696",
+      "date": "2026-10-10",
+      "subject": "fix(agent-core-v2): keep fork subagent request prefix identical to parent (#4152)",
+      "verdict": "tracked",
+      "note": "子代理应继承父 agent 的 profile/工具集/模型以对齐请求前缀；本仓未指定类型时落 coder（agent_tool.rs:954-1159）",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "419aced0e97fa04b75f8f71b089e1667f6de6d0a",
+      "date": "2026-10-09",
+      "subject": "fix(agent-core-v2): restore media tools after session resume (#4154)",
+      "verdict": "not-applicable",
+      "note": "v2 需重挂媒体工具注册器；本仓 Read 静态走媒体路径（core_tool_defs.rs:190），无注册器可丢"
+    },
+    {
+      "sha": "7091138f5e66289d04b9b7a5cd77f94af9308be3",
+      "date": "2026-10-09",
+      "subject": "fix(agent-core-v2): allow mid-turn progress notes and calm NotifyUser nudges (#4153)",
+      "verdict": "tracked",
+      "note": "允许中途进度文字、按轮次计静默、软化 NotifyUser 催促",
+      "roadmap": "§6.46"
+    },
+    {
+      "sha": "5b936697670ed15444bcb4720bd91e6ee776a941",
+      "date": "2026-10-08",
+      "subject": "feat(kap-server): add allow_ignored_globs to fs:list for un-ignoring named paths (#4058)",
+      "verdict": "tracked",
+      "note": "fs:list 支持 allow_ignored_globs 等参数（本仓只读 path）",
+      "roadmap": "§6.46"
+    },
     {
       "sha": "21406fb4c805cc8c715e6d1f16ad3fb5f25f4fe3",
       "date": "2026-09-30",

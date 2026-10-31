@@ -50,8 +50,8 @@
  * Exit code: 0 if consistent, 1 otherwise.
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '..');
 const AGENT_SRC = join(ROOT, 'packages', 'kimi-agent', 'src');
@@ -104,6 +104,34 @@ function readStringLiteral(src, open) {
     i += 1;
   }
   return null;
+}
+
+/**
+ * Files whose whole content is a `#[cfg(test)] mod <name>;` module.
+ *
+ * The attribute lives in the parent file, so `testModuleRanges` cannot see it
+ * from the child. Resolve the declaration the way rustc would and skip that
+ * file wholesale: its fixtures deliberately name keys that exist in no locale.
+ */
+function cfgTestModuleFiles(files) {
+  const out = new Set();
+  for (const file of files) {
+    const src = readFileSync(file, 'utf8');
+    for (const m of src.matchAll(
+      /^[ \t]*#\[cfg\(test\)\]\s*mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/gm,
+    )) {
+      const name = m[1];
+      const dir = dirname(file);
+      const parent = basename(file, '.rs');
+      const candidates =
+        parent === 'mod'
+          ? [join(dir, `${name}.rs`), join(dir, name, 'mod.rs')]
+          : [join(dir, parent, `${name}.rs`), join(dir, parent, name, 'mod.rs')];
+      const hit = candidates.find((candidate) => existsSync(candidate));
+      if (hit) out.add(hit);
+    }
+  }
+  return out;
 }
 
 /**
@@ -264,7 +292,11 @@ const used = new Map();
 /** @type {Array<[string, string[], string]>} */
 const parameterized = [];
 
-for (const file of walkRs(AGENT_SRC)) {
+const rsFiles = walkRs(AGENT_SRC);
+const testOnlyFiles = cfgTestModuleFiles(rsFiles);
+
+for (const file of rsFiles) {
+  if (testOnlyFiles.has(file)) continue;
   const src = readFileSync(file, 'utf8');
   const skip = testModuleRanges(src);
   for (const m of src.matchAll(/LocalizedText::(new|with_params)\(\s*"([^"]+)"/g)) {

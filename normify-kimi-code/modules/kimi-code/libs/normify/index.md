@@ -11,8 +11,8 @@ description:
   en: >
       The architecture-diagram system merged from dsh-normify: 31 normify_* tools, zero-tolerance validation, deterministic compilation and single-file HTML rendering, delivered as the built-in default plugin.
       
-revision: 18c71cdd8583b337dd80efc94225c9033f341f42
-updated_at: "2026-10-03T16:26:56.351Z"
+revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
+updated_at: "2026-10-31T15:13:40.699Z"
 fingerprint: 0a26361ca5747e56c03275e946592b8f90ab5cb16029a0597eb32b3e1cae9b9b
 source:
   - path: "packages/normify/src/tools.ts"

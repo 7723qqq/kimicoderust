@@ -10,8 +10,8 @@ description:
   en: >
       Reusable support libraries: TUI framework, i18n, auth, telemetry, session storage and parsers.
       
-revision: 18c71cdd8583b337dd80efc94225c9033f341f42
-updated_at: "2026-10-03T16:26:56.348Z"
+revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
+updated_at: "2026-10-31T15:13:40.696Z"
 fingerprint: 7c67e5bbc52e6495bd1e243889c53d5e9222e4f1eb7e7ad423b07e856daa0841
 source:
   - path: "packages/pi-tui/src/index.ts"

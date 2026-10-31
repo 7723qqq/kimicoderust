@@ -426,6 +426,13 @@ export interface JsRunTurnParams {
   /** Optional JSON-serialized PolicySnapshot for local permission evaluation (P26 批 3). */
   policySnapshotJson?: string
   /**
+   * Optional JSON-serialized `UsageStatus` snapshot (`{ byModel, total,
+   * currentTurn }`) the host persisted for this session. The engine seeds
+   * its buckets with it and owns every later fold; the host never re-derives
+   * them.
+   */
+  initialUsageJson?: string
+  /**
    * Optional JSON-serialized `[secondary_model]` subagent model pool: the
    * default alias, `force`, and one resolved LLM config per pool entry.
    * Absent = subagents inherit the caller's model.
@@ -603,6 +610,12 @@ export interface JsSessionStatus {
   pendingTurnIds: Array<number>
   /** P56 (G-5): execution-path summary of the last completed turn. */
   engine?: JsEngineExecSummary
+  /**
+   * v2 `UsageStatus` as a JSON snapshot (`{ byModel, total, currentTurn }`).
+   * The host persists it opaquely and passes it back as
+   * `initial_usage_json`; it never re-derives the buckets itself.
+   */
+  usageJson?: string
 }
 
 /** A subagent profile from the host's session catalog snapshot (P46). */

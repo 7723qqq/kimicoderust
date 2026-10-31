@@ -4,7 +4,13 @@ import type { Message, StreamedMessagePart, ToolCall } from '#/message';
 import type { ChatProvider, StreamedMessage, ThinkingEffort } from '#/provider';
 import type { Tool } from '#/tool';
 import type { TokenUsage } from '#/usage';
+import { setLocale } from '@moonshot-ai/i18n-runtime';
 import { describe, expect, it, vi } from 'vitest';
+
+// Message assertions below match the English catalog; pin the locale so a zh
+// host (or an env-driven default) cannot rewrite the message under the test.
+setLocale('en');
+
 function createMockStream(
   parts: StreamedMessagePart[],
   opts?: {

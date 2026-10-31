@@ -309,6 +309,19 @@ impl NativeHttpLlm {
         );
         let started_at = std::time::Instant::now();
 
+        // v2 #4230 (`thinking-cannot-disable`): Gemini 4 always reasons, and
+        // `off` has no encoding on that family (its levels are LOW/MEDIUM/HIGH
+        // only). Failing before the request is built keeps the user-facing
+        // reason instead of the provider's generic 400.
+        if is_google
+            && let Some(rejection) = google_genai::thinking_off_rejection(
+                &self.config.model,
+                self.config.reasoning_effort.as_deref(),
+            )
+        {
+            return Err(rejection.into());
+        }
+
         // `llm.step.begin` is deliberately *not* emitted here. A step boundary
         // belongs to the turn loop (`run_turn`), the only layer that knows the
         // turn and the step ordinal — the typed contract

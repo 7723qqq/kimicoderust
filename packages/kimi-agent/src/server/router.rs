@@ -74,6 +74,11 @@ pub struct HttpResponse {
 /// Standard authentication error code used across kap-server and protocol envelope.
 pub const AUTH_ERROR_CODE: u32 = 40101;
 
+/// Internal-only marker on the [`HttpResponse::route_miss`] sentinel. It never
+/// reaches the wire: `handle_request` consumes the sentinel to try the next
+/// route domain, exactly as the one giant match used to fall through.
+const ROUTE_MISS_HEADER: &str = "x-kimi-internal-route-miss";
+
 /// Default WWW-Authenticate realm for Kimi Code authentication challenge.
 pub const DEFAULT_AUTH_REALM: &str = "kimi-code";
 
@@ -141,6 +146,21 @@ impl HttpResponse {
 
     pub fn not_found() -> Self {
         Self::json(404, &serde_json::json!({ "error": "Not Found" }))
+    }
+
+    /// Internal routing sentinel: "this route domain did not claim the request".
+    ///
+    /// `handle_request` tries each domain in the original arm order and moves on
+    /// while the answer is this sentinel. Early returns from an arm bypass the
+    /// envelope negotiation exactly as they did when every arm lived in one
+    /// `match`.
+    pub(crate) fn route_miss() -> Self {
+        Self::not_found().with_header(ROUTE_MISS_HEADER, "1")
+    }
+
+    /// Whether this response is the internal [`Self::route_miss`] sentinel.
+    pub(crate) fn is_route_miss(&self) -> bool {
+        self.header(ROUTE_MISS_HEADER).is_some()
     }
 
     pub fn bad_request(msg: impl Into<String>) -> Self {

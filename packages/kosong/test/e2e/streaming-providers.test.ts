@@ -1,3 +1,4 @@
+import { setLocale } from '@moonshot-ai/i18n-runtime';
 import { describe, expect, it } from 'vitest';
 
 import { generate } from '#/generate';
@@ -7,6 +8,10 @@ import { extractText } from '#/message';
 import type { ChatProvider, StreamedMessage, ThinkingEffort } from '#/provider';
 import type { Tool } from '#/tool';
 import type { TokenUsage } from '#/usage';
+
+// The empty-response assertions match the English catalog: pin the locale so
+// the test is hermetic on a zh host too.
+setLocale('en');
 
 /**
  * Build a StreamedMessage from an array of parts plus metadata.

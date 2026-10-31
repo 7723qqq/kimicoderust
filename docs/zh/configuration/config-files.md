@@ -391,6 +391,7 @@ k3-max = "同一模型的 max Thinking 档位。适合最难的子任务。"
 | --- | --- | --- | --- |
 | `startup_timeout_ms` | `integer` | `30000`（30 秒） | 所有 MCP server 的全局默认连接（启动 + 工具发现）超时（毫秒）；`mcp.json` 的 `startupTimeoutMs` 优先于本节 |
 | `tool_timeout_ms` | `integer` | `60000`（60 秒） | 所有 MCP server 的全局默认单次工具调用超时（毫秒）；`mcp.json` 的 `toolTimeoutMs` 优先于本节 |
+| `default_deferred` | `boolean` | `false` | 按需加载工具的全局默认值：未声明 `deferred` 的 server 采用该值，逐个 server 声明的 `deferred` 优先级更高。仅在 `tool_select` 实验开启且模型声明 `dynamically_loaded_tools` 时生效 |
 
 `startup_timeout_ms` 和 `tool_timeout_ms` 可分别被环境变量 `KIMI_MCP_STARTUP_TIMEOUT_MS` 和 `KIMI_MCP_TOOL_TIMEOUT_MS` 覆盖，优先级高于配置文件。MCP server 的完整配置方式见 [MCP](../customization/mcp.md)。
 
@@ -527,7 +528,7 @@ api_key = "sk-xxx"
 
 `permission` 设置会话启动时自动加载的权限规则，控制 Agent 调用工具时是否需要用户确认。规则用 `[[permission.rules]]` 数组表写出，按顺序匹配，第一条命中即生效。
 
-也可以在 `[permission]` 下设置 `dangerous_command_guard = false` 完全关闭内置危险命令策略（"Always Ask" 和 "Ask When Needed" 模式下不再触发危险命令审批；"Never Ask" 模式本就不启用该策略），默认 `true`。环境变量 `KIMI_CODE_DANGEROUS_COMMAND_GUARD=false` 会覆盖文件设置并恢复策略引入前的行为。此开关只适用于已经在 Agent 之外统一命令限权的环境。
+也可以在 `[permission]` 下设置 `dangerous_command_guard = false` 完全关闭所有内置守卫审批策略：危险命令、访问 `.env` 或 `id_rsa` 等敏感文件、访问 git 控制路径都不再触发审批（"Always Ask" 和 "Ask When Needed" 模式下生效；"Never Ask" 模式本就不启用这些策略），默认 `true`。环境变量 `KIMI_CODE_DANGEROUS_COMMAND_GUARD=false` 会覆盖文件设置。关闭全部内置守卫后，Ask When Needed 模式下只有你自己配置的 `ask` 规则还会触发审批；Always Ask 模式下未被自动放行的工具仍会照常审批。拦截 `Read`/`Write`/`Edit` 触碰敏感文件的硬阻断仍然有效。此开关只适用于已经在 Agent 之外统一命令限权的环境。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |

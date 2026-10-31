@@ -177,9 +177,10 @@ pub struct PolicySnapshot {
     #[serde(default)]
     pub non_interactive: bool,
     /// `[permission] dangerousCommandGuard` (v2
-    /// `isDangerousCommandGuardEnabled`, default true): `false` disables the
-    /// whole DangerousCommandAsk policy, letting the remaining policies
-    /// decide every Bash call.
+    /// `isDangerousCommandGuardEnabled`, default true): `false` disables every
+    /// built-in guard ask policy — DangerousCommandAsk, SensitiveFileAccessAsk
+    /// and GitControlPathAccessAsk (v2 #4250) — letting the remaining policies
+    /// decide. The hard path-access block is a separate layer and stays on.
     #[serde(default = "crate::permission::default_true")]
     pub dangerous_command_guard: bool,
 }
@@ -645,10 +646,13 @@ impl PermissionEngine {
             };
         }
 
-        // 8. SensitiveFileAccessAsk
-        if let Some(path) = file_access
-            .iter()
-            .find(|path| crate::native::file_type::is_sensitive_file(path))
+        // 8. SensitiveFileAccessAsk (v2 `sensitive-file-access-ask.ts`, gated
+        //    by the same `[permission] dangerousCommandGuard` switch as
+        //    DangerousCommandAsk since #4250).
+        if self.snapshot.dangerous_command_guard
+            && let Some(path) = file_access
+                .iter()
+                .find(|path| crate::native::file_type::is_sensitive_file(path))
         {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Ask,
@@ -664,8 +668,11 @@ impl PermissionEngine {
             };
         }
 
-        // 9. GitControlPathAccessAsk
-        if let Some(path) = file_access.iter().find(|path| is_git_control_path(path)) {
+        // 9. GitControlPathAccessAsk (v2 `git-control-path-access-ask.ts`, same
+        //    guard switch).
+        if self.snapshot.dangerous_command_guard
+            && let Some(path) = file_access.iter().find(|path| is_git_control_path(path))
+        {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Ask,
                 policy_name: "GitControlPathAccessAsk".into(),
@@ -1136,6 +1143,41 @@ mod tests {
                 "Access to sensitive file requires approval: {sensitive}"
             ))
         );
+    }
+
+    /// v2 #4250: `[permission] dangerousCommandGuard = false` disables every
+    /// built-in guard ask policy, not just DangerousCommandAsk. The hard
+    /// path-access block is a separate layer and is unaffected.
+    #[test]
+    fn test_guard_off_disables_sensitive_and_git_path_asks() {
+        let sensitive = "/workspace/project/.env";
+        let git_path = "/workspace/project/.git/config";
+
+        let guarded = PermissionEngine::new(PolicySnapshot::default());
+        let verdict = guarded.evaluate("Read", &json!({ "path": sensitive }));
+        assert_eq!(verdict.policy_name, "SensitiveFileAccessAsk");
+        let verdict = guarded.evaluate("Read", &json!({ "path": git_path }));
+        assert_eq!(verdict.policy_name, "GitControlPathAccessAsk");
+
+        let unguarded = PermissionEngine::new(PolicySnapshot {
+            dangerous_command_guard: false,
+            ..Default::default()
+        });
+        for path in [sensitive, git_path] {
+            let verdict = unguarded.evaluate("Read", &json!({ "path": path }));
+            assert_eq!(
+                verdict.decision,
+                VerdictDecision::Allow,
+                "guards off must let the default-approve policy decide {path}"
+            );
+            assert_eq!(verdict.policy_name, "DefaultToolApprove");
+        }
+
+        // The switch skips the guard policy; it is not a blanket allow. A
+        // Bash call still falls through to the mode's own decision.
+        let verdict = unguarded.evaluate("Bash", &json!({ "command": "rm -rf /" }));
+        assert_eq!(verdict.decision, VerdictDecision::Ask);
+        assert_eq!(verdict.policy_name, "FallbackAsk");
     }
 
     #[test]

@@ -10,8 +10,8 @@ description:
   en: >
       The vendored pi-tui terminal UI framework: editor components, render loop and keyboard handling.
       
-revision: 18c71cdd8583b337dd80efc94225c9033f341f42
-updated_at: "2026-10-03T16:26:56.352Z"
+revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
+updated_at: "2026-10-31T15:13:40.700Z"
 fingerprint: f3ce21f3459a0fc5a95a9f3e97506eb541f66f3e3df8e832c04679f49921c382
 source:
   - path: "packages/pi-tui/src/index.ts"

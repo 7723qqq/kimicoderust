@@ -51,8 +51,8 @@
  * deferred one.
  */
 
-import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const CRATE = join(ROOT, 'packages', 'kimi-agent', 'src');
@@ -86,7 +86,7 @@ const SKIP_DIRS = new Set(['locales', 'target']);
  * fixture must reproduce byte for byte. It is test data that happens to live
  * outside a `#[cfg(test)]` module, so the module cut does not reach it.
  */
-const FIXTURE_FILES = new Set(['acp/events_map_golden.rs']);
+const FIXTURE_FILES = new Set(['packages/kimi-agent/src/acp/events_map_golden.rs']);
 
 // ── literal extraction ──────────────────────────────────────────────────────
 
@@ -94,6 +94,29 @@ const FIXTURE_FILES = new Set(['acp/events_map_golden.rs']);
 function testModuleStart(content) {
   const m = content.match(/^[ \t]*#\[cfg\(test\)\]/m);
   return m === null ? -1 : m.index;
+}
+
+/**
+ * Whole files that are the target of an external `#[cfg(test)] mod <name>;`.
+ *
+ * The inline form is cut by `testModuleStart`, but a split-out `tests.rs` has
+ * no attribute inside it: the declaration lives in its parent module. Without
+ * this set every assertion message in those files is reported as product prose
+ * (they are test data, not copy a user ever sees).
+ */
+function externalTestModuleFiles(files) {
+  const set = new Set();
+  const declaration = /^[ \t]*#\[cfg\(test\)\][ \t]*\r?\n[ \t]*mod\s+([A-Za-z0-9_]+)\s*;/gm;
+  for (const file of files) {
+    const raw = readFileSync(file, 'utf-8');
+    for (const m of raw.matchAll(declaration)) {
+      const dir = file.endsWith('mod.rs') ? dirname(file) : file.slice(0, -3);
+      for (const candidate of [join(dir, `${m[1]}.rs`), join(dir, m[1], 'mod.rs')]) {
+        if (existsSync(candidate)) set.add(candidate);
+      }
+    }
+  }
+  return set;
 }
 
 /**
@@ -538,11 +561,15 @@ function main() {
   const list = process.argv.includes('--list');
 
   const files = [...walk(CRATE)];
+  // A split-out test module is test code whose `#[cfg(test)]` sits in the
+  // parent: exclude those files before either pass reads them.
+  const testModules = externalTestModuleFiles(files);
+  const scanned = files.filter((file) => !testModules.has(file));
   // Two passes: a sentinel is often defined in one module and matched in
   // another, so the comparison operands have to be known crate-wide before
   // any file can classify its own literals.
-  const wireTokens = collectComparisonOperands(files);
-  const all = files.flatMap((file) =>
+  const wireTokens = collectComparisonOperands(scanned);
+  const all = scanned.flatMap((file) =>
     scanFile(file, relative(ROOT, file).replaceAll('\\', '/'), wireTokens),
   );
 
@@ -572,7 +599,10 @@ function main() {
     byCategory[cat] = (byCategory[cat] ?? 0) + 1;
   }
 
-  console.log(`scanned ${files.length} .rs files under packages/kimi-agent/src`);
+  console.log(
+    `scanned ${scanned.length} .rs files under packages/kimi-agent/src` +
+      ` (${files.length - scanned.length} external test module(s) skipped)`,
+  );
   console.log(`prose literals: ${all.length} (${all.length - hardcoded.length} on the catalog seam)`);
   console.log('');
   console.log('--- by allowlist category ---');

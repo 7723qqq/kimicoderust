@@ -7,7 +7,7 @@
  * scanning both sides and diffing:
  *
  *   - REST endpoints: `packages/protocol/src/rest/*.ts` header manifests vs the
- *     routes in `packages/kimi-agent/src/server/{mod,router}.rs`.
+ *     routes in `packages/kimi-agent/src/server/{mod,router,dispatch}.rs`.
  *   - WebSocket events: `packages/kimi-agent/ws-event-contract.json`
  *     (`webEvents` the client understands vs `serverEvents` we emit).
  *   - Tool names: `packages/kimi-agent/tool-name-contract.json` vs the tool
@@ -105,8 +105,18 @@ function collectTsRestEndpoints() {
 
 /** The routes the Rust server actually serves. */
 function collectRustRoutes() {
-  const source = ['src/server/mod.rs', 'src/server/router.rs']
-    .map((p) => join(AGENT, p))
+  const serverDir = join(AGENT, 'src/server');
+  const routeModules = existsSync(serverDir)
+    ? readdirSync(serverDir)
+        .filter((f) => f.startsWith('route_') && f.endsWith('.rs'))
+        .map((f) => join(serverDir, f))
+    : [];
+  const source = [
+    join(AGENT, 'src/server/mod.rs'),
+    join(AGENT, 'src/server/router.rs'),
+    join(AGENT, 'src/server/dispatch.rs'),
+    ...routeModules,
+  ]
     .filter(existsSync)
     .map(read)
     .join('\n');

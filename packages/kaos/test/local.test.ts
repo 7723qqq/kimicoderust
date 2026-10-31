@@ -1,3 +1,4 @@
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,25 @@ import { fileURLToPath } from 'node:url';
 import { KaosFileExistsError } from '#/errors';
 import { LocalKaos } from '#/local';
 import { afterEach, beforeEach, describe, expect, it, test } from 'vitest';
+
+/**
+ * Windows without Developer Mode (or SeCreateSymbolicLinkPrivilege) answers
+ * `EPERM` to `symlink`. The cycle-safety suite below describes behavior on a
+ * host that can actually create links; elsewhere there is nothing to test.
+ */
+function canCreateSymlink(): boolean {
+  const dir = mkdtempSync(join(tmpdir(), 'kaos-symlink-probe-'));
+  try {
+    writeFileSync(join(dir, 'target'), '');
+    symlinkSync(join(dir, 'target'), join(dir, 'link'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const symlinkSupported = canCreateSymlink();
 
 // LocalKaos normalizes every path to forward slashes (pathe). Mirror that in
 // path assertions so they hold on Windows, where node:path/node:os produce
@@ -547,7 +567,7 @@ describe('LocalKaos', () => {
   // so they distinguish "OS-ELOOP bailout" (buggy) from "app-level
   // cycle detection" (fixed). HARD_STOP is a final safety belt in case
   // a future kernel allows deeper symlink chains — tests shouldn't hang.
-  describe('glob symlink cycle safety', () => {
+  describe.skipIf(!symlinkSupported)('glob symlink cycle safety', () => {
     const HARD_STOP = 1000;
 
     it('T-C1 self-symlink cycle yields exactly one match', async () => {

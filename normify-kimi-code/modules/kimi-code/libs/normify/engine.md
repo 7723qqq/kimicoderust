@@ -10,8 +10,8 @@ description:
   en: >
       The deterministic core: frontmatter parser, L1/L2 validators, compiler, store and layout.
       
-revision: 18c71cdd8583b337dd80efc94225c9033f341f42
-updated_at: "2026-10-03T16:26:56.351Z"
+revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
+updated_at: "2026-10-31T15:13:40.699Z"
 fingerprint: 0aa3fcb8c328adfc412a2761a338fadb7a335410a9153f180414a54170da1fa0
 source:
   - path: "packages/normify/src/engine/validate.ts"

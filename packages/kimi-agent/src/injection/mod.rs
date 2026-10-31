@@ -37,6 +37,10 @@ pub mod interruption_reminder;
 /// Swarm-mode reminders (v2 `SwarmInjection`, the `swarm_mode` variant).
 pub mod swarm_mode;
 
+/// The stale-todo reminder (v2 `todoListReminder`, the `todo_list_reminder`
+/// variant).
+pub mod todo_reminder;
+
 /// What the injection providers read their domain values from.
 pub mod state;
 
@@ -125,6 +129,11 @@ pub struct InjectionContext<'a> {
     /// What the previous step's tool calls did. Empty when the caller does not
     /// track accesses, in which case per-access providers see no new ground.
     pub access: &'a StepAccess,
+    /// The live message list at this build pass, including this turn's prior
+    /// steps. Providers that recover state from the conversation (the todo
+    /// reminder's turn counters) read it here; v2's equivalents read
+    /// `memory.get()` at the same point in the step.
+    pub history: &'a [LLMMessage],
 }
 
 /// A named injection provider: returns the raw reminder text for the current
@@ -209,12 +218,27 @@ impl InjectionRegistry {
         is_new_turn: bool,
         access: &StepAccess,
     ) -> Vec<String> {
+        self.build_injections_with_history(is_new_turn, access, &[])
+    }
+
+    /// Run every provider with the live message list, so history-derived
+    /// providers see the same conversation v2's `memory.get()` returns at this
+    /// point in the step. The turn loop passes `messages` here; callers that
+    /// have no history (tests, one-shot probes) can use
+    /// [`Self::build_injections_with_accesses`] instead.
+    pub fn build_injections_with_history(
+        &mut self,
+        is_new_turn: bool,
+        access: &StepAccess,
+        history: &[LLMMessage],
+    ) -> Vec<String> {
         let mut texts = Vec::new();
         for entry in &mut self.entries {
             let ctx = InjectionContext {
                 is_new_turn,
                 injected: &self.injected,
                 access,
+                history,
             };
             if let Some(content) = (entry.provider)(&ctx)
                 && !content.trim().is_empty()
@@ -970,6 +994,7 @@ mod tests {
             is_new_turn: false,
             injected: &[],
             access,
+            history: &[],
         }
     }
 

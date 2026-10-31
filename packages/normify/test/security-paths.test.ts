@@ -1,4 +1,6 @@
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -14,6 +16,20 @@ import { makeWorkspace, moduleFixture, removeWorkspace, rootFixture } from './he
 import type { ProjectFixture } from './helpers';
 
 type ToolResult = { ok?: boolean; errors?: string[]; error?: { code: string; message: string }; [key: string]: unknown };
+
+function canCreateSymlink(): boolean {
+    const dir = mkdtempSync(join(tmpdir(), 'normify-symlink-probe-'));
+    try {
+        writeFileSync(join(dir, 'target'), '');
+        symlinkSync(join(dir, 'target'), join(dir, 'link'));
+        return true;
+    } catch {
+        return false;
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+}
+const symlinkSupported = canCreateSymlink();
 
 function tool(name: string, rootDir: string) {
     const spec = createToolRegistry({ rootDir }).find(t => t.name === name);
@@ -119,7 +135,9 @@ describe('路径围栏（A1 render out / A2 fingerprint source / A3 project dir�
             expect(errors[0]?.code).toBe('structure/source-entry-shape');
         });
 
-        it('符号链接指向仓库外时按 missing 处理（读预言机被切断）', async () => {
+        // Windows without Developer Mode denies `symlink` with EPERM: there is
+        // no link to test, so skip rather than fail on the environment.
+        it.skipIf(!symlinkSupported)('符号链接指向仓库外时按 missing 处理（读预言机被切断）', async () => {
             const secret = join(fx.outside, 'secret.txt');
             await writeFile(secret, 'top-secret', 'utf8');
             const repo = join(fx.root, 'repo');

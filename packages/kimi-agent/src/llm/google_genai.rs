@@ -31,8 +31,36 @@ pub fn model_supports_thoughts(model_id: &str) -> bool {
     let id = model_id.to_ascii_lowercase();
     id.contains("gemini-2.5")
         || id.contains("gemini-3")
+        || id.contains("gemini-4")
         || id.contains("-latest")
         || id.contains("thinking")
+}
+
+/// Gemini 3 and 4 take a named `thinkingLevel`; earlier families take a numeric
+/// `thinkingBudget` (v2 `encodeThinking`, `google-genai/lower.ts:232-268`).
+fn takes_thinking_level(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    id.contains("gemini-3") || id.contains("gemini-4")
+}
+
+/// v2 rejects `effort = off` for Gemini 4: the family always reasons and its
+/// thinking levels are LOW/MEDIUM/HIGH only, so there is no "disabled" encoding
+/// (`ThinkingConfigError`, `thinking-cannot-disable`, v2 #4230). Returns the
+/// user-facing reason; the transport fails the request before building it
+/// (`http.rs`), matching v2's throw inside the lowerer.
+pub fn thinking_off_rejection(model_id: &str, effort: Option<&str>) -> Option<String> {
+    let id = model_id.to_ascii_lowercase();
+    if !id.contains("gemini-4") {
+        return None;
+    }
+    let token = match effort {
+        Some(token @ ("off" | "none")) => token,
+        _ => return None,
+    };
+    Some(format!(
+        "Model '{}' always reasons and thinking cannot be turned off. Choose a concrete thinking effort (low, medium, high) instead of '{}'.",
+        model_id, token
+    ))
 }
 
 /// v2 `encodeGoogleGenAIThinking` (`google-genai/format.ts:148-182`): Gemini 3
@@ -47,7 +75,15 @@ pub fn model_supports_thoughts(model_id: &str) -> bool {
 /// an unmapped effort is otherwise indistinguishable on the wire from one that
 /// was never configured.
 fn thinking_level_for(model_id: &str, effort: Option<&str>) -> Option<&'static str> {
-    if !model_id.to_ascii_lowercase().contains("gemini-3") {
+    if !takes_thinking_level(model_id) {
+        return None;
+    }
+    // Gemini 4 has no disabled rung: `off` is rejected at the transport
+    // boundary (`thinking_off_rejection`, v2's `thinking-cannot-disable`).
+    // Returning None keeps a direct builder call from emitting Gemini 3's
+    // MINIMAL level, which Gemini 4 rejects with a 400.
+    if model_id.to_ascii_lowercase().contains("gemini-4") && matches!(effort, Some("off" | "none"))
+    {
         return None;
     }
     let level = match effort {
@@ -97,8 +133,8 @@ fn thinking_level_for(model_id: &str, effort: Option<&str>) -> Option<&'static s
 /// (`google-genai/requester.ts:52-55` gates the whole config on a resolved
 /// thinking state).
 fn thinking_budget_for(model_id: &str, effort: Option<&str>) -> Option<u32> {
-    if model_id.to_ascii_lowercase().contains("gemini-3") {
-        // A level IS the depth there; Gemini 3 rejects a budget beside it.
+    if takes_thinking_level(model_id) {
+        // A level IS the depth there; Gemini 3/4 reject a budget beside it.
         return None;
     }
     match effort {
@@ -1227,8 +1263,51 @@ mod tests {
         assert!(model_supports_thoughts("gemini-2.5-pro"));
         assert!(model_supports_thoughts("gemini-2.5-flash"));
         assert!(model_supports_thoughts("google/gemini-3-pro-preview"));
+        assert!(model_supports_thoughts("gemini-4-pro"));
         assert!(model_supports_thoughts("gemini-flash-latest"));
         assert!(!model_supports_thoughts("gemini-2.0-flash"));
         assert!(!model_supports_thoughts("gemini-1.5-pro"));
+    }
+
+    /// v2 #4208 / #4230: Gemini 4 takes `thinkingLevel` (`thinkingBudget` is
+    /// rejected with a 400), and `off` has no encoding on that family — the
+    /// transport fails with the `thinking-cannot-disable` reason instead of
+    /// sending Gemini 3's MINIMAL level.
+    #[test]
+    fn gemini_4_uses_thinking_level_and_rejects_off() {
+        let messages = vec![WireMessage::text("user", "hi")];
+        for (effort, level) in [("low", "LOW"), ("medium", "MEDIUM"), ("high", "HIGH")] {
+            let req = build_request_for_model(
+                &messages,
+                &[],
+                Some(2048),
+                true,
+                "gemini-4-pro",
+                Some(effort),
+            );
+            assert_eq!(
+                req["generationConfig"]["thinkingConfig"]["thinkingLevel"], level,
+                "effort {effort} must reach gemini-4 as thinkingLevel {level}"
+            );
+            assert!(
+                req["generationConfig"]["thinkingConfig"]
+                    .get("thinkingBudget")
+                    .is_none(),
+                "a level IS the depth on gemini-4, so no budget may ride along"
+            );
+        }
+
+        // The production `off` path reaches the builder with
+        // `include_thoughts = false` (http.rs derives it from a reasoning-on
+        // effort); there is no level to emit, so the request carries no
+        // thinkingConfig — the rejection happens before this point.
+        let req = build_request_for_model(&messages, &[], None, false, "gemini-4-pro", Some("off"));
+        assert!(req.get("generationConfig").is_none());
+
+        assert!(thinking_off_rejection("gemini-4-pro", Some("off")).is_some());
+        assert!(thinking_off_rejection("gemini-4-pro", Some("none")).is_some());
+        assert!(thinking_off_rejection("gemini-4-pro", Some("low")).is_none());
+        assert!(thinking_off_rejection("gemini-3-pro", Some("off")).is_none());
+        assert!(thinking_off_rejection("gemini-2.5-pro", Some("off")).is_none());
     }
 }
