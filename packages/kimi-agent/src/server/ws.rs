@@ -279,9 +279,10 @@ pub async fn serve_ws(
     let hello = ws_protocol::server_hello(&connection_id, heartbeat, SUBSCRIBER_QUEUE_DEPTH)?;
     write_frame(&mut writer, OP_TEXT, &hello).await?;
 
-    // Active session subscriptions. If None, connection is in wildcard/unrestricted
-    // mode (for backwards compatibility with transport tests before client_hello).
-    // Once client_hello or subscribe is received, it becomes Some(set).
+    // Active session subscriptions. `None` means nothing has been subscribed
+    // yet, so no session events are delivered; the old wildcard default leaked
+    // every session's events to any authenticated socket before its first
+    // `client_hello`/`subscribe`.
     let mut subscriptions: Option<HashSet<String>> = None;
     // Live transcript streams (`subscribe_v2`), keyed by session id.
     let mut transcripts: HashMap<String, TranscriptSubscription> = HashMap::new();
@@ -444,7 +445,10 @@ pub async fn serve_ws(
                     Ok(event) => {
                         let sid = &*event.session_id;
                         let should_send = match &subscriptions {
-                            None => true,
+                            // No subscription yet: deliver nothing. The old
+                            // wildcard default sent every session's events to
+                            // any authenticated socket until it subscribed.
+                            None => false,
                             Some(set) => set.contains(sid),
                         };
                         if should_send {
@@ -1407,6 +1411,39 @@ mod tests {
         String::from_utf8(payload).unwrap()
     }
 
+    /// Read frames until one carries `wanted` (heartbeat pings interleave).
+    async fn read_until_type(client: &mut TcpStream, wanted: &str) -> serde_json::Value {
+        loop {
+            let raw =
+                tokio::time::timeout(std::time::Duration::from_secs(10), read_text_frame(client))
+                    .await
+                    .expect("timed out waiting for a frame");
+            let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if frame["type"] == wanted {
+                return frame;
+            }
+        }
+    }
+
+    /// Subscribe this connection to one session and consume the ack.
+    async fn subscribe_to(client: &mut TcpStream, session: &str) {
+        let hello = format!(
+            r#"{{"type":"client_hello","id":"test-sub","payload":{{"subscriptions":["{session}"]}}}}"#
+        );
+        client
+            .write_all(&masked_frame(OP_TEXT, hello.as_bytes()))
+            .await
+            .unwrap();
+        let ack = read_until_type(client, "ack").await;
+        assert_eq!(ack["code"], 0, "{ack}");
+        assert!(
+            ack["payload"]["accepted_subscriptions"]
+                .as_array()
+                .is_some_and(|accepted| accepted.iter().any(|sid| sid == session)),
+            "subscription was not accepted: {ack}"
+        );
+    }
+
     /// Read the greeting every connection receives before it says anything.
     async fn read_server_hello(client: &mut TcpStream) -> serde_json::Value {
         let frame: serde_json::Value =
@@ -1418,6 +1455,7 @@ mod tests {
     #[tokio::test]
     async fn handshakes_then_streams_events_published_after_it_connects() {
         let server = Arc::new(crate::server::HttpServer::in_memory().unwrap());
+        server.store_arc().create_session("sess-ws", None).unwrap();
         let hub = server.hub();
         let (mut client, handshake, handle) =
             connect_upgraded(&server, "dGhlIHNhbXBsZSBub25jZQ==").await;
@@ -1430,6 +1468,7 @@ mod tests {
             read_server_hello(&mut client).await["payload"]["protocol_version"],
             2
         );
+        subscribe_to(&mut client, "sess-ws").await;
         for _ in 0..50 {
             if hub.subscriber_count() == 1 {
                 break;
@@ -1439,9 +1478,7 @@ mod tests {
         assert_eq!(hub.subscriber_count(), 1, "connection did not attach");
 
         hub.bus_for("sess-ws").publish(&step_event(7));
-        let frame: serde_json::Value =
-            serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
-        assert_eq!(frame["type"], "llm.step.begin", "{frame}");
+        let frame = read_until_type(&mut client, "llm.step.begin").await;
         assert_eq!(frame["session_id"], "sess-ws", "{frame}");
         assert_eq!(frame["seq"], 1, "the lane numbers from 1, {frame}");
         assert_eq!(frame["payload"]["step"], 7, "{frame}");
@@ -1469,6 +1506,7 @@ mod tests {
     #[tokio::test]
     async fn two_connections_each_receive_the_same_event() {
         let server = Arc::new(crate::server::HttpServer::in_memory().unwrap());
+        server.store_arc().create_session("sess-ws", None).unwrap();
         let hub = server.hub();
         let (mut first, _, handle) = connect_upgraded(&server, "key-a").await;
         let (mut second, _) = connect_client(handle.local_addr, "key-b", &[]).await;
@@ -1484,12 +1522,12 @@ mod tests {
         // Both were greeted; what must be identical is the event that follows.
         read_server_hello(&mut first).await;
         read_server_hello(&mut second).await;
+        subscribe_to(&mut first, "sess-ws").await;
+        subscribe_to(&mut second, "sess-ws").await;
         hub.bus_for("sess-ws").publish(&step_event(1));
 
-        let mut a: serde_json::Value =
-            serde_json::from_str(&read_text_frame(&mut first).await).unwrap();
-        let mut b: serde_json::Value =
-            serde_json::from_str(&read_text_frame(&mut second).await).unwrap();
+        let mut a = read_until_type(&mut first, "llm.step.begin").await;
+        let mut b = read_until_type(&mut second, "llm.step.begin").await;
         // Each frame is stamped as it is wrapped, so the arrival time is the only
         // field two connections may legitimately disagree on.
         let stamp_a = a.as_object_mut().unwrap().remove("timestamp");

@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::model::{
-    ActivityMeta, AgentPermission, AgentStatusMeta, AttachmentSource, InteractionKind,
-    InteractionState, StepState, StepTiming, StepUsage, TaskKind, TaskState, TextFrame, TextRole,
-    ThinkingFrame, ToolCallFrame, ToolFrameProgress, ToolFrameState, ToolProgressKind,
-    TranscriptAttachment, TranscriptFrame, TranscriptInteraction, TranscriptItem, TranscriptMarker,
-    TranscriptMeta, TranscriptMetaMerge, TranscriptPrompt, TranscriptPromptStatus, TranscriptStep,
-    TranscriptTask, TranscriptTurn, TranscriptUserOrigin, TurnOrigin, TurnState, UserOriginKind,
+    ActivityMeta, AgentPermission, AgentStatusMeta, AgentUsageMeta, AttachmentSource,
+    InteractionKind, InteractionState, StepState, StepTiming, StepUsage, TaskKind, TaskState,
+    TextFrame, TextRole, ThinkingFrame, ToolCallFrame, ToolFrameProgress, ToolFrameState,
+    ToolProgressKind, TranscriptAttachment, TranscriptFrame, TranscriptInteraction, TranscriptItem,
+    TranscriptMarker, TranscriptMeta, TranscriptMetaMerge, TranscriptPrompt,
+    TranscriptPromptStatus, TranscriptStep, TranscriptTask, TranscriptTurn, TranscriptUserOrigin,
+    TurnOrigin, TurnState, UserOriginKind,
 };
 use super::ops::{
     AgentTranscriptSnapshot, AppendTarget, StepHeader, StepKind, TranscriptOperation, TurnHeader,
@@ -1106,10 +1107,12 @@ impl TranscriptProjector {
                     "manual" => Some(AgentPermission::Manual),
                     _ => None,
                 });
+        let usage = value.get("usage").and_then(Self::parse_agent_usage);
         if model.is_none()
             && thinking_effort.is_none()
             && context_tokens.is_none()
             && permission.is_none()
+            && usage.is_none()
         {
             return Vec::new();
         }
@@ -1135,12 +1138,39 @@ impl TranscriptProjector {
         if permission.is_some() {
             agent.permission = permission;
         }
+        if usage.is_some() {
+            agent.usage = usage;
+        }
         vec![TranscriptOperation::MetaMerge {
             meta: TranscriptMetaMerge {
                 agent: Some(agent.clone()),
                 ..Default::default()
             },
         }]
+    }
+
+    /// The `AgentStatusUpdated.usage` payload as transcript meta (v2
+    /// `UsageStatus`: per-model buckets, their total, and the current turn).
+    fn parse_agent_usage(value: &Value) -> Option<AgentUsageMeta> {
+        let by_model = value.get("byModel").cloned().and_then(|by_model| {
+            serde_json::from_value::<HashMap<String, StepUsage>>(by_model).ok()
+        });
+        let current_turn = value
+            .get("currentTurn")
+            .cloned()
+            .and_then(|current| serde_json::from_value::<StepUsage>(current).ok());
+        let total = value
+            .get("total")
+            .cloned()
+            .and_then(|total| serde_json::from_value::<StepUsage>(total).ok());
+        if by_model.is_none() && current_turn.is_none() && total.is_none() {
+            return None;
+        }
+        Some(AgentUsageMeta {
+            by_model,
+            current_turn,
+            total,
+        })
     }
 
     /// The turn a custom delta addresses. The delta names its own turn (v2's
@@ -2397,6 +2427,47 @@ mod tests {
         assert_eq!(snapshot.attachments.len(), 1);
         assert_eq!(snapshot.tasks.len(), 1);
         assert!(snapshot.meta.agent.is_some());
+    }
+
+    #[test]
+    fn agent_status_usage_merges_the_per_model_buckets() {
+        let mut projector = TranscriptProjector::new();
+        let ops = projector.apply_event(&EngineEvent::Custom(json!({
+            "type": "agent.status.updated",
+            "usage": {
+                "byModel": {
+                    "k3": {"inputOther": 10, "output": 2, "inputCacheRead": 3, "inputCacheCreation": 4}
+                },
+                "total": {"inputOther": 10, "output": 2, "inputCacheRead": 3, "inputCacheCreation": 4},
+                "currentTurn": {"inputOther": 6, "output": 1, "inputCacheRead": 0, "inputCacheCreation": 0}
+            }
+        })));
+        match &ops[0] {
+            TranscriptOperation::MetaMerge { meta } => {
+                let usage = meta
+                    .agent
+                    .as_ref()
+                    .and_then(|agent| agent.usage.as_ref())
+                    .expect("usage meta");
+                assert_eq!(usage.by_model.as_ref().unwrap()["k3"].input_other, 10);
+                assert_eq!(usage.total.as_ref().map(|total| total.output), Some(2));
+                assert_eq!(
+                    usage.current_turn.as_ref().map(|turn| turn.input_other),
+                    Some(6)
+                );
+            }
+            other => panic!("expected meta.merge, got {other:?}"),
+        }
+
+        // A usage-only payload is still mergeable (it has no scalar fields).
+        assert!(
+            !projector
+                .apply_event(&EngineEvent::Custom(json!({
+                    "type": "agent.status.updated",
+                    "usage": {"total": {"inputOther": 1, "output": 0, "inputCacheRead": 0, "inputCacheCreation": 0}}
+                })))
+                .is_empty()
+        );
     }
 
     #[test]

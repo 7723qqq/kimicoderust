@@ -79,6 +79,7 @@ async fn ping_model(engine: &ServerEngine, model: &str) -> Value {
         messages: std::sync::Arc::from(vec![LLMMessage::user("ping")]),
         tools: std::sync::Arc::from(Vec::new()),
         cancel: None,
+        ..Default::default()
     };
     let started = std::time::Instant::now();
     match llm.chat(params).await {

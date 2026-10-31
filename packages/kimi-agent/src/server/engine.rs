@@ -622,6 +622,7 @@ impl ServerEngine {
         let native = config.extract_native_llm(Some(model))?;
         Some(crate::rpc::types::NativeLlmConfig {
             protocol: native.protocol,
+            provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
             base_url: native.base_url,
             api_key: native.api_key,
             // The env-bound credential channel survives resolution: the
@@ -629,7 +630,7 @@ impl ServerEngine {
             // the CLI entry point (`main.rs`) passes it through.
             api_key_env: native.api_key_env,
             model: native.model,
-            max_tokens: native.max_tokens,
+            max_tokens: native.max_output_size.or(native.max_tokens),
             custom_headers: native.custom_headers,
             reasoning_effort: config.resolve_effort(native.off_effort.as_deref()),
             thinking_budget: None,
@@ -1000,12 +1001,13 @@ impl ServerEngine {
             .map(|m| crate::compaction::estimate_tokens(&m.content) as usize)
             .sum();
 
+        let model = agent_config
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(self.spec.model_name.as_str());
         let mut payload = serde_json::json!({
             "type": "agent.status.updated",
-            "model": agent_config
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or(self.spec.model_name.as_str()),
+            "model": model,
             "contextTokens": context_tokens,
         });
         let object = payload.as_object_mut().unwrap_or_else(|| {
@@ -1034,6 +1036,13 @@ impl ServerEngine {
         // field on `AgentStatusUpdated` (`swarmOps.ts:41,45`).
         if crate::swarm::mode::swarm_mode_registry().is_active(crate::callbacks::MAIN_AGENT_ID) {
             object.insert("swarmMode".into(), serde_json::json!(true));
+        }
+        // v2's `AgentStatusUpdated` carries `usage` as a first-class field
+        // (`usageEvents.ts`), and the TUI's cumulative-token counter reads
+        // `usage.total` off it. Absent until the session records a turn.
+        if let Some(usage) = crate::session::usage::status(&self.store, session_id, model).to_json()
+        {
+            object.insert("usage".into(), usage);
         }
         payload
     }
@@ -1527,6 +1536,9 @@ impl ServerEngine {
         message_callbacks: Option<Arc<crate::server::message_events::MessageCallbacks>>,
     ) -> Result<TurnReport, EngineError> {
         let turn_id = format!("turn-{}", fastrand::u64(..));
+        // The model this turn's usage belongs to (v2 groups `UsageRecord`s by
+        // the request's model). Read before the LLM moves into `RunTurnInput`.
+        let turn_model = llm.model_name().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut turns = self
@@ -1712,6 +1724,16 @@ impl ServerEngine {
             )
             .map_err(EngineError::Store)?;
 
+        // Fold the turn's counters into the session's per-model usage buckets
+        // (v2 `UsageAgentModel.record` -> durable `byModel`). The turn is
+        // already durable; a usage write failure degrades the status snapshot
+        // rather than failing a completed turn.
+        if let Err(e) =
+            crate::session::usage::record_turn(&self.store, session_id, &turn_model, &result.usage)
+        {
+            tracing::warn!(%session_id, %e, "could not persist turn usage");
+        }
+
         // Reset micro compaction's idle clock: this turn produced assistant
         // output, so the prefix is fresh again and a cache miss is not due
         // (v2 stamps `lastAssistantAt` on `onDidFinishStep`).
@@ -1827,7 +1849,48 @@ fn apply_session_overrides(spec: &mut PipelineSpec, profile: &serde_json::Value)
         .filter(|effort| !effort.is_empty())
         && let Some(native) = spec.native_llm.as_mut()
     {
-        native.reasoning_effort = Some(effort.to_string());
+        // Mirror the host's `applySessionLlmOverrides`: anthropic takes a
+        // thinking budget, every other protocol an effort; thinking off
+        // clears the budget and the preserved-thinking keep instead of
+        // leaving the config's value on the wire.
+        let thinking_on = effort != "off" && effort != "none";
+        let is_kimi_anthropic = native.protocol == "anthropic"
+            && native
+                .provider_type
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
+        if is_kimi_anthropic {
+            // The Kimi anthropic trait takes an effort level (or the
+            // protocol-level disable), never a token budget.
+            native.thinking_budget = None;
+            native.reasoning_effort = Some(if thinking_on {
+                effort.to_string()
+            } else {
+                "off".to_string()
+            });
+        } else if native.protocol == "anthropic" {
+            native.reasoning_effort = None;
+            native.thinking_budget = if thinking_on {
+                Some(match effort {
+                    "low" => 1024,
+                    "medium" => 4096,
+                    "high" | "on" => 32000,
+                    other => other
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|v| *v > 0)
+                        .unwrap_or(32000),
+                })
+            } else {
+                None
+            };
+        } else {
+            native.thinking_budget = None;
+            native.reasoning_effort = thinking_on.then(|| effort.to_string());
+        }
+        if !thinking_on {
+            native.thinking_keep = None;
+        }
     }
     let disabled: Vec<String> = profile
         .get("disabled_tools")
@@ -2251,6 +2314,70 @@ mod tests {
             .expect("tools filter");
         assert!(filter.disabled.contains(&"Bash".to_string()));
         assert!(filter.disabled.contains(&"Write".to_string()));
+    }
+
+    #[test]
+    fn session_thinking_off_clears_the_budget_and_the_keep() {
+        let mut spec = spec();
+        spec.native_llm = Some(crate::rpc::types::NativeLlmConfig {
+            protocol: "anthropic".into(),
+            model: "base".into(),
+            thinking_budget: Some(32_000),
+            thinking_keep: Some("all".into()),
+            ..Default::default()
+        });
+        apply_session_overrides(&mut spec, &serde_json::json!({ "thinking": "off" }));
+        let native = spec.native_llm.as_ref().unwrap();
+        assert_eq!(native.thinking_budget, None);
+        assert_eq!(native.thinking_keep, None);
+        assert_ne!(native.reasoning_effort.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn session_thinking_maps_to_the_wire_dialect_of_the_protocol() {
+        let mut anthropic = spec();
+        anthropic.native_llm = Some(crate::rpc::types::NativeLlmConfig {
+            protocol: "anthropic".into(),
+            model: "base".into(),
+            ..Default::default()
+        });
+        apply_session_overrides(&mut anthropic, &serde_json::json!({ "thinking": "high" }));
+        let native = anthropic.native_llm.as_ref().unwrap();
+        assert_eq!(native.thinking_budget, Some(32_000));
+        assert_eq!(native.reasoning_effort, None);
+
+        let mut openai = spec();
+        openai.native_llm = Some(crate::rpc::types::NativeLlmConfig {
+            protocol: "openai".into(),
+            model: "base".into(),
+            thinking_budget: Some(1024),
+            ..Default::default()
+        });
+        apply_session_overrides(&mut openai, &serde_json::json!({ "thinking": "medium" }));
+        let native = openai.native_llm.as_ref().unwrap();
+        assert_eq!(native.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(native.thinking_budget, None);
+
+        // Kimi's anthropic wire takes the effort itself, and off must be
+        // explicit so the transport can send its protocol-level disable.
+        let mut kimi = spec();
+        kimi.native_llm = Some(crate::rpc::types::NativeLlmConfig {
+            protocol: "anthropic".into(),
+            provider_type: Some("kimi".into()),
+            model: "base".into(),
+            thinking_keep: Some("all".into()),
+            ..Default::default()
+        });
+        apply_session_overrides(&mut kimi, &serde_json::json!({ "thinking": "high" }));
+        let native = kimi.native_llm.as_ref().unwrap();
+        assert_eq!(native.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(native.thinking_budget, None);
+        assert_eq!(native.thinking_keep.as_deref(), Some("all"));
+
+        apply_session_overrides(&mut kimi, &serde_json::json!({ "thinking": "off" }));
+        let native = kimi.native_llm.as_ref().unwrap();
+        assert_eq!(native.reasoning_effort.as_deref(), Some("off"));
+        assert_eq!(native.thinking_keep, None);
     }
 
     #[test]
@@ -2707,6 +2834,82 @@ model = "gpt-x"
         engine.publish_status_updated("sess-status").await;
         let next = tokio::time::timeout(std::time::Duration::from_millis(50), sub.recv()).await;
         assert!(next.is_err(), "dedup must swallow the identical payload");
+    }
+
+    struct UsageScriptedLlm;
+
+    impl LLM for UsageScriptedLlm {
+        fn system_prompt(&self) -> &str {
+            "sys"
+        }
+        fn model_name(&self) -> &str {
+            "scripted-usage"
+        }
+        fn is_retryable_error(&self, _error: &str) -> bool {
+            false
+        }
+        fn chat(
+            &self,
+            _params: LLMChatParams,
+        ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            Box::pin(async {
+                Ok(LLMChatResponse {
+                    content: "done".into(),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".into()),
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 2,
+                        total_tokens: 12,
+                        input_cache_read: 3,
+                        input_cache_creation: 4,
+                    },
+                    timing: None,
+                })
+            })
+        }
+    }
+
+    /// The recorded turn usage must reach the status snapshot the client
+    /// folds, grouped by the model that produced it and accumulating across
+    /// turns (v2 `UsageAgentModel` -> `AgentStatusUpdated.usage`). This pins
+    /// the wiring — `record_turn` has its own unit tests.
+    #[tokio::test]
+    async fn a_finished_turn_records_usage_per_model_and_the_status_carries_it() {
+        let engine = engine();
+        engine
+            .store()
+            .create_session("sess-usage-wire", None)
+            .unwrap();
+
+        engine
+            .run_turn_on(&UsageScriptedLlm, "sess-usage-wire", 1, Vec::new(), "hello")
+            .await
+            .unwrap();
+        let status = engine.status_payload("sess-usage-wire");
+        assert_eq!(
+            status["usage"]["byModel"]["scripted-usage"]["inputOther"], 10,
+            "the turn's usage is attributed to its model: {status}"
+        );
+        assert_eq!(status["usage"]["total"]["output"], 2);
+        assert_eq!(status["usage"]["currentTurn"]["inputCacheRead"], 3);
+
+        engine
+            .run_turn_on(&UsageScriptedLlm, "sess-usage-wire", 2, Vec::new(), "again")
+            .await
+            .unwrap();
+        let status = engine.status_payload("sess-usage-wire");
+        assert_eq!(
+            status["usage"]["byModel"]["scripted-usage"]["inputOther"], 20,
+            "the bucket accumulates across turns: {status}"
+        );
+        assert_eq!(status["usage"]["total"]["inputOther"], 20);
+        assert_eq!(
+            status["usage"]["currentTurn"]["inputOther"], 10,
+            "currentTurn is the latest turn, not the session total"
+        );
     }
 
     #[test]

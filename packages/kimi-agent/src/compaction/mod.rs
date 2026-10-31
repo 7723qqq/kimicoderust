@@ -751,6 +751,7 @@ pub async fn summarize_with_llm_budgeted(
             messages: std::sync::Arc::from(summarization_prompt(history, instruction)),
             tools: std::sync::Arc::from(Vec::new()),
             cancel: cancel.cloned(),
+            ..Default::default()
         };
         let response = match cancel {
             Some(token) => tokio::select! {

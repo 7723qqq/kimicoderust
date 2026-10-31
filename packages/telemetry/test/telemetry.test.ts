@@ -511,7 +511,7 @@ describe('EventSink', () => {
     expect(transport.saved[0]?.[0]?.context).toMatchObject({
       app_name: 'kimi-code-cli',
       version: '1.2.3',
-      runtime: 'node',
+      runtime: typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined' ? 'bun' : 'node',
       ui_mode: 'shell',
       model: 'kimi-k2',
       terminal: 'test-terminal',

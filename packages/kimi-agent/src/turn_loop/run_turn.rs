@@ -897,6 +897,34 @@ pub fn run_turn<'a>(
                 goal_plan_state.clone(),
             );
         }
+        // The stale-todo reminder (v2 `TodoFeature` -> `todoService` ->
+        // `todoReminder`): main agent only, only while `TodoList` is active,
+        // and only after the todo feature has been used. v2's `used` flag lives
+        // in the todo actor; the engine has no such actor, so a `TodoList` call
+        // in the history stands in for it. The state read also doubles as the
+        // capability probe: a host without the state bridge cannot persist
+        // todo state, so reminding the model to maintain a list that cannot be
+        // saved would be worse than silence.
+        if input.agent_id == crate::callbacks::MAIN_AGENT_ID
+            && input.llm.transport() != "host-proxy"
+            && tool_defs
+                .iter()
+                .any(|def| def.name == crate::injection::todo_reminder::TODO_LIST_TOOL_NAME)
+            && crate::injection::todo_reminder::todo_list_used(&messages)
+            && let Ok(response) = callbacks
+                .state_read(crate::rpc::types::StateReadRequest {
+                    domain: "todo".into(),
+                    key: "todo".into(),
+                    turn_id: String::new(),
+                    tool_call_id: String::new(),
+                })
+                .await
+        {
+            crate::injection::todo_reminder::register_todo_reminder(
+                &mut injection_registry,
+                response.value,
+            );
+        }
         // Swarm mode is a mode like plan mode, so it announces itself the same
         // way (v2 `SwarmInjection`): the `swarm_mode` variant injects an
         // enter/exit reminder when the mode changes.
@@ -1176,10 +1204,12 @@ pub fn run_turn<'a>(
                 // The AGENTS.md reminder additionally needs the directories the
                 // previous step's tool calls touched; without them it saw an
                 // empty world and only ever probed the workspace root.
-                for text in
-                    injection_registry.build_injections_with_accesses(step_num == 0, &step_access)
-                {
-                    messages.push(crate::injection::injection_message(text));
+                for (variant, text) in injection_registry.build_injections_with_history_named(
+                    step_num == 0,
+                    &step_access,
+                    &messages,
+                ) {
+                    messages.push(crate::injection::injection_message_named(text, &variant));
                 }
             }
 
@@ -1244,6 +1274,10 @@ pub fn run_turn<'a>(
                     &retry_config,
                     Some(turn_cancel.token()),
                     Some(&telemetry),
+                    Some(crate::compaction::estimate_messages_tokens(
+                        &request_messages,
+                    )),
+                    input.max_context_tokens,
                 )
                 .await;
                 let e = match call {
@@ -2076,6 +2110,8 @@ Deliver your final response as text now. Further tool calls are refused.",
                             &retry_config,
                             Some(turn_cancel.token()),
                             Some(&telemetry),
+                            Some(crate::compaction::estimate_messages_tokens(&messages)),
+                            input.max_context_tokens,
                         )
                         .await;
 
@@ -2702,6 +2738,136 @@ mod tests {
                 .iter()
                 .map(|message| message.content.as_str())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The stale-todo reminder must reach a real turn: ten assistant turns
+    /// after the last `TodoList` write, the main agent's next step carries the
+    /// v2 reminder. This pins the run_turn wiring (main-agent gate, tool-active
+    /// gate, used gate, state read) rather than the module's own unit tests.
+    #[tokio::test]
+    async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
+        let llm = PredictTestLlm {
+            system_prompt: "You are helpful.".into(),
+            model_name: "test-model".into(),
+            return_tool_calls: false,
+            tool_responses: vec![],
+        };
+
+        let server = Arc::new(RpcServer::new());
+        let callbacks = rpc_callbacks(server.clone());
+
+        let mut messages = vec![LLMMessage::new("user", "Start")];
+        messages.push(LLMMessage {
+            role: "assistant".into(),
+            tool_calls: vec![crate::turn_loop::types::ToolCall {
+                id: "call_todo_write".into(),
+                name: "TodoList".into(),
+                arguments: serde_json::json!({
+                    "todos": [{ "title": "Ship it", "status": "in_progress" }]
+                }),
+                extras: None,
+            }],
+            ..Default::default()
+        });
+        for _ in 0..10 {
+            messages.push(LLMMessage::new("assistant", "working"));
+        }
+        messages.push(LLMMessage::new("user", "Continue"));
+
+        let input = RunTurnInput {
+            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+            previous_turn_aborted: false,
+            turn_id: "test-turn-todo-reminder".into(),
+            llm: &llm,
+            messages,
+            tools: &[],
+            tool_defs: vec![crate::tools::todo_list::todo_list_tool_def()],
+            max_steps: 5,
+            max_attempts: None,
+            max_context_tokens: None,
+            compaction_max_attempts: None,
+            permission_mode: None,
+            goal: None,
+            cancellation: None,
+            hook_guard: None,
+            media: None,
+            media_dropped: None,
+            toolset: None,
+        };
+
+        let turn = run_turn(input, &callbacks).await.expect("turn runs");
+        assert!(
+            turn.messages.iter().any(|message| message
+                .content
+                .contains("The TodoList tool has not been updated recently.")),
+            "the stale-todo reminder must reach the main agent's turn: {:?}",
+            turn.messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// v2 registers the todo reminder only for `MAIN_AGENT_ID`; a subagent
+    /// running the same stale history must not receive it.
+    #[tokio::test]
+    async fn test_todo_stale_reminder_is_main_agent_only() {
+        let llm = PredictTestLlm {
+            system_prompt: "You are helpful.".into(),
+            model_name: "test-model".into(),
+            return_tool_calls: false,
+            tool_responses: vec![],
+        };
+
+        let server = Arc::new(RpcServer::new());
+        let callbacks = rpc_callbacks(server.clone());
+
+        let mut messages = vec![LLMMessage::new("user", "Start")];
+        messages.push(LLMMessage {
+            role: "assistant".into(),
+            tool_calls: vec![crate::turn_loop::types::ToolCall {
+                id: "call_todo_write".into(),
+                name: "TodoList".into(),
+                arguments: serde_json::json!({
+                    "todos": [{ "title": "Ship it", "status": "in_progress" }]
+                }),
+                extras: None,
+            }],
+            ..Default::default()
+        });
+        for _ in 0..10 {
+            messages.push(LLMMessage::new("assistant", "working"));
+        }
+        messages.push(LLMMessage::new("user", "Continue"));
+
+        let input = RunTurnInput {
+            agent_id: "subagent-1".into(),
+            previous_turn_aborted: false,
+            turn_id: "test-turn-todo-reminder-subagent".into(),
+            llm: &llm,
+            messages,
+            tools: &[],
+            tool_defs: vec![crate::tools::todo_list::todo_list_tool_def()],
+            max_steps: 5,
+            max_attempts: None,
+            max_context_tokens: None,
+            compaction_max_attempts: None,
+            permission_mode: None,
+            goal: None,
+            cancellation: None,
+            hook_guard: None,
+            media: None,
+            media_dropped: None,
+            toolset: None,
+        };
+
+        let turn = run_turn(input, &callbacks).await.expect("turn runs");
+        assert!(
+            !turn.messages.iter().any(|message| message
+                .content
+                .contains("The TodoList tool has not been updated recently.")),
+            "a subagent must not receive the main agent's todo reminder"
         );
     }
 

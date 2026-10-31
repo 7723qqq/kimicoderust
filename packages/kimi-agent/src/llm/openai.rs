@@ -50,6 +50,39 @@ pub fn build_request_full(
     thinking_keep: Option<&str>,
     reasoning_key: Option<&str>,
 ) -> Value {
+    build_request_for_provider(
+        model,
+        messages,
+        tools,
+        stream,
+        reasoning_effort,
+        thinking_keep,
+        reasoning_key,
+        None,
+        None,
+        None,
+    )
+}
+
+/// [`build_request_full`] for a known provider family. `provider_type` is the
+/// resolved `[providers.*].type`: Kimi shares Chat Completions with every other
+/// OpenAI-compatible vendor but encodes thinking in a `thinking` object
+/// (`{type, effort?, keep?}`) instead of a top-level `reasoning_effort` (v2
+/// `kimiOpenAITrait.thinking`). `None` keeps the generic encoding.
+#[allow(clippy::too_many_arguments)]
+pub fn build_request_for_provider(
+    model: &str,
+    messages: &[WireMessage],
+    tools: &[ToolInfo],
+    stream: bool,
+    reasoning_effort: Option<&str>,
+    thinking_keep: Option<&str>,
+    reasoning_key: Option<&str>,
+    provider_type: Option<&str>,
+    cache_key: Option<&str>,
+    max_tokens: Option<u32>,
+) -> Value {
+    let is_kimi = provider_type.is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
     let msgs: Vec<Value> = messages
         .iter()
         .map(|message| project_message(message, reasoning_key))
@@ -63,18 +96,45 @@ pub fn build_request_full(
     if stream {
         req["stream_options"] = json!({ "include_usage": true });
     }
-    if let Some(effort) = crate::llm::effort::wire_reasoning_effort(reasoning_effort) {
-        req["reasoning_effort"] = json!(effort);
+    if let Some(cache_key) = cache_key.filter(|key| !key.is_empty()) {
+        // v2 `encodeOpenAICacheKey` / the Kimi trait's `encodeCacheKey`: the
+        // session id goes out as `prompt_cache_key`, which is what lets an
+        // OpenAI-compatible provider route consecutive turns of one session
+        // onto the same prompt cache.
+        req["prompt_cache_key"] = json!(cache_key);
     }
-    if let Some(keep) = thinking_keep
-        && !keep.is_empty()
-    {
-        // Moonshot preserved-thinking passthrough (`thinking.keep`):
-        // merged onto the `thinking` object so a companion config set
-        // alongside survives.
-        let mut thinking = req.get("thinking").cloned().unwrap_or_else(|| json!({}));
-        thinking["keep"] = json!(keep);
-        req["thinking"] = thinking;
+    if let Some(cap) = max_tokens {
+        // v2 `encodeMaxCompletionTokens`: a declared output cap is clamped to
+        // the provider's ceiling and spelled `max_completion_tokens` for the
+        // o-series / gpt-5 family; Kimi always takes the completion spelling.
+        let capped = cap.clamp(1, 128 * 1024);
+        if is_kimi || uses_max_completion_tokens(model) {
+            req["max_completion_tokens"] = json!(capped);
+        } else {
+            req["max_tokens"] = json!(capped);
+        }
+    }
+    if is_kimi {
+        apply_kimi_thinking(&mut req, reasoning_effort, thinking_keep);
+    } else {
+        if let Some(effort) = crate::llm::effort::wire_reasoning_effort(reasoning_effort) {
+            req["reasoning_effort"] = json!(effort);
+        }
+        // A resolved non-Kimi provider has no wire encoding for `keep` (v2
+        // only the Kimi and anthropic traits consume it). An unresolved
+        // provider keeps the historical Moonshot passthrough, which is the
+        // only caller that ever set `keep` without a provider type.
+        if provider_type.is_none()
+            && let Some(keep) = thinking_keep
+            && !keep.is_empty()
+        {
+            // Moonshot preserved-thinking passthrough (`thinking.keep`):
+            // merged onto the `thinking` object so a companion config set
+            // alongside survives.
+            let mut thinking = req.get("thinking").cloned().unwrap_or_else(|| json!({}));
+            thinking["keep"] = json!(keep);
+            req["thinking"] = thinking;
+        }
     }
 
     if !tools.is_empty() {
@@ -95,6 +155,45 @@ pub fn build_request_full(
     }
 
     req
+}
+
+/// v2 `encodeOpenAIMaxCompletionTokens`' model gate: the o-series and gpt-5
+/// reject the legacy `max_tokens` spelling, everything else still takes it.
+fn uses_max_completion_tokens(model: &str) -> bool {
+    let name = model.to_ascii_lowercase();
+    let o_series = name.strip_prefix('o').is_some_and(|rest| {
+        let mut chars = rest.chars();
+        chars.next().is_some_and(|first| first.is_ascii_digit())
+            && matches!(chars.next(), None | Some('-') | Some('.'))
+    });
+    o_series || name == "gpt-5" || name.starts_with("gpt-5-") || name.starts_with("gpt-5.")
+}
+
+/// Kimi's Chat Completions thinking encoding (v2 `kimiOpenAITrait.thinking`):
+/// the effort rides a `thinking` object — `{type:'disabled'}` when off,
+/// `{type:'enabled'}` for the boolean `"on"` (or no effort), and
+/// `{type:'enabled', effort}` for a declared level — and `keep` merges onto
+/// the same object. No top-level `reasoning_effort` is sent: Kimi validates
+/// that field against its own set and ignores it in favor of `thinking`.
+fn apply_kimi_thinking(
+    req: &mut Value,
+    reasoning_effort: Option<&str>,
+    thinking_keep: Option<&str>,
+) {
+    let effort = reasoning_effort.filter(|value| !value.is_empty());
+    let keep = thinking_keep.filter(|value| !value.is_empty());
+    if effort.is_none() && keep.is_none() {
+        return;
+    }
+    let mut thinking = match effort {
+        Some(value) if value == "off" || value == "none" => json!({ "type": "disabled" }),
+        Some("on") | None => json!({ "type": "enabled" }),
+        Some(level) => json!({ "type": "enabled", "effort": level }),
+    };
+    if let Some(keep) = keep {
+        thinking["keep"] = json!(keep);
+    }
+    req["thinking"] = thinking;
 }
 
 fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
@@ -424,10 +523,24 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
         None => prompt_tokens.saturating_sub(cached),
     };
 
+    // `input_tokens` is the uncached remainder (the host's `inputOther`), so
+    // the provider total — or, when it is absent, the reconstruction — has to
+    // add the cached prompt back; charging only the remainder under-counted
+    // every cache hit.
+    let total_tokens = u
+        .get("total_tokens")
+        .and_then(|x| x.as_u64())
+        .map(|t| t as u32)
+        .unwrap_or_else(|| {
+            input_tokens
+                .saturating_add(cached)
+                .saturating_add(output_tokens)
+        });
+
     TokenUsage {
         input_tokens,
         output_tokens,
-        total_tokens: input_tokens + output_tokens,
+        total_tokens,
         input_cache_read: cached,
         input_cache_creation: 0,
     }
@@ -878,7 +991,9 @@ mod tests {
         let parsed = parse_response(&v).unwrap();
         assert_eq!(parsed.usage.input_cache_read, 30);
         assert_eq!(parsed.usage.input_tokens, 10);
-        assert_eq!(parsed.usage.total_tokens, 15);
+        // `input_tokens` is the uncached remainder; the provider's
+        // `total_tokens` covers the whole prompt (30 cached + 10 other + 5).
+        assert_eq!(parsed.usage.total_tokens, 45);
         assert_eq!(parsed.usage.input_cache_creation, 0);
     }
 
@@ -1597,6 +1712,127 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_kimi_thinking_object() {
+        let msgs = vec![WireMessage::text("user", "hello")];
+        let build = |effort: Option<&str>, keep: Option<&str>| {
+            build_request_for_provider(
+                "kimi-k2",
+                &msgs,
+                &[],
+                true,
+                effort,
+                keep,
+                None,
+                Some("kimi"),
+                None,
+                None,
+            )
+        };
+
+        // Off is a protocol-level disable, not an omitted field.
+        let off = build(Some("off"), None);
+        assert_eq!(off["thinking"], json!({ "type": "disabled" }));
+        assert!(off.get("reasoning_effort").is_none());
+
+        // `on` is the boolean sentinel: enabled, no effort level.
+        let on = build(Some("on"), Some("all"));
+        assert_eq!(on["thinking"], json!({ "type": "enabled", "keep": "all" }));
+        assert!(on.get("reasoning_effort").is_none());
+
+        // A declared level rides inside the object.
+        let high = build(Some("high"), Some("all"));
+        assert_eq!(
+            high["thinking"],
+            json!({ "type": "enabled", "effort": "high", "keep": "all" })
+        );
+        assert!(high.get("reasoning_effort").is_none());
+
+        // Nothing configured: no thinking field at all.
+        let absent = build(None, None);
+        assert!(absent.get("thinking").is_none());
+        assert!(absent.get("reasoning_effort").is_none());
+
+        // The same effort on any other OpenAI-compatible provider keeps the
+        // top-level encoding and never grows a thinking object.
+        let generic = build_request_for_provider(
+            "gpt-4o",
+            &msgs,
+            &[],
+            true,
+            Some("high"),
+            Some("all"),
+            None,
+            Some("openai"),
+            None,
+            None,
+        );
+        assert_eq!(generic["reasoning_effort"], "high");
+        assert!(generic.get("thinking").is_none());
+    }
+
+    #[test]
+    fn test_build_request_cache_key_and_completion_budget() {
+        let msgs = vec![WireMessage::text("user", "hello")];
+
+        // Generic OpenAI: the session key rides `prompt_cache_key`; the cap
+        // keeps the legacy `max_tokens` spelling for non o-series/gpt-5 ids.
+        let generic = build_request_for_provider(
+            "gpt-4o",
+            &msgs,
+            &[],
+            true,
+            None,
+            None,
+            None,
+            Some("openai"),
+            Some("sess-1"),
+            Some(50_000),
+        );
+        assert_eq!(generic["prompt_cache_key"], "sess-1");
+        assert_eq!(generic["max_tokens"], 50_000);
+        assert!(generic.get("max_completion_tokens").is_none());
+
+        // v2's model gate: gpt-5 / o-series reject `max_tokens`.
+        for model in ["gpt-5", "gpt-5-mini", "o3", "o4-mini"] {
+            let req = build_request_for_provider(
+                model,
+                &msgs,
+                &[],
+                true,
+                None,
+                None,
+                None,
+                Some("openai"),
+                None,
+                Some(4096),
+            );
+            assert_eq!(
+                req["max_completion_tokens"], 4096,
+                "{model} must use the completion spelling"
+            );
+            assert!(req.get("max_tokens").is_none(), "{model}");
+        }
+
+        // Kimi always takes `max_completion_tokens`, clamped to v2's 128k
+        // chat-completions ceiling.
+        let kimi = build_request_for_provider(
+            "kimi-k3",
+            &msgs,
+            &[],
+            true,
+            None,
+            None,
+            None,
+            Some("kimi"),
+            Some("sess-2"),
+            Some(500_000),
+        );
+        assert_eq!(kimi["max_completion_tokens"], 128 * 1024);
+        assert_eq!(kimi["prompt_cache_key"], "sess-2");
+        assert!(kimi.get("max_tokens").is_none());
+    }
+
+    #[test]
     fn test_parse_usage_cache_variants() {
         // 1. DeepSeek's own format (prompt_cache_hit_tokens)
         let ds_usage = json!({
@@ -1609,7 +1845,9 @@ mod tests {
         assert_eq!(ds_res.input_cache_read, 80);
         assert_eq!(ds_res.input_tokens, 20);
         assert_eq!(ds_res.output_tokens, 20);
-        assert_eq!(ds_res.total_tokens, 40);
+        // The grand total covers the whole prompt: 80 cached + 20 miss + 20
+        // output, not just the uncached input.
+        assert_eq!(ds_res.total_tokens, 120);
 
         // 2. Moonshot AI (Kimi)'s own format (cached_tokens)
         let moonshot_usage = json!({

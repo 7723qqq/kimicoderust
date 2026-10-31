@@ -985,9 +985,12 @@ mod tests {
         // Usage and the finish reason ride on the stream, so they only surface
         // from `finish()` — that is why the accumulator outlives the loop.
         let final_response = accumulator.finish();
-        assert_eq!(final_response.usage.input_tokens, 11);
+        // `promptTokenCount` includes the cached prompt (v2
+        // `parseGoogleGenAIUsage` subtracts it); the total adds it back.
+        assert_eq!(final_response.usage.input_tokens, 8);
         assert_eq!(final_response.usage.output_tokens, 5);
         assert_eq!(final_response.usage.input_cache_read, 3);
+        assert_eq!(final_response.usage.total_tokens, 16);
         assert_eq!(final_response.finish_reason.as_deref(), Some("stop"));
     }
 

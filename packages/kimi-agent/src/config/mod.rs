@@ -1,7 +1,11 @@
 //! Pure Rust configuration and credential manager for `kimi-agent` (P27 批 1).
 //!
 //! Loads and validates `config.toml` without depending on Node/Bun or any JS runtimes.
-//! Discovers configuration from standard locations (`./config.toml`, `~/.kimi-code/config.toml`).
+//! Discovers configuration from user-owned locations (`KIMI_CONFIG_PATH`,
+//! `KIMI_CODE_HOME`, `~/.kimi-code/config.toml`, legacy `~/.kimi/config.toml`).
+//! A `config.toml` in the current directory is deliberately not discovered: a
+//! checked-out repository could otherwise inject providers, hooks and
+//! permission defaults before any trust prompt.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -676,6 +680,11 @@ pub struct KimiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedNativeLlm {
     pub protocol: String,
+    /// Declared provider family (`[providers.*].type`), lowercased. The
+    /// transport uses it for provider-specific wire encodings that the
+    /// protocol alone cannot express (the Kimi `thinking` object).
+    #[serde(default)]
+    pub provider_type: String,
     pub base_url: String,
     pub api_key: String,
     /// Name of the environment variable the credential is read from at
@@ -795,9 +804,12 @@ impl KimiConfig {
     /// 探测 `config.toml` 路径（严格支持环境变量隔离）：
     /// 1. `KIMI_CONFIG_PATH` 显式指定的文件路径
     /// 2. `KIMI_CODE_HOME/config.toml` 隔离目录
-    /// 3. `./config.toml` (当前工作区本地配置)
-    /// 4. `~/.kimi-code/config.toml` 全局配置
-    /// 5. `~/.kimi/config.toml` 遗留兼容配置
+    /// 3. `~/.kimi-code/config.toml` 全局配置
+    /// 4. `~/.kimi/config.toml` 遗留兼容配置
+    ///
+    /// `./config.toml` 不会被发现：仓库可以提交该文件来注入 providers/hooks/
+    /// permission 默认值，且在信任提示之前就会生效。需要工作区级配置时用
+    /// `KIMI_CONFIG_PATH` 显式指定。
     pub fn discover() -> Result<(Self, PathBuf), String> {
         // 1. 显式指定的配置文件路径
         if let Some(explicit) = std::env::var_os("KIMI_CONFIG_PATH") {
@@ -817,14 +829,7 @@ impl KimiConfig {
             }
         }
 
-        // 3. 当前工作区本地配置
-        let cwd_config = PathBuf::from("config.toml");
-        if cwd_config.is_file() {
-            let config = Self::from_file(&cwd_config)?;
-            return Ok((config, cwd_config));
-        }
-
-        // 4. 用户全局配置
+        // 3. 用户全局配置
         if let Some(home) = dirs_home() {
             let kimi_code_config = home.join(".kimi-code").join("config.toml");
             if kimi_code_config.is_file() {
@@ -839,7 +844,10 @@ impl KimiConfig {
             }
         }
 
-        Err("No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ./config.toml, or ~/.kimi-code/config.toml".into())
+        Err(
+            "No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ~/.kimi-code/config.toml, or ~/.kimi/config.toml"
+                .into(),
+        )
     }
 
     /// Extract the active Native LLM configuration for the given or default model.
@@ -986,6 +994,7 @@ impl KimiConfig {
 
         Some(ResolvedNativeLlm {
             protocol: protocol.into(),
+            provider_type: p_type,
             base_url,
             api_key,
             api_key_env,
@@ -1464,11 +1473,15 @@ impl KimiConfig {
 
     /// Resolve the thinking effort for the wire (schema `thinking.effort`,
     /// stored globally rather than per model): the off-effort when the model
-    /// declares one and thinking is disabled, else the chosen effort.
+    /// declares one and thinking is disabled, else the chosen effort. With
+    /// thinking off and no declared off-effort, the host-level `"off"` token
+    /// travels so wires with a protocol-level disable (Kimi's `thinking`
+    /// object) can send it; generic wires drop it silently
+    /// (`llm::effort::wire_reasoning_effort`).
     pub fn resolve_effort(&self, model_off_effort: Option<&str>) -> Option<String> {
         let enabled = self.thinking.enabled.unwrap_or(true);
         if !enabled {
-            return model_off_effort.map(str::to_string);
+            return Some(model_off_effort.unwrap_or("off").to_string());
         }
         self.thinking
             .effort
@@ -1789,11 +1802,12 @@ fn native_llm_config(
 ) -> NativeLlmConfig {
     let mut llm = NativeLlmConfig {
         protocol: resolved.protocol,
+        provider_type: Some(resolved.provider_type).filter(|value| !value.is_empty()),
         base_url: resolved.base_url,
         api_key: resolved.api_key,
         api_key_env: None,
         model: resolved.model,
-        max_tokens: resolved.max_tokens,
+        max_tokens: resolved.max_output_size.or(resolved.max_tokens),
         custom_headers: Default::default(),
         reasoning_effort: None,
         thinking_budget: None,
@@ -1919,6 +1933,7 @@ pattern = "Read(*)"
 
         let native_llm = config.extract_native_llm(None).unwrap();
         assert_eq!(native_llm.protocol, "openai");
+        assert_eq!(native_llm.provider_type, "openai");
         assert_eq!(native_llm.base_url, "https://api.moonshot.cn/v1");
         assert_eq!(native_llm.api_key, "sk-kimi-key");
         assert_eq!(native_llm.model, "kimi-k2-0711");
@@ -1934,8 +1949,32 @@ pattern = "Read(*)"
         let config = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
         let native_llm = config.extract_native_llm(Some("anthropic")).unwrap();
         assert_eq!(native_llm.protocol, "anthropic");
+        assert_eq!(native_llm.provider_type, "anthropic");
         assert_eq!(native_llm.base_url, "https://api.anthropic.com/v1");
         assert_eq!(native_llm.api_key, "sk-ant-key");
+    }
+
+    /// The provider family travels with the resolved transport: protocol alone
+    /// cannot tell Kimi (thinking object) from any other OpenAI-compatible
+    /// vendor (`reasoning_effort`).
+    #[test]
+    fn test_extract_native_llm_carries_the_provider_type() {
+        let config = KimiConfig::from_str(
+            r#"
+[providers.moonshot]
+type = "kimi"
+api_key = "sk-x"
+base_url = "https://api.moonshot.ai/v1"
+
+[models.moonshot-kimi]
+provider = "moonshot"
+model = "kimi-k3"
+"#,
+        )
+        .unwrap();
+        let native = config.extract_native_llm(Some("moonshot-kimi")).unwrap();
+        assert_eq!(native.provider_type, "kimi");
+        assert_eq!(native.protocol, "openai");
     }
 
     /// A one-provider config whose provider carries a credential but no
@@ -3329,7 +3368,9 @@ effort = "high"
         // explicitly instead of an omitted field (schema `offEffort`).
         let config = KimiConfig::from_str("[thinking]\nenabled = false\n").unwrap();
         assert_eq!(config.resolve_effort(Some("none")).as_deref(), Some("none"));
-        assert_eq!(config.resolve_effort(None), None);
+        // No declared off-effort: the host-level off token still travels, so a
+        // Kimi transport can encode its protocol-level `thinking: disabled`.
+        assert_eq!(config.resolve_effort(None).as_deref(), Some("off"));
 
         let on = KimiConfig::from_str("[thinking]\nenabled = true\neffort = \"low\"\n").unwrap();
         assert_eq!(on.resolve_effort(Some("none")).as_deref(), Some("low"));

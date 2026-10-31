@@ -110,19 +110,19 @@
       "note": "§6.25/§6.43.1 — the watcher is a standalone service, not a capability. Abbreviated path."
     },
     {
-      "cited": "sqlite_store.rs:1042",
+      "cited": "sqlite_store.rs:1061",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/session/sqlite_store.rs",
-      "line": 1042,
+      "line": 1061,
       "context": "sion` 现在 `",
       "expect": "pub fn fork_session(",
       "note": "§6.42.1/§10.23 — post-M1 pointer; M1 re-located this from :834-863. Bare basename: resolved path carried as data."
     },
     {
-      "cited": "server/mod.rs:5292",
+      "cited": "server/mod.rs:5307",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/server/mod.rs",
-      "line": 5292,
+      "line": 5307,
       "context": "REST 解析在 `",
       "expect": "let turn_index = match body.get(\"turnIndex\") {",
       "note": "§10.23 REST turnIndex parse; M1 re-located this from :5165. Bare basename: resolved path carried as data."
@@ -157,11 +157,11 @@
       "note": "§10.25 — the call site of the fork's micro-compaction gate. Crate-relative sub-path form."
     },
     {
-      "cited": "packages/kimi-agent/src/server/mod.rs:6234-6240",
+      "cited": "packages/kimi-agent/src/server/mod.rs:6256-6262",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/server/mod.rs",
-      "line": 6234,
-      "endLine": 6240,
+      "line": 6256,
+      "endLine": 6262,
       "context": "` 在 profil",
       "expect": "engine.publish_status_updated(session_id).await;",
       "note": "§10.34 — the explicit post-profile-write status refresh"
@@ -215,29 +215,29 @@
       "note": "§12 — the pwsh → powershell → Git Bash → cmd chain"
     },
     {
-      "cited": "packages/kimi-agent/napi-contract.d.ts:1524",
+      "cited": "packages/kimi-agent/napi-contract.d.ts:1543",
       "origin": "worktree",
       "path": "packages/kimi-agent/napi-contract.d.ts",
-      "line": 1524,
+      "line": 1543,
       "context": "to stop」（`",
       "expect": "pump task is signalled to stop",
       "note": "§10.42 — the contract wording 'signalled' the dispose note cites"
     },
     {
-      "cited": "packages/kimi-agent/src/tools/mod.rs:4662",
+      "cited": "packages/kimi-agent/src/tools/mod.rs:4679",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/tools/mod.rs",
-      "line": 4662,
+      "line": 4679,
       "context": "`），把句式的可变部",
       "expect": "pub(crate) fn arg_error_text(",
       "note": "§10 — the {{tool}}/{{field}} parameterized arg-error helper"
     },
     {
-      "cited": ":3717-3818",
+      "cited": ":3833-3934",
       "origin": "worktree",
       "path": "packages/node-sdk/src/native/sdk-rpc-client-native.ts",
-      "line": 3717,
-      "endLine": 3818,
+      "line": 3833,
+      "endLine": 3934,
       "context": "ssion`（现 `",
       "expect": "override async exportSession(input: ExportSessionInput): Promise<ExportSessionResult> {",
       "note": "§10.25 — the corrected host-side export range M1 recorded (`现 :3717-3818`), re-pointed from :3642-3698. The same stale pointer is still live at L6878; see the filed finding."

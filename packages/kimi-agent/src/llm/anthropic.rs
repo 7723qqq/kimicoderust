@@ -76,6 +76,41 @@ pub fn build_request_full(
     thinking_budget: Option<u32>,
     thinking_keep: Option<&str>,
 ) -> Value {
+    build_request_for_provider(
+        model,
+        max_tokens,
+        messages,
+        tools,
+        stream,
+        thinking_budget,
+        thinking_keep,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+/// [`build_request_full`] plus the runtime inputs the transport knows: the
+/// resolved effort and provider family (Kimi's anthropic trait encodes thinking
+/// as `{type:'enabled'}` + `output_config.effort` rather than an Anthropic
+/// `budget_tokens`), the session's prompt-cache key (`metadata.user_id`, v2
+/// `format.ts:243`), and the per-request completion cap (v2
+/// `resolveMaxCompletionCap`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_request_for_provider(
+    model: &str,
+    max_tokens: u32,
+    messages: &[WireMessage],
+    tools: &[ToolInfo],
+    stream: bool,
+    thinking_budget: Option<u32>,
+    thinking_keep: Option<&str>,
+    reasoning_effort: Option<&str>,
+    provider_type: Option<&str>,
+    cache_key: Option<&str>,
+    completion_cap: Option<u32>,
+) -> Value {
     let mut system = String::new();
     let mut msgs: Vec<Value> = Vec::new();
 
@@ -193,14 +228,24 @@ pub fn build_request_full(
         }
     }
 
-    let effective_max_tokens = if let Some(budget) = thinking_budget {
-        if budget > 0 && max_tokens <= budget {
+    let is_kimi = provider_type.is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
+    let effective_max_tokens = if is_kimi {
+        // The Claude ceiling table says nothing about a Kimi model: v2's
+        // `resolveDefaultMaxTokens` falls through to the requested cap for an
+        // unknown id, so the dynamic cap is the whole answer.
+        completion_cap.unwrap_or(max_tokens)
+    } else {
+        let capped = completion_cap
+            .map(|cap| max_tokens.min(cap))
+            .unwrap_or(max_tokens);
+        if let Some(budget) = thinking_budget
+            && budget > 0
+            && capped <= budget
+        {
             budget.saturating_add(4096)
         } else {
-            max_tokens
+            capped
         }
-    } else {
-        max_tokens
     };
 
     let mut req = json!({
@@ -211,7 +256,25 @@ pub fn build_request_full(
     if stream {
         req["stream"] = json!(true);
     }
-    if let Some(budget) = thinking_budget
+    if let Some(cache_key) = cache_key.filter(|key| !key.is_empty()) {
+        // v2 `format.ts:243`: the session id rides `metadata.user_id`.
+        req["metadata"] = json!({ "user_id": cache_key });
+    }
+    if is_kimi {
+        // v2 `kimiAnthropicTrait.thinking`: the effort is a level on
+        // `output_config`, not a token budget; off is a protocol-level
+        // disable.
+        if let Some(effort) = reasoning_effort.filter(|value| !value.is_empty()) {
+            if effort == "off" || effort == "none" {
+                req["thinking"] = json!({ "type": "disabled" });
+            } else {
+                req["thinking"] = json!({ "type": "enabled" });
+                if effort != "on" {
+                    req["output_config"] = json!({ "effort": effort });
+                }
+            }
+        }
+    } else if let Some(budget) = thinking_budget
         && budget > 0
     {
         req["thinking"] = json!({
@@ -406,11 +469,13 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
         .and_then(|u| u.get("cache_creation_input_tokens"))
         .and_then(|x| x.as_u64())
         .unwrap_or(0) as u32;
-    // Anthropic's `input_tokens` is the TOTAL input — the cache split fields
-    // are additive parts of it — so the wire's uncached `input_tokens` is the
-    // remainder. Same rule as `openai.rs::parse_usage`, and the same one the
-    // host-proxy leg applies through kosong (`anthropic.ts:718-728`).
-    let input_tokens = raw_input.saturating_sub(input_cache_read + input_cache_creation);
+    // Anthropic's `input_tokens` already excludes the cache split fields
+    // (`cache_read_input_tokens` / `cache_creation_input_tokens` are additive
+    // parts of the prompt, not of `input_tokens`), so it is the uncached
+    // remainder the host's `inputOther` expects — v2
+    // `parseRawUsage` maps it straight through. Subtracting the cache fields
+    // here double-counted them and under-reported the prompt.
+    let input_tokens = raw_input;
 
     Ok(LLMChatResponse {
         content: text,
@@ -420,7 +485,10 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
         usage: TokenUsage {
             input_tokens,
             output_tokens,
-            total_tokens: input_tokens + output_tokens,
+            total_tokens: input_tokens
+                .saturating_add(input_cache_read)
+                .saturating_add(input_cache_creation)
+                .saturating_add(output_tokens),
             input_cache_read,
             input_cache_creation,
         },
@@ -561,9 +629,8 @@ impl StreamAccumulator {
                         .get("cache_creation_input_tokens")
                         .and_then(|x| x.as_u64())
                         .unwrap_or(0) as u32;
-                    self.usage.input_tokens = raw_input.saturating_sub(
-                        self.usage.input_cache_read + self.usage.input_cache_creation,
-                    );
+                    // `input_tokens` excludes the cache fields on this wire.
+                    self.usage.input_tokens = raw_input;
                 }
                 None
             }
@@ -696,7 +763,12 @@ impl StreamAccumulator {
 
     /// Finalize the accumulated stream into a response.
     pub fn finish(mut self) -> LLMChatResponse {
-        self.usage.total_tokens = self.usage.input_tokens + self.usage.output_tokens;
+        self.usage.total_tokens = self
+            .usage
+            .input_tokens
+            .saturating_add(self.usage.input_cache_read)
+            .saturating_add(self.usage.input_cache_creation)
+            .saturating_add(self.usage.output_tokens);
         let mut thinking = Vec::new();
         let mut tool_calls = Vec::new();
 
@@ -912,10 +984,11 @@ mod tests {
         let parsed = parse_response(&v).unwrap();
         assert_eq!(parsed.usage.input_cache_read, 40);
         assert_eq!(parsed.usage.input_cache_creation, 5);
-        // Provider `input_tokens` is the total; the wire carries the uncached
-        // remainder, and the total follows the host's `inputOther + output`.
-        assert_eq!(parsed.usage.input_tokens, 5);
-        assert_eq!(parsed.usage.total_tokens, 11);
+        // Anthropic's `input_tokens` already excludes the cache fields, so it
+        // is the uncached remainder the host charges as `inputOther`; the
+        // total adds the cache split back (v2 `grandTotal`).
+        assert_eq!(parsed.usage.input_tokens, 50);
+        assert_eq!(parsed.usage.total_tokens, 101);
     }
 
     #[test]
@@ -1070,8 +1143,8 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.usage.input_cache_read, 40);
         assert_eq!(resp.usage.input_cache_creation, 5);
-        assert_eq!(resp.usage.input_tokens, 5);
-        assert_eq!(resp.usage.total_tokens, 14);
+        assert_eq!(resp.usage.input_tokens, 50);
+        assert_eq!(resp.usage.total_tokens, 104);
     }
 
     #[test]
@@ -1384,6 +1457,65 @@ mod tests {
         let req_no_keep =
             build_request_full("claude-sonnet-4-5", 64000, &msgs, &[], true, None, None);
         assert!(req_no_keep.get("context_management").is_none());
+    }
+
+    #[test]
+    fn test_build_request_kimi_anthropic_trait() {
+        let msgs = vec![WireMessage::text("user", "hello")];
+        let build = |effort: Option<&str>| {
+            build_request_for_provider(
+                "k3",
+                64000,
+                &msgs,
+                &[],
+                true,
+                None,
+                Some("all"),
+                effort,
+                Some("kimi"),
+                Some("sess-9"),
+                Some(50_000),
+            )
+        };
+
+        // A level is `output_config.effort`, never an Anthropic token budget.
+        let high = build(Some("high"));
+        assert_eq!(high["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(high["output_config"]["effort"], "high");
+        assert!(high["thinking"].get("budget_tokens").is_none());
+        // Kimi's endpoint has no Claude ceiling: the dynamic cap is the answer.
+        assert_eq!(high["max_tokens"], 50_000);
+        assert_eq!(high["metadata"]["user_id"], "sess-9");
+        assert_eq!(high["context_management"]["edits"][0]["keep"], "all");
+
+        // `on` enables thinking without a level.
+        let on = build(Some("on"));
+        assert_eq!(on["thinking"], json!({ "type": "enabled" }));
+        assert!(on.get("output_config").is_none());
+
+        // Off is a protocol-level disable.
+        let off = build(Some("off"));
+        assert_eq!(off["thinking"], json!({ "type": "disabled" }));
+        assert!(off.get("output_config").is_none());
+
+        // A standard anthropic provider keeps the budget encoding.
+        let standard = build_request_for_provider(
+            "claude-sonnet-4-5",
+            64_000,
+            &msgs,
+            &[],
+            true,
+            Some(32_000),
+            None,
+            Some("high"),
+            Some("anthropic"),
+            None,
+            Some(50_000),
+        );
+        assert_eq!(standard["thinking"]["budget_tokens"], 32_000);
+        assert!(standard.get("output_config").is_none());
+        // The completion cap can only lower the ceiling.
+        assert_eq!(standard["max_tokens"], 50_000);
     }
 
     #[test]

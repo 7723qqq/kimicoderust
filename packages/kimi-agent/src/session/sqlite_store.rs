@@ -415,6 +415,25 @@ fn turn_is_user_visible(origin: Option<&Value>, opening_role_is_user: bool) -> b
     }
 }
 
+/// v2 `isUndoAnchorOrigin` applied to a persisted turn: a real user prompt
+/// (origin absent or `user`), a user-typed skill/plugin activation, and never
+/// an in-turn steer or a derived turn (goal/cron/task/shell).
+fn turn_origin_is_undo_anchor(origin: Option<&Value>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    if origin.get("inTurn").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    match origin.get("kind").and_then(Value::as_str) {
+        None | Some("user") => true,
+        Some("skill_activation") | Some("plugin_command") => {
+            origin.get("trigger").and_then(Value::as_str) == Some("user-slash")
+        }
+        _ => false,
+    }
+}
+
 pub struct SqliteSessionStore {
     /// One connection, guarded for the whole store — so this lock is the
     /// highest-blast-radius mutex in the engine.
@@ -1239,24 +1258,59 @@ impl SqliteSessionStore {
         session_id: &str,
         count: usize,
     ) -> Result<Vec<(String, i64)>, String> {
+        if count == 0 {
+            return Err("undo refused: count must be a positive integer".into());
+        }
+        // v2 undoes user anchors, not "the newest N turn rows": a derived turn
+        // (goal/cron/task) or an in-turn steer is not an anchor, and cutting at
+        // an anchor removes every turn after it as well.
         let mut stmt = conn
             .prepare(
-                "SELECT turn_id, turn_number FROM turns WHERE session_id = ?1
-                 ORDER BY turn_number DESC LIMIT ?2",
+                "SELECT t.turn_id, t.turn_number, t.origin,
+                        (SELECT m.role FROM messages m
+                          WHERE m.session_id = t.session_id AND m.turn_id = t.turn_id
+                          ORDER BY m.id ASC LIMIT 1) AS opening_role
+                 FROM turns t
+                 WHERE t.session_id = ?1
+                 ORDER BY t.turn_number DESC",
             )
             .map_err(|e| e.to_string())?;
-        let selected: Vec<(String, i64)> = stmt
-            .query_map(params![session_id, count as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
+        let mut rows = stmt.query(params![session_id]).map_err(|e| e.to_string())?;
 
-        if selected.iter().any(|(tid, _)| turn_is_compaction(tid)) {
-            return Err(format!(
-                "undo refused: crossing the compaction boundary turn '{COMPACT_TURN_ID}' would corrupt the session projection"
-            ));
+        let mut selected: Vec<(String, i64)> = Vec::new();
+        let mut anchors = 0usize;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let turn_id: String = row.get(0).map_err(|e| e.to_string())?;
+            let turn_number: i64 = row.get(1).map_err(|e| e.to_string())?;
+            let origin: Option<Value> = row
+                .get::<_, Option<String>>(2)
+                .map_err(|e| e.to_string())?
+                .and_then(|raw| serde_json::from_str(&raw).ok());
+            let opening_role: Option<String> = row.get(3).map_err(|e| e.to_string())?;
+            selected.push((turn_id.clone(), turn_number));
+
+            if turn_is_compaction(&turn_id) {
+                return Err(format!(
+                    "undo refused: crossing the compaction boundary turn '{COMPACT_TURN_ID}' would corrupt the session projection"
+                ));
+            }
+            if opening_role.as_deref() == Some("user")
+                && turn_origin_is_undo_anchor(origin.as_ref())
+            {
+                anchors += 1;
+                if anchors >= count {
+                    break;
+                }
+            }
+        }
+
+        if anchors < count {
+            let message = if anchors == 0 {
+                "undo refused: nothing to undo (no user turn)".to_string()
+            } else {
+                format!("undo refused: only {anchors} of {count} requested turn(s) available")
+            };
+            return Err(message);
         }
         Ok(selected)
     }
@@ -1334,7 +1388,7 @@ impl SqliteSessionStore {
         for item in rows {
             let (rel_path, before, status) = item.map_err(|e| e.to_string())?;
             let full_path = workspace_root.join(&rel_path);
-            if status == "added" || before.is_none() {
+            if status == "added" {
                 if full_path.exists() {
                     let _ = std::fs::remove_file(&full_path);
                 }
@@ -1344,6 +1398,16 @@ impl SqliteSessionStore {
                 }
                 std::fs::write(&full_path, text)
                     .map_err(|e| format!("Failed to restore {}: {e}", full_path.display()))?;
+            } else {
+                // The pre-image was not stored (a file over the history byte
+                // cap). Treating "no pre-image" as "the file was added" deleted
+                // the user's file; leave it untouched instead.
+                tracing::warn!(
+                    %session_id,
+                    path = %full_path.display(),
+                    "cannot revert a file change without a stored pre-image; leaving the file untouched"
+                );
+                continue;
             }
             reverted.push(rel_path);
         }
@@ -3872,6 +3936,38 @@ mod tests {
         );
     }
 
+    /// A file over the history byte cap has no stored pre-image. Treating that
+    /// as "the file was added" deleted the user's file on undo; the revert must
+    /// leave it untouched and not report it as reverted.
+    #[test]
+    fn test_revert_skips_oversize_files_instead_of_deleting_them() {
+        let store = SqliteSessionStore::in_memory().unwrap();
+        store.create_session("sess-revert-big", None).unwrap();
+        let temp_ws = tempfile::tempdir().unwrap();
+        let file_path = temp_ws.path().join("big.bin");
+        std::fs::write(&file_path, "current contents").unwrap();
+        let before = "x".repeat(FILE_HISTORY_MAX_CONTENT_BYTES + 1);
+        store
+            .record_file_change(
+                "sess-revert-big",
+                1,
+                "big.bin",
+                Some(&before),
+                Some("current contents"),
+            )
+            .unwrap();
+
+        let reverted = store
+            .revert_turn_file_changes("sess-revert-big", 1, temp_ws.path())
+            .unwrap();
+        assert!(reverted.is_empty(), "oversize changes are not revertible");
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "current contents",
+            "the file must not be deleted when its pre-image was not stored"
+        );
+    }
+
     /// `plan_undo_turns` reports the newest turn numbers first and refuses a
     /// selection that would cross the compaction boundary — before anything
     /// is deleted, so callers can bail out ahead of reverting files.
@@ -3888,7 +3984,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.plan_undo_turns("sess-plan", 1).unwrap(), vec![2]);
-        assert_eq!(store.plan_undo_turns("sess-plan", 5).unwrap(), vec![2, 1]);
+        assert_eq!(store.plan_undo_turns("sess-plan", 2).unwrap(), vec![2, 1]);
+        let err = store.plan_undo_turns("sess-plan", 5).unwrap_err();
+        assert!(err.contains("only 2 of 5"), "unexpected error: {err}");
 
         store
             .save_turn("sess-plan", COMPACT_TURN_ID, 3, &msgs, None, None)
@@ -3897,6 +3995,42 @@ mod tests {
         assert!(err.contains("undo refused"), "unexpected error: {err}");
         // The refusal left the history intact.
         assert_eq!(store.load_session_history("sess-plan").unwrap().len(), 3);
+    }
+
+    /// Derived turns (goal/cron/task) and in-turn steers are not undo anchors;
+    /// cutting at the Nth real user turn removes every turn after it too.
+    #[test]
+    fn test_undo_selects_user_anchors_not_derived_turns() {
+        let store = SqliteSessionStore::in_memory().unwrap();
+        store.create_session("sess-anchor", None).unwrap();
+        let msgs = vec![crate::turn_loop::types::LLMMessage::user("hi")];
+        let user_origin = serde_json::json!({ "kind": "user" });
+        let goal_origin = serde_json::json!({ "kind": "goal" });
+        let cron_origin = serde_json::json!({ "kind": "cron" });
+        store
+            .save_turn("sess-anchor", "t1", 1, &msgs, None, Some(&user_origin))
+            .unwrap();
+        store
+            .save_turn("sess-anchor", "t2", 2, &msgs, None, Some(&goal_origin))
+            .unwrap();
+        store
+            .save_turn("sess-anchor", "t3", 3, &msgs, None, Some(&user_origin))
+            .unwrap();
+        store
+            .save_turn("sess-anchor", "t4", 4, &msgs, None, Some(&cron_origin))
+            .unwrap();
+
+        // The newest anchor is t3; the cut also removes the newer derived t4.
+        assert_eq!(store.plan_undo_turns("sess-anchor", 1).unwrap(), vec![4, 3]);
+        assert_eq!(store.undo_turns("sess-anchor", 1).unwrap(), 2);
+        assert_eq!(store.load_session_history("sess-anchor").unwrap().len(), 2);
+
+        // Only t1 remains as an anchor; t2 is derived and does not count.
+        let err = store.undo_turns("sess-anchor", 2).unwrap_err();
+        assert!(
+            err.contains("only 1 of 2"),
+            "a derived turn must not count as an anchor: {err}"
+        );
     }
 
     #[test]
@@ -4012,13 +4146,16 @@ mod tests {
         assert_eq!(history[0].content, "1");
         assert_eq!(history[1].content, "2");
 
-        // Undo 10 turns when only 2 remain -> undoes 2 turns
-        let undone_all = store.undo_turns("sess-undo", 10).unwrap();
+        // Undo 10 turns when only 2 remain -> an error, not a short undo
+        let err = store.undo_turns("sess-undo", 10).unwrap_err();
+        assert!(err.contains("only 2 of 10"), "unexpected error: {err}");
+        let undone_all = store.undo_turns("sess-undo", 2).unwrap();
         assert_eq!(undone_all, 2);
         assert!(store.load_session_history("sess-undo").unwrap().is_empty());
 
-        // Undo on empty session returns 0
-        assert_eq!(store.undo_turns("sess-undo", 1).unwrap(), 0);
+        // Undo on an empty session is unavailable
+        let err = store.undo_turns("sess-undo", 1).unwrap_err();
+        assert!(err.contains("nothing to undo"), "unexpected error: {err}");
     }
 
     #[test]
@@ -4113,7 +4250,23 @@ mod tests {
             "the report counts the user messages that survived"
         );
 
-        // Undoing a normal post-compaction turn still works…
+        // A normal turn recorded after the compaction is a user anchor and
+        // undoes cleanly; the trailing-pre-compaction row above has no
+        // messages of its own (the fold re-saved them under the compact turn),
+        // so it is not an anchor.
+        store
+            .save_turn(
+                "sess-compact",
+                "t-post",
+                17,
+                &[
+                    LLMMessage::user("Post-compaction question"),
+                    LLMMessage::assistant("ok"),
+                ],
+                None,
+                None,
+            )
+            .unwrap();
         let undone = store.undo_turns("sess-compact", 1).unwrap();
         assert_eq!(undone, 1);
 
@@ -4337,8 +4490,13 @@ mod tests {
         // Next turn number must be 3
         assert_eq!(store.next_turn_number("sess-undo").unwrap(), 3);
 
-        // Undo remaining 2 turns
-        let undone_all = store.undo_turns("sess-undo", 10).unwrap();
+        // Asking for more anchors than exist is an error, not a silent short
+        // undo: v2 reports SESSION_UNDO_UNAVAILABLE.
+        let err = store.undo_turns("sess-undo", 10).unwrap_err();
+        assert!(err.contains("only 2 of 10"), "unexpected error: {err}");
+
+        // Undo the remaining 2 anchors.
+        let undone_all = store.undo_turns("sess-undo", 2).unwrap();
         assert_eq!(undone_all, 2);
         let history_empty = store.load_session_history("sess-undo").unwrap();
         assert_eq!(history_empty.len(), 0);

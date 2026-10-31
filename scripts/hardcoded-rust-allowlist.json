@@ -261,9 +261,9 @@
       "text": "Invalid TOML configuration: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/config/mod.rs:No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ./config.toml, or ~/.kimi-code/config.toml": {
+    "packages/kimi-agent/src/config/mod.rs:No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ~/.kimi-code/config.toml, or ~/.kimi/config.toml": {
       "file": "packages/kimi-agent/src/config/mod.rs",
-      "text": "No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ./config.toml, or ~/.kimi-code/config.toml",
+      "text": "No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ~/.kimi-code/config.toml, or ~/.kimi/config.toml",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/config/mod.rs:[agent].multi_llm entry \"{alias}\" could not be resolved: add it to [models] with a provider that has credentials.": {
@@ -724,6 +724,16 @@
     "packages/kimi-agent/src/injection/swarm_mode.rs:## Swarm Mode Ended": {
       "file": "packages/kimi-agent/src/injection/swarm_mode.rs",
       "text": "## Swarm Mode Ended",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/injection/todo_reminder.rs:Current todo list:": {
+      "file": "packages/kimi-agent/src/injection/todo_reminder.rs",
+      "text": "Current todo list:",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/injection/todo_reminder.rs:The TodoList tool has not been updated recently.": {
+      "file": "packages/kimi-agent/src/injection/todo_reminder.rs",
+      "text": "The TodoList tool has not been updated recently.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/knowledge/mod.rs:DB lock: {e}": {
@@ -2994,6 +3004,11 @@
       "reason": "diagnostic",
       "manual": true
     },
+    "packages/kimi-agent/src/server/engine.rs:could not persist turn usage": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "could not persist turn usage",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/server/engine.rs:host does not support oauth token fetch": {
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "host does not support oauth token fetch",
@@ -3774,10 +3789,10 @@
       "text": "turn {turn_number}: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/server/mod.rs:undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.": {
+    "packages/kimi-agent/src/server/mod.rs:undo removed {removed} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.": {
       "file": "packages/kimi-agent/src/server/mod.rs",
-      "text": "undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.",
-      "reason": "deferred"
+      "text": "undo removed {removed} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/server/mod.rs:url is required for :import_registry": {
       "file": "packages/kimi-agent/src/server/mod.rs",
@@ -4459,6 +4474,11 @@
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
       "text": "Turn {turn_index} was not found in the session ({available_turns} available)",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/session/sqlite_store.rs:cannot revert a file change without a stored pre-image; leaving the file untouched": {
+      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
+      "text": "cannot revert a file change without a stored pre-image; leaving the file untouched",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/session/sqlite_store.rs:failed to apply patch to {domain}/{key}: {e}": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",

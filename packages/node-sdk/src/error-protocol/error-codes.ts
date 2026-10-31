@@ -31,6 +31,8 @@ export const ErrorCodes = {
   SESSION_APPROVAL_HANDLER_ERROR: 'session.approval_handler_error',
   SESSION_QUESTION_HANDLER_ERROR: 'session.question_handler_error',
   SESSION_INIT_FAILED: 'session.init_failed',
+  SESSION_BUSY: 'session.busy',
+  SESSION_UNDO_UNAVAILABLE: 'session.undo_unavailable',
 
   AGENT_NOT_FOUND: 'agent.not_found',
   TURN_AGENT_BUSY: 'turn.agent_busy',
@@ -158,6 +160,19 @@ export const KIMI_ERROR_INFO = {
     public: true,
     action: 'Wait for the active turn to complete before forking.',
   },
+  'session.busy': {
+    title: 'Session busy',
+    retryable: true,
+    public: true,
+    action: 'Wait for the active turn to finish, then retry.',
+  },
+  'session.undo_unavailable': {
+    title: 'Nothing to undo',
+    retryable: false,
+    public: true,
+    action: 'Check the requested count against the available user turns.',
+  },
+
   'session.export_not_found': {
     title: 'Session export directory missing',
     retryable: false,

@@ -26,6 +26,7 @@
 pub mod patch;
 pub mod sqlite_store;
 pub mod title;
+pub mod usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -156,6 +157,8 @@ pub struct SessionStatus {
     /// — the cross-process half of `/status`'s engine line. `None` until
     /// the session has run a turn.
     pub engine: Option<crate::rpc::types::EngineExecSummary>,
+    /// v2 `UsageStatus`: per-model buckets, their total, and the current turn.
+    pub usage: crate::session::usage::UsageStatus,
 }
 
 /// Fresh-per-turn tool-table provider (the turn-start snapshot source; the
@@ -370,6 +373,10 @@ struct Core {
     release_waiters: Vec<oneshot::Sender<()>>,
     /// P56 (G-5): execution-path summary of the last completed turn.
     last_engine: Option<crate::rpc::types::EngineExecSummary>,
+    /// v2 `UsageAgentModel` equivalent: per-model buckets accumulated across
+    /// this session's turns. Seeded from the host's persisted snapshot when a
+    /// handle is rebuilt or a session resumed, so the totals survive restarts.
+    usage: crate::session::usage::UsageStatus,
 }
 
 /// A turn parked by quiescence: the id was allocated at enqueue time (the
@@ -494,6 +501,17 @@ pub struct EngineSession {
 
 impl EngineSession {
     pub async fn new(config: SessionConfig) -> Self {
+        Self::new_seeded(config, crate::session::usage::UsageStatus::default()).await
+    }
+
+    /// Create a session seeded with the usage snapshot the host persisted for
+    /// it. The engine owns every subsequent fold; the host only stores and
+    /// hands back the opaque snapshot across handle builds (v2's durable
+    /// `UsageRecord` buckets surviving a restart).
+    pub async fn new_seeded(
+        config: SessionConfig,
+        initial_usage: crate::session::usage::UsageStatus,
+    ) -> Self {
         let initial_clock = read_turn_clock(&config.callbacks).await;
         let core = Arc::new(Mutex::new(Core {
             next_turn_id: initial_clock,
@@ -508,6 +526,7 @@ impl EngineSession {
             released: false,
             release_waiters: Vec::new(),
             last_engine: None,
+            usage: initial_usage,
         }));
         let steer_queue = Arc::new(Mutex::new(Vec::new()));
         let ctx = Arc::new(SessionContext {
@@ -831,6 +850,7 @@ impl EngineSession {
             active_turn_id: core.active_turn_id,
             pending_turn_ids: core.pending.iter().map(|t| t.turn_id).collect(),
             engine: core.last_engine.clone(),
+            usage: core.usage.clone(),
         }
     }
 
@@ -1221,6 +1241,9 @@ async fn pump(
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
             if let Ok(TurnOutcome::Ran(result)) = &outcome {
+                // v2 `UsageAgentModel.record`: the engine owns the fold; the
+                // host only persists the snapshot this status exposes.
+                core.usage.record(ctx.llm.model_name(), &result.usage);
                 // Record the interruption-reminder trigger for the next turn
                 // (v2 filters `TurnEnded` on the cancelled reason).
                 ctx.last_turn_aborted.store(
@@ -2631,6 +2654,48 @@ mod tests {
                 .any(|m| m.role == "assistant" && m.content == "main-response"),
             "steer turn history missing the main turn's answer"
         );
+    }
+
+    /// The session owns the usage fold (v2 `UsageAgentModel`): a finished
+    /// turn's counters land in its model's bucket and become `currentTurn`,
+    /// and `status()` exposes them for the napi host to cache and persist.
+    #[tokio::test]
+    async fn usage_is_folded_per_model_and_reported_by_status() {
+        let server = Arc::new(RpcServer::new());
+        let llm = Arc::new(ScriptedLlm::simple(vec![LLMChatResponse {
+            content: "done".into(),
+            thinking: Vec::new(),
+            tool_calls: Vec::new(),
+            finish_reason: Some("stop".into()),
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 2,
+                total_tokens: 12,
+                input_cache_read: 3,
+                input_cache_creation: 4,
+            },
+            timing: None,
+        }]));
+        let session = make_session(llm, rpc_callbacks(server)).await;
+
+        let mut receipt = session
+            .enqueue_turn(TurnRequest::user(msg("user", "hello"), Admission::NewTurn))
+            .unwrap();
+        let outcome = receipt.outcome().await.unwrap();
+        assert!(matches!(outcome, TurnOutcome::Ran(_)));
+
+        let status = session.status();
+        let bucket = &status.usage.by_model["scripted-llm"];
+        assert_eq!(bucket.input_other, 10);
+        assert_eq!(bucket.output, 2);
+        assert_eq!(bucket.input_cache_read, 3);
+        assert_eq!(bucket.input_cache_creation, 4);
+        assert_eq!(status.usage.total.output, 2);
+        assert_eq!(
+            status.usage.current_turn.map(|turn| turn.input_other),
+            Some(10)
+        );
+        session.shutdown();
     }
 
     /// The runner is shared across sessions, so a print turn must not fold

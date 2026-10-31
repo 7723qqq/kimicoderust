@@ -136,6 +136,21 @@ pub struct NativeHttpLlm {
     /// deltas carry it so the host attributes a subagent's stream to the
     /// subagent instead of the main transcript. `None` between turns.
     stream_agent_id: std::sync::Mutex<Option<String>>,
+    /// The session's stable prompt-cache key (v2 `cacheKey`: the session id).
+    /// OpenAI-compatible wires send it as `prompt_cache_key`, anthropic as
+    /// `metadata.user_id`. `None` for a transport with no session.
+    cache_key: Option<String>,
+}
+
+/// Whether the transport config asked for thinking, in either wire dialect:
+/// an OpenAI-shaped effort (anything but the host-level off tokens) or an
+/// anthropic thinking budget.
+fn thinking_is_on(config: &NativeLlmConfig) -> bool {
+    config
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|effort| !effort.is_empty() && effort != "off" && effort != "none")
+        || config.thinking_budget.is_some_and(|budget| budget > 0)
 }
 
 impl NativeHttpLlm {
@@ -153,6 +168,22 @@ impl NativeHttpLlm {
         if config.reasoning_effort.is_none() {
             config.reasoning_effort = config.off_effort.clone();
         }
+        // v2 `resolveThinkingKeep`: preserved thinking defaults to `"all"`
+        // while thinking is on, and is absent when it is off. Only the Kimi
+        // and anthropic wires consume it (a `thinking.keep` object field and
+        // a `clear_thinking_20251015` context-management edit); the generic
+        // OpenAI wire has no encoding for it, so it stays unset there until
+        // the user asks for it explicitly.
+        if config.thinking_keep.is_none()
+            && thinking_is_on(&config)
+            && (config.protocol == "anthropic"
+                || config
+                    .provider_type
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("kimi")))
+        {
+            config.thinking_keep = Some("all".to_string());
+        }
         let client = SHARED_HTTP_CLIENT.clone();
         Self {
             config,
@@ -164,6 +195,7 @@ impl NativeHttpLlm {
             fetch_gate: tokio::sync::Mutex::new(()),
             tool_call_ids: std::sync::Mutex::new(None),
             stream_agent_id: std::sync::Mutex::new(None),
+            cache_key: None,
         }
     }
 
@@ -188,6 +220,41 @@ impl NativeHttpLlm {
     pub fn with_auth_provider(mut self, auth: AuthTokenProvider) -> Self {
         self.auth = Some(auth);
         self
+    }
+
+    /// Attach the session's prompt-cache key (v2 `cacheKey`).
+    pub fn with_cache_key(mut self, key: Option<String>) -> Self {
+        self.cache_key = key.filter(|value| !value.is_empty());
+        self
+    }
+
+    /// The per-request completion cap (v2 `completionBudgetParams` +
+    /// `resolveMaxCompletionCap`): the model output cap when declared, else
+    /// the context window, else v2's 32000 fallback; the remaining context
+    /// (`window - used`) can only lower it, never raise it.
+    fn completion_cap(&self, params: &LLMChatParams) -> u32 {
+        const DEFAULT_FALLBACK: u32 = 32_000;
+        // The declared output cap (host-resolved `maxOutputSize` /
+        // `provider.maxTokens`) is the hard cap; an Anthropic model whose
+        // profile declares none still has its generation ceiling, which is the
+        // same value the request's `max_tokens` already uses.
+        let is_kimi = self
+            .config
+            .provider_type
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
+        let hard_cap = self.config.max_tokens.or_else(|| {
+            (self.config.protocol == "anthropic" && !is_kimi)
+                .then(|| anthropic::default_max_tokens_for_model(&self.config.model))
+        });
+        let base = hard_cap
+            .or(params.max_context_tokens)
+            .unwrap_or(DEFAULT_FALLBACK);
+        let cap = match (params.max_context_tokens, params.used_context_tokens) {
+            (Some(window), Some(used)) => base.min(window.saturating_sub(used)),
+            _ => base,
+        };
+        cap.max(1)
     }
 
     /// Moonshot preserved-thinking keep is active (`[thinking] keep` /
@@ -321,8 +388,9 @@ impl NativeHttpLlm {
         // are not steps, with no `turn.step.completed` to close them once the
         // addressed emissions were gated.
 
+        let completion_cap = self.completion_cap(&params);
         let mut body = if is_anthropic {
-            anthropic::build_request_full(
+            anthropic::build_request_for_provider(
                 &self.config.model,
                 self.config
                     .max_tokens
@@ -332,14 +400,20 @@ impl NativeHttpLlm {
                 true,
                 self.config.thinking_budget,
                 self.config.thinking_keep.as_deref(),
+                self.config.reasoning_effort.as_deref(),
+                self.config.provider_type.as_deref(),
+                self.cache_key.as_deref(),
+                Some(completion_cap),
             )
         } else if is_responses {
-            openai_responses::build_request_full(
+            openai_responses::build_request_with_budget(
                 &self.config.model,
                 &wire,
                 &params.tools,
                 true,
                 self.config.reasoning_effort.as_deref(),
+                self.cache_key.as_deref(),
+                Some(completion_cap),
             )
         } else if is_google {
             // The host expresses "thinking on" as an *effort* for every
@@ -357,16 +431,17 @@ impl NativeHttpLlm {
                 || self.config.thinking_budget.is_some_and(|b| b > 0);
             let include_thoughts =
                 reasoning_on && google_genai::model_supports_thoughts(&self.config.model);
-            google_genai::build_request_for_model(
+            google_genai::build_request_for_model_with_budget(
                 &wire,
                 &params.tools,
                 self.config.thinking_budget,
                 include_thoughts,
                 &self.config.model,
                 self.config.reasoning_effort.as_deref(),
+                Some(completion_cap),
             )
         } else {
-            openai::build_request_full(
+            openai::build_request_for_provider(
                 &self.config.model,
                 &wire,
                 &params.tools,
@@ -374,6 +449,9 @@ impl NativeHttpLlm {
                 self.config.reasoning_effort.as_deref(),
                 self.config.thinking_keep.as_deref(),
                 self.config.reasoning_key.as_deref(),
+                self.config.provider_type.as_deref(),
+                self.cache_key.as_deref(),
+                Some(completion_cap),
             )
         };
 
@@ -1501,6 +1579,7 @@ mod tests {
     fn config(protocol: &str, base_url: &str) -> NativeLlmConfig {
         NativeLlmConfig {
             protocol: protocol.into(),
+            provider_type: None,
             base_url: base_url.into(),
             api_key: "test-key".into(),
             api_key_env: None,
@@ -1519,6 +1598,220 @@ mod tests {
             reasoning_key: None,
             off_effort: None,
         }
+    }
+
+    /// v2 `resolveThinkingKeep` defaults preserved thinking to `"all"` while
+    /// thinking is on. Only the wires that encode it take that default — the
+    /// Kimi `thinking` object and anthropic's `clear_thinking_20251015` — so a
+    /// generic OpenAI-compatible endpoint never receives an unknown field.
+    #[test]
+    fn thinking_keep_defaults_to_all_where_the_wire_consumes_it() {
+        let build = |provider_type: Option<&str>, protocol: &str, effort: Option<&str>, budget| {
+            let mut cfg = config(protocol, "https://api.example.com/v1");
+            cfg.provider_type = provider_type.map(str::to_string);
+            cfg.reasoning_effort = effort.map(str::to_string);
+            cfg.thinking_budget = budget;
+            NativeHttpLlm::new(cfg, String::new())
+        };
+
+        assert_eq!(
+            build(Some("kimi"), "openai", Some("high"), None)
+                .config
+                .thinking_keep
+                .as_deref(),
+            Some("all")
+        );
+        assert_eq!(
+            build(Some("anthropic"), "anthropic", None, Some(32_000))
+                .config
+                .thinking_keep
+                .as_deref(),
+            Some("all"),
+            "an anthropic thinking budget is thinking on"
+        );
+        assert_eq!(
+            build(Some("kimi"), "openai", Some("off"), None)
+                .config
+                .thinking_keep,
+            None,
+            "thinking off carries no keep"
+        );
+        assert_eq!(
+            build(Some("openai"), "openai", Some("high"), None)
+                .config
+                .thinking_keep,
+            None,
+            "a generic OpenAI wire has no keep encoding"
+        );
+
+        let mut explicit = config("openai", "https://api.example.com/v1");
+        explicit.provider_type = Some("kimi".into());
+        explicit.reasoning_effort = Some("high".into());
+        explicit.thinking_keep = Some("1".into());
+        assert_eq!(
+            NativeHttpLlm::new(explicit, String::new())
+                .config
+                .thinking_keep
+                .as_deref(),
+            Some("1"),
+            "an explicit keep value outranks the default"
+        );
+    }
+
+    /// One-shot server that captures the first request body and answers with a
+    /// one-delta OpenAI SSE stream, so a test can assert what the transport
+    /// actually put on the wire.
+    async fn spawn_capturing_server() -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<String>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut tx = Some(tx);
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&raw[..header_end]).to_ascii_lowercase();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if raw.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                if let Some(tx) = tx.take() {
+                    let body_start = raw
+                        .windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .map(|i| i + 4)
+                        .unwrap_or(raw.len());
+                    let _ = tx.send(String::from_utf8_lossy(&raw[body_start..]).into_owned());
+                }
+                let body =
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (addr, handle, rx)
+    }
+
+    #[tokio::test]
+    async fn chat_puts_the_cache_key_and_completion_cap_on_the_openai_wire() {
+        let (addr, server, body) = spawn_capturing_server().await;
+        let mut cfg = config("openai", &format!("http://{addr}/v1"));
+        cfg.model = "gpt-4o".into();
+        cfg.max_tokens = Some(64_000);
+        let llm = NativeHttpLlm::new(cfg, String::new()).with_cache_key(Some("sess-1".to_string()));
+        let result = llm
+            .chat(LLMChatParams {
+                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                tools: Arc::from(Vec::new()),
+                used_context_tokens: Some(10_000),
+                max_context_tokens: Some(20_000),
+                ..Default::default()
+            })
+            .await;
+        assert!(result.is_ok(), "{:?}", result.err());
+        let body = body.await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["prompt_cache_key"], "sess-1");
+        // hard cap 64k, remaining window 10k — the smaller value wins.
+        assert_eq!(json["max_tokens"], 10_000);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_puts_the_kimi_anthropic_trait_on_the_wire() {
+        let (addr, server, body) = spawn_capturing_server().await;
+        let mut cfg = config("anthropic", &format!("http://{addr}/v1"));
+        cfg.model = "k3".into();
+        cfg.provider_type = Some("kimi".into());
+        cfg.reasoning_effort = Some("high".into());
+        cfg.max_tokens = Some(64_000);
+        let llm = NativeHttpLlm::new(cfg, String::new()).with_cache_key(Some("sess-2".to_string()));
+        // The fixed SSE body is OpenAI-shaped, so the anthropic decoder
+        // rejects it — this test only inspects the captured request.
+        let _ = llm
+            .chat(LLMChatParams {
+                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                tools: Arc::from(Vec::new()),
+                used_context_tokens: Some(10_000),
+                max_context_tokens: Some(50_000),
+                ..Default::default()
+            })
+            .await;
+        let body = body.await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["thinking"], serde_json::json!({ "type": "enabled" }));
+        assert_eq!(json["output_config"]["effort"], "high");
+        assert!(json["thinking"].get("budget_tokens").is_none());
+        assert_eq!(json["metadata"]["user_id"], "sess-2");
+        assert_eq!(json["max_tokens"], 40_000);
+        server.abort();
+    }
+
+    #[test]
+    fn completion_cap_follows_v2_budget_resolution() {
+        let params = |used: Option<u32>, window: Option<u32>| LLMChatParams {
+            used_context_tokens: used,
+            max_context_tokens: window,
+            ..Default::default()
+        };
+
+        // Declared output cap wins over the window, and the remaining context
+        // can only lower it.
+        let mut cfg = config("openai", "https://api.example.com/v1");
+        cfg.max_tokens = Some(64_000);
+        let llm = NativeHttpLlm::new(cfg, String::new());
+        assert_eq!(
+            llm.completion_cap(&params(Some(10_000), Some(200_000))),
+            64_000
+        );
+        assert_eq!(
+            llm.completion_cap(&params(Some(60_000), Some(64_000))),
+            4_000
+        );
+
+        // No declared cap: the window is the cap, minus what the request uses.
+        let llm = NativeHttpLlm::new(
+            config("openai", "https://api.example.com/v1"),
+            String::new(),
+        );
+        assert_eq!(
+            llm.completion_cap(&params(Some(90_000), Some(100_000))),
+            10_000
+        );
+        // v2's unknown-window fallback, never zero.
+        assert_eq!(llm.completion_cap(&params(None, None)), 32_000);
+        assert_eq!(llm.completion_cap(&params(Some(200_000), Some(100_000))), 1);
+
+        // An Anthropic model without a declared output cap keeps its
+        // generation ceiling as the hard cap, not the 32000 fallback.
+        let mut claude = config("anthropic", "https://api.anthropic.com/v1");
+        claude.model = "claude-sonnet-4-5".into();
+        let claude = NativeHttpLlm::new(claude, String::new());
+        assert_eq!(claude.completion_cap(&params(None, None)), 64_000);
     }
 
     #[test]
@@ -1733,6 +2026,7 @@ mod tests {
                 cancel: None,
                 messages: Arc::from(Vec::new()),
                 tools: Arc::from(Vec::new()),
+                ..Default::default()
             })
             .await;
         assert!(result.is_err());
@@ -1784,6 +2078,7 @@ mod tests {
                         ..Default::default()
                     }]),
                     tools: Arc::from(Vec::new()),
+                    ..Default::default()
                 })
                 .await
         });
@@ -1875,6 +2170,7 @@ mod tests {
             cancel: None,
             messages: Arc::from(Vec::new()),
             tools: Arc::from(Vec::new()),
+            ..Default::default()
         })
         .await
         .map_err(|e| e.to_string())
@@ -1922,6 +2218,7 @@ mod tests {
                     ..Default::default()
                 }]),
                 tools: Arc::from(Vec::new()),
+                ..Default::default()
             })
             .await;
 
@@ -1978,6 +2275,7 @@ mod tests {
                 cancel: None,
                 messages: Arc::from(Vec::new()),
                 tools: Arc::from(Vec::new()),
+                ..Default::default()
             })
             .await
             .expect_err("a 429 must not be Ok");
@@ -2024,6 +2322,7 @@ mod tests {
                 cancel: None,
                 messages: Arc::from(Vec::new()),
                 tools: Arc::from(Vec::new()),
+                ..Default::default()
             })
             .await
             .expect_err("a 429 must not be Ok");
@@ -2146,6 +2445,7 @@ mod tests {
                 cancel: None,
                 messages: Arc::from(Vec::new()),
                 tools: Arc::from(Vec::new()),
+                ..Default::default()
             })
             .await;
         let response = result.expect("expected the 401 to be recovered");
@@ -2300,6 +2600,7 @@ mod tests {
                 cancel: None,
                 messages: Arc::from(Vec::new()),
                 tools: Arc::from(Vec::new()),
+                ..Default::default()
             })
             .await;
         let msg = result.err().unwrap().to_string();
@@ -2403,6 +2704,7 @@ mod tests {
                 ..Default::default()
             }]),
             tools: Arc::from(Vec::new()),
+            ..Default::default()
         })
         .await
         .expect("the stream completes");

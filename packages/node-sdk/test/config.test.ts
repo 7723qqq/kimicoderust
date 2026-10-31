@@ -444,6 +444,34 @@ default_model = "env/alias"
     expect(llm?.['auth_provider']).toBeUndefined();
   });
 
+  it('forwards the provider family into the pool wire shape', () => {
+    // The engine needs the provider type to pick the Kimi thinking encoding:
+    // the same `openai` protocol on a Kimi provider must not carry
+    // `reasoning_effort`. This is the `nativeLlmWire` hop that would otherwise
+    // drop the field silently.
+    const config = parseConfigString(
+      `
+default_model = "moonshot/k3"
+
+[providers.moonshot]
+type = "kimi"
+base_url = "https://api.moonshot.ai/v1"
+api_key = "sk-x"
+
+[models."moonshot/k3"]
+provider = "moonshot"
+model = "k3"
+max_context_size = 200000
+
+[secondary_model]
+default_model = "moonshot/k3"
+`,
+      'secondary-provider-type.toml',
+    );
+    const llm = resolveSecondaryModelPool(config, true)?.models[0]?.llm;
+    expect(llm).toMatchObject({ provider_type: 'kimi', protocol: 'openai' });
+  });
+
   it('treats a lone default_model as a single-entry pool', () => {
     const config = parseConfigString(
       `${POOL_TOML}
@@ -1066,6 +1094,33 @@ max_context_size = 200000
       expect(llm?.capabilities).toBeUndefined();
       // The profile's effort still reaches the wire, matching the UI.
       expect(llm?.thinkingBudget).toBe(32000);
+    });
+
+    it('sends a Kimi anthropic alias its effort instead of a thinking budget', () => {
+      // Kimi's anthropic-compatible endpoint encodes thinking as
+      // `{type:'enabled'} + output_config.effort`, so the transport needs the
+      // effort itself; a numeric budget would be the wrong dialect.
+      const config = parseConfigString(
+        `default_model = "kimi/anthropic"
+
+[providers.kimi]
+type = "kimi"
+base_url = "https://api.kimi.com/coding"
+api_key = "sk-x"
+
+[models."kimi/anthropic"]
+provider = "kimi"
+model = "k3"
+protocol = "anthropic"
+max_context_size = 200000
+default_effort = "high"
+`,
+        'resolver-kimi-anthropic.toml',
+      );
+      const llm = resolveNativeLlmForAlias(config, 'kimi/anthropic');
+      expect(llm?.protocol).toBe('anthropic');
+      expect(llm?.reasoningEffort).toBe('high');
+      expect(llm?.thinkingBudget).toBeUndefined();
     });
 
     it('resolves an entry through one of its declared aliases', () => {

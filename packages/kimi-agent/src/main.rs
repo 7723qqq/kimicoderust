@@ -135,11 +135,13 @@ async fn main() -> anyhow::Result<()> {
                 providers: Vec::new(),
                 native_llm: Some(NativeLlmConfig {
                     protocol: native.protocol,
+                    provider_type: Some(native.provider_type.clone())
+                        .filter(|value| !value.is_empty()),
                     base_url: native.base_url,
                     api_key: native.api_key,
                     api_key_env: native.api_key_env,
                     model: native.model,
-                    max_tokens: native.max_tokens,
+                    max_tokens: native.max_output_size.or(native.max_tokens),
                     custom_headers: native.custom_headers,
                     // `thinking.effort` is a global choice (schema); a model
                     // that encodes "thinking off" as an effort value gets
@@ -1314,11 +1316,12 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
         providers,
         native_llm: Some(NativeLlmConfig {
             protocol: native.protocol,
+            provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
             base_url: native.base_url,
             api_key: native.api_key,
             api_key_env: native.api_key_env,
             model: native.model,
-            max_tokens: native.max_tokens,
+            max_tokens: native.max_output_size.or(native.max_tokens),
             custom_headers: native.custom_headers,
             reasoning_effort: config.resolve_effort(native.off_effort.as_deref()),
             thinking_budget: None,

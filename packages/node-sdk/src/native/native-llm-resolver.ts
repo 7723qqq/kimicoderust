@@ -15,6 +15,12 @@ const AUTH_HEADERS = new Set(['authorization', 'x-api-key', 'anthropic-version',
 
 export interface JsNativeLlmConfig {
   protocol: string;
+  /**
+   * Declared provider family (`[providers.*].type`, e.g. `kimi`): providers
+   * that share a protocol can still encode thinking differently — Kimi packs
+   * the effort into a `thinking` object instead of `reasoning_effort`.
+   */
+  providerType?: string;
   baseUrl: string;
   apiKey: string;
   /**
@@ -266,6 +272,12 @@ export function resolveNativeLlmForAlias(
 
   const thinkingConfig = config.thinking;
   const modelEffort = effortOverride ?? effective?.defaultEffort ?? thinkingConfig?.effort;
+  // Kimi's anthropic-compatible endpoint uses the same trait as its
+  // Chat Completions wire for thinking: an effort level (`output_config`) or a
+  // protocol-level disable, never Anthropic's `budget_tokens` (v2
+  // `kimiAnthropicTrait.thinking`). The engine needs the effort itself, so it
+  // travels as `reasoningEffort` and the budget stays unset.
+  const isKimiAnthropic = protocol === 'anthropic' && typeStr.toLowerCase() === 'kimi';
 
   if (
     thinkingConfig?.enabled !== false &&
@@ -273,7 +285,7 @@ export function resolveNativeLlmForAlias(
     modelEffort !== 'off' &&
     modelEffort !== 'none'
   ) {
-    if (protocol === 'anthropic') {
+    if (protocol === 'anthropic' && !isKimiAnthropic) {
       // Mirror rust-engine.ts exactly: high/on → 32000, an explicit numeric
       // effort is used verbatim, anything else falls back to 32000. The old
       // 16384/32768 split silently halved the high-tier reasoning budget versus
@@ -298,6 +310,7 @@ export function resolveNativeLlmForAlias(
 
   return {
     protocol,
+    providerType: typeStr.length > 0 ? typeStr : undefined,
     baseUrl: normalizeBaseUrl(protocol, rawBaseUrl),
     apiKey,
     model,
@@ -446,6 +459,7 @@ export interface SecondaryModelPoolWire {
 function nativeLlmWire(config: JsNativeLlmConfig): Record<string, unknown> {
   return {
     protocol: config.protocol,
+    provider_type: config.providerType,
     base_url: config.baseUrl,
     api_key: config.apiKey,
     api_key_env: config.apiKeyEnv,

@@ -105,6 +105,10 @@ export interface SessionStatus {
     steps: number | null;
     stop_reason: string | null;
   } | null;
+  /** v2 `UsageStatus` snapshot (`{ byModel, total, currentTurn }`). Opaque to
+   *  the host: persist it across handle builds and pass it back as
+   *  `initialUsageJson`; never re-derive it. */
+  usageJson?: string | null;
 }
 
 /**

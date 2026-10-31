@@ -17,7 +17,7 @@ mod glob;
 pub mod goal;
 mod grep;
 pub mod image_compress;
-mod line_endings;
+pub(crate) mod line_endings;
 pub mod list_directory;
 mod llm_stream;
 /// The `#[napi]` surface of this module's tools, re-exported for the addon.

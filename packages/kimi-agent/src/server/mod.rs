@@ -185,6 +185,21 @@ impl RemoteControlStatusWire {
     }
 }
 
+/// The host executable the CLI recorded for plugin stdio servers declared
+/// with `command: "node"`: the packaged Bun binary can re-execute the entry
+/// itself (`<runner> __plugin_run_node <entry>`), so a Bun-only install needs
+/// no system Node.js. Unset for a standalone `kimi-agent --serve` run, which
+/// keeps spawning `node` as declared.
+fn plugin_node_runner() -> Option<std::path::PathBuf> {
+    std::env::var_os("KIMI_NODE_RUNNER")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+fn plugin_manager_with_env(store: Arc<SqliteSessionStore>) -> plugins::PluginManager {
+    plugins::PluginManager::new(store).with_node_runner(plugin_node_runner())
+}
+
 impl HttpServer {
     /// A server over its own event hub.
     pub fn new(store: Arc<SqliteSessionStore>) -> Self {
@@ -265,7 +280,7 @@ impl HttpServer {
             interaction_manager: Arc::new(
                 interaction::InteractionManager::new().with_hub(hub.clone()),
             ),
-            plugin_manager: Arc::new(plugins::PluginManager::new(store)),
+            plugin_manager: Arc::new(plugin_manager_with_env(store)),
             oauth_manager: Arc::new(oauth::OAuthManager::new()),
             prompt_queue: Arc::new(prompt_queue::PromptQueue::new()),
             config_override: Arc::new(Mutex::new(None)),
@@ -512,7 +527,7 @@ impl HttpServer {
     #[must_use]
     pub fn with_plugin_home(mut self, home: PathBuf) -> Self {
         self.plugin_manager = Arc::new(
-            plugins::PluginManager::new(self.store.clone())
+            plugin_manager_with_env(self.store.clone())
                 .with_marketplace_dir(plugins::default_marketplace_dir())
                 .with_home_dir(Some(home)),
         );
@@ -5726,7 +5741,7 @@ impl HttpServer {
                     }
                 }
                 match self.store.undo_turns(session_id, count) {
-                    Ok(undone) => {
+                    Ok(removed) => {
                         // Restore the engine-owned state domains (`todo`,
                         // `plan`, …) to the anchor each turn pushed. Without
                         // this the transcript loses turns while `todo.json`
@@ -5739,9 +5754,11 @@ impl HttpServer {
                         // therefore a partial application and must be reported
                         // rather than swallowed — a silent divergence is worse
                         // than a visible error.
-                        if let Err(e) = self.rollback_state_for_undo(session_id, count) {
+                        // One checkpoint exists per removed turn, including
+                        // the derived turns the anchor cut swept up.
+                        if let Err(e) = self.rollback_state_for_undo(session_id, removed) {
                             return HttpResponse::internal_error(format!(
-                                "undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session."
+                                "undo removed {removed} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session."
                             ));
                         }
                         // Online transcripts must learn about the cut, exactly
@@ -5751,11 +5768,11 @@ impl HttpServer {
                             .publish(&crate::events::EngineEvent::Custom(json!({
                                 "type": "context.undone",
                                 "sessionId": session_id,
-                                "undone": undone,
+                                "undone": count,
                                 "turnNumbers": turn_numbers,
                             })));
                         HttpResponse::ok(&json!({
-                            "undone": undone,
+                            "undone": count,
                             "sessionId": session_id
                         }))
                     }
@@ -13904,13 +13921,26 @@ max_context_size = 1000
                 path: format!("/api/v1/sessions/{sid}:undo"),
                 query: None,
                 headers: HashMap::new(),
-                body: serde_json::to_vec(&json!({ "count": 3 })).unwrap(),
+                body: serde_json::to_vec(&json!({ "count": 1 })).unwrap(),
             })
             .await;
         assert_eq!(
             res.status, 200,
-            "requesting more undos than checkpoints exist must not error"
+            "an undo inside the available anchors must not require a checkpoint"
         );
+
+        // Asking for more anchors than exist is unavailable, independent of
+        // the checkpoint stack.
+        let res = server
+            .handle_request(&HttpRequest {
+                method: "POST".into(),
+                path: format!("/api/v1/sessions/{sid}:undo"),
+                query: None,
+                headers: HashMap::new(),
+                body: serde_json::to_vec(&json!({ "count": 3 })).unwrap(),
+            })
+            .await;
+        assert_eq!(res.status, 400, "insufficient undo count must be refused");
     }
 
     #[tokio::test]

@@ -370,7 +370,7 @@ function initialRuntimeState(config: KimiConfig, model: string | undefined) {
     towerMode: false,
     maxContextTokens: resolveModelContextWindow(config, config.defaultModel),
     contextTokens: 0,
-    usage: { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+    usageJson: undefined,
     goal: null,
     currentTurnId: 0,
   };
@@ -396,7 +396,13 @@ function applySessionLlmOverrides(
   const out: JsNativeLlmConfig = { ...llm };
   const effort = meta.thinkingEffort;
   const thinkingOn = effort !== '' && effort !== 'off' && effort !== 'none';
-  if (out.protocol === 'anthropic') {
+  const kimiAnthropic =
+    out.protocol === 'anthropic' && out.providerType?.toLowerCase() === 'kimi';
+  if (kimiAnthropic) {
+    // Kimi's anthropic trait encodes the effort itself; there is no budget.
+    out.thinkingBudget = undefined;
+    out.reasoningEffort = thinkingOn ? effort : 'off';
+  } else if (out.protocol === 'anthropic') {
     out.reasoningEffort = undefined;
     if (!thinkingOn) out.thinkingBudget = undefined;
     else if (effort === 'low') out.thinkingBudget = 1024;
@@ -464,21 +470,61 @@ function shellCommandKey(sessionId: string, commandId: string | undefined): stri
 }
 
 /**
- * The history cut index that removes the last `count` user turns: walking from
- * the end, the Nth-from-last user message starts the earliest turn to drop, so
- * everything from it onward is undone. Fewer than `count` user turns clears the
- * whole history.
+ * v2 `isUndoAnchor` (`conversationTime.ts`): a real user turn — a plain user
+ * prompt, or a user-typed skill/plugin activation. In-turn steers, injections
+ * and derived turns are not anchors.
  */
-function truncateHistoryByTurns(history: readonly SessionPrompt[], count: number): number {
-  if (count <= 0) return history.length;
-  let seen = 0;
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i]?.role === 'user') {
-      seen += 1;
-      if (seen === count) return i;
+function isUndoAnchorPrompt(message: SessionPrompt): boolean {
+  if (message.role !== 'user') return false;
+  const origin = message.origin as
+    | { readonly kind?: string; readonly inTurn?: boolean; readonly trigger?: string }
+    | undefined;
+  if (origin?.inTurn === true) return false;
+  if (origin === undefined || origin.kind === 'user') return true;
+  return (
+    (origin.kind === 'skill_activation' || origin.kind === 'plugin_command') &&
+    origin.trigger === 'user-slash'
+  );
+}
+
+interface UndoCut {
+  readonly cutIndex: number;
+  readonly removedCount: number;
+  readonly stoppedAtCompaction: boolean;
+}
+
+/** v2 `computeUndoCut`: the cut at the Nth anchor from the end. */
+function computeUndoCut(
+  history: readonly SessionPrompt[],
+  count: number,
+): UndoCut {
+  let remaining = count;
+  let cutIndex = -1;
+  let removedCount = 0;
+  let stoppedAtCompaction = false;
+  for (let i = history.length - 1; i >= 0 && remaining > 0; i--) {
+    const message = history[i];
+    if (message === undefined) continue;
+    const kind = (message.origin as { readonly kind?: string } | undefined)?.kind;
+    if (kind === 'injection') continue;
+    if (kind === 'compaction_summary') {
+      stoppedAtCompaction = true;
+      break;
+    }
+    if (isUndoAnchorPrompt(message)) {
+      remaining -= 1;
+      removedCount += 1;
+      cutIndex = i;
     }
   }
-  return 0;
+  return { cutIndex, removedCount, stoppedAtCompaction };
+}
+
+/** v2 `formatUndoUnavailableMessage`. */
+function formatUndoUnavailable(cut: UndoCut, requested: number): string {
+  if (cut.stoppedAtCompaction) return 'Nothing to undo: would cross a compaction boundary';
+  if (cut.removedCount === 0) return 'Nothing to undo: no user message to undo';
+  return `Nothing to undo: only ${cut.removedCount} of ${requested} requested turn(s) available`;
 }
 
 /**
@@ -489,7 +535,8 @@ function truncateHistoryByTurns(history: readonly SessionPrompt[], count: number
 function retainThroughTurn(history: readonly SessionPrompt[], turnIndex: number): number {
   let seen = 0;
   for (let i = 0; i < history.length; i++) {
-    if (history[i]?.role === 'user') {
+    const message = history[i];
+    if (message !== undefined && isUndoAnchorPrompt(message)) {
       if (seen === turnIndex) return i + 1;
       seen += 1;
     }
@@ -1058,7 +1105,12 @@ interface NativeSessionMeta {
   towerMode: boolean;
   maxContextTokens: number;
   contextTokens: number;
-  usage: { inputOther: number; output: number; inputCacheRead: number; inputCacheCreation: number };
+  /**
+   * The engine's `UsageStatus` snapshot (`{ byModel, total, currentTurn }`),
+   * cached for sync status events and persisted across handle builds. The
+   * engine owns the fold; the host never re-derives it.
+   */
+  usageJson?: string | undefined;
   goal: NativeGoalState | null;
   /** The active plan document handle (plan mode); content lives in the plan file. */
   plan: { id: string; content: string; path: string } | undefined;
@@ -1117,6 +1169,8 @@ interface PersistedSessionMeta {
   goal?: NativeGoalState | null | undefined;
   forkedFrom?: string | undefined;
   contextTokens?: number | undefined;
+  /** The engine's opaque `UsageStatus` snapshot, restored into the next handle. */
+  usageJson?: string | undefined;
   agents?: Record<string, AgentMeta> | undefined;
   /** Headless session (upstream `nonInteractive`): skips the engine's dangerous-command ask policy. */
   nonInteractive?: boolean | undefined;
@@ -2443,6 +2497,9 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       modelName: nativeLlm?.model ?? meta.model ?? 'default',
       messages: [],
       tools: [],
+      // The engine seeds its per-model buckets from the snapshot the host last
+      // persisted; the host never re-derives them.
+      initialUsageJson: meta.usageJson,
       workspaceRoot: workDir,
       nativeTools: config.agent?.nativeTools !== false,
       // `/add-dir` roots. The engine serves paths under them natively; without
@@ -2583,7 +2640,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
         towerMode: false,
         maxContextTokens: resolveModelContextWindow(config, config.defaultModel),
         contextTokens: persisted?.contextTokens ?? 0,
-        usage: { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+        usageJson: persisted?.usageJson,
         goal: persisted?.goal ?? null,
         plan: persisted?.plan,
         forkedFrom: persisted?.forkedFrom,
@@ -2840,12 +2897,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
           ? { id: meta.plan.id, content: meta.plan.content, path: meta.plan.path }
           : null,
         swarmMode: meta.swarmMode,
-        usage: {
-          inputOther: meta.usage.inputOther,
-          output: meta.usage.output,
-          inputCacheRead: meta.usage.inputCacheRead,
-          inputCacheCreation: meta.usage.inputCacheCreation,
-        },
+        usage: { ...this.usageFromSnapshot(meta.usageJson) },
         tools: [],
         background: [],
       },
@@ -3323,12 +3375,50 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
 
   override async getUsage(input: SessionIdRpcInput): Promise<SessionUsage> {
     const meta = this.requireSession(input.sessionId);
-    const { inputOther, output, inputCacheRead, inputCacheCreation } = meta.usage;
-    // v2's usage view is empty until the first turn records tokens.
-    if (inputOther === 0 && output === 0 && inputCacheRead === 0 && inputCacheCreation === 0) {
+    if (meta.handle !== undefined) {
+      try {
+        const status = await meta.handle.status();
+        if (status.usageJson !== undefined && status.usageJson !== null) {
+          if (meta.usageJson !== status.usageJson) {
+            meta.usageJson = status.usageJson;
+            this.persistMeta(meta);
+          }
+          return this.usageFromSnapshot(status.usageJson);
+        }
+      } catch {
+        // Fall through to the cached snapshot.
+      }
+    }
+    return this.usageFromSnapshot(meta.usageJson);
+  }
+
+  /**
+   * The engine's `UsageStatus` snapshot as the SDK's `SessionUsage`. The host
+   * only decodes the opaque JSON the engine produced; it never derives the
+   * buckets or totals itself.
+   */
+  private usageFromSnapshot(raw: string | undefined): SessionUsage {
+    if (raw === undefined) return {};
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return typeof parsed === 'object' && parsed !== null ? (parsed as SessionUsage) : {};
+    } catch {
       return {};
     }
-    return { total: { inputOther, output, inputCacheRead, inputCacheCreation } };
+  }
+
+  /** Cache the engine's latest usage snapshot after a turn and persist it. */
+  private async refreshUsage(meta: NativeSessionMeta): Promise<void> {
+    if (meta.handle === undefined) return;
+    try {
+      const status = await meta.handle.status();
+      if (status.usageJson !== undefined && status.usageJson !== null) {
+        meta.usageJson = status.usageJson;
+        this.persistMeta(meta);
+      }
+    } catch {
+      // Best-effort: the next turn or getUsage reads the engine again.
+    }
   }
 
   override async getStatus(input: SessionIdRpcInput): Promise<SessionStatus> {
@@ -3603,17 +3693,49 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
         `cannot undo history of session "${input.sessionId}" without a live engine handle`,
       );
     }
-    const history = await meta.handle.getHistory();
-    const cut = truncateHistoryByTurns(history, input.count);
-    if (cut >= history.length) return; // nothing to undo
-    // Exclusive window so no turn is admitted mid-truncation.
-    const acquired = await meta.handle.tryAcquireQuiescence();
-    try {
-      await meta.handle.setHistory(history.slice(0, cut));
-    } finally {
-      if (acquired) await meta.handle.releaseQuiescence();
+    if (!Number.isSafeInteger(input.count) || input.count <= 0) {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        'Undo count must be a positive safe integer',
+        { details: { field: 'count' } },
+      );
     }
-    meta.messageCount = Math.max(0, meta.messageCount - (history.length - cut));
+    const history = await meta.handle.getHistory();
+    const cut = computeUndoCut(history, input.count);
+    if (cut.cutIndex < 0 || cut.removedCount < input.count) {
+      throw new KimiError(
+        ErrorCodes.SESSION_UNDO_UNAVAILABLE,
+        formatUndoUnavailable(cut, input.count),
+        {
+          details: {
+            reason: cut.stoppedAtCompaction
+              ? 'compaction_boundary'
+              : cut.removedCount === 0
+                ? 'empty'
+                : 'insufficient',
+            requestedCount: input.count,
+            undoableCount: cut.removedCount,
+            stoppedAtCompaction: cut.stoppedAtCompaction,
+          },
+        },
+      );
+    }
+    // Exclusive window so no turn is admitted mid-truncation. Without it the
+    // cut raced an active or queued turn and spliced the history under it.
+    const acquired = await meta.handle.tryAcquireQuiescence();
+    if (!acquired) {
+      throw new KimiError(
+        ErrorCodes.SESSION_BUSY,
+        'Cannot undo while a turn is active or queued. Wait for it to finish, then retry.',
+        { details: { reason: 'loop' } },
+      );
+    }
+    try {
+      await meta.handle.setHistory(history.slice(0, cut.cutIndex));
+    } finally {
+      await meta.handle.releaseQuiescence();
+    }
+    meta.messageCount = Math.max(0, meta.messageCount - (history.length - cut.cutIndex));
     meta.contextTokens = 0;
     meta.updatedAt = Date.now();
     this.persistMeta(meta);
@@ -3641,7 +3763,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       // a negative index and falls through to `history.length`, which would
       // silently retain the whole session under a "truncate at this turn"
       // call. v2 gets this from the engine, which owns the rule there.
-      const availableTurns = history.filter((message) => message.role === 'user').length;
+      const availableTurns = history.filter(isUndoAnchorPrompt).length;
       if (input.turnIndex < 0 || input.turnIndex >= availableTurns) {
         throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Fork turn index is out of range', {
           details: { turnIndex: input.turnIndex, availableTurns },
@@ -5719,10 +5841,9 @@ private renderProjectSkillPrompt(
   private recordTurnOutcome(meta: NativeSessionMeta, outcome: SessionTurnOutcome): void {
     const result = outcome.result;
     if (!result) return;
-    meta.usage.inputOther += result.inputTokens;
-    meta.usage.output += result.outputTokens;
-    meta.usage.inputCacheRead += result.inputCacheRead;
-    meta.usage.inputCacheCreation += result.inputCacheCreation;
+    // The engine owns the usage fold; refresh the cached snapshot it exposes
+    // instead of re-summing the outcome here.
+    void this.refreshUsage(meta);
     // The last turn's full prompt size is the best proxy the native handle
     // offers for live context occupancy (it exposes no direct token count).
     meta.contextTokens = result.inputTokens + result.inputCacheRead + result.inputCacheCreation;
@@ -5932,6 +6053,7 @@ private renderProjectSkillPrompt(
       goal: meta.goal,
       forkedFrom: meta.forkedFrom,
       contextTokens: meta.contextTokens,
+      usageJson: meta.usageJson,
       agents: meta.agents,
       agentProfile: meta.agentProfile,
       agentFiles: meta.agentFiles,
@@ -6091,6 +6213,7 @@ private renderProjectSkillPrompt(
 
   /** The `agent.status.updated` snapshot emitted after a runtime-state change. */
   private emitStatusUpdated(meta: NativeSessionMeta): void {
+    const usage = this.usageFromSnapshot(meta.usageJson);
     this.receiveEvent({
       sessionId: meta.id,
       agentId: 'main',
@@ -6105,6 +6228,7 @@ private renderProjectSkillPrompt(
       maxContextTokens: meta.maxContextTokens,
       contextUsage:
         meta.maxContextTokens > 0 ? meta.contextTokens / meta.maxContextTokens : 0,
+      ...(Object.keys(usage).length > 0 ? { usage } : {}),
     });
   }
 

@@ -483,6 +483,13 @@ impl PermissionEngine {
     pub fn evaluate(&self, tool_name: &str, args: &Value) -> LocalPermissionVerdict {
         let tool_lower = tool_name.to_ascii_lowercase();
         let target_subject = extract_rule_subject(&tool_lower, args);
+        // Rule matching sees the raw spelling, the lexically resolved path and
+        // the realpath: a deny rule for `/etc/passwd` must also match
+        // `/etc/../etc/passwd`, and one for the workspace file must match a
+        // symlink that resolves outside it.
+        let rule_subjects =
+            rule_subject_variants(&tool_lower, target_subject.clone(), self.workspace_dir());
+        let path_subject = rule_subjects.last().cloned();
         let file_access = file_accesses(&tool_lower, args);
 
         // 1. AutoModeAskUserQuestionDeny
@@ -498,8 +505,7 @@ impl PermissionEngine {
         }
 
         // 2. UserConfiguredDeny
-        if let Some(rule) =
-            Self::matches_any_rule(&self.compiled_deny, &tool_lower, target_subject.as_deref())
+        if let Some(rule) = Self::matches_any_rule(&self.compiled_deny, &tool_lower, &rule_subjects)
         {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Deny,
@@ -586,11 +592,9 @@ impl PermissionEngine {
         }
 
         // 5. SessionApprovalHistory
-        if let Some(rule) = Self::matches_any_rule(
-            &self.compiled_session,
-            &tool_lower,
-            target_subject.as_deref(),
-        ) {
+        if let Some(rule) =
+            Self::matches_any_rule(&self.compiled_session, &tool_lower, &rule_subjects)
+        {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Allow,
                 policy_name: "SessionApprovalHistory".into(),
@@ -606,8 +610,7 @@ impl PermissionEngine {
         }
 
         // 6. UserConfiguredAsk
-        if let Some(rule) =
-            Self::matches_any_rule(&self.compiled_ask, &tool_lower, target_subject.as_deref())
+        if let Some(rule) = Self::matches_any_rule(&self.compiled_ask, &tool_lower, &rule_subjects)
         {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Ask,
@@ -629,7 +632,7 @@ impl PermissionEngine {
 
         // 7. UserConfiguredAllow
         if let Some(rule) =
-            Self::matches_any_rule(&self.compiled_allow, &tool_lower, target_subject.as_deref())
+            Self::matches_any_rule(&self.compiled_allow, &tool_lower, &rule_subjects)
         {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Allow,
@@ -726,7 +729,7 @@ impl PermissionEngine {
         //     platform, any path under a prefix" breadth was a deviation and is
         //     gone.
         if matches!(tool_lower.as_str(), "write" | "edit")
-            && let Some(path) = target_subject.as_deref()
+            && let Some(path) = path_subject.as_deref()
             && let Some(dir) = self.workspace_dir()
             && is_posix_path(dir)
             && is_posix_path(path)
@@ -762,14 +765,88 @@ impl PermissionEngine {
     fn matches_any_rule(
         rules: &[CompiledRule],
         tool_lower: &str,
-        subject: Option<&str>,
+        subjects: &[String],
     ) -> Option<String> {
         for rule in rules {
-            if rule.matches(tool_lower, subject) {
+            // A tool-only rule (`Bash*`, with no argument pattern) matches even
+            // when the call carries no subject; with a subject, any spelling of
+            // the target can satisfy the argument pattern.
+            let matched = if subjects.is_empty() {
+                rule.matches(tool_lower, None)
+            } else {
+                subjects
+                    .iter()
+                    .any(|subject| rule.matches(tool_lower, Some(subject.as_str())))
+            };
+            if matched {
                 return Some(rule.raw_rule.clone());
             }
         }
         None
+    }
+}
+
+/// The subject spellings a rule can match: the raw argument, the lexically
+/// resolved absolute path, and its realpath. A deny rule for `/etc/passwd`
+/// otherwise missed `/etc/../etc/passwd`; an allow rule for the workspace
+/// missed a symlinked target outside it.
+fn rule_subject_variants(tool_lower: &str, raw: Option<String>, cwd: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let mut variants = vec![raw.clone()];
+    if !matches!(
+        tool_lower,
+        "read" | "write" | "edit" | "grep" | "glob" | "listdirectory" | "list_directory"
+    ) {
+        return variants;
+    }
+    let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
+        return variants;
+    };
+    let path_class = if cwd.starts_with('/') {
+        crate::native::path_access::PathClass::Posix
+    } else {
+        crate::native::path_access::PathClass::Win32
+    };
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| home.to_string_lossy().to_string());
+    let expanded = crate::native::path_access::expand_user_path(&raw, home.as_deref(), path_class);
+    let Ok(lexical) = crate::native::path_access::canonicalize_path(&expanded, cwd, path_class)
+    else {
+        return variants;
+    };
+    variants.push(lexical.clone());
+    if let Ok(canonical) = std::fs::canonicalize(&lexical) {
+        variants.push(strip_verbatim_prefix(&canonical.to_string_lossy()));
+    }
+    // Rules are commonly written with `/` even on Windows; match both
+    // spellings of the resolved path.
+    let slash_variants: Vec<String> = variants
+        .iter()
+        .filter(|variant| variant.contains('\\'))
+        .map(|variant| variant.replace('\\', "/"))
+        .collect();
+    variants.extend(slash_variants);
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
+/// Windows `canonicalize` returns a `\\?\` (or `\\?\UNC\`) verbatim path;
+/// rules are written in the normal spelling.
+fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = path.strip_prefix("\\\\?\\") {
+        rest.to_string()
+    } else if let Some(rest) = path.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = path.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        path.to_string()
     }
 }
 
@@ -2040,6 +2117,31 @@ mod tests {
         let verdict = engine.evaluate("Write", &json!({ "path": "SRC/Main.rs" }));
         assert_eq!(verdict.decision, VerdictDecision::Allow);
         assert_eq!(verdict.policy_name, "UserConfiguredAllow");
+    }
+
+    /// A deny rule must match the resolved target, not only the raw spelling:
+    /// `/sub/../secret` reaches the same file as `/secret`, and matching the raw
+    /// path let the traversal bypass the rule.
+    #[test]
+    fn test_rule_subject_resolves_dot_dot_traversal() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("secret.txt"), "x").unwrap();
+        let root = std::fs::canonicalize(ws.path()).unwrap();
+        let secret = std::fs::canonicalize(root.join("secret.txt")).unwrap();
+        let rule_path = secret.to_string_lossy().replace('\\', "/");
+        let engine = PermissionEngine::with_workspace(
+            PolicySnapshot {
+                mode: PermissionMode::Manual,
+                deny_rules: vec![format!("Read({rule_path})")],
+                ..Default::default()
+            },
+            Some(root.to_string_lossy().to_string()),
+            Vec::new(),
+        );
+        let traversal = root.join("sub").join("..").join("secret.txt");
+        let verdict = engine.evaluate("Read", &json!({ "path": traversal.to_string_lossy() }));
+        assert_eq!(verdict.decision, VerdictDecision::Deny);
+        assert_eq!(verdict.policy_name, "UserConfiguredDeny");
     }
 
     /// v2 `matchRuleSubjects`: a leading `!` negates the argument pattern, so

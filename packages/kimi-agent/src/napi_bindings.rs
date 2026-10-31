@@ -880,6 +880,11 @@ pub struct JsRunTurnParams {
     pub shell_path: Option<String>,
     /// Optional JSON-serialized PolicySnapshot for local permission evaluation (P26 批 3).
     pub policy_snapshot_json: Option<String>,
+    /// Optional JSON-serialized `UsageStatus` snapshot (`{ byModel, total,
+    /// currentTurn }`) the host persisted for this session. The engine seeds
+    /// its buckets with it and owns every later fold; the host never re-derives
+    /// them.
+    pub initial_usage_json: Option<String>,
     /// Optional JSON-serialized `[secondary_model]` subagent model pool: the
     /// default alias, `force`, and one resolved LLM config per pool entry.
     /// Absent = subagents inherit the caller's model.
@@ -1111,6 +1116,10 @@ pub struct JsLlmProviderDef {
 pub struct JsNativeLlmConfig {
     /// "openai" (Chat Completions) or "anthropic" (Messages), or "google" / "openai_responses".
     pub protocol: String,
+    /// Declared provider family (`[providers.*].type`, e.g. "kimi"): the
+    /// transport encodes the Kimi `thinking` object instead of a top-level
+    /// `reasoning_effort` for it.
+    pub provider_type: Option<String>,
     /// API base URL including the version segment (e.g. `.../v1`).
     pub base_url: String,
     pub api_key: String,
@@ -2015,6 +2024,7 @@ async fn build_engine_pipeline(
                         model: p.model.clone(),
                         native: p.native.as_ref().map(|cfg| NativeLlmConfig {
                             protocol: cfg.protocol.clone(),
+                            provider_type: cfg.provider_type.clone(),
                             base_url: cfg.base_url.clone(),
                             api_key: cfg.api_key.clone(),
                             api_key_env: cfg.api_key_env.clone(),
@@ -2039,6 +2049,7 @@ async fn build_engine_pipeline(
             .unwrap_or_default(),
         native_llm: params.native_llm.as_ref().map(|cfg| NativeLlmConfig {
             protocol: cfg.protocol.clone(),
+            provider_type: cfg.provider_type.clone(),
             base_url: cfg.base_url.clone(),
             api_key: cfg.api_key.clone(),
             api_key_env: cfg.api_key_env.clone(),
@@ -2577,6 +2588,10 @@ pub struct JsSessionStatus {
     pub pending_turn_ids: Vec<f64>,
     /// P56 (G-5): execution-path summary of the last completed turn.
     pub engine: Option<JsEngineExecSummary>,
+    /// v2 `UsageStatus` as a JSON snapshot (`{ byModel, total, currentTurn }`).
+    /// The host persists it opaquely and passes it back as
+    /// `initial_usage_json`; it never re-derives the buckets itself.
+    pub usage_json: Option<String>,
 }
 
 /// P56 (G-5): cross-process engine execution summary.
@@ -2713,42 +2728,50 @@ pub fn create_engine_session(
                 provider
             });
 
-            let session = EngineSession::new(SessionConfig {
-                llm: pipeline.llm.clone(),
-                callbacks: pipeline.callbacks.clone(),
-                max_steps: params.max_steps.unwrap_or(u32::MAX),
-                max_attempts: params.max_attempts,
-                max_context_tokens: compaction_window(
-                    params.native_llm.as_ref(),
-                    params.max_context_tokens,
-                ),
-                compaction_max_attempts: params.compaction_max_attempts,
-                permission_mode: pipeline.permission_mode,
-                tool_defs: tool_defs_provider,
-                goal: goal_provider,
-                on_before_turn: None,
-                agent_cancel_slot: Some(agent_cancel_slot),
-                steer_slot: Some(steer_slot),
-                hook_guard: pipeline.hook_guard.clone(),
-                print_background: print_background_policy(&params),
-                // The host's session id is also the task-notification key: the
-                // print settle drains only this session's completions.
-                session_id: params.session_id.clone(),
-                task_runner: SUBAGENT_MANAGER.get_task_runner_sync(),
-                toolset: pipeline.toolset.clone(),
-                // M1c (v2 #3963): the host-injected turn-telemetry context.
-                // Present on the napi path, the pump emits the turn lifecycle
-                // through the host/telemetry seam.
-                telemetry: params
-                    .telemetry
-                    .map(|t| crate::turn_loop::types::TelemetryContext {
-                        mode: t.mode,
-                        provider_type: t.provider_type,
-                        protocol: t.protocol,
-                        thinking_effort: t.thinking_effort,
-                        enabled_plugins: t.enabled_plugins,
+            let initial_usage = params
+                .initial_usage_json
+                .as_deref()
+                .map(crate::session::usage::UsageStatus::from_json_str)
+                .unwrap_or_default();
+            let session = EngineSession::new_seeded(
+                SessionConfig {
+                    llm: pipeline.llm.clone(),
+                    callbacks: pipeline.callbacks.clone(),
+                    max_steps: params.max_steps.unwrap_or(u32::MAX),
+                    max_attempts: params.max_attempts,
+                    max_context_tokens: compaction_window(
+                        params.native_llm.as_ref(),
+                        params.max_context_tokens,
+                    ),
+                    compaction_max_attempts: params.compaction_max_attempts,
+                    permission_mode: pipeline.permission_mode,
+                    tool_defs: tool_defs_provider,
+                    goal: goal_provider,
+                    on_before_turn: None,
+                    agent_cancel_slot: Some(agent_cancel_slot),
+                    steer_slot: Some(steer_slot),
+                    hook_guard: pipeline.hook_guard.clone(),
+                    print_background: print_background_policy(&params),
+                    // The host's session id is also the task-notification key: the
+                    // print settle drains only this session's completions.
+                    session_id: params.session_id.clone(),
+                    task_runner: SUBAGENT_MANAGER.get_task_runner_sync(),
+                    toolset: pipeline.toolset.clone(),
+                    // M1c (v2 #3963): the host-injected turn-telemetry context.
+                    // Present on the napi path, the pump emits the turn lifecycle
+                    // through the host/telemetry seam.
+                    telemetry: params.telemetry.map(|t| {
+                        crate::turn_loop::types::TelemetryContext {
+                            mode: t.mode,
+                            provider_type: t.provider_type,
+                            protocol: t.protocol,
+                            thinking_effort: t.thinking_effort,
+                            enabled_plugins: t.enabled_plugins,
+                        }
                     }),
-            })
+                },
+                initial_usage,
+            )
             .await;
 
             let session_id = format!("session-{}", SESSION_NEXT_ID.fetch_add(1, Ordering::SeqCst));
@@ -2979,6 +3002,7 @@ pub fn session_status(session_id: String) -> napi::Result<JsSessionStatus> {
                 steps: e.steps.map(|s| s as f64),
                 stop_reason: e.stop_reason,
             }),
+            usage_json: status.usage.to_json().map(|value| value.to_string()),
         })
     })
 }
@@ -3910,6 +3934,7 @@ mod tests {
     fn js_native_llm() -> JsNativeLlmConfig {
         JsNativeLlmConfig {
             protocol: "openai".into(),
+            provider_type: None,
             base_url: "https://api.example.com/v1".into(),
             api_key: "test-key".into(),
             api_key_env: None,

@@ -180,18 +180,35 @@ fn render_template(template: &str, pairs: &[(&str, &str)]) -> String {
 /// reminder, blocked/paused goals get their status note, and every other
 /// status (or an absent/invalid value) yields an empty string.
 ///
-/// The value must be the durable `GoalState` wire shape (camelCase, as
-/// stored by the state store under the `"goal"` domain). The stored
-/// `wallClockMs` is used for the progress line; callers with a live
-/// wall-clock figure can build the snapshot themselves and call
-/// [`goal_active_reminder`] / [`goal_blocked_note`] / [`goal_paused_note`]
-/// directly.
+/// The durable goal domain is `{ "goal": <snapshot> | null }`; the snapshot is
+/// the camelCase `GoalSnapshot` wire shape. A bare `GoalState` is also accepted
+/// for callers that build the state themselves. The stored `wallClockMs` is
+/// used for the progress line; callers with a live wall-clock figure can build
+/// the snapshot themselves and call [`goal_active_reminder`] /
+/// [`goal_blocked_note`] / [`goal_paused_note`] directly.
 pub fn goal_injection_text(goal_value: &Value) -> String {
-    let Ok(state) = serde_json::from_value::<GoalState>(goal_value.clone()) else {
+    let nested = goal_value.get("goal");
+    let value = nested.unwrap_or(goal_value);
+    if value.is_null() {
+        return String::new();
+    }
+    let snapshot = if nested.is_some() {
+        serde_json::from_value::<GoalSnapshot>(value.clone())
+            .ok()
+            .or_else(|| {
+                serde_json::from_value::<GoalState>(value.clone())
+                    .ok()
+                    .map(|state| to_snapshot(&state, state.wall_clock_ms))
+            })
+    } else {
+        serde_json::from_value::<GoalState>(value.clone())
+            .ok()
+            .map(|state| to_snapshot(&state, state.wall_clock_ms))
+    };
+    let Some(snapshot) = snapshot else {
         return String::new();
     };
-    let snapshot = to_snapshot(&state, state.wall_clock_ms);
-    match state.status {
+    match snapshot.status {
         // `WaitFor` is a native tool on every engine path, so the guidance to
         // wait inside the turn (v2 `isWaitForAvailable()`) always applies.
         // Passing `false` here made `GOAL_WAIT_FOR_GUIDANCE` unreachable.
@@ -497,6 +514,21 @@ mod tests {
 
     fn goal_value(state: &GoalState) -> Value {
         serde_json::to_value(state).unwrap()
+    }
+
+    fn wrapped_goal_value(state: &GoalState) -> Value {
+        json!({ "goal": to_snapshot(state, state.wall_clock_ms) })
+    }
+
+    /// The durable domain value is `{ goal: snapshot | null }`, not a bare
+    /// `GoalState`; the reminder must read the wrapped snapshot or every goal
+    /// turn injects nothing.
+    #[test]
+    fn test_goal_injection_reads_the_wrapped_snapshot() {
+        let text = goal_injection_text(&wrapped_goal_value(&sample_state()));
+        assert!(text.contains("Ship the feature"));
+        assert!(text.contains("Status: active"));
+        assert_eq!(goal_injection_text(&json!({ "goal": null })), "");
     }
 
     #[test]

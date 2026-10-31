@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createKimiHarness, ErrorCodes, type Event, type KimiError } from '#/index';
 
@@ -138,6 +138,112 @@ describe('Session plan, compact, usage, and resume APIs', () => {
 
       await expect(session.getUsage()).resolves.toEqual({});
     } finally {
+      await harness.close();
+    }
+  });
+
+  it('groups a finished turn under its model and restores the buckets on resume', async () => {
+    const { createServer } = await import('node:http');
+    const calls = { count: 0 };
+    const server = createServer((req, res) => {
+      req.on('data', () => {});
+      req.on('end', () => {
+        if (req.url?.includes('/chat/completions') !== true) {
+          res.writeHead(404).end();
+          return;
+        }
+        calls.count += 1;
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'close',
+        });
+        const chunk = (delta: Record<string, unknown>, finish: string | null = null): string =>
+          `data: ${JSON.stringify({
+            id: 'c',
+            object: 'chat.completion.chunk',
+            created: 0,
+            model: 'mock',
+            choices: [{ index: 0, delta, finish_reason: finish }],
+          })}\n\n`;
+        res.write(chunk({ role: 'assistant', content: 'hi' }));
+        res.write(chunk({}, 'stop'));
+        // The usage-only chunk the engine's `stream_options.include_usage`
+        // asks for; only the first request carries tokens so title generation
+        // (if any later call happens) cannot double the counters.
+        if (calls.count === 1) {
+          res.write(
+            `data: ${JSON.stringify({
+              id: 'c',
+              object: 'chat.completion.chunk',
+              created: 0,
+              model: 'mock',
+              choices: [],
+              usage: {
+                prompt_tokens: 40,
+                completion_tokens: 5,
+                total_tokens: 45,
+                prompt_tokens_details: { cached_tokens: 30 },
+              },
+            })}\n\n`,
+          );
+        }
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const port = typeof address === 'object' && address !== null ? address.port : 0;
+
+    const homeDir = await makeTempDir(tempDirs, 'kimi-sdk-usage-turn-home-');
+    const workDir = await makeTempDir(tempDirs, 'kimi-sdk-usage-turn-work-');
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `
+default_model = "test-model"
+
+[providers.local]
+type = "openai"
+base_url = "http://127.0.0.1:${port}/v1"
+api_key = "sk-test"
+
+[models.test-model]
+provider = "local"
+model = "test-model"
+max_context_size = 200000
+`,
+      'utf-8',
+    );
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const session = await harness.createSession({ id: 'ses_usage_turn', workDir });
+      const ended = waitForSessionEvent(session, (event) => event.type === 'turn.ended');
+      await session.prompt('hello');
+      await expect(ended).resolves.toMatchObject({ reason: 'completed' });
+
+      const expected = {
+        byModel: {
+          'test-model': { inputOther: 10, output: 5, inputCacheRead: 30, inputCacheCreation: 0 },
+        },
+        total: { inputOther: 10, output: 5, inputCacheRead: 30, inputCacheCreation: 0 },
+        currentTurn: { inputOther: 10, output: 5, inputCacheRead: 30, inputCacheCreation: 0 },
+      };
+      // `turn.ended` reaches the event stream before the host's outcome fold
+      // lands (the SDK settles the turn on the `turnOutcome` promise), so poll
+      // instead of racing it.
+      await vi.waitFor(async () => {
+        await expect(session.getUsage()).resolves.toEqual(expected);
+      });
+      await session.close();
+
+      // The durable slice: a resumed session reports the same buckets instead
+      // of resetting to zero (v2's `UsageRecord` fold survives restarts).
+      const resumed = await harness.resumeSession({ id: session.id });
+      await expect(resumed.getUsage()).resolves.toEqual(expected);
+    } finally {
+      server.close();
       await harness.close();
     }
   });
