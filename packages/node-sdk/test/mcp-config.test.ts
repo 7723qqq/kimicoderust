@@ -689,3 +689,95 @@ describe('workspace-scoped MCP OAuth', () => {
     }
   }, 20_000);
 });
+
+/**
+ * Plugin-contributed MCP servers are engine-owned config, addressed by
+ * `{ pluginId, serverName }` (v2's plugin locator). The browser flow is the
+ * global one; the grant lands under the engine's runtime name so the session's
+ * MCP manager finds it at connect time.
+ */
+describe('plugin MCP OAuth', () => {
+  it('authorizes a plugin-contributed remote server under its runtime name', async () => {
+    const homeDir = await makeTempDir();
+    const pluginDir = await makeTempDir();
+    const statusServer = await startMcpAuthStatusServer();
+    await writeFile(
+      join(pluginDir, 'kimi.plugin.json'),
+      JSON.stringify({
+        name: 'acme-plugin',
+        mcpServers: {
+          remote: { transport: 'http', url: statusServer.oauthUrl, auth: 'oauth' },
+          local: { command: process.execPath, args: ['server.mjs'] },
+        },
+      }),
+      'utf-8',
+    );
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const installed = await harness.installPlugin(pluginDir);
+      expect(installed.id).toBe('acme-plugin');
+
+      // Unknown plugin ids and undeclared/stdio servers are refused before any
+      // listener or network call.
+      await expect(
+        harness.authenticateAppMcpServer(
+          { pluginId: 'missing-plugin', serverName: 'remote' },
+          { onAuthorizationUrl: async () => true },
+        ),
+      ).rejects.toThrow(/is not installed/);
+      await expect(
+        harness.authenticateAppMcpServer(
+          { pluginId: 'acme-plugin', serverName: 'nope' },
+          { onAuthorizationUrl: async () => true },
+        ),
+      ).rejects.toThrow(/does not declare an MCP server/);
+      await expect(
+        harness.authenticateAppMcpServer(
+          { pluginId: 'acme-plugin', serverName: 'local' },
+          { onAuthorizationUrl: async () => true },
+        ),
+      ).rejects.toThrow(/stdio transport/);
+
+      const urls: string[] = [];
+      await harness.authenticateAppMcpServer(
+        { pluginId: 'acme-plugin', serverName: 'remote' },
+        {
+          onAuthorizationUrl: async (url) => {
+            urls.push(url);
+            const response = await fetch(url, { redirect: 'follow' });
+            expect(response.ok).toBe(true);
+          },
+        },
+      );
+      expect(urls).toHaveLength(1);
+
+      // The engine registers the server as `<pluginId>__<server>`, so that is
+      // the key the grant must be stored under.
+      const key = mcpOAuthStoreKey('acme-plugin__remote', statusServer.oauthUrl);
+      const raw = await readFile(
+        join(homeDir, 'credentials', 'mcp', `${key}-tokens.json`),
+        'utf-8',
+      );
+      expect(raw).not.toContain(statusServer.authToken);
+
+      // A usable grant short-circuits the flow.
+      await harness.authenticateAppMcpServer(
+        { pluginId: 'acme-plugin', serverName: 'remote' },
+        {
+          onAuthorizationUrl: async () => {
+            throw new Error('the browser must not open again');
+          },
+        },
+      );
+
+      await harness.resetAppMcpServerAuth({ pluginId: 'acme-plugin', serverName: 'remote' });
+      await expect(
+        readFile(join(homeDir, 'credentials', 'mcp', `${key}-tokens.json`), 'utf-8'),
+      ).rejects.toThrow();
+    } finally {
+      await harness.close();
+      await statusServer.close();
+    }
+  }, 20_000);
+});

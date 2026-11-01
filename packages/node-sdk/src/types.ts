@@ -678,6 +678,12 @@ export type { McpServerEntry as McpServerInfo };
 
 export interface McpServerLocator {
   readonly serverName: string;
+  /**
+   * The plugin that contributes the server (v2's
+   * `{ source: 'plugin', pluginId, serverName }` locator). Absent means the
+   * server is resolved from the session's MCP config layers instead.
+   */
+  readonly pluginId?: string;
   readonly scope?: string;
 }
 

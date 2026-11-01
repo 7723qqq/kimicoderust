@@ -3362,14 +3362,17 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
    * exists so a session/plugin panel can authenticate a server that is not in
    * the user-global config (v2 `beginMcpServerAuth({ locator })`).
    *
-   * Plugin-contributed servers are not host-side config: the engine's plugin
-   * manager owns them, so a locator naming one resolves to no entry here and
-   * is reported as not configured.
+   * A locator with a `pluginId` addresses a plugin-contributed server
+   * instead; its manifest is engine-owned, so that branch reads it through
+   * `getPluginInfo` (see {@link beginPluginMcpServerAuth}).
    */
   override async beginMcpServerAuth(
     locator: McpServerLocator,
     options: { readonly cwd?: string } = {},
   ): Promise<BeginGlobalMcpServerAuthResult> {
+    if (locator.pluginId !== undefined && locator.pluginId.length > 0) {
+      return this.beginPluginMcpServerAuth(locator.pluginId, locator.serverName);
+    }
     const workDir = options.cwd ?? process.cwd();
     const servers = await this.loadSessionMcpConfig(workDir);
     const config = servers[locator.serverName];
@@ -3415,6 +3418,58 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     };
   }
 
+  /**
+   * Authorize a plugin-contributed remote server (v2's plugin locator). The
+   * manifest is engine-owned, so it is read through `getPluginInfo`; the grant
+   * is stored under the engine's runtime name (`<pluginId>__<name>`) because
+   * that is the name the session's MCP manager registers the server under.
+   */
+  private async beginPluginMcpServerAuth(
+    pluginId: string,
+    serverName: string,
+  ): Promise<BeginGlobalMcpServerAuthResult> {
+    const info = await this.getPluginInfo(pluginId);
+    const server = info.mcpServers?.find((entry) => entry.name === serverName);
+    if (server === undefined) {
+      throw new KimiError(
+        ErrorCodes.MCP_SERVER_NOT_FOUND,
+        `Plugin "${pluginId}" does not declare an MCP server named "${serverName}"`,
+      );
+    }
+    if (server.transport === 'stdio' || server.command !== undefined) {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        `MCP server "${serverName}" uses stdio transport and does not support OAuth authorization`,
+      );
+    }
+    const url = server.url;
+    if (url === undefined) {
+      throw new KimiError(
+        ErrorCodes.MCP_SERVER_NOT_FOUND,
+        `MCP server "${serverName}" is not a configured remote server`,
+      );
+    }
+    const runtimeName = server.runtimeName ?? `${pluginId}__${serverName}`;
+    const state = await this.readMcpOAuthTokens(runtimeName, url);
+    if (state.hasTokens && (!state.expired || state.hasRefreshToken)) {
+      return { status: 'already-authorized' };
+    }
+    const started = await beginMcpOAuthFlow({
+      name: runtimeName,
+      serverUrl: url,
+      clientName: 'Kimi Code',
+      persist: async (tokens) => {
+        const native = await this.engineMcpOAuth();
+        native.mcpOauthStoreTokens(runtimeName, url, JSON.stringify(tokens), this.mcpOAuthDir());
+      },
+    });
+    return {
+      status: 'authorization-required',
+      flowId: started.flowId,
+      authorizationUrl: started.authorizationUrl,
+    };
+  }
+
   override async completeMcpServerAuth(
     input: { readonly flowId: string; readonly timeoutMs?: number },
     signal?: AbortSignal,
@@ -3440,6 +3495,16 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     locator: McpServerLocator,
     options: { readonly cwd?: string } = {},
   ): Promise<void> {
+    if (locator.pluginId !== undefined && locator.pluginId.length > 0) {
+      const info = await this.getPluginInfo(locator.pluginId);
+      const server = info.mcpServers?.find((entry) => entry.name === locator.serverName);
+      const url = server?.url;
+      if (url === undefined) return;
+      const runtimeName = server?.runtimeName ?? `${locator.pluginId}__${locator.serverName}`;
+      const native = await this.engineMcpOAuth();
+      native.mcpOauthRemove(runtimeName, url, this.mcpOAuthDir());
+      return;
+    }
     const workDir = options.cwd ?? process.cwd();
     const config = (await this.loadSessionMcpConfig(workDir))[locator.serverName];
     if (config?.url === undefined) return;

@@ -514,6 +514,7 @@ pub struct PluginCommandDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginMcpServerInfo {
+    /// The manifest-local server name (what the plugin panel shows).
     pub name: String,
     pub transport: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -522,6 +523,12 @@ pub struct PluginMcpServerInfo {
     pub args: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The namespaced name the engine's MCP manager registers this server
+    /// under (`<pluginId>__<name>`, v2 `pluginMcpRuntimeName`). Host-side
+    /// authorization must store the grant under this name so the engine finds
+    /// it when the session connects the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_name: Option<String>,
     pub enabled: bool,
 }
 
@@ -1897,6 +1904,7 @@ impl PluginManager {
                 });
             out.push(PluginMcpServerInfo {
                 name: name.clone(),
+                runtime_name: Some(format!("{id}__{name}")),
                 transport,
                 command: config
                     .get("command")

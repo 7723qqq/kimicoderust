@@ -9339,3 +9339,19 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   下一次 handle 重建）；预算跳过只记日志，没有像 v2 那样向宿主发 WarningIssued 事件；
   子代理回合（`subagent/manager.rs`）以 `hook_guard: None` 运行，配置 hooks 与插件
   hooks 都不会在子代理回合触发（此前即如此，与本次导入无关）。
+
+## 38. 2026-10-31 插件提供的 MCP 服务器 OAuth（plugin locator）
+
+- `PluginMcpServerInfo.runtime_name`：引擎注册插件 MCP 服务器时使用的
+  `<pluginId>__<name>`（v2 `pluginMcpRuntimeName`）随信息下发；宿主授权后按这个
+  名字落盘授权，会话连接时 MCP manager 才能按同一 key 找到授权。
+- SDK `McpServerLocator.pluginId`（对应 v2 的
+  `{ source: 'plugin', pluginId, serverName }` locator）：native 的
+  `beginMcpServerAuth` / `resetMcpServerAuth` 在带 `pluginId` 时改读引擎的
+  `getPluginInfo(pluginId).mcpServers`（manifest 由引擎插件管理器持有，host 的
+  `.mcp.json` 分层看不到插件服务器），校验已声明/非 stdio/有 url 后走同一 PKCE
+  流程与加密存储；reconnect 也用运行时名。
+- 测试：`plugin MCP OAuth`（未知插件、未声明服务器、stdio 均先拒绝；真实授权写入
+  `<pluginId>__<name>` key 的加密信封；二次调用不再打开浏览器；reset 删除授权）。
+- **剩余**：插件 MCP 条目声明的 `headers` / `bearerTokenEnvVar` 不走 OAuth（与全局
+  条目一致）；HTTP-ACP 桥接会话的插件授权仍由宿主侧发起。
