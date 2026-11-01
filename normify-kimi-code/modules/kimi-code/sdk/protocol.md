@@ -10,8 +10,8 @@ description:
   en: >
       Shared REST + WS protocol schemas (envelope, error codes, pagination, ws-control) for the daemon.
       
-revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
-updated_at: "2026-11-01T07:59:04.615Z"
+revision: 932e017600564470d7e43d7b25bb49896c06cca1
+updated_at: "2026-11-01T08:11:48.022Z"
 fingerprint: e18131a9359e789be96c6ee7dfdff001ef7d9c6af16bad85cb0030e4f52618bc
 source:
   - path: "packages/protocol/src/index.ts"

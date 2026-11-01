@@ -10,8 +10,8 @@ description:
   en: >
       tree-sitter-bash bindings: bash command parsing for permission analysis.
       
-revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
-updated_at: "2026-11-01T07:59:04.555Z"
+revision: 932e017600564470d7e43d7b25bb49896c06cca1
+updated_at: "2026-11-01T08:11:48.008Z"
 fingerprint: cd85557cb6a81f3acb56ecc8343a322f3ec56eb7782afc82afc07609daf84f88
 source:
   - path: "packages/tree-sitter-bash/src/index.ts"

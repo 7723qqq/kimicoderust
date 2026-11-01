@@ -1739,3 +1739,142 @@ async fn test_foreground_subagent_reads_the_guard_through_the_tool_filter() {
     let text = wait_for_marker(&submitted).await;
     assert!(text.contains("UserPromptSubmit"), "{text:?}");
 }
+
+struct FailingSubagentLlm;
+impl crate::turn_loop::types::LLM for FailingSubagentLlm {
+    fn system_prompt(&self) -> &str {
+        "mock system prompt"
+    }
+
+    fn model_name(&self) -> &str {
+        "mock-subagent-model"
+    }
+
+    fn is_retryable_error(&self, _error: &str) -> bool {
+        false
+    }
+
+    fn chat(
+        &self,
+        _params: crate::turn_loop::types::LLMChatParams,
+    ) -> crate::rpc::types::BoxFuture<
+        '_,
+        Result<crate::turn_loop::types::LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>,
+    > {
+        Box::pin(async { Err("provider is unavailable".into()) })
+    }
+}
+
+/// v2 `notifyTurnEnded` per agent: a failed subagent turn fires `StopFailure`
+/// (the main pump already did this for its own turns).
+#[tokio::test]
+async fn test_subagent_turn_failure_fires_stop_failure_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("StopFailure-marker");
+    let guard = Arc::new(crate::tools::external_hooks::HookGuard::new(vec![
+        marker_hook("StopFailure", dir.path()),
+    ]));
+    let manager = Arc::new(SubagentManager::new());
+
+    let id = manager
+        .spawn_and_run(
+            "research",
+            "Hook Scanner",
+            "fail the turn",
+            Arc::new(FailingSubagentLlm),
+            Arc::new(GuardedCallbacks { guard }),
+        )
+        .await
+        .unwrap();
+    let text = wait_for_marker(&marker).await;
+    assert!(text.contains("StopFailure"), "{text:?}");
+    assert!(
+        manager
+            .get_instance(&id)
+            .await
+            .is_some_and(|instance| instance.state == SubagentState::Failed),
+        "the failed turn marks the instance failed"
+    );
+}
+
+/// A parent cancel drops the turn future; v2 still reports the cancelled
+/// turn as `Interrupt`, so the subagent's end-of-turn hooks stay symmetric
+/// with the main turn's.
+#[tokio::test]
+async fn test_subagent_parent_cancel_fires_interrupt_hook() {
+    struct GatedLlm {
+        started: Arc<tokio::sync::Semaphore>,
+    }
+    impl crate::turn_loop::types::LLM for GatedLlm {
+        fn system_prompt(&self) -> &str {
+            "mock system prompt"
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-subagent-model"
+        }
+
+        fn is_retryable_error(&self, _error: &str) -> bool {
+            false
+        }
+
+        fn chat(
+            &self,
+            _params: crate::turn_loop::types::LLMChatParams,
+        ) -> crate::rpc::types::BoxFuture<
+            '_,
+            Result<
+                crate::turn_loop::types::LLMChatResponse,
+                Box<dyn std::error::Error + Send + Sync>,
+            >,
+        > {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.add_permits(1);
+                std::future::pending::<
+                    Result<
+                        crate::turn_loop::types::LLMChatResponse,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                >()
+                .await
+            })
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("Interrupt-marker");
+    let guard = Arc::new(crate::tools::external_hooks::HookGuard::new(vec![
+        marker_hook("Interrupt", dir.path()),
+    ]));
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let manager = Arc::new(SubagentManager::new());
+    manager
+        .set_runtime(
+            Arc::new(GatedLlm {
+                started: started.clone(),
+            }),
+            Arc::new(GuardedCallbacks { guard }),
+            None,
+        )
+        .await;
+    let id = manager.spawn("research", "Hook Scanner").await.unwrap();
+
+    let parent = Arc::new(crate::subagent::types::ParentCancel::new());
+    let cancel = parent.clone();
+    let trigger = tokio::spawn(async move {
+        let _permit = started.acquire().await.unwrap();
+        cancel.trigger();
+    });
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        manager.run_foreground_turn(&id, "hang forever", Some(parent.as_ref())),
+    )
+    .await
+    .expect("the parent cancel must release the turn")
+    .unwrap();
+    trigger.await.unwrap();
+    assert!(matches!(outcome, ForegroundTurnOutcome::ParentCancelled));
+    let text = wait_for_marker(&marker).await;
+    assert!(text.contains("Interrupt"), "{text:?}");
+}

@@ -10,8 +10,8 @@ description:
   en: >
       WS gateway: /api/v1/ws, hub fan-out, protocol envelopes and interaction round-trips.
       
-revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
-updated_at: "2026-11-01T07:59:04.428Z"
+revision: 932e017600564470d7e43d7b25bb49896c06cca1
+updated_at: "2026-11-01T08:11:47.997Z"
 fingerprint: 8257df4806fdb044ce3de583366170a1c86be58f3f73cdc4c882f731b72ff017
 source:
   - path: "packages/kimi-agent/src/server/ws.rs"

@@ -9504,3 +9504,20 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   failed/cancelled 结果不发送这两个事件（需要把结束态分类下沉到子代理回合执行处）；
   `UserPromptSubmit` 的 block/append 结果仍只观察（既有 partial parity，与子代理无关）；
   hook payload 不带 agent id，多代理同时触发时外部脚本无法区分来源。
+
+## 43. 2026-11-01 子代理回合结束态 hooks（StopFailure / Interrupt）
+
+- 新增 `session::notify_agent_turn_end` + `AgentTurnEnd`（`Ran` / `Failed` /
+  `Cancelled`），把 v2 `agentExternalHooksService.notifyTurnEnded` 的判定集中到一处：
+  cancelled → `Interrupt`；failed → `StopFailure`（`Filtered` / `MaxSteps` 用
+  `turn_end_error_payload` 的 code/message，`Err` 文本走 `turn_failure_code` 分类）；
+  clean / blocked → 不发。主回合 pump 原本内联的同一段逻辑改为调用它（行为不变）。
+- 三条子代理入口在回合结束后调用该 helper：后台 `spawn_and_run`、前台
+  `run_foreground_turn_with_history`、持久 `run_persistent_turn`；父取消在
+  `run_one` 的 select 里得到 `RunExit::ParentCancelled`，按 v2 报 `Interrupt`
+  （turn future 被丢弃，仍视为被取消的 agent 回合）。
+- 测试：`test_subagent_turn_failure_fires_stop_failure_hook`（失败回合 → StopFailure
+  marker，实例状态 Failed）、`test_subagent_parent_cancel_fires_interrupt_hook`
+  （LLM 挂起 → 父取消 → ParentCancelled 结果 + Interrupt marker）；
+  `cargo test --lib` 3335 passed。
+- **剩余**：hook payload 仍不带 agent id；`UserPromptSubmit` 的 block/append 仍只观察。

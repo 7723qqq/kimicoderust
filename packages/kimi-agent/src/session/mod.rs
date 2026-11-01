@@ -1370,26 +1370,7 @@ async fn pump(
                 duration_ms: Some(turn_duration_ms),
             });
             if let Some(ref guard) = ctx.hook_guard {
-                match reason {
-                    // v2 `TurnEnded` filters: Interrupt on cancelled,
-                    // StopFailure carries the turn's error payload.
-                    TurnEndReason::Cancelled => guard.notify_interrupt(turn_id).await,
-                    TurnEndReason::Failed => {
-                        let (error_type, error_message) = error
-                            .as_ref()
-                            .and_then(|payload| {
-                                Some((
-                                    payload.get("code")?.as_str()?.to_string(),
-                                    payload.get("message")?.as_str()?.to_string(),
-                                ))
-                            })
-                            .unwrap_or_else(|| {
-                                ("internal".to_string(), format!("{:?}", result.stop_reason))
-                            });
-                        guard.notify_stop_failure(&error_type, &error_message).await;
-                    }
-                    _ => {}
-                }
+                notify_agent_turn_end(guard, turn_id, AgentTurnEnd::Ran(result)).await;
             }
         } else if let Err(e) = &outcome {
             let payload = turn_failure_payload(e);
@@ -1400,15 +1381,7 @@ async fn pump(
                 duration_ms: Some(turn_duration_ms),
             });
             if let Some(ref guard) = ctx.hook_guard {
-                let error_type = payload
-                    .get("code")
-                    .and_then(|code| code.as_str())
-                    .unwrap_or("internal");
-                let error_message = payload
-                    .get("message")
-                    .and_then(|message| message.as_str())
-                    .unwrap_or(e);
-                guard.notify_stop_failure(error_type, error_message).await;
+                notify_agent_turn_end(guard, turn_id, AgentTurnEnd::Failed(e.as_str())).await;
             }
             // v2 dispatches a separate `AgentErrorEvent` alongside the failed
             // `turn.ended` (loopService.ts:1533-1537); the host renders that
@@ -2011,6 +1984,60 @@ fn turn_failure_code(message: &str) -> &'static str {
 /// provider's response body reaches the user.
 fn turn_failure_payload(message: &str) -> serde_json::Value {
     error_payload(turn_failure_code(message), message.to_string())
+}
+
+/// How one agent turn ended, as far as the `StopFailure` / `Interrupt` hooks
+/// are concerned (v2 `agentExternalHooksService.notifyTurnEnded`).
+pub(crate) enum AgentTurnEnd<'a> {
+    Ran(&'a TurnResult),
+    Failed(&'a str),
+    /// A parent cancel dropped the turn before it produced a result.
+    Cancelled,
+}
+
+/// Fire the per-agent turn-end hooks. v2 subscribes every agent's
+/// `TurnEnded`: `cancelled` reports `Interrupt`, `failed` reports
+/// `StopFailure` with the protocol error code, clean turns report neither.
+/// Shared by the session pump and the subagent turn runners.
+pub(crate) async fn notify_agent_turn_end(
+    guard: &crate::tools::external_hooks::HookGuard,
+    turn_id: u64,
+    end: AgentTurnEnd<'_>,
+) {
+    match end {
+        AgentTurnEnd::Ran(result) => match end_reason_of(&result.stop_reason) {
+            TurnEndReason::Cancelled => guard.notify_interrupt(turn_id).await,
+            TurnEndReason::Failed => {
+                let error = turn_end_error_payload(&result.stop_reason, result.steps);
+                let (error_type, error_message) = error
+                    .as_ref()
+                    .and_then(|payload| {
+                        Some((
+                            payload.get("code")?.as_str()?.to_string(),
+                            payload.get("message")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .unwrap_or_else(|| {
+                        ("internal".to_string(), format!("{:?}", result.stop_reason))
+                    });
+                guard.notify_stop_failure(&error_type, &error_message).await;
+            }
+            TurnEndReason::Completed | TurnEndReason::Blocked => {}
+        },
+        AgentTurnEnd::Failed(message) => {
+            let payload = turn_failure_payload(message);
+            let error_type = payload
+                .get("code")
+                .and_then(|code| code.as_str())
+                .unwrap_or("internal");
+            let error_message = payload
+                .get("message")
+                .and_then(|message| message.as_str())
+                .unwrap_or(message);
+            guard.notify_stop_failure(error_type, error_message).await;
+        }
+        AgentTurnEnd::Cancelled => guard.notify_interrupt(turn_id).await,
+    }
 }
 
 /// Whether a turn's origin is one an undo may cut back to (v2 undo anchor).

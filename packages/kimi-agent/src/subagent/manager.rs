@@ -679,6 +679,7 @@ async fn run_one(
             .unwrap_or_default();
         guard.notify_turn_started(turn_seq, &origin, &prompt).await;
     }
+    let end_guard = hook_guard.clone();
     let run_input = crate::turn_loop::types::RunTurnInput {
         agent_id: agent_id.to_string(),
         previous_turn_aborted: false,
@@ -709,7 +710,7 @@ async fn run_one(
     };
     let run_future = crate::turn_loop::run_turn::run_turn_continued(run_input, callbacks);
     tokio::pin!(run_future);
-    match parent_cancel {
+    let outcome = match parent_cancel {
         Some(signal) => {
             tokio::select! {
                 result = &mut run_future => {
@@ -721,7 +722,16 @@ async fn run_one(
         None => run_future
             .await
             .map_err(|err| RunExit::Failed(err.to_string())),
+    };
+    if let Some(guard) = end_guard.as_ref() {
+        let end = match &outcome {
+            Ok(turn) => crate::session::AgentTurnEnd::Ran(turn),
+            Err(RunExit::ParentCancelled) => crate::session::AgentTurnEnd::Cancelled,
+            Err(RunExit::Failed(message)) => crate::session::AgentTurnEnd::Failed(message),
+        };
+        crate::session::notify_agent_turn_end(guard, turn_seq, end).await;
     }
+    outcome
 }
 
 impl SubagentManager {
@@ -1221,6 +1231,7 @@ worktree root the tower assigns you as your full authority scope.";
                     .notify_turn_started(turn_seq, &origin, &prompt_str)
                     .await;
             }
+            let end_guard = hook_guard.clone();
             let messages = vec![crate::turn_loop::types::LLMMessage {
                 role: "user".into(),
                 content: format!("{}\n\nTask: {}", def.system_prompt, prompt_str),
@@ -1260,6 +1271,14 @@ worktree root the tower assigns you as your full authority scope.";
                 )
                 .await
                 .map_err(|e| e.to_string());
+
+            if let Some(guard) = end_guard.as_ref() {
+                let end = match &run_result {
+                    Ok(turn) => crate::session::AgentTurnEnd::Ran(turn),
+                    Err(message) => crate::session::AgentTurnEnd::Failed(message),
+                };
+                crate::session::notify_agent_turn_end(guard, turn_seq, end).await;
+            }
 
             match run_result {
                 Ok(turn_res) => {
@@ -1970,6 +1989,7 @@ worktree root the tower assigns you as your full authority scope.";
         if let Some(guard) = hook_guard.as_ref() {
             guard.notify_turn_started(turn_seq, &origin, prompt).await;
         }
+        let end_guard = hook_guard.clone();
         let run_input = crate::turn_loop::types::RunTurnInput {
             agent_id: id.to_string(),
             max_attempts: None,
@@ -1997,6 +2017,14 @@ worktree root the tower assigns you as your full authority scope.";
             )
             .await
             .map_err(|e| e.to_string());
+
+        if let Some(guard) = end_guard.as_ref() {
+            let end = match &run_result {
+                Ok(turn) => crate::session::AgentTurnEnd::Ran(turn),
+                Err(message) => crate::session::AgentTurnEnd::Failed(message),
+            };
+            crate::session::notify_agent_turn_end(guard, turn_seq, end).await;
+        }
 
         match run_result {
             Ok(turn) => {

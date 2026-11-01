@@ -10,8 +10,8 @@ description:
   en: >
       Packaging and build: tsdown configs, the ?raw asset loader, Bun single-file compilation and the CI matrix.
       
-revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
-updated_at: "2026-11-01T07:59:04.621Z"
+revision: 932e017600564470d7e43d7b25bb49896c06cca1
+updated_at: "2026-11-01T08:11:48.024Z"
 fingerprint: 497d8ef202539095a3b85255faf6723f2123b6becd5c85cc7ce18c1ddd25f46a
 source:
   - path: "build/raw-text-plugin.mjs"
