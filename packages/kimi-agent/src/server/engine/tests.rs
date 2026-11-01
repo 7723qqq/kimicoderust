@@ -1128,10 +1128,20 @@ async fn a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuatio
     store.write_domain("goal", &outcome.stored).unwrap();
 
     let continuation = engine
-        .pending_goal_continuation("sess-goal")
+        .pending_goal_continuation("sess-goal", false)
         .await
         .expect("an active goal owes its continuation");
-    assert!(continuation.contains("ship the thing"), "{continuation}");
+    assert!(
+        continuation.starts_with("Continue working toward the active goal."),
+        "{continuation}"
+    );
+    assert!(
+        engine
+            .pending_goal_continuation("sess-goal", true)
+            .await
+            .is_some_and(|prompt| prompt.contains("reached the per-turn step limit")),
+        "a step-capped continuation carries the v2 step-cap prefix"
+    );
 
     engine
         .run_turn_on(&UsageLlm, "sess-goal", 1, Vec::new(), "hello")
@@ -1143,7 +1153,7 @@ async fn a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuatio
     assert_eq!(goal.tokens_used, 5, "the turn's output tokens are folded");
     assert!(
         engine
-            .pending_goal_continuation("sess-goal")
+            .pending_goal_continuation("sess-goal", false)
             .await
             .is_some(),
         "the goal is still active, so it still owes turns"
@@ -1158,7 +1168,7 @@ async fn a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuatio
     store.write_domain("goal", &outcome.stored).unwrap();
     assert!(
         engine
-            .pending_goal_continuation("sess-goal")
+            .pending_goal_continuation("sess-goal", false)
             .await
             .is_none(),
         "a completed goal owes no continuation"

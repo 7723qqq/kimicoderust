@@ -174,6 +174,7 @@ import { buildSessionHandle, type BuildHandleDeps } from './sdk-client/build-han
 import {
   toTurnEndReason,
   toGoalSnapshot,
+  nativeGoalWallClockMs,
   computeUndoCut,
   formatUndoUnavailable,
   isUndoAnchorPrompt,
@@ -210,6 +211,7 @@ import type {
   ResolvedSkillPrompt,
   SDKRpcClientNativeOptions,
   NativeSessionMeta,
+  NativeGoalState,
   EngineTaskWireEntry,
   PersistedSessionMeta,
 } from './sdk-client/helpers';
@@ -1397,10 +1399,12 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
 
   override async createGoal(input: SessionIdRpcInput & CreateGoalInput): Promise<GoalSnapshot> {
     const meta = this.requireSession(input.sessionId);
-    if (meta.goal && meta.goal.status === 'active' && input.replace !== true) {
+    // v2 `prepareForGoalCreation`: any existing goal must be explicitly
+    // replaced, whatever its status.
+    if (meta.goal && input.replace !== true) {
       throw new KimiError(
-        ErrorCodes.GOAL_STATUS_INVALID,
-        'a goal is already active; pass replace to override it',
+        ErrorCodes.GOAL_ALREADY_EXISTS,
+        'A goal already exists; use replace to start a new one',
       );
     }
     const now = Date.now();
@@ -1414,15 +1418,15 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       tokensUsed: 0,
       inputTokensUsed: 0,
       outputTokensUsed: 0,
+      // The engine owns the live wall-clock figure; a fresh goal starts at 0
+      // and the next `goal.updated` carries the engine's reading.
+      wallClockMs: 0,
+      budget: {},
     };
+    this.persistMeta(meta);
     // The goal panel is driven by `goal.updated`; nothing else emitted it, so
     // a goal created through the SDK never reached the UI.
-    this.receiveEvent({
-      sessionId: input.sessionId,
-      agentId: 'main',
-      type: 'goal.updated',
-      snapshot: toGoalSnapshot(meta.goal) as unknown as ProtocolGoalSnapshot,
-    });
+    this.emitGoalUpdated(input.sessionId, meta.goal);
     return toGoalSnapshot(meta.goal);
   }
 
@@ -1440,21 +1444,72 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
   }
 
   override async cancelGoal(input: SessionIdRpcInput): Promise<GoalSnapshot> {
-    // GoalStatus has no dedicated 'cancelled' value; a cancelled goal is
-    // terminal, so it lands on 'complete' (the goal callback then reports null
-    // and the engine stops auto-continuing).
-    return this.transitionGoal(input.sessionId, 'complete');
+    // v2 `cancelGoal`: the goal is removed, not completed. The returned
+    // snapshot is the pre-cancel state; the engine store follows on the next
+    // goal-state write, where a host that reports no goal clears it.
+    const meta = this.requireSession(input.sessionId);
+    const goal = meta.goal;
+    if (!goal) {
+      throw new KimiError(ErrorCodes.GOAL_NOT_FOUND, 'No current goal');
+    }
+    const snapshot = toGoalSnapshot(goal);
+    meta.goal = null;
+    this.persistMeta(meta);
+    this.receiveEvent({
+      sessionId: input.sessionId,
+      agentId: 'main',
+      type: 'goal.updated',
+      snapshot: null,
+    });
+    return snapshot;
   }
 
   private transitionGoal(sessionId: string, status: GoalStatus): GoalSnapshot {
     const meta = this.requireSession(sessionId);
     const goal = meta.goal;
     if (!goal) {
-      throw new KimiError(ErrorCodes.GOAL_NOT_FOUND, 'no goal to transition');
+      throw new KimiError(ErrorCodes.GOAL_NOT_FOUND, 'No current goal');
     }
-    goal.status = status;
-    goal.updatedAt = Date.now();
+    const now = Date.now();
+    if (status === 'active') {
+      // v2 `resumeGoal`: only a paused or blocked goal can resume.
+      if (goal.status === 'active') return toGoalSnapshot(goal);
+      if (goal.status !== 'paused' && goal.status !== 'blocked') {
+        throw new KimiError(
+          ErrorCodes.GOAL_NOT_RESUMABLE,
+          `Cannot resume a goal in status "${goal.status}"`,
+        );
+      }
+      goal.wallClockMs = nativeGoalWallClockMs(goal, now);
+      goal.status = 'active';
+      goal.updatedAt = now;
+    } else {
+      // v2 `pauseGoal`: already paused is idempotent; anything else must be
+      // active.
+      if (goal.status === 'paused') return toGoalSnapshot(goal);
+      if (goal.status !== 'active') {
+        throw new KimiError(
+          ErrorCodes.GOAL_STATUS_INVALID,
+          `Cannot pause a goal in status "${goal.status}"`,
+        );
+      }
+      // Settle the live clock at the pause, so the panel stops counting.
+      goal.wallClockMs = nativeGoalWallClockMs(goal, now);
+      goal.status = status;
+      goal.updatedAt = now;
+    }
+    this.persistMeta(meta);
+    this.emitGoalUpdated(sessionId, goal);
     return toGoalSnapshot(goal);
+  }
+
+  private emitGoalUpdated(sessionId: string, goal: NativeGoalState): void {
+    this.receiveEvent({
+      sessionId,
+      agentId: 'main',
+      type: 'goal.updated',
+      snapshot: toGoalSnapshot(goal) as unknown as ProtocolGoalSnapshot,
+    });
   }
 
   override async setModel(input: SetSessionModelRpcInput): Promise<SetSessionModelRpcResult> {

@@ -10,8 +10,8 @@ description:
   en: >
       Inspector panels: activity, audit and channel views over the session transcript.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T15:13:40.661Z"
+revision: c7d34cbe784d29928dada6568fb144fe4bece585
+updated_at: "2026-11-01T05:34:45.991Z"
 fingerprint: 82ca8ebe5a9f477063075d1d47b94327ce232b5be7cf9caf6b9abd4a823bff14
 source:
   - path: "apps/kimi-inspect/src/panels.ts"

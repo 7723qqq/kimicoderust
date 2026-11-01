@@ -10,8 +10,8 @@ description:
   en: >
       A one-shot reminder at the next turn's head when the previous turn was interrupted by the user; suppressed when history already carries one.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T15:13:40.666Z"
+revision: c7d34cbe784d29928dada6568fb144fe4bece585
+updated_at: "2026-11-01T05:34:45.994Z"
 fingerprint: fdee6b3e7e8a70860988a206eb7415953a14895f46e4007389b57a41147e06e5
 source:
   - path: "packages/kimi-agent/src/injection/interruption_reminder.rs"

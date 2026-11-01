@@ -195,14 +195,14 @@
       "note": "§10 — the {{tool}}/{{field}} parameterized arg-error helper; moved down when tools/mod.rs tests left the file"
     },
     {
-      "cited": ":1636-1737",
+      "cited": ":1760-1861",
       "origin": "worktree",
       "path": "packages/node-sdk/src/native/sdk-rpc-client-native.ts",
-      "line": 1636,
-      "endLine": 1737,
+      "line": 1760,
+      "endLine": 1861,
       "context": "ssion`（现 `",
       "expect": "override async exportSession(input: ExportSessionInput): Promise<ExportSessionResult> {",
-      "note": "§10.25 — the corrected host-side export range M1 recorded, re-pointed from :3642-3698 and again when the helper block moved to sdk-client/."
+      "note": "§10.25 — the corrected host-side export range M1 recorded, re-pointed from :3642-3698, again when the helper block moved to sdk-client/, and again when the goal lifecycle block shifted it (+124)."
     }
   ]
 }

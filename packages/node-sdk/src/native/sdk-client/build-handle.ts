@@ -823,18 +823,26 @@ export async function buildSessionHandle(
       });
     },
     goal: async () => {
-      // Fresh goal snapshot per turn (snake_case wire). Only an active goal
-      // drives the engine's autonomous continuation; paused / terminal goals
-      // report null so the turn loop does not keep going.
+      // Fresh goal snapshot per turn (snake_case wire). The engine owns the
+      // durable goal store and every fold / lifecycle decision; the host
+      // supplies its live status (a user pause / resume / cancel), the budget
+      // limits the goal carries, and the freshness stamp the engine uses to
+      // apply a host-side transition exactly once. `null` means this host owns
+      // goals and has none — the engine clears a goal the host dropped.
       const goal = meta.goal;
-      if (!goal || goal.status !== 'active') return null;
+      if (!goal) return null;
+      const snapshot = toGoalSnapshot(goal);
       return JSON.stringify({
         goal_id: goal.goalId,
         objective: goal.objective,
         status: goal.status,
-        wall_clock_ms: Date.now() - goal.createdAt,
+        token_budget: snapshot.budget?.tokenBudget ?? null,
+        turn_budget: snapshot.budget?.turnBudget ?? null,
+        wall_clock_budget_ms: snapshot.budget?.wallClockBudgetMs ?? null,
+        wall_clock_ms: snapshot.wallClockMs,
         tokens_used: goal.tokensUsed,
         turns_used: goal.turnsUsed,
+        updated_at: goal.updatedAt,
       });
     },
     turnEvent: (eventJson: string) => {

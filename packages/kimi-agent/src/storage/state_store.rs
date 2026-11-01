@@ -603,7 +603,7 @@ impl StateStore {
     fn apply_goal_write(&self, value: &Value) -> Result<StateWriteOutcome, String> {
         let Some(action) = value.get("action").and_then(|a| a.as_str()) else {
             return Err(
-                "State write error: [-32003] invalid goal state value: expected { action: \"create\" | \"update\" | \"set_budget\" | \"record_usage\", ... }".into(),
+                "State write error: [-32003] invalid goal state value: expected { action: \"create\" | \"update\" | \"set_budget\" | \"record_usage\" | \"lifecycle\", ... }".into(),
             );
         };
         match action {
@@ -614,6 +614,11 @@ impl StateStore {
             // the turn driver submits, so an active goal's counters and the
             // continuation budget stay current without host arithmetic.
             "record_usage" => self.goal_record_usage_action(value),
+            // v2 `applyLifecycle`: the runtime-side transitions the engine
+            // itself drives (pause on interrupt / error, block on budget).
+            // They only apply while the goal is active, unlike the
+            // user-facing `update` action.
+            "lifecycle" => self.goal_lifecycle(value),
             _ => Err(format!(
                 "State write error: [-32003] invalid goal action: {action}"
             )),
@@ -640,8 +645,98 @@ impl StateStore {
             state.tokens_used += tokens;
             state.output_tokens_used += tokens;
             state.updated_at = now;
+            // v2 `accountTokenUsage` / `incrementGoalTurn` end with
+            // `blockIfBudgetReached`: the write that spends the last budget
+            // unit is the one that blocks, so the caller observes the block
+            // in this same response.
+            if let Some(outcome) = self.block_if_budget_reached(&mut state, now) {
+                return Ok(outcome);
+            }
         }
         Ok(goal_outcome(&state, now))
+    }
+
+    /// v2 `applyLifecycle`: settle the wall clock, set the status and reason,
+    /// and anchor (or clear) the live wall-clock start. Pausing / blocking /
+    /// completing is a no-op once the goal already left `active`
+    /// (`pauseActiveGoal` / `markBlocked` / `markComplete`); resuming is only
+    /// legal from `paused` / `blocked` (`resumeGoal`).
+    fn goal_lifecycle(&self, value: &Value) -> Result<StateWriteOutcome, String> {
+        let Some(status) = value.get("status").and_then(|s| s.as_str()) else {
+            return Err(
+                "State write error: [-32003] invalid goal lifecycle value: expected { action: \"lifecycle\", status: string, reason?: string }".into(),
+            );
+        };
+        let reason = value.get("reason").and_then(|r| r.as_str());
+        let now = now_ms();
+        let Some(mut state) = self.read_goal_state() else {
+            return Ok(StateWriteOutcome {
+                stored: json!({ "goal": Value::Null }),
+                response: json!({ "goal": Value::Null }),
+            });
+        };
+        match status {
+            "active" => {
+                if !matches!(state.status, GoalStatus::Paused | GoalStatus::Blocked) {
+                    return Err(format!(
+                        "State write error: [-32004] Cannot resume a goal in status \"{}\"",
+                        state.status.as_str()
+                    ));
+                }
+                settle_wall_clock(&mut state, now);
+                state.status = GoalStatus::Active;
+                state.terminal_reason = None;
+                state.wall_clock_resumed_at = Some(now);
+                state.updated_at = now;
+                // v2 `resumeGoal` blocks immediately when the resumed goal has
+                // no budget left instead of buying another turn.
+                if let Some(outcome) = self.block_if_budget_reached(&mut state, now) {
+                    return Ok(outcome);
+                }
+            }
+            "paused" | "blocked" | "complete" => {
+                let target = match status {
+                    "paused" => GoalStatus::Paused,
+                    "blocked" => GoalStatus::Blocked,
+                    _ => GoalStatus::Complete,
+                };
+                if state.status != GoalStatus::Active {
+                    return Ok(goal_outcome(&state, now));
+                }
+                settle_wall_clock(&mut state, now);
+                state.status = target;
+                state.terminal_reason = reason.map(str::to_string);
+                state.wall_clock_resumed_at = None;
+                state.updated_at = now;
+            }
+            _ => {
+                return Err(format!(
+                    "State write error: [-32003] invalid goal lifecycle status: {status}"
+                ));
+            }
+        }
+        Ok(goal_outcome(&state, now))
+    }
+
+    /// v2 `blockIfBudgetReached`: an active goal whose usage reached any limit
+    /// moves to `blocked` with the v2 reason, settling the wall clock first so
+    /// the stored elapsed time stops at the block.
+    fn block_if_budget_reached(
+        &self,
+        state: &mut GoalState,
+        now: u64,
+    ) -> Option<StateWriteOutcome> {
+        if state.status != GoalStatus::Active {
+            return None;
+        }
+        let snapshot = to_snapshot(state, live_wall_clock_ms(state, now));
+        let reason = crate::goal::goal_budget_block_reason(&snapshot.budget)?;
+        settle_wall_clock(state, now);
+        state.status = GoalStatus::Blocked;
+        state.terminal_reason = Some(reason);
+        state.wall_clock_resumed_at = None;
+        state.updated_at = now;
+        Some(goal_outcome(state, now))
     }
 
     fn goal_create(&self, value: &Value) -> Result<StateWriteOutcome, String> {
@@ -673,6 +768,7 @@ impl StateStore {
             wall_clock_resumed_at: Some(now),
             budget_limits: GoalBudgetLimits::default(),
             terminal_reason: None,
+            host_owned: false,
             created_at: now,
             updated_at: now,
         };
@@ -682,17 +778,19 @@ impl StateStore {
     fn goal_update(&self, value: &Value) -> Result<StateWriteOutcome, String> {
         let Some(status) = value.get("status").and_then(|s| s.as_str()) else {
             return Err(
-                "State write error: [-32003] invalid goal update value: expected { action: \"update\", status: \"active\" | \"complete\" | \"blocked\" }".into(),
+                "State write error: [-32003] invalid goal update value: expected { action: \"update\", status: \"active\" | \"paused\" | \"complete\" | \"blocked\", reason?: string }".into(),
             );
         };
-        if !matches!(status, "active" | "complete" | "blocked") {
+        if !matches!(status, "active" | "paused" | "complete" | "blocked") {
             return Err(
                 "State write error: [-32003] Invalid goal status. Use `active`, `complete`, or `blocked`.".into(),
             );
         }
+        let reason = value.get("reason").and_then(|r| r.as_str());
         let Some(mut state) = self.read_goal_state() else {
             let message = match status {
                 "active" => "No current goal",
+                "paused" => "No current goal",
                 "complete" => "Goal not completed: no active goal.",
                 _ => "Goal not blocked: no active goal.",
             };
@@ -710,8 +808,31 @@ impl StateStore {
                         state.status.as_str()
                     ));
                 }
+                settle_wall_clock(&mut state, now);
                 state.status = GoalStatus::Active;
+                state.terminal_reason = None;
                 state.wall_clock_resumed_at = Some(now);
+                state.updated_at = now;
+                if let Some(outcome) = self.block_if_budget_reached(&mut state, now) {
+                    return Ok(outcome);
+                }
+            }
+            "paused" => {
+                // v2 `pauseGoal`: already paused is idempotent (and keeps the
+                // recorded reason); any other non-active status is invalid.
+                if state.status == GoalStatus::Paused {
+                    return Ok(goal_outcome(&state, now));
+                }
+                if state.status != GoalStatus::Active {
+                    return Err(format!(
+                        "State write error: [-32004] Cannot pause a goal in status \"{}\"",
+                        state.status.as_str()
+                    ));
+                }
+                settle_wall_clock(&mut state, now);
+                state.status = GoalStatus::Paused;
+                state.terminal_reason = reason.map(str::to_string);
+                state.wall_clock_resumed_at = None;
             }
             "complete" => {
                 if state.status != GoalStatus::Active {
@@ -721,7 +842,8 @@ impl StateStore {
                 }
                 settle_wall_clock(&mut state, now);
                 state.status = GoalStatus::Complete;
-                state.terminal_reason = None;
+                state.terminal_reason = reason.map(str::to_string);
+                state.wall_clock_resumed_at = None;
             }
             _ => {
                 if state.status != GoalStatus::Active {
@@ -731,7 +853,8 @@ impl StateStore {
                 }
                 settle_wall_clock(&mut state, now);
                 state.status = GoalStatus::Blocked;
-                state.terminal_reason = None;
+                state.terminal_reason = reason.map(str::to_string);
+                state.wall_clock_resumed_at = None;
             }
         }
         state.updated_at = now;
@@ -775,6 +898,11 @@ impl StateStore {
         }
         let now = now_ms();
         state.updated_at = now;
+        // v2 `setBudgetLimits` runs `blockIfBudgetReached` after the merge: a
+        // limit that is already spent blocks the goal in the same write.
+        if let Some(outcome) = self.block_if_budget_reached(&mut state, now) {
+            return Ok(outcome);
+        }
         Ok(goal_outcome(&state, now))
     }
 
@@ -924,61 +1052,81 @@ impl StateStore {
         })
     }
 
-    /// Seed the local goal from the host's live goal context.
+    /// Adopt the host's live goal snapshot into the local store.
     ///
-    /// On the native host the goal lifecycle is host-owned, but every engine
-    /// side effect — the turn-end usage fold, the model's `UpdateGoal` /
-    /// `SetGoalBudget` — has to land in one store. Without this seed a
-    /// host-created goal has no local record and the first mutation fails with
-    /// "no current goal". No-op when a goal is already stored (the engine's
-    /// own `CreateGoal` wins) or when the host reports none.
-    pub fn seed_goal_from_context(
+    /// On the native host the user-facing lifecycle (`createGoal` /
+    /// `pauseGoal` / `resumeGoal` / `cancelGoal`) is host-initiated, but every
+    /// engine side effect — the turn-end fold, the model's `UpdateGoal` /
+    /// `SetGoalBudget` — has to land in one store. A goal the store does not
+    /// have yet, or one whose id differs from the host's (a replace), is built
+    /// from the host snapshot. Otherwise only a snapshot *newer* than the
+    /// store's last write is applied: that is a host-side status transition
+    /// the engine has not seen yet. Counters and budgets stay engine-owned, so
+    /// a host snapshot that lags the last fold can never roll them back.
+    pub fn sync_goal_from_context(
         &self,
         goal: &crate::rpc::types::GoalContext,
     ) -> Result<bool, String> {
-        if self.read_goal_state().is_some() {
+        let now = now_ms();
+        let Some(mut state) = self
+            .read_goal_state()
+            .filter(|state| state.goal_id == goal.goal_id)
+        else {
+            let state = goal_state_from_context(goal, now);
+            self.write_domain("goal", &goal_outcome(&state, now).stored)?;
+            return Ok(true);
+        };
+        // The host knows this goal now (it created it, or adopted the engine's
+        // `goal.updated`), so a later "no goal" from the host may clear it.
+        let adopted = !state.host_owned;
+        state.host_owned = true;
+        if goal.updated_at <= state.updated_at as i64 {
+            if adopted {
+                self.write_domain("goal", &goal_outcome(&state, now).stored)?;
+            }
+            return Ok(adopted);
+        }
+        let status = host_goal_status(goal.status);
+        if status == state.status {
+            if adopted {
+                self.write_domain("goal", &goal_outcome(&state, now).stored)?;
+            }
+            return Ok(adopted);
+        }
+        settle_wall_clock(&mut state, now);
+        state.status = status;
+        state.terminal_reason = None;
+        state.wall_clock_resumed_at = if status == GoalStatus::Active {
+            Some(now)
+        } else {
+            None
+        };
+        state.updated_at = now;
+        self.write_domain("goal", &goal_outcome(&state, now).stored)?;
+        Ok(true)
+    }
+
+    /// Drop the stored goal when the host reports it cleared its own copy
+    /// (v2 `cancelGoal`). Only a goal the host has reported back to the
+    /// engine can be cleared this way: an engine-created goal that the host
+    /// has not adopted yet would otherwise be lost to a stale "no goal".
+    /// `false` when there was nothing to clear.
+    pub fn clear_host_goal(&self) -> Result<bool, String> {
+        let Some(state) = self.read_goal_state() else {
+            return Ok(false);
+        };
+        if !state.host_owned {
             return Ok(false);
         }
-        use crate::rpc::types::GoalStatus as HostGoalStatus;
-        let status = match goal.status {
-            HostGoalStatus::Active => GoalStatus::Active,
-            HostGoalStatus::Paused => GoalStatus::Paused,
-            HostGoalStatus::Blocked => GoalStatus::Blocked,
-            HostGoalStatus::Complete => GoalStatus::Complete,
-            HostGoalStatus::BudgetLimited => GoalStatus::BudgetLimited,
-            HostGoalStatus::UsageLimited => GoalStatus::UsageLimited,
-        };
-        let now = now_ms();
-        let tokens_used = u64::try_from(goal.tokens_used.max(0)).unwrap_or(0);
-        let wall_clock_ms = u64::try_from(goal.wall_clock_ms.max(0)).unwrap_or(0);
-        let budget_of = |value: Option<i64>| {
-            value
-                .and_then(|value| u64::try_from(value).ok())
-                .filter(|value| *value > 0)
-        };
-        let state = GoalState {
-            goal_id: goal.goal_id.clone(),
-            objective: goal.objective.clone(),
-            completion_criterion: None,
-            status,
-            turns_used: u64::try_from(goal.turns_used.max(0)).unwrap_or(0),
-            tokens_used,
-            input_tokens_used: 0,
-            output_tokens_used: tokens_used,
-            wall_clock_ms,
-            wall_clock_resumed_at: (status == GoalStatus::Active).then_some(now),
-            budget_limits: GoalBudgetLimits {
-                token_budget: budget_of(goal.token_budget),
-                turn_budget: budget_of(goal.turn_budget),
-                wall_clock_budget_ms: budget_of(goal.wall_clock_budget_ms),
-            },
-            terminal_reason: None,
-            created_at: now.saturating_sub(wall_clock_ms),
-            updated_at: now,
-        };
-        let outcome = goal_outcome(&state, now);
-        self.write_domain("goal", &outcome.stored)?;
+        self.write_domain("goal", &json!({ "goal": Value::Null }))?;
         Ok(true)
+    }
+
+    /// The stored goal projected as the model/host-facing snapshot, with the
+    /// live wall-clock figure folded in. `None` when no goal is stored.
+    pub fn goal_snapshot(&self) -> Option<Value> {
+        let state = self.read_goal_state()?;
+        serde_json::to_value(state.snapshot_now()).ok()
     }
 
     fn read_goal_state(&self) -> Option<GoalState> {
@@ -1044,26 +1192,6 @@ impl StateStore {
         }))
     }
 
-    /// Fold one turn's usage into the stored goal (v2 `incrementGoalTurn` +
-    /// `accountTokenUsage` semantics): only an active goal is updated, and
-    /// the turn count and output tokens accumulate across turns. No-op
-    /// when no goal is stored or it is not active.
-    pub fn goal_record_usage(&self, turns_delta: u64, output_tokens_delta: u64) {
-        let Some(mut state) = self.read_goal_state() else {
-            return;
-        };
-        if state.status != GoalStatus::Active {
-            return;
-        }
-        let now = now_ms();
-        state.turns_used += turns_delta;
-        state.tokens_used += output_tokens_delta;
-        state.output_tokens_used += output_tokens_delta;
-        state.updated_at = now;
-        let outcome = goal_outcome(&state, now);
-        let _ = self.write_domain("goal", &outcome.stored);
-    }
-
     /// The stored goal projected into the turn-loop `GoalContext`, with the
     /// live wall-clock figure folded in for active goals. `None` when no
     /// goal is stored.
@@ -1089,30 +1217,79 @@ impl StateStore {
             wall_clock_ms,
             tokens_used: state.tokens_used as i64,
             turns_used: state.turns_used as i64,
+            updated_at: state.updated_at as i64,
         })
     }
 }
 
-/// The stored goal domain value `{goal: <snapshot> | null}` with the live
-/// wall-clock figure for active goals.
-fn goal_outcome(state: &GoalState, now_ms: u64) -> StateWriteOutcome {
-    let snapshot = to_snapshot(state, live_wall_clock_ms(state, now_ms));
-    let stored = json!({ "goal": serde_json::to_value(&snapshot).unwrap_or(Value::Null) });
-    StateWriteOutcome {
-        stored: stored.clone(),
-        response: stored,
+/// Map the host-wire goal status onto the persisted spelling.
+fn host_goal_status(status: crate::rpc::types::GoalStatus) -> GoalStatus {
+    use crate::rpc::types::GoalStatus as HostGoalStatus;
+    match status {
+        HostGoalStatus::Active => GoalStatus::Active,
+        HostGoalStatus::Paused => GoalStatus::Paused,
+        HostGoalStatus::Blocked => GoalStatus::Blocked,
+        HostGoalStatus::Complete => GoalStatus::Complete,
+        HostGoalStatus::BudgetLimited => GoalStatus::BudgetLimited,
+        HostGoalStatus::UsageLimited => GoalStatus::UsageLimited,
     }
 }
 
-/// The live wall-clock figure for an active goal: the stored elapsed time
-/// plus the time since the last resume (v2 `toSnapshot` semantics).
-fn live_wall_clock_ms(state: &GoalState, now_ms: u64) -> u64 {
-    if state.status == GoalStatus::Active
-        && let Some(resumed_at) = state.wall_clock_resumed_at
-    {
-        return state.wall_clock_ms + now_ms.saturating_sub(resumed_at);
+/// Build the local goal record from a host snapshot (first adoption of a
+/// host-created goal, or a replace onto a new goal id).
+fn goal_state_from_context(goal: &crate::rpc::types::GoalContext, now: u64) -> GoalState {
+    let status = host_goal_status(goal.status);
+    let tokens_used = u64::try_from(goal.tokens_used.max(0)).unwrap_or(0);
+    let wall_clock_ms = u64::try_from(goal.wall_clock_ms.max(0)).unwrap_or(0);
+    let budget_of = |value: Option<i64>| {
+        value
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0)
+    };
+    GoalState {
+        goal_id: goal.goal_id.clone(),
+        objective: goal.objective.clone(),
+        completion_criterion: None,
+        status,
+        turns_used: u64::try_from(goal.turns_used.max(0)).unwrap_or(0),
+        tokens_used,
+        input_tokens_used: 0,
+        output_tokens_used: tokens_used,
+        wall_clock_ms,
+        wall_clock_resumed_at: (status == GoalStatus::Active).then_some(now),
+        budget_limits: GoalBudgetLimits {
+            token_budget: budget_of(goal.token_budget),
+            turn_budget: budget_of(goal.turn_budget),
+            wall_clock_budget_ms: budget_of(goal.wall_clock_budget_ms),
+        },
+        terminal_reason: None,
+        host_owned: true,
+        created_at: now.saturating_sub(wall_clock_ms),
+        updated_at: now,
     }
-    state.wall_clock_ms
+}
+
+/// The stored goal domain value `{goal: <GoalState> | null}` and the
+/// snapshot response the caller renders from it.
+///
+/// The **state** is what is persisted: it carries `wallClockResumedAt` and
+/// `budgetLimits`, without which the live wall-clock figure would reset to
+/// the last write on every read. The **snapshot** is what a caller (the tool
+/// output, the host event) renders — v2 keeps the same split between its
+/// durable `GoalState` and its `GoalSnapshot`.
+fn goal_outcome(state: &GoalState, now_ms: u64) -> StateWriteOutcome {
+    let snapshot = to_snapshot(state, live_wall_clock_ms(state, now_ms));
+    let stored = json!({ "goal": serde_json::to_value(state).unwrap_or(Value::Null) });
+    StateWriteOutcome {
+        stored,
+        response: json!({ "goal": serde_json::to_value(&snapshot).unwrap_or(Value::Null) }),
+    }
+}
+
+/// The live wall-clock figure for an active goal (v2 `toSnapshot`
+/// semantics: stored elapsed time plus time since the last resume).
+fn live_wall_clock_ms(state: &GoalState, now_ms: u64) -> u64 {
+    state.live_wall_clock_ms(now_ms)
 }
 
 /// Fold the elapsed time since the last resume into `wall_clock_ms` and
@@ -1761,7 +1938,7 @@ mod tests {
                 &json!({ "action": "set_budget", "value": 20, "unit": "turns" }),
             )
             .unwrap();
-        assert_eq!(outcome.stored["goal"]["budget"]["turnBudget"], 20);
+        assert_eq!(outcome.response["goal"]["budget"]["turnBudget"], 20);
         store.write_domain("goal", &outcome.stored).unwrap();
         // Update with no goal at all.
         store.clear_domain("goal").unwrap();
@@ -1931,7 +2108,6 @@ mod tests {
     #[test]
     fn test_goal_record_usage_accumulates_across_turns() {
         let (_tmp, store) = store();
-        store.goal_record_usage(1, 10);
         let outcome = store
             .apply_write(
                 "goal",
@@ -1939,8 +2115,15 @@ mod tests {
             )
             .unwrap();
         store.write_domain("goal", &outcome.stored).unwrap();
-        store.goal_record_usage(1, 10);
-        store.goal_record_usage(1, 20);
+        for tokens in [10, 20] {
+            let outcome = store
+                .apply_write(
+                    "goal",
+                    &json!({ "action": "record_usage", "turns": 1, "output_tokens": tokens }),
+                )
+                .unwrap();
+            store.write_domain("goal", &outcome.stored).unwrap();
+        }
         let ctx = store.goal_context().unwrap();
         assert_eq!(ctx.turns_used, 2);
         assert_eq!(ctx.tokens_used, 30);
@@ -1960,10 +2143,249 @@ mod tests {
             .apply_write("goal", &json!({ "action": "update", "status": "complete" }))
             .unwrap();
         store.write_domain("goal", &outcome.stored).unwrap();
-        store.goal_record_usage(1, 10);
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 10 }),
+            )
+            .unwrap();
+        assert_eq!(outcome.stored["goal"]["status"], "complete");
         let ctx = store.goal_context().unwrap();
         assert_eq!(ctx.turns_used, 0);
         assert_eq!(ctx.tokens_used, 0);
+    }
+
+    /// v2 `blockIfBudgetReached`: the fold that reaches a limit blocks the
+    /// goal in the same write, with the v2 terminal reason.
+    #[test]
+    fn test_goal_record_usage_blocks_when_the_budget_is_spent() {
+        let (_tmp, store) = store();
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "create", "objective": "Ship the feature" }),
+            )
+            .unwrap();
+        store.write_domain("goal", &outcome.stored).unwrap();
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "set_budget", "value": 2, "unit": "turns" }),
+            )
+            .unwrap();
+        store.write_domain("goal", &outcome.stored).unwrap();
+
+        let first = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 5 }),
+            )
+            .unwrap();
+        store.write_domain("goal", &first.stored).unwrap();
+        assert_eq!(first.stored["goal"]["status"], "active");
+
+        let second = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 5 }),
+            )
+            .unwrap();
+        store.write_domain("goal", &second.stored).unwrap();
+        assert_eq!(second.stored["goal"]["status"], "blocked");
+        assert_eq!(
+            second.stored["goal"]["terminalReason"],
+            "Blocked after goal budget reached: turn budget 2"
+        );
+        let ctx = store.goal_context().unwrap();
+        assert_eq!(ctx.status, crate::turn_loop::types::GoalStatus::Blocked);
+    }
+
+    /// v2 `setBudgetLimits`: setting a limit that is already spent blocks the
+    /// goal immediately.
+    #[test]
+    fn test_goal_set_budget_blocks_an_already_spent_budget() {
+        let (_tmp, store) = store();
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "create", "objective": "Ship the feature" }),
+            )
+            .unwrap();
+        store.write_domain("goal", &outcome.stored).unwrap();
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 50 }),
+            )
+            .unwrap();
+        store.write_domain("goal", &outcome.stored).unwrap();
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "set_budget", "value": 25, "unit": "tokens" }),
+            )
+            .unwrap();
+        assert_eq!(outcome.stored["goal"]["status"], "blocked");
+        assert_eq!(
+            outcome.stored["goal"]["terminalReason"],
+            "Blocked after goal budget reached: token budget 25"
+        );
+    }
+
+    /// v2 lifecycle transitions: the runtime `lifecycle` action settles the
+    /// wall clock and records the reason, while the user-facing `update`
+    /// action keeps `pauseGoal` / `resumeGoal` validation.
+    #[test]
+    fn test_goal_lifecycle_pauses_blocks_and_resumes() {
+        let (_tmp, store) = store();
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "create", "objective": "Ship the feature" }),
+            )
+            .unwrap();
+        store.write_domain("goal", &outcome.stored).unwrap();
+
+        let paused = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "lifecycle", "status": "paused", "reason": "Paused after interruption" }),
+            )
+            .unwrap();
+        store.write_domain("goal", &paused.stored).unwrap();
+        assert_eq!(paused.stored["goal"]["status"], "paused");
+        assert_eq!(
+            paused.stored["goal"]["terminalReason"],
+            "Paused after interruption"
+        );
+
+        // A second pause is a no-op that keeps the recorded reason.
+        let again = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "lifecycle", "status": "paused", "reason": "other" }),
+            )
+            .unwrap();
+        assert_eq!(
+            again.stored["goal"]["terminalReason"],
+            "Paused after interruption"
+        );
+
+        // Resume, then block through the runtime action: lifecycle transitions
+        // only apply while the goal is active.
+        let resumed = store
+            .apply_write("goal", &json!({ "action": "update", "status": "active" }))
+            .unwrap();
+        store.write_domain("goal", &resumed.stored).unwrap();
+        let blocked = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "lifecycle", "status": "blocked", "reason": "Blocked by UserPromptSubmit hook" }),
+            )
+            .unwrap();
+        store.write_domain("goal", &blocked.stored).unwrap();
+        assert_eq!(blocked.stored["goal"]["status"], "blocked");
+        assert_eq!(
+            blocked.stored["goal"]["terminalReason"],
+            "Blocked by UserPromptSubmit hook"
+        );
+
+        // The user cannot pause a blocked goal, but can resume it.
+        let err = store
+            .apply_write("goal", &json!({ "action": "update", "status": "paused" }))
+            .unwrap_err();
+        assert!(
+            err.contains("Cannot pause a goal in status \"blocked\""),
+            "{err}"
+        );
+
+        let resumed = store
+            .apply_write("goal", &json!({ "action": "update", "status": "active" }))
+            .unwrap();
+        store.write_domain("goal", &resumed.stored).unwrap();
+        assert_eq!(resumed.stored["goal"]["status"], "active");
+        assert!(
+            resumed.response["goal"]
+                .get("terminalReason")
+                .is_none_or(serde_json::Value::is_null)
+        );
+    }
+
+    /// The persisted goal record must keep `wallClockResumedAt`; storing the
+    /// read-projection instead froze the live wall clock at the last write,
+    /// so a wall-clock budget could never be reached by elapsed time.
+    #[test]
+    fn test_goal_wall_clock_accumulates_from_the_persisted_anchor() {
+        let (_tmp, store) = store();
+        let now = now_ms();
+        store
+            .write_domain(
+                "goal",
+                &json!({ "goal": {
+                    "goalId": "goal-clock",
+                    "objective": "o",
+                    "status": "active",
+                    "turnsUsed": 0,
+                    "tokensUsed": 0,
+                    "inputTokensUsed": 0,
+                    "outputTokensUsed": 0,
+                    "wallClockMs": 1000,
+                    "wallClockResumedAt": now.saturating_sub(2500),
+                    "createdAt": now.saturating_sub(5000),
+                    "updatedAt": now.saturating_sub(500)
+                }}),
+            )
+            .unwrap();
+        let ctx = store.goal_context().unwrap();
+        assert!(
+            ctx.wall_clock_ms >= 3500,
+            "live wall clock: {}",
+            ctx.wall_clock_ms
+        );
+
+        // A write round-trips the anchor instead of settling it.
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 0 }),
+            )
+            .unwrap();
+        store.write_domain("goal", &outcome.stored).unwrap();
+        let after = store.read_goal_state().expect("still stored");
+        assert!(after.wall_clock_resumed_at.is_some());
+    }
+
+    /// Only a goal the host has reported back can be cleared by a host that
+    /// now reports none; an engine-created goal the host has not adopted yet
+    /// must survive.
+    #[test]
+    fn test_clear_host_goal_only_clears_an_adopted_goal() {
+        let (_tmp, store) = store();
+        let outcome = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "create", "objective": "Engine goal" }),
+            )
+            .unwrap();
+        store.write_domain("goal", &outcome.stored).unwrap();
+        assert!(!store.clear_host_goal().unwrap());
+        assert!(store.goal_context().is_some());
+
+        let context = crate::rpc::types::GoalContext {
+            goal_id: "goal-host".into(),
+            objective: "Host goal".into(),
+            status: crate::rpc::types::GoalStatus::Active,
+            token_budget: None,
+            turn_budget: None,
+            wall_clock_budget_ms: None,
+            wall_clock_ms: 0,
+            tokens_used: 0,
+            turns_used: 0,
+            updated_at: 0,
+        };
+        assert!(store.sync_goal_from_context(&context).unwrap());
+        assert!(store.clear_host_goal().unwrap());
+        assert!(store.goal_context().is_none());
     }
 
     #[test]
@@ -2267,12 +2689,16 @@ mod goal_usage_tests {
         assert_eq!(frozen.stored["goal"]["status"], "complete");
     }
 
-    /// A host-created goal has no local record until the engine seeds one; the
-    /// seed carries the counters, budgets and status the host reported.
+    /// The host creates goals; the engine adopts the snapshot the first time
+    /// it sees it, then only applies newer host transitions — a host snapshot
+    /// that lags the engine's last fold must not roll counters back, and a
+    /// host pause / resume / cancel must land in the store before the next
+    /// continuation decision reads it.
     #[test]
-    fn seed_goal_from_context_copies_the_host_snapshot() {
+    fn sync_goal_from_context_adopts_and_reconciles_the_host_snapshot() {
         let (_tmp, store) = store();
-        let context = crate::rpc::types::GoalContext {
+        let now = now_ms();
+        let mut context = crate::rpc::types::GoalContext {
             goal_id: "goal-host".into(),
             objective: "Host goal".into(),
             status: crate::rpc::types::GoalStatus::Active,
@@ -2282,8 +2708,9 @@ mod goal_usage_tests {
             wall_clock_ms: 1200,
             tokens_used: 42,
             turns_used: 2,
+            updated_at: now as i64,
         };
-        assert!(store.seed_goal_from_context(&context).unwrap());
+        assert!(store.sync_goal_from_context(&context).unwrap());
         let stored = store.goal_context().expect("seeded");
         assert_eq!(stored.goal_id, "goal-host");
         assert_eq!(stored.turns_used, 2);
@@ -2291,13 +2718,37 @@ mod goal_usage_tests {
         assert_eq!(stored.turn_budget, Some(3));
         assert_eq!(stored.token_budget, Some(5000));
 
-        // A second seed must not overwrite an engine-owned goal.
-        let context = crate::rpc::types::GoalContext {
-            goal_id: "goal-other".into(),
-            objective: "Other".into(),
-            ..context
-        };
-        assert!(!store.seed_goal_from_context(&context).unwrap());
-        assert_eq!(store.goal_context().unwrap().goal_id, "goal-host");
+        // An older host snapshot (the host has not adopted the engine's last
+        // fold yet) leaves the store untouched.
+        context.status = crate::rpc::types::GoalStatus::Paused;
+        context.tokens_used = 1;
+        context.updated_at = now as i64 - 1_000;
+        assert!(!store.sync_goal_from_context(&context).unwrap());
+        let stored = store.goal_context().unwrap();
+        assert_eq!(stored.status, crate::turn_loop::types::GoalStatus::Active);
+        assert_eq!(stored.tokens_used, 42);
+
+        // A newer host transition wins: pause, then resume.
+        context.updated_at = now as i64 + 1_000;
+        assert!(store.sync_goal_from_context(&context).unwrap());
+        assert_eq!(
+            store.goal_context().unwrap().status,
+            crate::turn_loop::types::GoalStatus::Paused
+        );
+
+        context.status = crate::rpc::types::GoalStatus::Active;
+        context.updated_at = now as i64 + 2_000;
+        assert!(store.sync_goal_from_context(&context).unwrap());
+        assert_eq!(
+            store.goal_context().unwrap().status,
+            crate::turn_loop::types::GoalStatus::Active
+        );
+
+        // A different goal id is a host replace: the store adopts it wholesale.
+        context.goal_id = "goal-other".into();
+        context.objective = "Other".into();
+        context.updated_at = now as i64 - 5_000;
+        assert!(store.sync_goal_from_context(&context).unwrap());
+        assert_eq!(store.goal_context().unwrap().goal_id, "goal-other");
     }
 }

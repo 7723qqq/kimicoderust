@@ -1222,6 +1222,7 @@ pub struct JsGoalContext {
     pub wall_clock_ms: i64,
     pub tokens_used: i64,
     pub turns_used: i64,
+    pub updated_at: i64,
 }
 
 #[napi(object)]
@@ -2393,6 +2394,7 @@ async fn run_turn_rust_impl(
         wall_clock_ms: g.wall_clock_ms,
         tokens_used: g.tokens_used,
         turns_used: g.turns_used,
+        updated_at: g.updated_at,
     });
 
     let input = RunTurnInput {

@@ -1008,6 +1008,7 @@ mod goal_tests {
             turns_used: 0,
             wall_clock_budget_ms: None,
             wall_clock_ms: 0,
+            updated_at: 0,
         }
     }
 
@@ -1071,6 +1072,7 @@ mod goal_tests {
             turns_used: 99999,
             wall_clock_budget_ms: None,
             wall_clock_ms: 0,
+            updated_at: 0,
         };
         assert!(!g.would_exceed_budget(99999, 99999, 0));
     }
@@ -1087,6 +1089,7 @@ mod goal_tests {
             turns_used: 0,
             wall_clock_budget_ms: None,
             wall_clock_ms: 0,
+            updated_at: 0,
         };
         assert_eq!(g.budget_fraction(100, 5, 0), 0.0);
     }
@@ -1143,6 +1146,7 @@ mod goal_tests {
             wall_clock_ms: 9000,
             tokens_used: 0,
             turns_used: 0,
+            updated_at: 0,
         };
         assert!(
             g.would_exceed_budget(0, 0, 1000),

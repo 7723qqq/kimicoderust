@@ -10,8 +10,8 @@ description:
   en: >
       Session transcript persistence and projection.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T15:13:40.700Z"
+revision: c7d34cbe784d29928dada6568fb144fe4bece585
+updated_at: "2026-11-01T05:34:46.026Z"
 fingerprint: 29781c29a8f47abc80927532980be6b67f5eeacc60cd5b7b1a9d9b336635d896
 source:
   - path: "packages/transcript/src/index.ts"

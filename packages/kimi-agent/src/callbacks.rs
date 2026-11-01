@@ -1608,15 +1608,27 @@ impl HostCallbacks for StateStoreCallbacks {
                     return Ok(resp);
                 }
                 // The goal lifecycle is host-owned on the native path, but the
-                // engine store is where its side effects land. Seed it from the
+                // engine store is where its side effects land. Sync it from the
                 // host's live snapshot first, so a host-created goal accepts
                 // the model's UpdateGoal / SetGoalBudget and the turn-end usage
-                // fold.
-                if request.domain == "goal"
-                    && let Ok(Some(context)) = inner.goal().await
-                    && let Err(error) = store.seed_goal_from_context(&context)
-                {
-                    tracing::warn!(%error, "could not seed the local goal from the host snapshot");
+                // fold, and a host-side pause / resume / cancel reaches the
+                // store the continuation decision reads.
+                if request.domain == "goal" {
+                    match inner.goal().await {
+                        Ok(Some(context)) => {
+                            if let Err(error) = store.sync_goal_from_context(&context) {
+                                tracing::warn!(%error, "could not sync the local goal from the host snapshot");
+                            }
+                        }
+                        // A host that owns goals and reports none has cleared
+                        // its goal (`cancelGoal`); the engine store must follow.
+                        Ok(None) => {
+                            if let Err(error) = store.clear_host_goal() {
+                                tracing::warn!(%error, "could not clear the local goal");
+                            }
+                        }
+                        Err(_) => {}
+                    }
                 }
                 return match store.apply_write(&request.domain, &request.value) {
                     Ok(outcome) => {
@@ -1634,11 +1646,13 @@ impl HostCallbacks for StateStoreCallbacks {
                             // host's panel and its per-turn provider see the
                             // engine's folds (usage counters, status
                             // transitions) even for turns that never resolved
-                            // a prompt receipt.
+                            // a prompt receipt. The persisted value is the
+                            // durable `GoalState`; the event carries the
+                            // snapshot the host contract expects.
                             inner.emit_event(serde_json::json!({
                                 "type": "goal.updated",
                                 "domain": "goal",
-                                "value": outcome.stored,
+                                "value": outcome.response,
                             }));
                         }
                         Ok(StateWriteResponse {
@@ -1712,13 +1726,13 @@ impl HostCallbacks for StateStoreCallbacks {
         let legacy_store = self.cron_store.clone();
         let inner = self.inner.clone();
         Box::pin(async move {
-            // The host owns the live goal on host-proxied transports; when it
-            // has none (standalone engine/REPL), the local state store is the
-            // authority, the same one the goal tools write through.
-            if let Ok(Some(goal)) = inner.goal().await {
-                return Ok(Some(goal));
+            // `Ok(None)` means the host owns goals and has none; `Err` means it
+            // has no goal bridge at all, so the local store is the authority
+            // (standalone engine / REPL).
+            match inner.goal().await {
+                Ok(goal) => Ok(goal),
+                Err(_) => Ok(store.goal_context().or_else(|| legacy_store.goal_context())),
             }
-            Ok(store.goal_context().or_else(|| legacy_store.goal_context()))
         })
     }
 

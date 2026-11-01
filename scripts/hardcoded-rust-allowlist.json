@@ -181,10 +181,17 @@
       "text": "Tool execute serialize error: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/callbacks.rs:could not seed the local goal from the host snapshot": {
+    "packages/kimi-agent/src/callbacks.rs:could not clear the local goal": {
       "file": "packages/kimi-agent/src/callbacks.rs",
-      "text": "could not seed the local goal from the host snapshot",
-      "reason": "diagnostic"
+      "text": "could not clear the local goal",
+      "reason": "diagnostic",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/callbacks.rs:could not sync the local goal from the host snapshot": {
+      "file": "packages/kimi-agent/src/callbacks.rs",
+      "text": "could not sync the local goal from the host snapshot",
+      "reason": "diagnostic",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/callbacks.rs:host does not support goal": {
       "file": "packages/kimi-agent/src/callbacks.rs",
@@ -501,20 +508,92 @@
       "text": "<untrusted_completion_criterion> {} </untrusted_completion_criterion>",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/goal/mod.rs:Blocked after goal budget reached": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Blocked after goal budget reached",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:LLM not set, send \"/login\" to login": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "LLM not set, send \"/login\" to login",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:Paused after goal continuation failure": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Paused after goal continuation failure",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:Paused after interruption": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Paused after interruption",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:Paused after model configuration error": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Paused after model configuration error",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:Paused after provider API error": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Paused after provider API error",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:Paused after provider authentication error": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Paused after provider authentication error",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:Paused after provider safety policy block": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Paused after provider safety policy block",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:Paused after runtime error": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Paused after runtime error",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/goal/mod.rs:time {}/{} (remaining {})": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "time {}/{} (remaining {})",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:token budget {token_budget}": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "token budget {token_budget}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/goal/mod.rs:tokens {}/{} (remaining {})": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "tokens {}/{} (remaining {})",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/goal/mod.rs:turn budget {turn_budget}": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "turn budget {turn_budget}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/goal/mod.rs:turns {}/{} (remaining {})": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "turns {}/{} (remaining {})",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/goal/mod.rs:wall-clock budget {wall_clock_budget_ms}ms": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "wall-clock budget {wall_clock_budget_ms}ms",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/injection/goal_plan.rs:## Re-entering Plan Mode": {
       "file": "packages/kimi-agent/src/injection/goal_plan.rs",
@@ -4925,6 +5004,12 @@
       "text": "State write error: [-32004] A goal already exists; use replace to start a new one",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/storage/state_store.rs:State write error: [-32004] Cannot pause a goal in status \"{}\"": {
+      "file": "packages/kimi-agent/src/storage/state_store.rs",
+      "text": "State write error: [-32004] Cannot pause a goal in status \"{}\"",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/storage/state_store.rs:State write error: [-32004] Cannot resume a goal in status \"{}\"": {
       "file": "packages/kimi-agent/src/storage/state_store.rs",
       "text": "State write error: [-32004] Cannot resume a goal in status \"{}\"",
@@ -7025,11 +7110,6 @@
       "file": "packages/kimi-agent/src/tools/goal_tools.rs",
       "text": "Invalid goal state from host: expected { goal: <snapshot> | null }.",
       "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/goal_tools.rs:The lifecycle status to set for the current goal. Use `blocked` for impossible, unsafe, or contradictory objectives, or after the same non-terminal blocking condition repeats for at least 3 consecutive goal turns.": {
-      "file": "packages/kimi-agent/src/tools/goal_tools.rs",
-      "text": "The lifecycle status to set for the current goal. Use `blocked` for impossible, unsafe, or contradictory objectives, or after the same non-terminal blocking condition repeats for at least 3 consecutive goal turns.",
-      "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/goal_tools.rs:The positive numeric budget value.": {
       "file": "packages/kimi-agent/src/tools/goal_tools.rs",

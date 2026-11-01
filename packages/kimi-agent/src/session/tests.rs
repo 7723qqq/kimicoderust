@@ -132,12 +132,15 @@ fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
         &server,
         crate::rpc::types::methods::HOST_STATE_READ,
         |_params| {
+            // The native host serves no state domain over this bridge (the
+            // SDK's `stateRead` throws for everything but `plan`), so the
+            // engine's local store is the authority. Answering with a
+            // successful `null` instead made the host-first goal branch look
+            // authoritative and hid everything the store held.
             Box::pin(async move {
-                let resp = crate::rpc::types::StateReadResponse {
-                    value: serde_json::Value::Null,
-                };
-                serde_json::to_value(&resp)
-                    .map_err(|e| crate::rpc::types::JsonRpcError::internal_error(e.to_string()))
+                Err(crate::rpc::types::JsonRpcError::internal_error(
+                    "host does not support state bridge".to_string(),
+                ))
             })
         },
     );
@@ -617,37 +620,44 @@ async fn test_print_steer_ignores_another_sessions_notifications() {
 /// would spin forever.
 #[tokio::test]
 async fn test_print_run_continues_active_goal() {
-    let server = Arc::new(RpcServer::new());
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_dir(dir.path().join("state")).unwrap());
+    let host = Arc::new(HostGoalCallbacks {
+        inner: rpc_callbacks(Arc::new(RpcServer::new())),
+        goal: crate::rpc::types::GoalContext {
+            goal_id: "g1".into(),
+            objective: "ship the thing".into(),
+            status: crate::rpc::types::GoalStatus::Active,
+            token_budget: None,
+            turn_budget: None,
+            wall_clock_budget_ms: None,
+            wall_clock_ms: 0,
+            tokens_used: 100,
+            turns_used: 1,
+            updated_at: 0,
+        },
+        events: Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(crate::callbacks::StateStoreCallbacks {
+        inner: host,
+        store: store.clone(),
+        cron_store: store.clone(),
+    });
     let llm = Arc::new(ScriptedLlm::simple(vec![
         text_response("main-response"),
         text_response("goal-response"),
     ]));
     let requests = llm.requests.clone();
-    let goal: GoalProvider = Arc::new(|| {
-        Box::pin(async {
-            Some(crate::turn_loop::types::GoalContext {
-                goal_id: "g1".into(),
-                objective: "ship the thing".into(),
-                status: crate::turn_loop::types::GoalStatus::Active,
-                token_budget: None,
-                turn_budget: None,
-                wall_clock_budget_ms: None,
-                wall_clock_ms: 0,
-                tokens_used: 100,
-                turns_used: 1,
-            })
-        })
-    });
     let config = SessionConfig {
         llm,
-        callbacks: rpc_callbacks(server),
+        callbacks,
         max_steps: 5,
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
-        goal: Some(goal),
+        goal: None,
         on_before_turn: None,
         agent_cancel_slot: None,
         steer_slot: None,
@@ -678,10 +688,16 @@ async fn test_print_run_continues_active_goal() {
     );
     let continuation = &calls[1];
     assert!(
+        continuation.iter().any(|m| m.role == "user"
+            && m.content
+                .contains("Continue working toward the active goal.")),
+        "continuation turn missing the v2 prompt: {continuation:?}"
+    );
+    assert!(
         continuation
             .iter()
-            .any(|m| m.role == "user" && m.content.contains("ship the thing")),
-        "continuation turn missing the goal objective: {continuation:?}"
+            .any(|m| m.content.contains("ship the thing")),
+        "continuation turn missing the goal reminder: {continuation:?}"
     );
     assert!(
         continuation
@@ -2029,35 +2045,123 @@ fn undo_anchor_origins_match_the_host_predicate() {
     }
 }
 
-/// v2 `blockIfBudgetReached` runs before `launchContinuationTurn`: an active
-/// goal owes turns until its budget is spent, and a terminal goal owes none.
-#[test]
-fn goal_continuation_prompt_respects_status_and_budget() {
-    use crate::turn_loop::types::GoalStatus;
+/// v2 `stopAfterBudgetReached` runs before `settleAbnormalTurn`: a turn
+/// cancelled because the wall-clock budget expired blocks the goal with the
+/// budget reason instead of pausing it as an interruption.
+#[tokio::test]
+async fn settle_goal_blocks_on_a_spent_budget_before_settling_an_abort() {
+    use crate::session::goal_turn::{GoalTurnEnd, settle_goal_after_turn};
 
-    let goal = |status, turns_used, turn_budget| crate::turn_loop::types::GoalContext {
-        goal_id: "g1".into(),
-        objective: "ship the thing".into(),
-        status,
-        token_budget: None,
-        turn_budget,
-        wall_clock_budget_ms: None,
-        wall_clock_ms: 0,
-        tokens_used: 0,
-        turns_used,
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_dir(dir.path().join("state")).unwrap());
+    let host = Arc::new(HostGoalCallbacks {
+        inner: rpc_callbacks(Arc::new(RpcServer::new())),
+        goal: crate::rpc::types::GoalContext {
+            goal_id: "goal-clock".into(),
+            objective: "ship the thing".into(),
+            status: crate::rpc::types::GoalStatus::Active,
+            token_budget: None,
+            turn_budget: None,
+            wall_clock_budget_ms: Some(1),
+            wall_clock_ms: 100,
+            tokens_used: 0,
+            turns_used: 0,
+            updated_at: 0,
+        },
+        events: Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
+    let callbacks = crate::callbacks::StateStoreCallbacks {
+        inner: host,
+        store: store.clone(),
+        cron_store: store.clone(),
     };
 
-    assert!(goal_continuation_prompt(None).is_none());
-    assert!(
-        goal_continuation_prompt(Some(&goal(GoalStatus::Complete, 0, None))).is_none(),
-        "a terminal goal owes no continuation"
+    let after = settle_goal_after_turn(
+        &callbacks,
+        GoalTurnEnd::Ran {
+            stop: &crate::turn_loop::types::LoopTurnStopReason::Aborted,
+            output_tokens: 0,
+        },
+    )
+    .await;
+    assert!(after.continuation.is_none());
+    let stored = store.read_domain("goal").expect("the goal is stored");
+    assert_eq!(stored["goal"]["status"], "blocked");
+    assert_eq!(
+        stored["goal"]["terminalReason"],
+        "Blocked after goal budget reached: wall-clock budget 1ms"
     );
-    let active = goal_continuation_prompt(Some(&goal(GoalStatus::Active, 1, None)))
-        .expect("an active goal continues");
-    assert!(active.contains("ship the thing"), "{active}");
+}
+
+/// v2 `handleTurnEnded` + `blockIfBudgetReached`: a completed turn folds into
+/// the goal and owes a continuation until the budget is spent; the write that
+/// exhausts it blocks the goal with the v2 reason instead.
+#[tokio::test]
+async fn settle_goal_after_turn_folds_blocks_and_continues() {
+    use crate::session::goal_turn::{GoalTurnEnd, settle_goal_after_turn};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_dir(dir.path().join("state")).unwrap());
+    let host = Arc::new(HostGoalCallbacks {
+        inner: rpc_callbacks(Arc::new(RpcServer::new())),
+        goal: crate::rpc::types::GoalContext {
+            goal_id: "goal-budget".into(),
+            objective: "ship the thing".into(),
+            status: crate::rpc::types::GoalStatus::Active,
+            token_budget: None,
+            turn_budget: Some(2),
+            wall_clock_budget_ms: None,
+            wall_clock_ms: 0,
+            tokens_used: 0,
+            turns_used: 0,
+            updated_at: 0,
+        },
+        events: Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
+    let callbacks = crate::callbacks::StateStoreCallbacks {
+        inner: host,
+        store: store.clone(),
+        cron_store: store.clone(),
+    };
+
+    let first = settle_goal_after_turn(
+        &callbacks,
+        GoalTurnEnd::Ran {
+            stop: &crate::turn_loop::types::LoopTurnStopReason::EndTurn,
+            output_tokens: 5,
+        },
+    )
+    .await;
     assert!(
-        goal_continuation_prompt(Some(&goal(GoalStatus::Active, 2, Some(2)))).is_none(),
-        "an exhausted turn budget must not buy another turn"
+        first.continuation.is_some(),
+        "the first turn leaves the goal active"
+    );
+    assert!(
+        first
+            .continuation
+            .as_deref()
+            .is_some_and(|prompt| prompt.starts_with("Continue working toward the active goal.")),
+        "the continuation carries the v2 prompt"
+    );
+
+    let second = settle_goal_after_turn(
+        &callbacks,
+        GoalTurnEnd::Ran {
+            stop: &crate::turn_loop::types::LoopTurnStopReason::EndTurn,
+            output_tokens: 5,
+        },
+    )
+    .await;
+    assert!(second.continuation.is_none(), "the budget is spent");
+    let stored = store.read_domain("goal").expect("the goal is stored");
+    assert_eq!(stored["goal"]["status"], "blocked");
+    assert_eq!(
+        stored["goal"]["terminalReason"],
+        "Blocked after goal budget reached: turn budget 2"
+    );
+    assert_eq!(
+        store.goal_context().expect("the goal is stored").turns_used,
+        2
     );
 }
 
@@ -2215,6 +2319,7 @@ async fn test_interactive_session_continues_an_active_goal() {
             wall_clock_ms: 0,
             tokens_used: 0,
             turns_used: 0,
+            updated_at: 0,
         },
         events: events.clone(),
     });
@@ -2264,10 +2369,17 @@ async fn test_interactive_session_continues_an_active_goal() {
     let calls = requests.lock().unwrap();
     assert_eq!(calls.len(), 2, "one goal continuation turn");
     assert!(
+        calls[1].iter().any(|m| m.role == "user"
+            && m.content
+                .contains("Continue working toward the active goal.")),
+        "the continuation carries the v2 prompt: {:?}",
+        calls[1]
+    );
+    assert!(
         calls[1]
             .iter()
-            .any(|m| m.role == "user" && m.content.contains("ship the thing")),
-        "the continuation carries the goal: {:?}",
+            .any(|m| m.content.contains("ship the thing")),
+        "the continuation turn also carries the goal reminder: {:?}",
         calls[1]
     );
     drop(calls);

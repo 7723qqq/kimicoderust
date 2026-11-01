@@ -416,6 +416,57 @@ fn engine_without_a_model(store: Arc<SqliteSessionStore>, hub: Arc<EventHub>) ->
     )
 }
 
+/// The REST goal read is served from the engine's goal store — the store the
+/// turn settle writes — so it reports the budget and counters the engine
+/// folded, not a stale sqlite row or a host-side copy.
+#[tokio::test]
+async fn session_goal_route_serves_the_engine_store_snapshot() {
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let hub = Arc::new(EventHub::new());
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = store
+        .create_workspace(dir.path().to_str().unwrap(), None)
+        .unwrap();
+    store
+        .create_session_with_workspace("sess-engine-goal", None, Some(&workspace.id))
+        .unwrap();
+    let server = HttpServer::with_hub(store.clone(), hub.clone())
+        .with_engine(engine_without_a_model(store.clone(), hub));
+
+    let session_store =
+        crate::storage::StateStore::for_session(dir.path(), "sess-engine-goal").unwrap();
+    for write in [
+        json!({ "action": "create", "objective": "engine goal" }),
+        json!({ "action": "set_budget", "value": 4, "unit": "turns" }),
+        json!({ "action": "record_usage", "turns": 1, "output_tokens": 7 }),
+    ] {
+        let outcome = session_store.apply_write("goal", &write).unwrap();
+        session_store.write_domain("goal", &outcome.stored).unwrap();
+    }
+    // A stale sqlite row must not shadow the engine store.
+    store
+        .put_state("goal", "sess-engine-goal", &json!({ "objective": "stale" }))
+        .unwrap();
+
+    let res = server
+        .handle_request(&HttpRequest {
+            method: "GET".into(),
+            path: "/api/v1/sessions/sess-engine-goal/goal".into(),
+            query: None,
+            headers: HashMap::new(),
+            body: Vec::new(),
+        })
+        .await;
+    assert_eq!(res.status, 200);
+    let body: Value = serde_json::from_slice(&res.body).unwrap();
+    assert_eq!(body["objective"], "engine goal");
+    assert_eq!(body["status"], "active");
+    assert_eq!(body["turnsUsed"], 1);
+    assert_eq!(body["tokensUsed"], 7);
+    assert_eq!(body["budget"]["turnBudget"], 4);
+    assert_eq!(body["budget"]["remainingTurns"], 3);
+}
+
 async fn prompt(server: &HttpServer, session_id: &str) -> HttpResponse {
     server
         .handle_request(&HttpRequest {

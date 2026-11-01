@@ -10,8 +10,8 @@ description:
   en: >
       Editor integration: embeds sessions into VS Code.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T15:13:40.663Z"
+revision: c7d34cbe784d29928dada6568fb144fe4bece585
+updated_at: "2026-11-01T05:34:45.992Z"
 fingerprint: 08633cfde48f4e01b674cf3e966ea03cc3af8ddd2d974d20c79a958ce3973f84
 source:
   - path: "apps/vscode/src/extension.ts"

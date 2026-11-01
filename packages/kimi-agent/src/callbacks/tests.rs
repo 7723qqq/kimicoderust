@@ -1192,6 +1192,7 @@ fn gate_goal(id: &str) -> crate::turn_loop::types::GoalContext {
         tokens_used: 0,
         turns_used: 0,
         wall_clock_ms: 0,
+        updated_at: 0,
     }
 }
 
@@ -2563,6 +2564,7 @@ async fn test_goal_write_seeds_from_the_host_snapshot_and_emits_goal_updated() {
         wall_clock_ms: 0,
         tokens_used: 0,
         turns_used: 0,
+        updated_at: 0,
     };
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let adapter = StateStoreCallbacks {
@@ -2613,4 +2615,99 @@ async fn test_goal_write_seeds_from_the_host_snapshot_and_emits_goal_updated() {
     assert_eq!(updated.len(), 2, "one event per goal write: {events:?}");
     assert_eq!(updated[0]["value"]["goal"]["turnsUsed"], 1);
     assert_eq!(updated[1]["value"]["goal"]["status"], "complete");
+}
+
+/// v2 `cancelGoal` removes the goal. The engine store follows the host's
+/// "no goal" report for a goal the host had adopted — and only for one it
+/// had adopted.
+#[tokio::test]
+async fn test_a_host_that_clears_its_goal_clears_the_engine_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_dir(tmp.path().join("state")).unwrap());
+    let goal = Arc::new(std::sync::Mutex::new(Some(GoalContext {
+        goal_id: "goal-host".into(),
+        objective: "Host goal".into(),
+        status: crate::turn_loop::types::GoalStatus::Active,
+        token_budget: None,
+        turn_budget: None,
+        wall_clock_budget_ms: None,
+        wall_clock_ms: 0,
+        tokens_used: 0,
+        turns_used: 0,
+        updated_at: 0,
+    })));
+    let adapter = StateStoreCallbacks {
+        inner: Arc::new(HostOwnedGoalCallbacks {
+            goal: goal.clone(),
+            events: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        store: store.clone(),
+        cron_store: store.clone(),
+    };
+    let write = |value: serde_json::Value| StateWriteRequest {
+        domain: "goal".into(),
+        key: "goal".into(),
+        value,
+        undoable: false,
+        turn_id: String::new(),
+        tool_call_id: String::new(),
+    };
+
+    adapter
+        .state_write(write(
+            serde_json::json!({ "action": "record_usage", "turns": 1, "output_tokens": 9 }),
+        ))
+        .await
+        .expect("the fold adopts the host goal");
+    assert!(store.goal_context().is_some());
+
+    *goal.lock().unwrap() = None;
+    let response = adapter
+        .state_write(write(
+            serde_json::json!({ "action": "record_usage", "turns": 1, "output_tokens": 9 }),
+        ))
+        .await
+        .expect("a cleared host goal is not an error");
+    assert!(response.value["goal"].is_null());
+    assert!(
+        store.goal_context().is_none(),
+        "the engine store follows the host's clear"
+    );
+}
+
+/// An engine-created goal the host has never reported back must survive a
+/// host that answers "no goal": the host never knew about it, so it cannot
+/// have cleared it.
+#[tokio::test]
+async fn test_an_engine_created_goal_survives_a_host_reporting_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_dir(tmp.path().join("state")).unwrap());
+    let outcome = store
+        .apply_write(
+            "goal",
+            &serde_json::json!({ "action": "create", "objective": "Engine goal" }),
+        )
+        .unwrap();
+    store.write_domain("goal", &outcome.stored).unwrap();
+    let adapter = StateStoreCallbacks {
+        inner: Arc::new(HostOwnedGoalCallbacks {
+            goal: Arc::new(std::sync::Mutex::new(None)),
+            events: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        store: store.clone(),
+        cron_store: store.clone(),
+    };
+    let response = adapter
+        .state_write(StateWriteRequest {
+            domain: "goal".into(),
+            key: "goal".into(),
+            value: serde_json::json!({ "action": "record_usage", "turns": 1, "output_tokens": 4 }),
+            undoable: false,
+            turn_id: String::new(),
+            tool_call_id: String::new(),
+        })
+        .await
+        .expect("the fold lands on the engine-created goal");
+    assert_eq!(response.value["goal"]["turnsUsed"], 1);
+    assert!(store.goal_context().is_some());
 }

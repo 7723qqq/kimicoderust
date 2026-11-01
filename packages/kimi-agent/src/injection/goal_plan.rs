@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::goal::{
     GoalSnapshot, GoalState, GoalStatus, completion_criterion_block, escape_untrusted_text,
-    format_budgets, format_elapsed, is_nearing_budget, reason_suffix, to_snapshot,
+    format_budgets, format_elapsed, is_nearing_budget, reason_suffix,
 };
 use crate::injection::state::DomainValueSource;
 
@@ -198,12 +198,12 @@ pub fn goal_injection_text(goal_value: &Value) -> String {
             .or_else(|| {
                 serde_json::from_value::<GoalState>(value.clone())
                     .ok()
-                    .map(|state| to_snapshot(&state, state.wall_clock_ms))
+                    .map(|state| state.snapshot_now())
             })
     } else {
         serde_json::from_value::<GoalState>(value.clone())
             .ok()
-            .map(|state| to_snapshot(&state, state.wall_clock_ms))
+            .map(|state| state.snapshot_now())
     };
     let Some(snapshot) = snapshot else {
         return String::new();
@@ -486,7 +486,7 @@ pub fn register_goal_plan_injections<S>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::goal::GoalBudgetLimits;
+    use crate::goal::{GoalBudgetLimits, to_snapshot};
     use serde_json::json;
 
     fn sample_state() -> GoalState {
@@ -506,6 +506,7 @@ mod tests {
                 turn_budget: Some(10),
                 wall_clock_budget_ms: Some(3_600_000),
             },
+            host_owned: false,
             terminal_reason: None,
             created_at: 1_700_000_000_000,
             updated_at: 1_700_000_042_000,

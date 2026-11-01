@@ -10,8 +10,8 @@ description:
   en: >
       Inspector shell: React entry, app root and the engine connection context.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T15:13:40.662Z"
+revision: c7d34cbe784d29928dada6568fb144fe4bece585
+updated_at: "2026-11-01T05:34:45.991Z"
 fingerprint: df321b3d7420b674af690b4072d6af793013184a390fbacb12fe3b8626ba3dc6
 source:
   - path: "apps/kimi-inspect/src/main.tsx"

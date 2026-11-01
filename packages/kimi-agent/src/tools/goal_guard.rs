@@ -196,6 +196,7 @@ mod tests {
             tokens_used: 0,
             turns_used: 0,
             wall_clock_ms: 0,
+            updated_at: 0,
         }
     }
 

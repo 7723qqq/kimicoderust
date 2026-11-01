@@ -121,11 +121,17 @@ export function toKimiErrorCode(raw: unknown): KimiErrorCode {
 }
 
 /**
- * The native harness's TS-side goal state. The Rust engine pulls a fresh goal
- * snapshot per turn through the `goal` callback (snake_case wire), so this is
- * the authority for the goal lifecycle; budgets are not modelled natively yet,
- * so the budget report is all-null / not-reached.
+ * The native harness's TS-side goal state. The Rust engine owns the goal
+ * store, so this is the host's projection of the engine's snapshots (status,
+ * counters, budget limits) plus any host-initiated transition until the next
+ * `goal.updated` adopts the engine's reading.
  */
+export interface NativeGoalBudget {
+  readonly tokenBudget?: number | null;
+  readonly turnBudget?: number | null;
+  readonly wallClockBudgetMs?: number | null;
+}
+
 export interface NativeGoalState {
   goalId: string;
   objective: string;
@@ -136,14 +142,18 @@ export interface NativeGoalState {
   tokensUsed: number;
   inputTokensUsed: number;
   outputTokensUsed: number;
+  /** The engine's last reported wall-clock figure (v2 `GoalState.wallClockMs`). */
+  wallClockMs?: number;
+  /** The goal's hard limits, as the engine reported them. */
+  budget?: NativeGoalBudget;
 }
 
 /**
  * The inverse of {@link toGoalSnapshot} for the engine's `goal.updated`
  * snapshot: the engine owns the goal fold (usage counters, status
- * transitions), so the host adopts what it reports instead of re-deriving it.
- * Accepts both spellings the engine has used — camelCase (`goalId`) and the
- * snake_case GoalState aliases (`goal_id`).
+ * transitions, budget limits), so the host adopts what it reports instead of
+ * re-deriving it. Accepts both spellings the engine has used — camelCase
+ * (`goalId`) and the snake_case GoalState aliases (`goal_id`).
  */
 export function goalStateFromSnapshot(snapshot: Record<string, unknown>): NativeGoalState {
   const budget =
@@ -156,6 +166,9 @@ export function goalStateFromSnapshot(snapshot: Record<string, unknown>): Native
   const createdAt =
     number(snapshot['createdAt']) ?? number(snapshot['created_at']) ?? Date.now();
   const status = snapshot['status'];
+  const tokenBudget = number(budget['tokenBudget']);
+  const turnBudget = number(budget['turnBudget']);
+  const wallClockBudgetMs = number(budget['wallClockBudgetMs']);
   return {
     goalId: text(snapshot['goalId']) || text(snapshot['goal_id']),
     objective: text(snapshot['objective']),
@@ -168,10 +181,48 @@ export function goalStateFromSnapshot(snapshot: Record<string, unknown>): Native
       number(snapshot['inputTokensUsed']) ?? number(budget['inputTokensUsed']) ?? 0,
     outputTokensUsed:
       number(snapshot['outputTokensUsed']) ?? number(budget['outputTokensUsed']) ?? 0,
+    wallClockMs: number(snapshot['wallClockMs']) ?? number(snapshot['wall_clock_ms']) ?? 0,
+    budget: {
+      tokenBudget: tokenBudget ?? null,
+      turnBudget: turnBudget ?? null,
+      wallClockBudgetMs: wallClockBudgetMs ?? null,
+    },
   };
 }
 
+/**
+ * The live wall-clock figure for a goal: the engine's last reported value,
+ * plus the time since that report while the goal is active. A goal the host
+ * created itself has no engine reading yet, so it falls back to its age.
+ */
+export function nativeGoalWallClockMs(goal: NativeGoalState, now: number): number {
+  if (goal.wallClockMs === undefined) return Math.max(0, now - goal.createdAt);
+  if (goal.status !== 'active') return goal.wallClockMs;
+  return goal.wallClockMs + Math.max(0, now - goal.updatedAt);
+}
+
+const NULL_GOAL_BUDGET = {
+  tokenBudget: null,
+  turnBudget: null,
+  wallClockBudgetMs: null,
+  remainingTokens: null,
+  remainingTurns: null,
+  remainingWallClockMs: null,
+  tokenBudgetReached: false,
+  turnBudgetReached: false,
+  wallClockBudgetReached: false,
+  overBudget: false,
+} as const;
+
 export function toGoalSnapshot(goal: NativeGoalState): GoalSnapshot {
+  const now = Date.now();
+  const wallClockMs = nativeGoalWallClockMs(goal, now);
+  const tokenBudget = goal.budget?.tokenBudget ?? null;
+  const turnBudget = goal.budget?.turnBudget ?? null;
+  const wallClockBudgetMs = goal.budget?.wallClockBudgetMs ?? null;
+  const tokenBudgetReached = tokenBudget !== null && goal.tokensUsed >= tokenBudget;
+  const turnBudgetReached = turnBudget !== null && goal.turnsUsed >= turnBudget;
+  const wallClockBudgetReached = wallClockBudgetMs !== null && wallClockMs >= wallClockBudgetMs;
   return {
     goalId: goal.goalId,
     objective: goal.objective,
@@ -180,18 +231,20 @@ export function toGoalSnapshot(goal: NativeGoalState): GoalSnapshot {
     tokensUsed: goal.tokensUsed,
     inputTokensUsed: goal.inputTokensUsed,
     outputTokensUsed: goal.outputTokensUsed,
-    wallClockMs: Date.now() - goal.createdAt,
+    wallClockMs,
     budget: {
-      tokenBudget: null,
-      turnBudget: null,
-      wallClockBudgetMs: null,
-      remainingTokens: null,
-      remainingTurns: null,
-      remainingWallClockMs: null,
-      tokenBudgetReached: false,
-      turnBudgetReached: false,
-      wallClockBudgetReached: false,
-      overBudget: false,
+      ...NULL_GOAL_BUDGET,
+      tokenBudget,
+      turnBudget,
+      wallClockBudgetMs,
+      remainingTokens: tokenBudget === null ? null : Math.max(0, tokenBudget - goal.tokensUsed),
+      remainingTurns: turnBudget === null ? null : Math.max(0, turnBudget - goal.turnsUsed),
+      remainingWallClockMs:
+        wallClockBudgetMs === null ? null : Math.max(0, wallClockBudgetMs - wallClockMs),
+      tokenBudgetReached,
+      turnBudgetReached,
+      wallClockBudgetReached,
+      overBudget: tokenBudgetReached || turnBudgetReached || wallClockBudgetReached,
       inputTokensUsed: goal.inputTokensUsed,
       outputTokensUsed: goal.outputTokensUsed,
     },

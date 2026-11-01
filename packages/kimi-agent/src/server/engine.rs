@@ -1258,22 +1258,45 @@ impl ServerEngine {
             .map(Arc::new)
     }
 
+    /// The session's goal snapshot, as the engine's own goal store holds it.
+    /// This is the store the after-turn settle writes, so a REST read sees the
+    /// fold / pause / budget block that just happened instead of a host copy.
+    pub fn session_goal_snapshot(&self, session_id: &str) -> Option<Value> {
+        let store = self.session_state_store(session_id)?;
+        store.goal_snapshot()
+    }
+
     /// The goal-continuation prompt the session's next autonomous turn owes,
     /// or `None` when the goal is inactive or its budget is spent.
     ///
     /// v2's `goalService` launched the continuation from the turn-end hook,
     /// so the prompt loop that drives REST / ACP turns owns the re-prompt
-    /// here: the turn loop reports the decision as telemetry and no host
-    /// consumes it on this entry point.
-    pub async fn pending_goal_continuation(&self, session_id: &str) -> Option<String> {
-        let workspace = self.session_workspace(session_id);
-        let ws_ref = workspace
-            .as_ref()
-            .map(|workspace| std::path::PathBuf::from(&workspace.root))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let callbacks = self.session_callbacks(session_id, &ws_ref);
-        let goal = callbacks.goal().await.ok().flatten();
-        crate::session::goal_continuation_prompt(goal.as_ref())
+    /// here. The decision reads the engine's own goal store — the same store
+    /// the after-turn settle folded into — so it sees the pause / block that
+    /// settle just recorded instead of a host-side copy that may lag.
+    pub async fn pending_goal_continuation(
+        &self,
+        session_id: &str,
+        step_capped: bool,
+    ) -> Option<String> {
+        let store = self.session_state_store(session_id)?;
+        let goal = store.goal_context()?;
+        if !goal.status.is_active() {
+            return None;
+        }
+        let tokens_spent = goal
+            .token_budget
+            .is_some_and(|budget| goal.tokens_used >= budget);
+        let turns_spent = goal
+            .turn_budget
+            .is_some_and(|budget| goal.turns_used >= budget);
+        let time_spent = goal
+            .wall_clock_budget_ms
+            .is_some_and(|budget| goal.wall_clock_ms >= budget);
+        if tokens_spent || turns_spent || time_spent {
+            return None;
+        }
+        Some(crate::goal::continuation_prompt(step_capped))
     }
 
     /// The project's `workspace.additional_dir` roots.
@@ -1907,14 +1930,14 @@ impl ServerEngine {
         history: Vec<LLMMessage>,
         prompt: &str,
     ) -> Result<TurnReport, EngineError> {
-        let callbacks: Arc<dyn HostCallbacks> = if let Some(mgr) = self.interaction_manager() {
-            Arc::new(
-                ServerHost::with_interaction(mgr, session_id.to_string())
-                    .with_oauth(self.oauth_manager()),
-            )
-        } else {
-            Arc::new(ServerHost::standalone().with_oauth(self.oauth_manager()))
-        };
+        // The same callback stack the product entry builds: the engine's
+        // state-domain seam (goal / plan / todo / cron) must be present or an
+        // after-turn goal fold has nowhere to land on this path.
+        let ws_ref = self
+            .session_workspace(session_id)
+            .map(|workspace| std::path::PathBuf::from(&workspace.root))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let callbacks = self.session_callbacks(session_id, &ws_ref);
         let message_callbacks = Arc::new(crate::server::message_events::MessageCallbacks::new(
             callbacks,
             session_id,
@@ -2136,6 +2159,11 @@ impl ServerEngine {
                     crate::server::activity::InterruptReason::Error,
                     Some(error.clone()),
                 );
+                crate::session::goal_turn::settle_goal_after_turn(
+                    callbacks.as_ref(),
+                    crate::session::goal_turn::GoalTurnEnd::Failed { error: &error },
+                )
+                .await;
                 return Err(EngineError::Turn(error));
             }
         };
@@ -2181,14 +2209,19 @@ impl ServerEngine {
             tracing::warn!(%session_id, %e, "could not persist turn usage");
         }
 
-        // v2 `incrementGoalTurn` + `accountTokenUsage`: fold the finished turn
-        // into an active goal, so the next turn's steering and the
-        // continuation budget read real totals. The REPL folds the same way
-        // after its turns; without it a server goal's budget could never be
-        // exhausted.
-        if let Some(store) = self.session_state_store(session_id) {
-            store.goal_record_usage(1, result.usage.output_tokens.into());
-        }
+        // v2 `incrementGoalTurn` + `accountTokenUsage` + `settleAbnormalTurn`:
+        // fold the finished turn into the session's goal, settle a pause /
+        // budget block, and let the queue's continuation decision read the
+        // same store. Without this a server goal's budget could never be
+        // exhausted and an error would leave the goal active.
+        crate::session::goal_turn::settle_goal_after_turn(
+            callbacks.as_ref(),
+            crate::session::goal_turn::GoalTurnEnd::Ran {
+                stop: &result.stop_reason,
+                output_tokens: result.usage.output_tokens.into(),
+            },
+        )
+        .await;
 
         // Reset micro compaction's idle clock: this turn produced assistant
         // output, so the prefix is fresh again and a cache miss is not due

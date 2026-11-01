@@ -10,8 +10,8 @@ description:
   en: >
       The two backends behind t(): the engine's translate when the native module loads, falling back to the pure-JS flat map when it does not.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T15:13:40.694Z"
+revision: c7d34cbe784d29928dada6568fb144fe4bece585
+updated_at: "2026-11-01T05:34:46.021Z"
 fingerprint: 5d71281ba78fc35769e7fe948f61ba070146f368cc699702506b4a47a7d9d3b2
 source:
   - path: "packages/i18n-runtime/src/i18n.ts"

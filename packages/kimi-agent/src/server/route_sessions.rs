@@ -998,10 +998,20 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
+                // The engine's goal store is the authority: the turn settle
+                // folds / pauses / blocks there, and the REST read must see
+                // that snapshot (with its budget report). The sqlite state row
+                // remains the fallback for a server running without an engine.
                 let goal_val = self
-                    .store
-                    .get_state("goal", session_id)
-                    .unwrap_or(None)
+                    .engine
+                    .as_ref()
+                    .and_then(|engine| engine.session_goal_snapshot(session_id))
+                    .or_else(|| {
+                        self.store
+                            .get_state("goal", session_id)
+                            .unwrap_or(None)
+                            .filter(|goal| !goal.is_null())
+                    })
                     .unwrap_or(Value::Null);
                 // v2 answers the bare `goalSnapshotSchema` or `null`
                 // (kap-server/src/routes/sessions.ts:798 →

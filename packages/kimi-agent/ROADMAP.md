@@ -4920,7 +4920,7 @@ usage 累积 + detect() + 遥测  ← 三合一（见上表）
 | 2 | **分叉 turn_index** | `sqlite_store.rs:834-863` 加参数 + 按 v2 `forkTurnSlice.ts:80-99` 的 `origin.kind` 分类切边界 + promptId 配对（`:118-176`）；调用方两处（`src/server/mod.rs:5165` 解析 body 的 `turnIndex`、`acp/mod.rs:1015`）；**注意 fork 的历史按 `save_turn` 分行存储，切分要按 turn 而非按 message**。**（2026-10-04 行号重定位：该项已于 2026-10-02 完成，见 §10.23——`fork_session` 现在 `sqlite_store.rs:1042`；REST 解析在 `server/route_sessions.rs:459`；ACP 调用在 `acp/mod.rs:1020`。v2 侧 `origin.kind` 分类的真实位置是 `forkTurnSlice.ts:86-103` 的 `isUserVisibleTurnRecord`、promptId 配对在 `:185-190`；原引的 `:80-99`/`:118-176` 已漂移）** | **3-4 人天** |
 | 5+15 | **micro `detect()` + 遥测 `api_error`** | 新增一个跨 step 的 usage 累积结构（`input_cache_read` / `input_cache_creation` / tokens），`server/engine.rs:1348` 前加判据，配置面加 2 个常量；遥测侧同源数据报 `api_error`。**（2026-10-04 状态与行号）** 两项都已完成：P1-5 见 §10.25（`compaction/micro.rs:132-155` 的 `detect_micro_compaction`，调用点 `server/engine.rs:1416-1429`），`api_error` 见 §10.39。**原估的「新增跨 step 的 usage 累积结构」被证伪**——cache-miss 判据读的是「距上次 assistant 输出的空闲时长」而非 usage（判据在**退役副本** `.tmp/v2-ref/…/agent/microCompaction/microCompactionService.ts:94-95`；**上游无该模块**，见 §1 「上下文智能压缩」行的裁定与 §6.44.1），故本行后半的合并理由不成立（§6.45.2 已记）。`server/engine.rs:1348` 现在是注释块中部，与判据无关 | **2-3 人天**（已完成） |
 | 6 | ~~**wire 版本 + metadata + 迁移链**~~ **已完成 2026-10-03**（§10.34） | 版本列 + 打戳 + 前向拒绝已落地；**五个迁移经证据核验无物可迁**（见 §10.34 三条理由），故不建空迁移链 | **已完成**（原 4-6 人天为五个迁移定价，那些迁移不适用） |
-| 7 | ~~**磁盘日志 + 导出 ZIP**~~ **原描述不成立（§10.30）**；两半残余**均已完成 2026-10-03**：引擎 REST 导出见 §10.31，会话级日志接线见 §10.33 | 引擎侧 REST 导出补 manifest + 日志成员 + 遍历会话树，参照 `packages/node-sdk/src/native/sdk-rpc-client-native.ts` 的 `exportSession`（现 `:1636-1737`，manifest 构造在 `:1678`、会话树遍历在 `:1695-1716`）。**（2026-10-04 状态与行号重定位：原引 `:3642-3698` 已漂移——那现在是 fork 的 turnIndex 越界检查，与导出无关；本行原列的「残余只剩」两项都已在 §10.31/§10.33 落地）** | **已完成** |
+| 7 | ~~**磁盘日志 + 导出 ZIP**~~ **原描述不成立（§10.30）**；两半残余**均已完成 2026-10-03**：引擎 REST 导出见 §10.31，会话级日志接线见 §10.33 | 引擎侧 REST 导出补 manifest + 日志成员 + 遍历会话树，参照 `packages/node-sdk/src/native/sdk-rpc-client-native.ts` 的 `exportSession`（现 `:1760-1861`，manifest 构造在 `:1802`、会话树遍历在 `:1819-1840`）。**（2026-10-04 状态与行号重定位：原引 `:3642-3698` 已漂移——那现在是 fork 的 turnIndex 越界检查，与导出无关；本行原列的「残余只剩」两项都已在 §10.31/§10.33 落地）** | **已完成** |
 | 8 | ~~POST /undo 回滚接线~~ **已完成 2026-10-01** | 新增 `rollback_state_for_undo`（`src/server/mod.rs:7544`），接在 `undo` 路由 `:5742`。**台账原引三处「已有模式」全是假的**——`engine.rs` 中 `.rollback()` 零调用，唯一生产调用者是 `repl/mod.rs:784`；`engine.rs:1226` 是 `for_workspace` 的 `Err(_)` 臂、`:1256` 只是注释提到 `StateStoreCallbacks`。真实模式在 `callbacks.rs:1608-1626`（`checkpoint` 的 host/local 合并）。**核实后新增的要点**：checkpoint 是 LIFO 栈（`state_store.rs:175/210` 的 `checkpoint`/`rollback`），`count=N` 必须弹 N 次而非一次。失败如实上报而非静默——行已删除，静默分叉比可见错误更糟。两个测试：`undo_restores_state_domains_from_the_checkpoint_stack`（钉 LIFO 到最早锚点）与 `undo_succeeds_when_no_checkpoint_was_ever_taken`（钉空栈不算错）；前者已用环境变量探针反证——断开接线后 depth 停在 2，测试确实失败。**（2026-10-04 行号重定位：原引 `:7371`/`:5594`/`:782`/`:1168`/`:1197`/`:1536-1554`/`:244` 均已漂移；`state_store.rs:244` 现在是 `checkpoint_depth` 而非栈本身）** | **已完成** |
 | 10 | ~~`len()/4` 一行修正~~ **已完成 2026-10-01** | `server/engine.rs` 改用 `compaction::estimate_tokens`（现见 `:996-1001` 的状态栏估算与 `:1419-1422` 的压缩判据）。**实测纠正**：原估「对 CJK 低报约 4 倍」是错的——`len()` 是字节数，3 字节/汉字 → 低报 **25%**（300 字节报 75，实际 100 token）。附带修掉截断：43 ASCII 字符旧值报 10，现为 11。新增测试 `context_tokens_count_cjk_per_character_and_leave_ascii_alone`（ASCII 差异 ≤1 仅进位、CJK 100 字符 = 100 token、混合串按连续 ASCII 段一次进位）。副作用是状态栏与压缩触发器现在共用同一估算器，两者不会再对「有多满」产生分歧。**（2026-10-04 行号重定位：原引 `engine.rs:933` 已漂移——那现在是 `take_last_turn_aborted`）** | **已完成** |
 | 11 | ~~**PermissionRuleScope + 审批留痕**~~ **已完成 2026-10-03**（§10.42） | 结论与估算不同：无需把 `Vec<String>` 换结构，也无需 agent state 通道——引擎侧的 `UserConfiguredAsk` 本就有命中规则，把它带到批准请求与 wire，宿主在 `scope==='session'` 时记住即可 | **已完成** |
@@ -9411,3 +9411,67 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   `UpdateGoal complete/blocked` 结束，v2 同语义但缺少预算护栏）；print 模式的
   continuation 仍读宿主的每回合 provider（未接折叠快照）；`GoalContext` 未携带
   `blocked_streak`。
+
+## 41. 2026-11-01 goal 生命周期整模块（预算 / 异常结算 / step-cap 续跑）
+
+- 持久化：`goal` 域从存“读投影”改为存 v2 `GoalState`（保留 `budgetLimits` 与
+  `wallClockResumedAt`），响应与事件仍是 `GoalSnapshot`。此前每次写都把快照当状态写回，
+  resume 锚点丢失，活跃 goal 的墙钟在两次写之间不再增长——wall-clock 预算实际只能约束
+  单个回合。`goal_outcome` 现在分别产出 `stored`（状态）与 `response`（快照）；
+  `StateStoreCallbacks` 的 `goal.updated` 发快照；REST `GET :goal` 走
+  `ServerEngine::session_goal_snapshot`（`StateStore::goal_snapshot()`，含预算报告），
+  sqlite 行只作无引擎回退。
+- 生命周期动作：新增 `lifecycle`（v2 `applyLifecycle`：仅 active 时 pause/block/complete，
+  settle 墙钟并写 `terminalReason`；resume 只能从 paused/blocked，恢复后立即
+  `blockIfBudgetReached`）；`update` 扩展 `paused` + `reason`（v2 `pauseGoal` 幂等语义，
+  非 active 拒绝）；`record_usage` / `set_budget` 在折叠/合并后执行
+  `blockIfBudgetReached`，终态原因为 v2
+  `Blocked after goal budget reached: turn budget N, token budget M, wall-clock budget Kms`。
+  删除独立的 `goal_record_usage`（生产与测试统一走 `apply_write`）。
+- 宿主同步：`sync_goal_from_context` 取代单向播种——无本地 goal 或 goal id 变化时整体
+  采纳宿主快照（含预算）；否则只在宿主 `updated_at` 更新时应用状态迁移，计数与预算仍归
+  引擎，滞后快照不会回滚折叠。采纳即记 `hostOwned`；宿主 `Ok(None)`（拥有 goal 但已清空）
+  只清除 `hostOwned` 的 goal（v2 `cancelGoal`），引擎自建且宿主尚未采纳的 goal 不会被误删。
+  `GoalContext` 增加 `updated_at`，napi `JsGoalContext` 同步透传。
+- 回合结算：新增 `session/goal_turn.rs::settle_goal_after_turn`（v2 `handleTurnEnded` +
+  `settleAbnormalTurn` + `blockIfBudgetReached`），pump、server `execute`（含失败路径）共用：
+  折叠 usage；折叠后的 snapshot 不是 active 就到此为止；完成 → 普通 continuation；
+  `MaxSteps` → `GOAL_STEP_CAP_CONTINUATION_PROMPT`；`Filtered` → pause
+  “Paused after provider safety policy block”；`Aborted` → pause “Paused after
+  interruption”；`BudgetLimited` → 用折叠报告的原因 block；`Err` →
+  `goal_failure_pause_reason` 分类（rate limit / connection / auth / filtered / api /
+  model config / runtime）。折叠先执行预算 block，所以墙钟到期的 cancel 得到的是预算原因而
+  不是“被中断”。continuation 文本改为 v2 固定 `GOAL_CONTINUATION_PROMPT`（objective 由
+  goal reminder 注入，不再塞进续跑提示），step-cap 前缀逐字移植；
+  `goal.continuation` / `goal.blocked` / `goal.paused` telemetry 删除（无宿主消费，
+  状态由 `goal.updated` 承担）。
+- turn loop：非 active goal 不再在第一步前中止回合（v2 只把回合绑定到开始时 active 的
+  goal；paused/blocked 走注入提醒的普通对话），steering 与 deadline guard 同样只对 active
+  goal 生效；预算门改用 v2 口径（输出 token + 整个 goal 的回合数，墙钟不变），与 store 的
+  折叠报告一致。
+- server / ACP：prompt queue 与 ACP 循环把 `MaxSteps` 也视为“可能还欠一回合”，
+  `ServerEngine::pending_goal_continuation(session_id, step_capped)` 读引擎 goal store
+  （与结算同一份数据），不再读宿主 provider。
+- SDK 宿主：`NativeGoalState` / `toGoalSnapshot` 携带预算上限并生成 v2 报告
+  （reached / remaining / live wall clock）；`nativeGoalWallClockMs` 在 active 时按
+  `updatedAt` 递增，暂停时冻结；goal provider 每回合发送全部状态、三项预算与
+  `updated_at`（不再只报 active，`Ok(None)` 语义因此可用）；`createGoal` 对任何已有 goal
+  要求 `replace`，`pauseGoal` / `resumeGoal` 按 v2 校验并在迁移时发 `goal.updated`，
+  `cancelGoal` 真正清空（事件 snapshot 为 null，返回清空前快照）。
+- 测试：`test_goal_record_usage_blocks_when_the_budget_is_spent`、
+  `test_goal_set_budget_blocks_an_already_spent_budget`、
+  `test_goal_lifecycle_pauses_blocks_and_resumes`、
+  `test_goal_wall_clock_accumulates_from_the_persisted_anchor`、
+  `test_clear_host_goal_only_clears_an_adopted_goal`、
+  `settle_goal_after_turn_folds_blocks_and_continues`、
+  `settle_goal_blocks_on_a_spent_budget_before_settling_an_abort`、
+  `test_inactive_goal_runs_the_turn_as_ordinary_chat`、
+  `session_goal_route_serves_the_engine_store_snapshot`、
+  `test_a_host_that_clears_its_goal_clears_the_engine_store`、
+  `test_an_engine_created_goal_survives_a_host_reporting_none`、
+  `goal-state.test.ts`（5 项）；`cargo test --lib` 3330 passed。
+- **剩余**：`blocked_streak` 仍未实现（v2 由 actor 运行时计数，store 无该字段，快照恒
+  null）；`GoalContext` 不带 `terminal_reason`，宿主侧 pause 记录的原因只能为空；
+  “已关闭 agent”（v2 `Paused after agent closed`）没有对应钩子；SDK 仍不提供预算设置
+  RPC（预算只能由模型 `SetGoalBudget` 写入）；third-party 宿主直接读 `state_read` 的
+  `goal` 域时拿到的是 `GoalState`（注入层已兼容两种形状，外部宿主未验）。

@@ -449,9 +449,14 @@ pub async fn run_prompt_loop(
         // turns; a cancel stops the chain, the way v2 pauses the goal on an
         // interrupted turn.
         let mut outcome = outcome;
-        while outcome.as_ref().is_ok_and(turn_completed) && !queue.active_is_cancelled(&session_id)
+        while !queue.active_is_cancelled(&session_id)
+            && outcome.as_ref().is_ok_and(turn_owes_goal_continuation)
         {
-            let Some(text) = engine.pending_goal_continuation(&session_id).await else {
+            let step_capped = outcome.as_ref().is_ok_and(turn_step_capped);
+            let Some(text) = engine
+                .pending_goal_continuation(&session_id, step_capped)
+                .await
+            else {
                 break;
             };
             let history = store.load_session_history(&session_id).unwrap_or_default();
@@ -504,6 +509,19 @@ pub(crate) fn turn_completed(report: &TurnReport) -> bool {
         report.stop_reason.as_str(),
         "EndTurn" | "MaxTokens" | "RepeatBreaker"
     )
+}
+
+/// A turn after which the goal may owe another turn: a clean completion, or
+/// the per-turn step budget running out (v2 `isMaxStepsTurnFailure`, which
+/// continues with the step-cap prompt instead of pausing).
+pub(crate) fn turn_owes_goal_continuation(report: &TurnReport) -> bool {
+    turn_completed(report) || turn_step_capped(report)
+}
+
+/// Whether the turn stopped because it ran out of steps inside its goal
+/// (v2 `isMaxStepsTurnFailure`).
+pub(crate) fn turn_step_capped(report: &TurnReport) -> bool {
+    report.stop_reason == "MaxSteps"
 }
 
 #[cfg(test)]

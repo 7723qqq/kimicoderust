@@ -1453,6 +1453,11 @@ pub struct GoalContext {
     pub tokens_used: i64,
     /// Cumulative turns run so far (before this turn).
     pub turns_used: i64,
+    /// When the host last changed the goal, in Unix milliseconds. The engine
+    /// syncs a host-initiated pause / resume / cancel into its own goal store
+    /// only when this is newer than the store's last write.
+    #[serde(default)]
+    pub updated_at: i64,
 }
 
 impl GoalContext {

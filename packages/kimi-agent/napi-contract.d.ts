@@ -209,6 +209,7 @@ export interface JsGoalContext {
   wallClockMs: number
   tokensUsed: number
   turnsUsed: number
+  updatedAt: number
 }
 
 export interface JsLlmProviderDef {

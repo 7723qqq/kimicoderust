@@ -10,8 +10,8 @@ description:
   en: >
       OAuth and API-key auth: token refresh and credential storage.
       
-revision: b5bf884dce712b7fb6a56859dac2cca05d87b18a
-updated_at: "2026-10-31T15:13:40.700Z"
+revision: c7d34cbe784d29928dada6568fb144fe4bece585
+updated_at: "2026-11-01T05:34:46.026Z"
 fingerprint: 89e800b1882c56fdc1c29fe8f5c73a86ae6bba381738337763bc2d1b0d26a73d
 source:
   - path: "packages/oauth/src/index.ts"

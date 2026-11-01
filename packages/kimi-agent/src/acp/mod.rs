@@ -467,14 +467,19 @@ impl AcpServer {
             .run_turn_with_media(session_id, turn_number, history, prompt, media, origin)
             .await;
         // v2 `launchContinuationTurn` on this entry point too: a goal still
-        // active after a cleanly completed turn owns the next one. The
-        // response reports the user's turn; continuation turns stream as
-        // `session/update`s like any other.
-        let mut owed = result
-            .as_ref()
-            .is_ok_and(crate::server::prompt_queue::turn_completed);
-        while owed {
-            let Some(text) = engine.pending_goal_continuation(session_id).await else {
+        // active after a cleanly completed turn (or a turn that hit its step
+        // budget) owns the next one. The response reports the user's turn;
+        // continuation turns stream as `session/update`s like any other.
+        let mut owed = result.as_ref().ok().cloned();
+        while let Some(report) = owed {
+            if !crate::server::prompt_queue::turn_owes_goal_continuation(&report) {
+                break;
+            }
+            let step_capped = crate::server::prompt_queue::turn_step_capped(&report);
+            let Some(text) = engine
+                .pending_goal_continuation(session_id, step_capped)
+                .await
+            else {
                 break;
             };
             let history = self
@@ -492,8 +497,7 @@ impl AcpServer {
                     Some(json!({ "kind": "system_trigger", "name": "goal_continuation" })),
                 )
                 .await
-                .as_ref()
-                .is_ok_and(crate::server::prompt_queue::turn_completed);
+                .ok();
         }
         bus.unsubscribe(subscription);
         result

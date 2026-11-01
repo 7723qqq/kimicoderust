@@ -98,8 +98,37 @@ pub struct GoalState {
     pub budget_limits: GoalBudgetLimits,
     #[serde(default)]
     pub terminal_reason: Option<String>,
+    /// Whether the host has reported this goal back to the engine. A host
+    /// that owns goals and reports none can only have cleared a goal it knew
+    /// about; an engine-created goal the host has not adopted yet must survive
+    /// that report.
+    #[serde(default)]
+    pub host_owned: bool,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+impl GoalState {
+    /// The live wall-clock figure: the settled elapsed time plus the time
+    /// since the last resume for an active goal (v2 `liveWallClockMs`).
+    pub fn live_wall_clock_ms(&self, now_ms: u64) -> u64 {
+        if self.status == GoalStatus::Active
+            && let Some(resumed_at) = self.wall_clock_resumed_at
+        {
+            return self.wall_clock_ms + now_ms.saturating_sub(resumed_at);
+        }
+        self.wall_clock_ms
+    }
+
+    /// Project this state with the live wall-clock figure read from the
+    /// system clock (v2 `toSnapshot` on the runtime's live state).
+    pub fn snapshot_now(&self) -> GoalSnapshot {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        to_snapshot(self, self.live_wall_clock_ms(now))
+    }
 }
 
 /// Model-facing goal snapshot, mirroring v2 `GoalSnapshot` (camelCase wire
@@ -413,6 +442,121 @@ pub fn is_nearing_budget(goal: &GoalSnapshot) -> bool {
     max_budget_fraction(goal) >= 0.75
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle reasons and continuation prompts
+// (v2 `goalService.ts` constants; the engine writes these into
+// `terminalReason` and into the continuation turns it queues.)
+// ---------------------------------------------------------------------------
+
+/// v2 `GOAL_BUDGET_BLOCK_PREFIX`: the terminal reason every hard-budget
+/// block starts with. `reason_suffix`/`terminalReason.startsWith` checks
+/// key off this prefix, so it is protocol data.
+pub const GOAL_BUDGET_BLOCK_PREFIX: &str = "Blocked after goal budget reached";
+
+/// v2 `GOAL_RATE_LIMIT_PAUSE_REASON`.
+pub const GOAL_RATE_LIMIT_PAUSE_REASON: &str = "Paused after provider rate limit";
+/// v2 `GOAL_PROVIDER_CONNECTION_PAUSE_PREFIX`.
+pub const GOAL_PROVIDER_CONNECTION_PAUSE_PREFIX: &str = "Paused after provider connection error";
+/// v2 `GOAL_PROVIDER_AUTH_PAUSE_PREFIX`.
+pub const GOAL_PROVIDER_AUTH_PAUSE_PREFIX: &str = "Paused after provider authentication error";
+/// v2 `GOAL_PROVIDER_API_PAUSE_PREFIX`.
+pub const GOAL_PROVIDER_API_PAUSE_PREFIX: &str = "Paused after provider API error";
+/// v2 `GOAL_MODEL_CONFIG_PAUSE_PREFIX`.
+pub const GOAL_MODEL_CONFIG_PAUSE_PREFIX: &str = "Paused after model configuration error";
+/// v2 `GOAL_RUNTIME_PAUSE_PREFIX`.
+pub const GOAL_RUNTIME_PAUSE_PREFIX: &str = "Paused after runtime error";
+/// v2 `GOAL_CONTINUATION_FAILURE_PAUSE_PREFIX`.
+pub const GOAL_CONTINUATION_FAILURE_PAUSE_PREFIX: &str = "Paused after goal continuation failure";
+/// v2 `GOAL_PROVIDER_FILTERED_PAUSE_REASON`.
+pub const GOAL_PROVIDER_FILTERED_PAUSE_REASON: &str = "Paused after provider safety policy block";
+/// v2 `pauseOnInterrupt` reason.
+pub const GOAL_INTERRUPTED_PAUSE_REASON: &str = "Paused after interruption";
+
+/// v2 `GOAL_CONTINUATION_PROMPT`, verbatim: the turn a continuation queues
+/// carries this text. The objective itself arrives through the goal reminder
+/// injection, not through this prompt.
+pub const GOAL_CONTINUATION_PROMPT: &str = "Continue working toward the active goal. Keep the self-audit brief. Do not explore unrelated interpretations once the goal can be decided. If the objective is simple, already answered, impossible, unsafe, or contradictory, do not run another goal turn. Explain briefly if useful, then call UpdateGoal with `complete` or `blocked` in the same turn. Otherwise, weigh the objective and any completion criteria against the work done so far, choose one bounded, useful slice of work, and use the existing conversation context and your tools. Do not try to finish a broad goal in one turn unless the whole goal is genuinely small. Most goal turns should not call UpdateGoal: after completing a useful slice, if material work remains, end the turn normally without calling UpdateGoal so the runtime can continue the goal in the next turn. Call UpdateGoal with `complete` only when all required work is done, any stated validation has passed, and there is no useful next action. Completion audit: before calling `complete`, verify the current state against the actual objective and every explicit requirement. Treat weak or indirect evidence as not complete. Do not mark complete after only producing a plan, summary, first pass, or partial result. Do not mark complete merely because a budget is nearly exhausted or you want to stop. Blocked audit: do not call UpdateGoal with `blocked` the first time you hit a blocker. Use `blocked` only for a genuine impasse: an external condition, required user input, missing credentials or permissions, or a persistent technical failure. For those non-terminal blockers, the same blocking condition must repeat for at least 3 consecutive goal turns before you call `blocked`, counting the original/user-triggered turn and automatic continuations. If a previously blocked goal is resumed, treat the resumed run as a fresh blocked audit. Exception: if the objective itself is impossible, unsafe, or contradictory, call UpdateGoal with `blocked` in the same turn; do not run more goal turns just to satisfy the audit. Do not use `blocked` because the work is large, hard, slow, uncertain, incomplete, still needs validation, would benefit from clarification, or needs more goal turns. Once the 3-turn threshold is met and you cannot make meaningful progress without user input or an external-state change, call UpdateGoal with `blocked`; do not keep reporting the blocker while leaving the goal active. Do not ask the user for input unless a real blocker prevents progress.";
+
+/// v2 `GOAL_STEP_CAP_CONTINUATION_PROMPT` prefix: a continuation that
+/// follows a turn which exhausted its per-turn step budget.
+pub const GOAL_STEP_CAP_CONTINUATION_PREFIX: &str = "The previous goal turn reached the per-turn step limit before finishing its work, so a new turn was started for you. Pick up where that turn stopped and keep each slice of work small enough to fit the limit. ";
+
+/// The continuation prompt a continuation turn carries, mirroring v2
+/// `launchContinuationTurn`'s `stepCapped` selection.
+pub fn continuation_prompt(step_capped: bool) -> String {
+    if step_capped {
+        format!("{GOAL_STEP_CAP_CONTINUATION_PREFIX}{GOAL_CONTINUATION_PROMPT}")
+    } else {
+        GOAL_CONTINUATION_PROMPT.to_string()
+    }
+}
+
+/// The terminal reason a hard-budget block records, mirroring v2
+/// `goalBudgetBlockReason`: `Blocked after goal budget reached: turn budget
+/// N, token budget M, wall-clock budget Kms`. `None` while no budget is
+/// reached.
+pub fn goal_budget_block_reason(budget: &GoalBudgetReport) -> Option<String> {
+    let mut reached: Vec<String> = Vec::new();
+    if budget.turn_budget_reached
+        && let Some(turn_budget) = budget.turn_budget
+    {
+        reached.push(format!("turn budget {turn_budget}"));
+    }
+    if budget.token_budget_reached
+        && let Some(token_budget) = budget.token_budget
+    {
+        reached.push(format!("token budget {token_budget}"));
+    }
+    if budget.wall_clock_budget_reached
+        && let Some(wall_clock_budget_ms) = budget.wall_clock_budget_ms
+    {
+        reached.push(format!("wall-clock budget {wall_clock_budget_ms}ms"));
+    }
+    if reached.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{GOAL_BUDGET_BLOCK_PREFIX}: {}",
+        reached.join(", ")
+    ))
+}
+
+/// Classify a failed turn onto its v2 goal pause reason, mirroring
+/// `goalFailurePauseReason`. `code` is the protocol error code the turn
+/// failed with; `message` is the failure text when one is available.
+pub fn goal_failure_pause_reason(code: &str, message: Option<&str>) -> String {
+    match code {
+        "provider.rate_limit" => GOAL_RATE_LIMIT_PAUSE_REASON.to_string(),
+        "provider.connection_error" => {
+            pause_reason_with_message(GOAL_PROVIDER_CONNECTION_PAUSE_PREFIX, message)
+        }
+        "provider.auth_error" => {
+            pause_reason_with_message(GOAL_PROVIDER_AUTH_PAUSE_PREFIX, message)
+        }
+        "provider.filtered" => GOAL_PROVIDER_FILTERED_PAUSE_REASON.to_string(),
+        "provider.api_error" | "provider.not_found" | "provider.overloaded" => {
+            pause_reason_with_message(GOAL_PROVIDER_API_PAUSE_PREFIX, message)
+        }
+        "model.not_configured" => pause_reason_with_message(
+            GOAL_MODEL_CONFIG_PAUSE_PREFIX,
+            Some("LLM not set, send \"/login\" to login"),
+        ),
+        "model.config_invalid" => {
+            pause_reason_with_message(GOAL_MODEL_CONFIG_PAUSE_PREFIX, message)
+        }
+        _ => pause_reason_with_message(GOAL_RUNTIME_PAUSE_PREFIX, message),
+    }
+}
+
+/// v2 `pauseReasonWithMessage`: the bare prefix when the message is absent
+/// or blank, `prefix: message` otherwise.
+pub fn pause_reason_with_message(prefix: &str, message: Option<&str>) -> String {
+    match message.map(str::trim).filter(|message| !message.is_empty()) {
+        Some(message) => format!("{prefix}: {message}"),
+        None => prefix.to_string(),
+    }
+}
+
 /// Escape untrusted goal text for reminder templates, mirroring v2
 /// `escapeUntrustedText` (`&`, `<`, `>`).
 pub fn escape_untrusted_text(text: &str) -> String {
@@ -464,6 +608,7 @@ mod tests {
                 turn_budget: Some(10),
                 wall_clock_budget_ms: Some(3_600_000),
             },
+            host_owned: false,
             terminal_reason: None,
             created_at: 1_700_000_000_000,
             updated_at: 1_700_000_042_000,
@@ -760,5 +905,78 @@ mod tests {
         let mut state = sample_state();
         state.completion_criterion = None;
         assert_eq!(completion_criterion_block(&to_snapshot(&state, 42_000)), "");
+    }
+
+    #[test]
+    fn test_goal_budget_block_reason_matches_v2() {
+        let mut state = sample_state();
+        assert_eq!(
+            goal_budget_block_reason(&compute_budget_report(&state, 42_000)),
+            None
+        );
+
+        state.turns_used = 10;
+        assert_eq!(
+            goal_budget_block_reason(&compute_budget_report(&state, 42_000)).as_deref(),
+            Some("Blocked after goal budget reached: turn budget 10")
+        );
+
+        state.tokens_used = 500;
+        state.wall_clock_ms = 3_600_000;
+        assert_eq!(
+            goal_budget_block_reason(&compute_budget_report(&state, 3_600_000)).as_deref(),
+            Some(
+                "Blocked after goal budget reached: turn budget 10, token budget 500, wall-clock budget 3600000ms"
+            )
+        );
+    }
+
+    #[test]
+    fn test_continuation_prompts_match_v2() {
+        assert_eq!(continuation_prompt(false), GOAL_CONTINUATION_PROMPT);
+        assert_eq!(
+            continuation_prompt(true),
+            format!("{GOAL_STEP_CAP_CONTINUATION_PREFIX}{GOAL_CONTINUATION_PROMPT}")
+        );
+        assert!(
+            continuation_prompt(false).starts_with("Continue working toward the active goal."),
+            "the v2 continuation prompt is fixed text, not the old objective template"
+        );
+    }
+
+    #[test]
+    fn test_goal_failure_pause_reason_classifies_codes() {
+        assert_eq!(
+            goal_failure_pause_reason("provider.rate_limit", Some("slow down")),
+            "Paused after provider rate limit"
+        );
+        assert_eq!(
+            goal_failure_pause_reason("provider.connection_error", Some("connect refused")),
+            "Paused after provider connection error: connect refused"
+        );
+        assert_eq!(
+            goal_failure_pause_reason("provider.auth_error", None),
+            "Paused after provider authentication error"
+        );
+        assert_eq!(
+            goal_failure_pause_reason("provider.filtered", Some("ignored")),
+            "Paused after provider safety policy block"
+        );
+        assert_eq!(
+            goal_failure_pause_reason("provider.overloaded", Some(" 503  ")),
+            "Paused after provider API error: 503"
+        );
+        assert_eq!(
+            goal_failure_pause_reason("model.not_configured", None),
+            "Paused after model configuration error: LLM not set, send \"/login\" to login"
+        );
+        assert_eq!(
+            goal_failure_pause_reason("internal", None),
+            "Paused after runtime error"
+        );
+        assert_eq!(
+            goal_failure_pause_reason("internal", Some("boom")),
+            "Paused after runtime error: boom"
+        );
     }
 }

@@ -1687,6 +1687,7 @@ async fn test_turn_binds_start_goal_for_stale_check() {
         tokens_used: 0,
         turns_used: 0,
         wall_clock_ms: 0,
+        updated_at: 0,
     };
     let input = RunTurnInput {
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -3650,114 +3651,67 @@ async fn test_max_attempts_caps_llm_retries() {
 
 // ── Goal budget tests ───────────────────────────────────────────────
 
-/// A goal whose status is Paused must abort the turn before step 0,
-/// yielding `Paused` and 0 steps.
+/// v2 binds a turn only to a goal that was active when the turn started: a
+/// paused or blocked goal is ordinary chat, with no per-step budget gate and
+/// no goal steering. (The goal reminder injection still tells the model the
+/// goal exists and is not being pursued.)
 #[tokio::test]
-async fn test_goal_paused_stops_before_first_step() {
-    let llm = PredictTestLlm {
-        system_prompt: "You are helpful.".into(),
-        model_name: "test-model".into(),
-        return_tool_calls: false,
-        tool_responses: vec![],
-    };
-    let server = Arc::new(RpcServer::new());
-    let callbacks = rpc_callbacks(server.clone());
+async fn test_inactive_goal_runs_the_turn_as_ordinary_chat() {
+    for (status, turn_id) in [
+        (GoalStatus::Paused, "test-paused"),
+        (GoalStatus::Blocked, "test-blocked"),
+    ] {
+        let llm = PredictTestLlm {
+            system_prompt: "You are helpful.".into(),
+            model_name: "test-model".into(),
+            return_tool_calls: false,
+            tool_responses: vec![],
+        };
+        let callbacks = rpc_callbacks(Arc::new(RpcServer::new()));
+        let goal = GoalContext {
+            goal_id: "g1".into(),
+            objective: "Do thing".into(),
+            status,
+            token_budget: None,
+            turn_budget: None,
+            tokens_used: 0,
+            turns_used: 0,
+            wall_clock_budget_ms: None,
+            wall_clock_ms: 0,
+            updated_at: 0,
+        };
+        let input = RunTurnInput {
+            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+            previous_turn_aborted: false,
+            turn_id: turn_id.into(),
+            llm: &llm,
+            messages: vec![LLMMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                ..Default::default()
+            }],
+            tools: &[],
+            tool_defs: vec![],
+            max_steps: 5,
+            max_attempts: None,
+            max_context_tokens: None,
+            compaction_max_attempts: None,
+            permission_mode: None,
+            goal: Some(goal),
+            cancellation: None,
+            hook_guard: None,
+            media: None,
+            media_dropped: None,
+            toolset: None,
+        };
 
-    let goal = GoalContext {
-        goal_id: "g1".into(),
-        objective: "Do thing".into(),
-        status: GoalStatus::Paused,
-        token_budget: None,
-        turn_budget: None,
-        tokens_used: 0,
-        turns_used: 0,
-        wall_clock_budget_ms: None,
-        wall_clock_ms: 0,
-    };
-
-    let input = RunTurnInput {
-        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
-        previous_turn_aborted: false,
-        turn_id: "test-paused".into(),
-        llm: &llm,
-        messages: vec![LLMMessage {
-            role: "user".into(),
-            content: "hi".into(),
-            ..Default::default()
-        }],
-        tools: &[],
-        tool_defs: vec![],
-        max_steps: 5,
-        max_attempts: None,
-        max_context_tokens: None,
-        compaction_max_attempts: None,
-        permission_mode: None,
-        goal: Some(goal),
-        cancellation: None,
-        hook_guard: None,
-        media: None,
-        media_dropped: None,
-        toolset: None,
-    };
-
-    let result = run_turn(input, &callbacks).await.unwrap();
-    assert!(matches!(result.stop_reason, LoopTurnStopReason::Paused));
-    assert_eq!(result.steps, 0, "paused goal should not run any steps");
-}
-
-/// A goal whose status is Blocked must abort the turn before step 0,
-/// yielding `Aborted`.
-#[tokio::test]
-async fn test_goal_blocked_stops_before_first_step() {
-    let llm = PredictTestLlm {
-        system_prompt: "You are helpful.".into(),
-        model_name: "test-model".into(),
-        return_tool_calls: false,
-        tool_responses: vec![],
-    };
-    let server = Arc::new(RpcServer::new());
-    let callbacks = rpc_callbacks(server.clone());
-
-    let goal = GoalContext {
-        goal_id: "g2".into(),
-        objective: "Do thing".into(),
-        status: GoalStatus::Blocked,
-        token_budget: None,
-        turn_budget: None,
-        tokens_used: 0,
-        turns_used: 0,
-        wall_clock_budget_ms: None,
-        wall_clock_ms: 0,
-    };
-
-    let input = RunTurnInput {
-        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
-        previous_turn_aborted: false,
-        turn_id: "test-blocked".into(),
-        llm: &llm,
-        messages: vec![LLMMessage {
-            role: "user".into(),
-            content: "hi".into(),
-            ..Default::default()
-        }],
-        tools: &[],
-        tool_defs: vec![],
-        max_steps: 5,
-        max_attempts: None,
-        max_context_tokens: None,
-        compaction_max_attempts: None,
-        permission_mode: None,
-        goal: Some(goal),
-        cancellation: None,
-        hook_guard: None,
-        media: None,
-        media_dropped: None,
-        toolset: None,
-    };
-
-    let result = run_turn(input, &callbacks).await.unwrap();
-    assert!(matches!(result.stop_reason, LoopTurnStopReason::Aborted));
-    assert_eq!(result.steps, 0);
+        let result = run_turn(input, &callbacks).await.unwrap();
+        assert!(
+            matches!(result.stop_reason, LoopTurnStopReason::EndTurn),
+            "{turn_id}: an inactive goal must not drive the turn"
+        );
+        assert_eq!(result.steps, 1, "{turn_id}");
+    }
 }
 
 /// A goal whose token budget is already exhausted (tokens_used >= budget)
@@ -3785,6 +3739,7 @@ async fn test_goal_token_budget_exhausted() {
         turns_used: 0,
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
+        updated_at: 0,
     };
 
     let input = RunTurnInput {
@@ -3852,6 +3807,7 @@ async fn test_goal_turn_budget_exhausted() {
         turns_used: 3,
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
+        updated_at: 0,
     };
 
     let input = RunTurnInput {
@@ -3910,6 +3866,7 @@ async fn test_goal_active_with_budget_completes() {
         turns_used: 1,
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
+        updated_at: 0,
     };
 
     let input = RunTurnInput {
@@ -4009,6 +3966,7 @@ async fn test_goal_wall_clock_deadline_triggers_budget_limit() {
         turns_used: 0,
         wall_clock_budget_ms: Some(50), // 50ms budget vs 1000ms LLM
         wall_clock_ms: 0,
+        updated_at: 0,
     };
 
     let input = RunTurnInput {
@@ -4481,6 +4439,7 @@ async fn test_goal_steering_injected_into_system_prompt() {
         turns_used: 1,
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
+        updated_at: 0,
     };
 
     let input = RunTurnInput {
@@ -4609,6 +4568,7 @@ fn test_render_goal_steering_basic() {
         turns_used: 1,
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
+        updated_at: 0,
     };
     let text = render_goal_steering(&goal, 50, 1, 0);
     assert!(text.contains("Write tests"), "should contain objective");
@@ -4633,6 +4593,7 @@ fn test_render_goal_steering_wall_clock_budget() {
         wall_clock_ms: 5000,
         tokens_used: 0,
         turns_used: 0,
+        updated_at: 0,
     };
     let text = render_goal_steering(&goal, 0, 0, 500);
     assert!(
@@ -4666,6 +4627,7 @@ fn test_render_goal_steering_near_limit() {
         turns_used: 0,
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
+        updated_at: 0,
     };
     // 80 + 10 = 90 / 100 = 0.9 >= 0.75 → should say "nearing"
     let text = render_goal_steering(&goal, 10, 0, 0);
@@ -4687,6 +4649,7 @@ fn test_render_goal_steering_no_budgets() {
         turns_used: 0,
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
+        updated_at: 0,
     };
     let text = render_goal_steering(&goal, 0, 0, 0);
     assert!(text.contains("Do thing"), "should contain objective");

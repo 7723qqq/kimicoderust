@@ -308,91 +308,15 @@ pub fn run_turn_with_lifecycle_telemetry<'a>(
     })
 }
 
+/// The turn with its lifecycle telemetry; goal continuation and abnormal-turn
+/// settlement are engine-owned and run after the turn in
+/// [`crate::session::goal_turn::settle_goal_after_turn`].
 pub fn run_turn_with_telemetry<'a>(
     input: RunTurnInput<'a>,
     telemetry: TelemetryContext,
     callbacks: &'a Arc<dyn HostCallbacks>,
 ) -> BoxFuture<'a, Result<TurnResult, Box<dyn std::error::Error + 'a>>> {
-    // Capture the goal before the move into the turn so the continuation
-    // emission below can read it after the turn.
-    let goal_for_continuation = input.goal.clone();
-    let turn_id = input.turn_id.clone();
-    let future = run_turn_with_lifecycle_telemetry(input, &telemetry, callbacks);
-    Box::pin(async move {
-        let result = future.await;
-        if let Ok(result) = &result {
-            // Goal-mode continuation (v2 `launchContinuationTurn`):
-            // a successful goal turn enqueues another turn so the goal
-            // progresses past a single model response. v2 enqueued a
-            // `ContinuationStepRequest` on the loop; the engine surfaces
-            // the decision as `goal.continuation` telemetry, and the
-            // print settle (session/mod.rs) turns it into the follow-up
-            // turn itself — no native host re-prompts on the event.
-            let reason = telemetry_reason(&result.stop_reason);
-            if reason == "completed"
-                && let Some(goal) = goal_for_continuation.as_ref()
-                && matches!(goal.status, crate::turn_loop::types::GoalStatus::Active)
-            {
-                let continuation_prompt = crate::native::goal::steering::render_continuation(
-                    &goal.objective,
-                    goal.tokens_used,
-                    goal.token_budget,
-                );
-                callbacks.telemetry(telemetry_payload(
-                    "goal.continuation",
-                    &telemetry,
-                    &turn_id,
-                    Some(serde_json::json!({
-                        "goal_id": goal.goal_id,
-                        "tokens_used": goal.tokens_used,
-                        "token_budget": goal.token_budget,
-                        "prompt": continuation_prompt,
-                    })),
-                ));
-            }
-            // Goal-mode terminal transitions (v2 `blockIfBudgetReached` +
-            // `settleAbnormalTurn`): the engine tells the host to leave
-            // `active`. `goal.blocked` covers budget stops so the host
-            // transitions the goal to `blocked` with a budget reason;
-            // `goal.paused` covers failed / aborted / filtered turns so
-            // the host pauses with the classified reason. v2 emits
-            // `goal.status_changed` for both (goalOps.ts:1083,
-            // `goalFailurePauseReason`).
-            if let Some(goal) = goal_for_continuation.as_ref()
-                && matches!(goal.status, crate::turn_loop::types::GoalStatus::Active)
-            {
-                match &result.stop_reason {
-                    LoopTurnStopReason::BudgetLimited => {
-                        callbacks.telemetry(telemetry_payload(
-                            "goal.blocked",
-                            &telemetry,
-                            &turn_id,
-                            Some(serde_json::json!({
-                                "goal_id": goal.goal_id,
-                                "reason": "budget",
-                            })),
-                        ));
-                    }
-                    LoopTurnStopReason::Filtered
-                    | LoopTurnStopReason::Aborted
-                    | LoopTurnStopReason::MaxSteps
-                    | LoopTurnStopReason::Unknown => {
-                        callbacks.telemetry(telemetry_payload(
-                            "goal.paused",
-                            &telemetry,
-                            &turn_id,
-                            Some(serde_json::json!({
-                                "goal_id": goal.goal_id,
-                                "reason": telemetry_interrupt_reason(&result.stop_reason),
-                            })),
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        result
-    })
+    run_turn_with_lifecycle_telemetry(input, &telemetry, callbacks)
 }
 
 /// The turn's submitted prompt for `UserPromptSubmit` hooks (v2
@@ -775,7 +699,13 @@ pub fn run_turn<'a>(
         };
 
         // Build system prompt, optionally enriched with goal steering text.
-        let system_prompt = if let Some(ref goal) = goal {
+        // A goal that is paused / blocked is not driven by this turn: it gets
+        // the goal reminder injection instead of per-step steering, and the
+        // turn runs as ordinary chat (v2 only binds a turn to an *active*
+        // goal).
+        let system_prompt = if let Some(ref goal) = goal
+            && goal.status.is_active()
+        {
             format!(
                 "{}\n\n{}",
                 input.llm.system_prompt(),
@@ -820,30 +750,34 @@ pub fn run_turn<'a>(
                 }
             }
         }
-        let _deadline_guard = DeadlineGuard(if let Some(ref g) = goal {
-            if let Some(budget_ms) = g.wall_clock_budget_ms {
-                let total_used = g.wall_clock_ms;
-                let remaining_ms = (budget_ms - total_used).max(0) as u64;
-                let cancel_token = turn_cancel.token().clone();
-                let goal_id = g.goal_id.clone();
-                let tid = turn_id.clone();
-                let cbs = callbacks.clone();
-                Some(tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(remaining_ms)).await;
-                    cbs.emit_event(serde_json::json!({
-                        "type": "goal.budget.limit_reached",
-                        "turn_id": tid,
-                        "goal_id": goal_id,
-                        "budget_type": "wall_clock",
-                    }));
-                    cancel_token.cancel();
-                }))
+        let _deadline_guard = DeadlineGuard(
+            if let Some(ref g) = goal
+                && g.status.is_active()
+            {
+                if let Some(budget_ms) = g.wall_clock_budget_ms {
+                    let total_used = g.wall_clock_ms;
+                    let remaining_ms = (budget_ms - total_used).max(0) as u64;
+                    let cancel_token = turn_cancel.token().clone();
+                    let goal_id = g.goal_id.clone();
+                    let tid = turn_id.clone();
+                    let cbs = callbacks.clone();
+                    Some(tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(remaining_ms)).await;
+                        cbs.emit_event(serde_json::json!({
+                            "type": "goal.budget.limit_reached",
+                            "turn_id": tid,
+                            "goal_id": goal_id,
+                            "budget_type": "wall_clock",
+                        }));
+                        cancel_token.cancel();
+                    }))
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        });
+            },
+        );
 
         // Context compaction knobs. The window comes from the host's model
         // resolution; without it the budget falls back to the fixed default.
@@ -1017,29 +951,19 @@ pub fn run_turn<'a>(
             let turn_wall_clock_ms = elapsed_wall_clock_ms(turn_started);
 
             // ── Goal budget check ──────────────────────────────────────────
-            // Before each step, verify the goal is still active and within
-            // budget. If the host paused/blocked it or a budget is exhausted,
-            // stop the turn immediately.
-            if let Some(ref goal) = goal {
-                if !goal.status.is_active() {
-                    let reason = match goal.status {
-                        GoalStatus::Paused => LoopTurnStopReason::Paused,
-                        GoalStatus::Blocked => LoopTurnStopReason::Aborted,
-                        _ => LoopTurnStopReason::EndTurn,
-                    };
-                    return Ok(turn_result(
-                        reason,
-                        step_num, // this step didn't run
-                        total_usage,
-                        0,
-                        llm_retries,
-                        messages.clone(),
-                    )
-                    .with_last_request_usage(last_request_usage.clone()));
-                }
-                // Check budgets with cumulative usage so far.
-                let turn_tokens = total_usage.total_tokens as i64;
-                let turns_this_turn = step_num as i64;
+            // Only an *active* goal drives this turn. v2 binds a turn to the
+            // goal that was active when it started; a goal paused or blocked
+            // before the turn is ordinary chat (the host cancels a live turn
+            // itself when it pauses the goal mid-flight).
+            if let Some(ref goal) = goal
+                && goal.status.is_active()
+            {
+                // v2 `stopAfterBudgetReached` compares the goal's own
+                // counters: `tokensUsed` accumulates output tokens, and the
+                // turn budget counts whole goal turns (the current turn is
+                // folded in at turn end, not before it starts).
+                let turn_tokens = total_usage.output_tokens as i64;
+                let turns_this_turn = 0;
                 if goal.would_exceed_budget(turn_tokens, turns_this_turn, turn_wall_clock_ms) {
                     callbacks.emit_event(serde_json::json!({
                         "type": "goal.budget.limit_reached",
