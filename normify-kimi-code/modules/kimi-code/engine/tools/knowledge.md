@@ -10,8 +10,8 @@ description:
   en: >
       Registered tool names: Skill, Knowledge, memory_read/write/append/delete/list/str_replace, Lsp.
       
-revision: c7d34cbe784d29928dada6568fb144fe4bece585
-updated_at: "2026-11-01T05:34:46.018Z"
+revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
+updated_at: "2026-11-01T07:59:04.523Z"
 fingerprint: ff232bccd30fe26a6462dc1730d09a29b697b5fe247490d3638103ad18472b03
 source:
   - path: "packages/kimi-agent/src/tools/skill.rs"

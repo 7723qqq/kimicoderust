@@ -10,8 +10,8 @@ description:
   en: >
       Audit view: permission decisions and approvals, with diff/truncate/serialize helpers.
       
-revision: c7d34cbe784d29928dada6568fb144fe4bece585
-updated_at: "2026-11-01T05:34:45.989Z"
+revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
+updated_at: "2026-11-01T07:59:04.293Z"
 fingerprint: b3ccc14804109024cc3d6cfd835af0b691ca2de28eaecbef8b3c5a550270a25c
 source:
   - path: "apps/kimi-inspect/src/audit/trail.ts"

@@ -9475,3 +9475,32 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   “已关闭 agent”（v2 `Paused after agent closed`）没有对应钩子；SDK 仍不提供预算设置
   RPC（预算只能由模型 `SetGoalBudget` 写入）；third-party 宿主直接读 `state_read` 的
   `goal` 域时拿到的是 `GoalState`（注入层已兼容两种形状，外部宿主未验）。
+
+## 42. 2026-11-01 子代理回合接入每-agent hooks 与 subagent origin
+
+- v2 的 `AgentExternalHooksService` 是 **per-agent** 服务：每个子代理回合同样触发
+  `TurnStarted` / `UserPromptSubmit` / `PreCompact` / `Stop`，Stop 否决也在同一回合内
+  续跑。fork 此前把三条子代理回合入口（后台 `spawn_and_run`、前台
+  `run_foreground_turn_with_history`、持久 `run_persistent_turn`）都写成
+  `hook_guard: None`，这些 hook 从未在子代理上触发。
+- 三条入口改为从**本回合的 callbacks** 读取 guard（`HostCallbacks::hook_guard`，
+  即 pipeline 里 `NativeToolCallbacks` 持有的那份），而不是挂在进程级
+  `SubagentManager` 上——后者由多个会话共享，挂上去会让 A 会话的 hooks 跑进 B 会话的
+  子代理。`ToolFilterCallbacks` 补上 `hook_guard` 转发，否则前台路径的包装层会把
+  guard 藏掉。
+- 子代理回合改用 `run_turn_continued`：Stop hook 的一次性续跑按 v2 在同一回合内
+  重提示（`stop_hook_continuation_used` 仍只允许一次）。
+- 子代理 prompt 带 v2 `AGENT_RUN_PROMPT_ORIGIN`
+  （`system_trigger/subagent`）写入 user 消息的 origin；`TurnStarted` 在回合头触发，
+  turn id 取 `subturn-<seq>` 的数字部分，因此 hook payload 的 `turn_id` 唯一。
+  持久子代理的历史记录同样保留该 origin。
+- 测试：`test_subagent_turns_fire_lifecycle_hooks`（TurnStarted / UserPromptSubmit /
+  Stop 三个 marker 全部落地）、
+  `test_subagent_stop_hook_continuation_runs_inside_the_turn`（否决后 LLM 恰好被调用
+  两次）、
+  `test_foreground_subagent_reads_the_guard_through_the_tool_filter`（前台包装层透传
+  guard）；`cargo test --lib` 3333 passed。
+- **剩余**：`StopFailure` / `Interrupt` 仍只由会话 pump 在回合后触发，子代理回合的
+  failed/cancelled 结果不发送这两个事件（需要把结束态分类下沉到子代理回合执行处）；
+  `UserPromptSubmit` 的 block/append 结果仍只观察（既有 partial parity，与子代理无关）；
+  hook payload 不带 agent id，多代理同时触发时外部脚本无法区分来源。

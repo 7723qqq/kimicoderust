@@ -280,6 +280,13 @@ struct ToolFilterCallbacks {
 }
 
 impl crate::callbacks::HostCallbacks for ToolFilterCallbacks {
+    fn hook_guard(&self) -> Option<Arc<crate::tools::external_hooks::HookGuard>> {
+        // The subagent turn reads its lifecycle hooks from the callbacks it
+        // runs with; without this delegation the filter wrapper hid the
+        // pipeline's guard and subagent turns ran unguarded.
+        self.inner.hook_guard()
+    }
+
     fn llm_chat(
         &self,
         request: crate::rpc::types::LlmChatRequest,
@@ -652,11 +659,31 @@ async fn run_one(
     cancel_flag: &Arc<AtomicBool>,
     parent_cancel: Option<&crate::subagent::types::ParentCancel>,
 ) -> Result<crate::turn_loop::types::TurnResult, RunExit> {
+    // v2 instantiates the external-hooks service per agent; the guard rides
+    // the callbacks this session already runs with, so a subagent fires
+    // `UserPromptSubmit` / `PreCompact` / `Stop` without sharing another
+    // session's hooks.
+    let hook_guard = callbacks.hook_guard();
+    // v2 `AGENT_RUN_PROMPT_ORIGIN`: the subagent's prompt is a system trigger
+    // named `subagent`. `TurnStarted` hooks fire per agent in v2
+    // (`agentExternalHooksService`), so the subagent announces its own turn;
+    // the numeric suffix keeps the hook payload's turn id unique.
+    let origin = crate::subagent::types::agent_run_prompt_origin();
+    let turn_seq = fastrand::u64(..);
+    if let Some(guard) = hook_guard.as_ref() {
+        let prompt = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        guard.notify_turn_started(turn_seq, &origin, &prompt).await;
+    }
     let run_input = crate::turn_loop::types::RunTurnInput {
         agent_id: agent_id.to_string(),
         previous_turn_aborted: false,
         max_attempts: None,
-        turn_id: format!("subturn-{}", fastrand::u64(..)),
+        turn_id: format!("subturn-{turn_seq}"),
         llm: runtime.llm.as_ref(),
         messages,
         tools: &[],
@@ -671,16 +698,16 @@ async fn run_one(
         permission_mode: None,
         goal: None,
         cancellation: Some(cancel_flag.clone()),
-        // Lifecycle hooks (`UserPromptSubmit` / `PreCompact` / `Stop`) are
-        // main-turn scoped by design; subagent turns skip them here while
-        // `PreToolUse` gating still applies through the tool callbacks.
-        // Keep `run_turn` (not `run_turn_continued`) for the same reason.
-        hook_guard: None,
+        // v2 instantiates the external-hooks service per agent, so a subagent
+        // turn fires `UserPromptSubmit` / `PreCompact` / `Stop` like the main
+        // turn, and `run_turn_continued` honors the Stop hook's one-shot
+        // continuation inside the same turn.
+        hook_guard,
         media: Some(&runtime.media),
         media_dropped: Some(runtime.media_dropped.clone()),
         toolset: None,
     };
-    let run_future = crate::turn_loop::run_turn::run_turn(run_input, callbacks);
+    let run_future = crate::turn_loop::run_turn::run_turn_continued(run_input, callbacks);
     tokio::pin!(run_future);
     match parent_cancel {
         Some(signal) => {
@@ -1186,7 +1213,14 @@ worktree root the tower assigns you as your full authority scope.";
             .and_then(|r| r.session_id.clone().filter(|session| !session.is_empty()));
 
         let subagent_run = async move {
-            let turn_id = format!("subturn-{}", fastrand::u64(..));
+            let origin = crate::subagent::types::agent_run_prompt_origin();
+            let turn_seq = fastrand::u64(..);
+            let hook_guard = callbacks.hook_guard();
+            if let Some(guard) = hook_guard.as_ref() {
+                guard
+                    .notify_turn_started(turn_seq, &origin, &prompt_str)
+                    .await;
+            }
             let messages = vec![crate::turn_loop::types::LLMMessage {
                 role: "user".into(),
                 content: format!("{}\n\nTask: {}", def.system_prompt, prompt_str),
@@ -1195,13 +1229,13 @@ worktree root the tower assigns you as your full authority scope.";
                 tool_call_id: None,
 
                 prompt_id: None,
-                origin: None,
+                origin: Some(origin),
             }];
 
             let run_input = crate::turn_loop::types::RunTurnInput {
                 agent_id: subagent_id.clone(),
                 max_attempts: None,
-                turn_id,
+                turn_id: format!("subturn-{turn_seq}"),
                 llm: llm.as_ref(),
                 messages,
                 tools: &[],
@@ -1212,7 +1246,7 @@ worktree root the tower assigns you as your full authority scope.";
                 permission_mode: None,
                 goal: None,
                 cancellation: cancel_flag,
-                hook_guard: None,
+                hook_guard,
                 media: None,
                 media_dropped: None,
                 toolset: None,
@@ -1222,7 +1256,7 @@ worktree root the tower assigns you as your full authority scope.";
             let run_result = crate::tools::CALLER_AGENT_ID
                 .scope(
                     subagent_id.clone(),
-                    crate::turn_loop::run_turn::run_turn(run_input, &callbacks),
+                    crate::turn_loop::run_turn::run_turn_continued(run_input, &callbacks),
                 )
                 .await
                 .map_err(|e| e.to_string());
@@ -1353,6 +1387,7 @@ worktree root the tower assigns you as your full authority scope.";
             Some(prefix) if !prefix.trim().is_empty() => format!("{prefix}\n\n{prompt}"),
             _ => prompt.to_string(),
         };
+        let origin = crate::subagent::types::agent_run_prompt_origin();
 
         let messages = if let Some(history) = inherited_history {
             let mut msgs = crate::subagent::fork::close_trailing_open_tool_exchange(&history);
@@ -1370,7 +1405,7 @@ worktree root the tower assigns you as your full authority scope.";
                 tool_call_id: None,
 
                 prompt_id: None,
-                origin: None,
+                origin: Some(origin),
             });
             msgs
         } else {
@@ -1382,7 +1417,7 @@ worktree root the tower assigns you as your full authority scope.";
                 tool_call_id: None,
 
                 prompt_id: None,
-                origin: None,
+                origin: Some(origin),
             }]
         };
 
@@ -1553,6 +1588,7 @@ worktree root the tower assigns you as your full authority scope.";
             history.push(crate::turn_loop::types::LLMMessage {
                 role: "user".into(),
                 content: prompt.to_string(),
+                origin: Some(crate::subagent::types::agent_run_prompt_origin()),
                 ..Default::default()
             });
             history
@@ -1921,17 +1957,23 @@ worktree root the tower assigns you as your full authority scope.";
         messages.push(crate::turn_loop::types::LLMMessage {
             role: "user".into(),
             content: user_content.clone(),
+            origin: Some(crate::subagent::types::agent_run_prompt_origin()),
             ..Default::default()
         });
 
         // Wrap the LLM so the final assistant response can be appended to
         // the instance history after the turn (TurnResult carries no content).
         let recording = RecordingLlm::new(llm);
-        let turn_id = format!("subturn-{}", fastrand::u64(..));
+        let origin = crate::subagent::types::agent_run_prompt_origin();
+        let turn_seq = fastrand::u64(..);
+        let hook_guard = callbacks.hook_guard();
+        if let Some(guard) = hook_guard.as_ref() {
+            guard.notify_turn_started(turn_seq, &origin, prompt).await;
+        }
         let run_input = crate::turn_loop::types::RunTurnInput {
             agent_id: id.to_string(),
             max_attempts: None,
-            turn_id,
+            turn_id: format!("subturn-{turn_seq}"),
             llm: &recording,
             messages,
             tools: &[],
@@ -1942,7 +1984,7 @@ worktree root the tower assigns you as your full authority scope.";
             permission_mode: None,
             goal: None,
             cancellation: Some(cancel_flag.clone()),
-            hook_guard: None,
+            hook_guard,
             media: None,
             media_dropped: None,
             toolset: None,
@@ -1951,7 +1993,7 @@ worktree root the tower assigns you as your full authority scope.";
         let run_result = crate::tools::CALLER_AGENT_ID
             .scope(
                 id.to_string(),
-                crate::turn_loop::run_turn::run_turn(run_input, &callbacks),
+                crate::turn_loop::run_turn::run_turn_continued(run_input, &callbacks),
             )
             .await
             .map_err(|e| e.to_string());
@@ -1967,6 +2009,7 @@ worktree root the tower assigns you as your full authority scope.";
                         entry.messages.push(crate::turn_loop::types::LLMMessage {
                             role: "user".into(),
                             content: user_content,
+                            origin: Some(crate::subagent::types::agent_run_prompt_origin()),
                             ..Default::default()
                         });
                         if let Some(content) = assistant_content {

@@ -17,7 +17,7 @@
     "includesTestCode": true,
     "files": 295,
     "modules": 39,
-    "sites": 2694
+    "sites": 2724
   },
   "edges": [
     "acp -> callbacks",
@@ -218,6 +218,7 @@
     "subagent -> injection",
     "subagent -> llm",
     "subagent -> native",
+    "subagent -> permission",
     "subagent -> prompt",
     "subagent -> rpc",
     "subagent -> session",

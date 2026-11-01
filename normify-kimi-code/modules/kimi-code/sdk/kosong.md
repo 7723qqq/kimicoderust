@@ -10,8 +10,8 @@ description:
   en: >
       The LLM abstraction layer for modern AI agent applications.
       
-revision: c7d34cbe784d29928dada6568fb144fe4bece585
-updated_at: "2026-11-01T05:34:46.027Z"
+revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
+updated_at: "2026-11-01T07:59:04.602Z"
 fingerprint: b6d6f9d0f57605798392ba65e50dd324997417cbceb0ccb1ef8ac64e9a8ef5b1
 source:
   - path: "packages/kosong/src/index.ts"

@@ -1488,3 +1488,254 @@ async fn a_pre_parent_record_reads_back_as_unowned() {
     assert_eq!(state.parent_agent_id, None);
     assert_eq!(state.swarm_item, None);
 }
+
+/// Callbacks that expose a hook guard the way `NativeToolCallbacks` does in
+/// the pipeline: the subagent turn reads its hooks from here, per session.
+struct GuardedCallbacks {
+    guard: Arc<crate::tools::external_hooks::HookGuard>,
+}
+
+impl crate::callbacks::HostCallbacks for GuardedCallbacks {
+    fn hook_guard(&self) -> Option<Arc<crate::tools::external_hooks::HookGuard>> {
+        Some(self.guard.clone())
+    }
+
+    fn list_tools(
+        &self,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<crate::rpc::types::ListToolsResponse, String>,
+    > {
+        Box::pin(async { Ok(crate::rpc::types::ListToolsResponse { tools: Vec::new() }) })
+    }
+
+    fn llm_chat(
+        &self,
+        _req: crate::rpc::types::LlmChatRequest,
+    ) -> futures_util::future::BoxFuture<'static, Result<crate::rpc::types::LlmChatResponse, String>>
+    {
+        Box::pin(async { Err("Not needed in mock".into()) })
+    }
+
+    fn execute_tool(
+        &self,
+        _req: crate::rpc::types::ToolExecuteRequest,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<crate::rpc::types::ToolExecuteResponse, String>,
+    > {
+        Box::pin(async { Err("Not needed in mock".into()) })
+    }
+
+    fn check_permission(
+        &self,
+        _req: crate::rpc::types::PermissionCheckRequest,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<crate::rpc::types::PermissionDecision, String>,
+    > {
+        Box::pin(async { Ok(crate::rpc::types::PermissionDecision::allow()) })
+    }
+}
+
+/// A hook command that appends its event name to a file, portably through
+/// the platform shell the guard uses (cmd.exe / sh).
+fn marker_hook(event: &str, dir: &std::path::Path) -> crate::permission::HookDef {
+    crate::permission::HookDef {
+        event: event.into(),
+        matcher: String::new(),
+        command: format!("echo {event} > {event}-marker"),
+        timeout: Some(10),
+        cwd: Some(dir.to_string_lossy().into_owned()),
+        env: None,
+    }
+}
+
+/// Portable `exit 2` with a reason on stderr, as the Stop-veto tests use.
+fn stop_veto(reason: &str) -> String {
+    if cfg!(windows) {
+        format!("echo {reason} 1>&2 & exit /b 2")
+    } else {
+        format!(
+            "echo '{reason}' >&2; exit 2",
+            reason = reason.replace('\'', "'\''")
+        )
+    }
+}
+
+async fn wait_for_marker(path: &std::path::Path) -> String {
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && !text.trim().is_empty()
+        {
+            return text;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("marker {} was never written", path.display());
+}
+
+async fn wait_for_completion(manager: &Arc<SubagentManager>, id: &str) {
+    for _ in 0..100 {
+        if let Some(instance) = manager.get_instance(id).await
+            && instance.state == SubagentState::Completed
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("subagent did not complete");
+}
+
+/// v2 instantiates `AgentExternalHooksService` per agent, so a subagent turn
+/// fires its own `TurnStarted` / `UserPromptSubmit` / `Stop` hooks — not just
+/// the main turn's.
+#[tokio::test]
+async fn test_subagent_turns_fire_lifecycle_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("TurnStarted-marker");
+    let submitted = dir.path().join("UserPromptSubmit-marker");
+    let stopped = dir.path().join("Stop-marker");
+    let guard = Arc::new(crate::tools::external_hooks::HookGuard::new(vec![
+        marker_hook("TurnStarted", dir.path()),
+        marker_hook("UserPromptSubmit", dir.path()),
+        marker_hook("Stop", dir.path()),
+    ]));
+    let manager = Arc::new(SubagentManager::new());
+
+    let id = manager
+        .spawn_and_run(
+            "research",
+            "Hook Scanner",
+            "inspect the hook wiring",
+            Arc::new(MockSubagentLlm),
+            Arc::new(GuardedCallbacks { guard }),
+        )
+        .await
+        .unwrap();
+    wait_for_completion(&manager, &id).await;
+
+    for (path, event) in [
+        (&started, "TurnStarted"),
+        (&submitted, "UserPromptSubmit"),
+        (&stopped, "Stop"),
+    ] {
+        let text = wait_for_marker(path).await;
+        assert!(
+            text.contains(event),
+            "{event} hook wrote {text:?} to {}",
+            path.display()
+        );
+    }
+}
+
+/// The Stop hook's one-shot continuation belongs to the turn: a subagent
+/// whose clean stop is vetoed re-prompts inside the same turn instead of
+/// ending with the hook's reason dropped.
+#[tokio::test]
+async fn test_subagent_stop_hook_continuation_runs_inside_the_turn() {
+    let guard = Arc::new(crate::tools::external_hooks::HookGuard::new(vec![
+        crate::permission::HookDef {
+            event: "Stop".into(),
+            matcher: String::new(),
+            command: stop_veto("keep going"),
+            timeout: Some(10),
+            cwd: None,
+            env: None,
+        },
+    ]));
+    let manager = Arc::new(SubagentManager::new());
+    let calls = Arc::new(AtomicU32::new(0));
+    let llm = Arc::new(CountingSubagentLlm {
+        calls: calls.clone(),
+    });
+
+    let id = manager
+        .spawn_and_run(
+            "research",
+            "Hook Scanner",
+            "finish the task",
+            llm,
+            Arc::new(GuardedCallbacks { guard }),
+        )
+        .await
+        .unwrap();
+    wait_for_completion(&manager, &id).await;
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the veto re-prompts once inside the same turn"
+    );
+}
+
+struct CountingSubagentLlm {
+    calls: Arc<AtomicU32>,
+}
+
+impl crate::turn_loop::types::LLM for CountingSubagentLlm {
+    fn system_prompt(&self) -> &str {
+        "mock system prompt"
+    }
+
+    fn model_name(&self) -> &str {
+        "mock-subagent-model"
+    }
+
+    fn is_retryable_error(&self, _error: &str) -> bool {
+        false
+    }
+
+    fn chat(
+        &self,
+        _params: crate::turn_loop::types::LLMChatParams,
+    ) -> crate::rpc::types::BoxFuture<
+        '_,
+        Result<crate::turn_loop::types::LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Ok(crate::turn_loop::types::LLMChatResponse {
+                content: "Autonomous research result complete.".into(),
+                thinking: Vec::new(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".into()),
+                usage: crate::rpc::types::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 15,
+                    total_tokens: 25,
+                    input_cache_read: 0,
+                    input_cache_creation: 0,
+                },
+                timing: None,
+            })
+        })
+    }
+}
+
+/// The foreground path wraps the runtime callbacks in `ToolFilterCallbacks`;
+/// the wrapper must forward the hook guard, or a foreground subagent runs
+/// unguarded while the background path fires hooks.
+#[tokio::test]
+async fn test_foreground_subagent_reads_the_guard_through_the_tool_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let submitted = dir.path().join("UserPromptSubmit-marker");
+    let guard = Arc::new(crate::tools::external_hooks::HookGuard::new(vec![
+        marker_hook("UserPromptSubmit", dir.path()),
+    ]));
+    let manager = Arc::new(SubagentManager::new());
+    manager
+        .set_runtime(
+            Arc::new(MockSubagentLlm),
+            Arc::new(GuardedCallbacks { guard }),
+            None,
+        )
+        .await;
+    let id = manager.spawn("research", "Hook Scanner").await.unwrap();
+
+    manager
+        .run_foreground_turn(&id, "inspect the hook wiring", None)
+        .await
+        .unwrap();
+    let text = wait_for_marker(&submitted).await;
+    assert!(text.contains("UserPromptSubmit"), "{text:?}");
+}

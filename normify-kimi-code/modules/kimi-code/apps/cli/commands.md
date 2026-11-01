@@ -10,8 +10,8 @@ description:
   en: >
       CLI plumbing: the commander program, subcommands, config and startup error handling.
       
-revision: c7d34cbe784d29928dada6568fb144fe4bece585
-updated_at: "2026-11-01T05:34:45.983Z"
+revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
+updated_at: "2026-11-01T07:59:04.284Z"
 fingerprint: 11307ca4b20870cb630e3cd29f6e561c8e90cac74d4d9fdfb3b7fc3b97dc1b03
 source:
   - path: "apps/kimi-code/src/cli/commands.ts"

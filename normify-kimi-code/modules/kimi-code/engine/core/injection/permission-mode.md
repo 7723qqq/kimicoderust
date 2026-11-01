@@ -10,8 +10,8 @@ description:
   en: >
       Injected once when the permission mode drifts from the baseline, so the model knows which mode it is in.
       
-revision: c7d34cbe784d29928dada6568fb144fe4bece585
-updated_at: "2026-11-01T05:34:45.995Z"
+revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
+updated_at: "2026-11-01T07:59:04.301Z"
 fingerprint: 85d729a331e9662900f8280ebf84c6331efc17869cdd7167b759dbc3bd0c8bba
 source:
   - path: "packages/kimi-agent/src/injection/permission_mode.rs"

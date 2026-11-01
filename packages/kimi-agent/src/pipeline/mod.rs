@@ -323,7 +323,9 @@ pub async fn build_engine_pipeline(
     // Turn-lifecycle hooks (v2 `agentExternalHooksService`, G-6 #6):
     // user-configured commands observe the turn (`UserPromptSubmit` /
     // `PreCompact`) and can veto a clean text stop (`Stop`). Built once
-    // per pipeline; turn drivers clone it per turn, subagent turns skip it.
+    // per pipeline; turn drivers clone it per turn, and subagent turns read
+    // it from the callbacks they already run with (per session, not from the
+    // process-wide subagent manager).
     // Plugin-contributed hooks are appended after the configured ones (v2
     // `[...configured, ...pluginHooks]`); a session with neither gets no guard.
     let hook_guard = if policy_snapshot.is_none() && plugin_hooks.is_empty() {

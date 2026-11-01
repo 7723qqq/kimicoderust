@@ -5,6 +5,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+/// The origin a subagent's prompt rides, mirroring v2 `AGENT_RUN_PROMPT_ORIGIN`
+/// (`session/subagent/runAgentTurn.ts`): a system trigger named `subagent`,
+/// not a user prompt. It is displayable (`isDisplayablePromptOrigin`) and is
+/// what `TurnStarted` hooks match against.
+pub fn agent_run_prompt_origin() -> serde_json::Value {
+    serde_json::json!({ "kind": "system_trigger", "name": "subagent" })
+}
+
 /// A profile's summary distillation policy (v2 `AgentProfileSummaryPolicy`):
 /// when the subagent's final assistant text is shorter than `min_chars`
 /// (UTF-16 code units, v2 `String.length`), the engine re-prompts with

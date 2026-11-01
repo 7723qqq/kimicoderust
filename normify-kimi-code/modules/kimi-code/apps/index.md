@@ -10,8 +10,8 @@ description:
   en: >
       Shippable surfaces of Kimi Code: the CLI/TUI app, editor integrations, visualization and the docs site.
       
-revision: c7d34cbe784d29928dada6568fb144fe4bece585
-updated_at: "2026-11-01T05:34:45.987Z"
+revision: b46cc711fbf0f7be46d03a1ff637613ab2b7e8a3
+updated_at: "2026-11-01T07:59:04.288Z"
 fingerprint: 14764da2b2dfe9da338d51be9485e4dc82735a72ec027e70a8ce89641c71898e
 source:
   - path: "apps/kimi-code/src/main.ts"
