@@ -289,6 +289,102 @@ impl HttpServer {
                     HttpResponse::not_found()
                 }
             }
+            // The browser lands here after the authorization server's
+            // redirect. Unauthenticated by design (a browser carries no bearer
+            // token): the single-use `state` minted by `auth:begin-auth-code`
+            // is the credential this route checks, and the code is worthless
+            // without the PKCE verifier held by the pending flow.
+            ("GET", "/api/v1/mcp/auth/callback") | ("GET", "/api/v2/mcp/auth/callback") => {
+                let state = req.query_param("state").unwrap_or_default();
+                let Some(service) = self.mcp_oauth.lock().await.clone() else {
+                    return html_result(
+                        503,
+                        "Authorization unavailable",
+                        "MCP OAuth is not configured on this server.",
+                    );
+                };
+                if let Some(error) = req.query_param("error").filter(|value| !value.is_empty()) {
+                    let description = req.query_param("error_description").unwrap_or_default();
+                    let message = if description.is_empty() {
+                        format!("The provider returned \"{error}\".")
+                    } else {
+                        format!("The provider returned \"{error}\": {description}")
+                    };
+                    if let Some(flow) = self.mcp_auth_code.take_by_state(&state).await {
+                        self.mcp_auth_code
+                            .finish(
+                                &flow.flow_id,
+                                crate::mcp::oauth::auth_code::AuthCodeStatus {
+                                    done: true,
+                                    authenticated: false,
+                                    key: None,
+                                    error: Some(message.clone()),
+                                },
+                            )
+                            .await;
+                    }
+                    return html_result(400, "Authorization failed", &message);
+                }
+                let Some(code) = req.query_param("code").filter(|value| !value.is_empty()) else {
+                    return html_result(
+                        400,
+                        "Authorization failed",
+                        "The callback carried no authorization code.",
+                    );
+                };
+                let Some(flow) = self.mcp_auth_code.take_by_state(&state).await else {
+                    return html_result(
+                        400,
+                        "Authorization failed",
+                        "This authorization request is unknown or has expired. Start the login again.",
+                    );
+                };
+                let outcome = crate::mcp::oauth::auth_code::exchange_code(
+                    &reqwest::Client::new(),
+                    &flow,
+                    &code,
+                )
+                .await
+                .and_then(|tokens| {
+                    let key = crate::mcp::oauth::mcp_oauth_store_key(&flow.name, &flow.server_url)?;
+                    service.store_tokens(&key, &tokens)?;
+                    Ok(key)
+                });
+                match outcome {
+                    Ok(key) => {
+                        self.mcp_auth_code
+                            .finish(
+                                &flow.flow_id,
+                                crate::mcp::oauth::auth_code::AuthCodeStatus {
+                                    done: true,
+                                    authenticated: true,
+                                    key: Some(key),
+                                    error: None,
+                                },
+                            )
+                            .await;
+                        html_result(
+                            200,
+                            "Authorization complete",
+                            "You can close this window and return to Kimi Code.",
+                        )
+                    }
+                    Err(error) => {
+                        self.mcp_auth_code
+                            .finish(
+                                &flow.flow_id,
+                                crate::mcp::oauth::auth_code::AuthCodeStatus {
+                                    done: true,
+                                    authenticated: false,
+                                    key: None,
+                                    error: Some(error.clone()),
+                                },
+                            )
+                            .await;
+                        html_result(400, "Authorization failed", &error)
+                    }
+                }
+            }
             ("GET", "/api/v1/mcp/auth-statuses") | ("GET", "/api/v2/mcp/auth-statuses") => {
                 // `authenticated` is a real probe, not key presence: the token
                 // is fetched through the OAuth service, which refreshes an
@@ -335,6 +431,80 @@ impl HttpServer {
                     );
                 };
                 match action {
+                    // Browser authorization-code + PKCE: the server discovers
+                    // the authorization server, registers a public PKCE client
+                    // and mints one flow. The browser opens the returned URL;
+                    // the callback route below exchanges the code.
+                    "begin-auth-code" => {
+                        if name.is_empty() || url.is_empty() {
+                            return HttpResponse::bad_request("name and url are required");
+                        }
+                        // The redirect must land on this server. A caller
+                        // behind an HTTPS proxy passes its own spelling;
+                        // otherwise the request's Host header is the address
+                        // the browser used to reach us.
+                        let redirect_uri = body
+                            .get("redirect_uri")
+                            .and_then(|v| v.as_str())
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "http://{}{}",
+                                    req.header("host").unwrap_or("127.0.0.1"),
+                                    MCP_AUTH_CALLBACK_PATH
+                                )
+                            });
+                        let scope = body.get("scope").and_then(|v| v.as_str());
+                        match self
+                            .mcp_auth_code
+                            .begin(
+                                &reqwest::Client::new(),
+                                name,
+                                url,
+                                &redirect_uri,
+                                scope,
+                                "Kimi Code",
+                            )
+                            .await
+                        {
+                            Ok(start) => HttpResponse::ok(
+                                &serde_json::to_value(start).unwrap_or(Value::Null),
+                            ),
+                            Err(e) => HttpResponse::bad_request(e),
+                        }
+                    }
+                    // Poll the flow the browser is completing: 202 while it is
+                    // still pending, 200 on success, 400 on failure.
+                    "complete-auth-code" => {
+                        let flow_id = body
+                            .get("flow_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        if flow_id.is_empty() {
+                            return HttpResponse::bad_request("flow_id is required");
+                        }
+                        let status = self.mcp_auth_code.status(flow_id).await;
+                        let payload = serde_json::to_value(&status).unwrap_or(Value::Null);
+                        if !status.done {
+                            HttpResponse::json(202, &payload)
+                        } else if status.authenticated {
+                            HttpResponse::ok(&payload)
+                        } else {
+                            HttpResponse::json(400, &payload)
+                        }
+                    }
+                    "cancel-auth-code" => {
+                        let flow_id = body
+                            .get("flow_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        if flow_id.is_empty() {
+                            return HttpResponse::bad_request("flow_id is required");
+                        }
+                        let cancelled = self.mcp_auth_code.cancel(flow_id).await;
+                        HttpResponse::ok(&json!({ "cancelled": cancelled }))
+                    }
                     // RFC 8628 §3.1: start a device authorization.
                     "begin" => {
                         let endpoint = body
@@ -524,4 +694,32 @@ impl HttpServer {
         };
         finalize_response(req, resp)
     }
+}
+
+/// The callback path the begin route advertises unless the caller supplies its
+/// own redirect URI.
+const MCP_AUTH_CALLBACK_PATH: &str = "/api/v1/mcp/auth/callback";
+
+/// A small HTML page for the browser the authorization server redirected: the
+/// flow's result has to be readable without any client.
+fn html_result(status: u16, title: &str, message: &str) -> HttpResponse {
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
+         <body style=\"font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem\">\
+         <h1>{title}</h1><p>{message}</p></body></html>",
+        title = escape_html(title),
+        message = escape_html(message),
+    );
+    HttpResponse::bytes(status, "text/html; charset=utf-8", body.into_bytes())
+}
+
+/// The provider's error text is third-party content rendered into the result
+/// page, so it must not be able to inject markup.
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }

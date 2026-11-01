@@ -92,6 +92,7 @@ impl HttpServer {
             web_assets_dir: None,
             mcp_manager: Arc::new(crate::mcp::manager::McpManager::new()),
             mcp_oauth: Arc::new(tokio::sync::Mutex::new(None)),
+            mcp_auth_code: Arc::new(crate::mcp::oauth::auth_code::AuthCodeRegistry::default()),
             interaction_manager: Arc::new(
                 interaction::InteractionManager::new().with_hub(hub.clone()),
             ),

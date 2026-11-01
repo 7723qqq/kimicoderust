@@ -1463,6 +1463,66 @@
       "text": "{name} requires OAuth — run /mcp-config login {name}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:Invalid MCP server url: {error}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "Invalid MCP server url: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth authorization server offers no dynamic client registration": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth authorization server offers no dynamic client registration",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth client registration failed (HTTP {status})": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth client registration failed (HTTP {status})",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth client registration failed: {error}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth client registration failed: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth could not obtain randomness: {error}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth could not obtain randomness: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth discovery failed for {server_url}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth discovery failed for {server_url}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth registration returned no client_id": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth registration returned no client_id",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth token exchange failed (HTTP {status})": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth token exchange failed (HTTP {status})",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth token exchange failed (HTTP {status}): {detail}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth token exchange failed (HTTP {status}): {detail}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:MCP OAuth token exchange failed: {error}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "MCP OAuth token exchange failed: {error}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:the authorization request expired": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "the authorization request expired",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:unknown or expired MCP OAuth flow: {flow_id}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "unknown or expired MCP OAuth flow: {flow_id}",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/mcp/oauth/crypto.rs:failed to decrypt MCP OAuth credentials": {
       "file": "packages/kimi-agent/src/mcp/oauth/crypto.rs",
       "text": "failed to decrypt MCP OAuth credentials",
@@ -4324,6 +4384,16 @@
       "text": "Kimi agent native server is shutting down",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:Authorization failed": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "Authorization failed",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:Authorization unavailable": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "Authorization unavailable",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/route_tools_mcp.rs:Field 'refresh_token' is required: remote control authenticates to the relay with the Kimi login credential": {
       "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
       "text": "Field 'refresh_token' is required: remote control authenticates to the relay with the Kimi login credential",
@@ -4339,14 +4409,54 @@
       "text": "MCP OAuth is not configured",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:MCP OAuth is not configured on this server.": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "MCP OAuth is not configured on this server.",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/route_tools_mcp.rs:Missing 'enabled' field": {
       "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
       "text": "Missing 'enabled' field",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:The callback carried no authorization code.": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "The callback carried no authorization code.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:The provider returned \"{error}\".": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "The provider returned \"{error}\".",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:The provider returned \"{error}\": {description}": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "The provider returned \"{error}\": {description}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:This authorization request is unknown or has expired. Start the login again.": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "This authorization request is unknown or has expired. Start the login again.",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/route_tools_mcp.rs:Unknown MCP auth action: {other}": {
       "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
       "text": "Unknown MCP auth action: {other}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:You can close this window and return to Kimi Code.": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "You can close this window and return to Kimi Code.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:flow_id is required": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "flow_id is required",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/route_tools_mcp.rs:name and url are required": {
+      "file": "packages/kimi-agent/src/server/route_tools_mcp.rs",
+      "text": "name and url are required",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/server/route_workspaces.rs:Cancelled by client": {

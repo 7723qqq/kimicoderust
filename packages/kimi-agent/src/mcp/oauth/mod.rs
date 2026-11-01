@@ -6,6 +6,7 @@
 //! Still missing: the file-backed store wiring, the device-code login flow,
 //! single-flight refresh, and the `needs-auth` server status.
 
+pub mod auth_code;
 pub mod crypto;
 pub mod device;
 pub mod service;

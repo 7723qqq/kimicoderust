@@ -6636,6 +6636,162 @@ async fn test_http_mcp_auth_device_flow() {
     assert_eq!(reset_body["removed"], true);
 }
 
+/// `mcp/auth:begin-auth-code` discovers the authorization server, registers a
+/// PKCE client and returns the browser URL; the unauthenticated callback route
+/// exchanges the code and stores the grant; polling reports the outcome. The
+/// callback is the only `/api` GET that bypasses bearer auth — the single-use
+/// state is its credential.
+#[tokio::test]
+async fn test_http_mcp_auth_authorization_code_flow() {
+    let (as_base, as_requests) = crate::mcp::oauth::auth_code::test_helpers::spawn_mock_as().await;
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let service = Arc::new(crate::mcp::oauth::McpOAuthService::new(Arc::new(
+        crate::mcp::oauth::McpOAuthFileStore::new(dir.path()),
+    )));
+    let server = HttpServer::new(store)
+        .with_auth(crate::server::auth::ServerAuth::Token(Arc::from("tok3n")))
+        .with_mcp_oauth_service(service)
+        .await;
+
+    let post = |path: &str, body: Value| HttpRequest {
+        method: "POST".into(),
+        path: path.into(),
+        query: None,
+        headers: std::collections::HashMap::new(),
+        body: serde_json::to_vec(&body).unwrap(),
+    };
+
+    // The begin route stays behind the bearer gate.
+    let unauthorized = server
+        .handle_request(&post(
+            "/api/v1/mcp/auth:begin-auth-code",
+            json!({ "name": "srv", "url": format!("{as_base}/mcp") }),
+        ))
+        .await;
+    assert_eq!(unauthorized.status, 401);
+
+    let begin = server
+        .handle_request(&HttpRequest {
+            headers: std::collections::HashMap::from([(
+                "authorization".to_string(),
+                "Bearer tok3n".to_string(),
+            )]),
+            ..post(
+                "/api/v1/mcp/auth:begin-auth-code",
+                json!({
+                    "name": "srv",
+                    "url": format!("{as_base}/mcp"),
+                    "redirect_uri": "http://127.0.0.1:9/cb"
+                }),
+            )
+        })
+        .await;
+    assert_eq!(
+        begin.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&begin.body)
+    );
+    let begin_body: Value = serde_json::from_slice(&begin.body).unwrap();
+    let state = begin_body["state"].as_str().unwrap().to_string();
+    let flow_id = begin_body["flow_id"].as_str().unwrap().to_string();
+    let authorization_url = begin_body["authorization_url"].as_str().unwrap();
+    assert!(authorization_url.contains("code_challenge_method=S256"));
+    assert!(authorization_url.contains("resource="));
+
+    // Polling before the browser returns: still pending.
+    let pending = server
+        .handle_request(&HttpRequest {
+            headers: std::collections::HashMap::from([(
+                "authorization".to_string(),
+                "Bearer tok3n".to_string(),
+            )]),
+            ..post(
+                "/api/v1/mcp/auth:complete-auth-code",
+                json!({ "flow_id": flow_id }),
+            )
+        })
+        .await;
+    assert_eq!(pending.status, 202);
+
+    // The callback carries no bearer token; it must still be served.
+    let callback = server
+        .handle_request(&HttpRequest {
+            method: "GET".into(),
+            path: "/api/v1/mcp/auth/callback".into(),
+            query: Some(format!("code=the-code&state={state}")),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        })
+        .await;
+    assert_eq!(callback.status, 200);
+    assert_eq!(
+        callback.header("Content-Type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(
+        as_requests
+            .lock()
+            .await
+            .iter()
+            .any(|request| request.starts_with("POST /token "))
+    );
+
+    let complete = server
+        .handle_request(&HttpRequest {
+            headers: std::collections::HashMap::from([(
+                "authorization".to_string(),
+                "Bearer tok3n".to_string(),
+            )]),
+            ..post(
+                "/api/v1/mcp/auth:complete-auth-code",
+                json!({ "flow_id": flow_id }),
+            )
+        })
+        .await;
+    assert_eq!(complete.status, 200);
+    let complete_body: Value = serde_json::from_slice(&complete.body).unwrap();
+    assert_eq!(complete_body["authenticated"], true);
+    let key = complete_body["key"].as_str().unwrap().to_string();
+    assert_eq!(
+        key,
+        crate::mcp::oauth::mcp_oauth_store_key("srv", &format!("{as_base}/mcp")).unwrap()
+    );
+    let service = server.mcp_oauth.lock().await.clone().unwrap();
+    assert!(
+        service.access_token(&key).await.is_some(),
+        "the grant the engine would use is stored and usable"
+    );
+
+    // A replayed callback state is refused (single use).
+    let replay = server
+        .handle_request(&HttpRequest {
+            method: "GET".into(),
+            path: "/api/v1/mcp/auth/callback".into(),
+            query: Some(format!("code=the-code&state={state}")),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        })
+        .await;
+    assert_eq!(replay.status, 400);
+
+    // Unknown flows are finished-with-error, never "still pending".
+    let unknown = server
+        .handle_request(&HttpRequest {
+            headers: std::collections::HashMap::from([(
+                "authorization".to_string(),
+                "Bearer tok3n".to_string(),
+            )]),
+            ..post(
+                "/api/v1/mcp/auth:complete-auth-code",
+                json!({ "flow_id": "no-such-flow" }),
+            )
+        })
+        .await;
+    assert_eq!(unknown.status, 400);
+}
+
 #[tokio::test]
 async fn test_http_session_events_and_projection() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());

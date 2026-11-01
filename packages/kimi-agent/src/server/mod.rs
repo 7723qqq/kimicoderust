@@ -113,6 +113,9 @@ pub struct HttpServer {
     mcp_manager: Arc<crate::mcp::manager::McpManager>,
     /// MCP OAuth credentials (device-code login surface).
     mcp_oauth: Arc<tokio::sync::Mutex<Option<Arc<crate::mcp::oauth::McpOAuthService>>>>,
+    /// Pending browser authorization-code flows (the standalone server has no
+    /// JS host to hold them): keyed by callback state and by flow id.
+    mcp_auth_code: Arc<crate::mcp::oauth::auth_code::AuthCodeRegistry>,
     interaction_manager: Arc<interaction::InteractionManager>,
     plugin_manager: Arc<plugins::PluginManager>,
     oauth_manager: Arc<oauth::OAuthManager>,

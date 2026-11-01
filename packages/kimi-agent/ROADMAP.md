@@ -9355,3 +9355,30 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   `<pluginId>__<name>` key 的加密信封；二次调用不再打开浏览器；reset 删除授权）。
 - **剩余**：插件 MCP 条目声明的 `headers` / `bearerTokenEnvVar` 不走 OAuth（与全局
   条目一致）；HTTP-ACP 桥接会话的插件授权仍由宿主侧发起。
+
+## 39. 2026-10-31 standalone server 浏览器 auth-code 路由
+
+- 新增 `mcp/oauth/auth_code.rs`（host 端 `mcp-oauth.ts` 流程的等价 Rust 实现）：
+  RFC 9728 protected-resource + RFC 8414/OIDC 发现（路径感知 well-known 优先）、
+  RFC 7591 动态注册公开 PKCE 客户端、PKCE S256、RFC 8707 resource、code 交换
+  （confidential client 的 client_secret 可带），以及 pending-flow 注册表：
+  `state` 单次使用、15 分钟过期，`flow_id` 的结果保留 10 分钟供轮询。
+  PKCE verifier/state 用 `getrandom`，取不到随机数时登录失败而不是退化。
+- server 路由（`route_tools_mcp.rs`）：
+  - `POST /api/v1|v2/mcp/auth:begin-auth-code` `{name,url,redirect_uri?,scope?}`：
+    发现 → 注册 → 生成授权 URL，返回 `{flow_id, authorization_url, state,
+    redirect_uri, expires_in}`。redirect 默认
+    `http://<Host>/api/v1/mcp/auth/callback`；HTTPS 反代由调用方显式传入。
+  - `GET /api/v1|v2/mcp/auth/callback?code&state`：浏览器回调，**无 bearer**
+    （`ServerAuth::is_bypassed` 仅放行这两个路径，单次高熵 state 即凭证），
+    交换 code、按 `(name,url)` 落盘并返回 HTML 结果页（第三方错误文本已转义）；
+    state 重放返回 400。
+  - `POST .../auth:complete-auth-code {flow_id}`：202 pending / 200 authenticated /
+    400 failed（含未知 flow）；`cancel-auth-code` 丢弃 pending flow。
+- 测试：`auth_code` 五项单测（发现+注册+PKCE+交换 e2e、state 单次使用、状态轮询、
+  RFC 7636 向量、发现失败）；`test_http_mcp_auth_authorization_code_flow`
+  （begin 仍受 bearer 门禁、202→未认证回调 200→200 authenticated、grant 可被
+  service 读取、state 重放与未知 flow 被拒）。
+- **剩余**：回调要求 server 对浏览器可达（远程部署需传正确的 redirect_uri）；
+  设备码与 auth-code 两条流程并存，未按 AS 元数据自动选择；同一服务器并发登录
+  未做互斥。

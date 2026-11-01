@@ -185,6 +185,12 @@ impl ServerAuth {
         matches!(path, "/api/v1/healthz" | "/api/v1/health" | "/health")
             || path == "/openapi.json"
             || path == "/asyncapi.json"
+            // The MCP OAuth browser callback: the authorization server
+            // redirects a browser here, and a browser carries no bearer token.
+            // The single-use, high-entropy `state` minted by
+            // `auth:begin-auth-code` is the credential this route checks.
+            || path == "/api/v1/mcp/auth/callback"
+            || path == "/api/v2/mcp/auth/callback"
     }
 }
 
