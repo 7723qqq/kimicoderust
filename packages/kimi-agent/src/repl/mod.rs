@@ -874,10 +874,9 @@ pub async fn start_repl(
 
         match outcome {
             Ok(crate::session::TurnOutcome::Ran(turn_res)) => {
-                // Fold the turn into the stored goal (v2 turn-end usage
-                // accounting): turns_used +1, tokens_used += output.
-                state_store.goal_record_usage(1, turn_res.usage.output_tokens.into());
-
+                // The goal usage fold moved into the session pump (v2
+                // `incrementGoalTurn` + `accountTokenUsage`), which every turn
+                // driver shares; folding here as well double-counted.
                 // Persist turn to session store. The session's internal id
                 // is exposed for callers that need it.
                 let _ = session_store.append_turn(

@@ -1236,6 +1236,12 @@ async fn pump(
         // long time and must not inflate the turn's own reported duration.
         let turn_duration_ms = started.elapsed().as_millis() as u64;
 
+        // v2 `incrementGoalTurn` + `accountTokenUsage`: fold the finished turn
+        // into the session's goal and use the post-fold snapshot — not the
+        // host's (possibly stale) provider — to decide whether another
+        // autonomous turn is owed.
+        let goal_snapshot = record_goal_turn_usage(&ctx, &outcome).await;
+
         // `[background]` print policy (`kimi -p`): drain the session's
         // background tasks while the turn slot is still held, so the session
         // never reads as settled mid-drain and the follow-up decisions below
@@ -1315,6 +1321,24 @@ async fn pump(
                     steps: None,
                     stop_reason: Some("failed".into()),
                 });
+            }
+            // Interactive goal continuation (v2 `launchContinuationTurn`): a
+            // goal still active after a cleanly completed turn queues the next
+            // turn itself. It carries no prompt receipt — the host's `prompt()`
+            // belongs to the user's turn, the way v2's continuation is a
+            // separate prompt. Print runs keep their receipt-chained settle.
+            if ctx.print_background.is_none()
+                && ctx.session_id.is_some()
+                && let Some(snapshot) = goal_snapshot.as_ref()
+                && let Some(text) = goal_continuation_from_snapshot(snapshot)
+            {
+                let mut no_receipt = None;
+                enqueue_print_followup_turn(
+                    &mut core,
+                    &mut no_receipt,
+                    text,
+                    serde_json::json!({ "kind": "system_trigger", "name": "goal_continuation" }),
+                );
             }
             // `steer` / goal / cron: hand what the model is still owed back as
             // follow-up turns, before the idle gate below sees an empty queue.
@@ -1441,6 +1465,89 @@ async fn settle_print_background(ctx: &SessionContext, cancel: &AtomicBool) -> b
         };
         tokio::time::sleep(remaining.min(PRINT_SETTLE_POLL)).await;
     }
+}
+
+/// Fold a completed turn into the session's goal store (v2
+/// `incrementGoalTurn` + `accountTokenUsage`) and return the post-fold
+/// snapshot, or `None` when the session has no goal or the fold failed.
+///
+/// Runs before the core lock: it goes through the state-bridge seam, which is
+/// async and, on the native host, seeds the local store from the host's live
+/// snapshot first.
+async fn record_goal_turn_usage(
+    ctx: &SessionContext,
+    outcome: &Result<TurnOutcome, String>,
+) -> Option<serde_json::Value> {
+    let Ok(TurnOutcome::Ran(result)) = outcome else {
+        return None;
+    };
+    if end_reason_of(&result.stop_reason) != TurnEndReason::Completed {
+        return None;
+    }
+    let response = ctx
+        .callbacks
+        .state_write(crate::rpc::types::StateWriteRequest {
+            domain: "goal".into(),
+            key: "goal".into(),
+            value: serde_json::json!({
+                "action": "record_usage",
+                "turns": 1,
+                "output_tokens": result.usage.output_tokens,
+            }),
+            undoable: false,
+            turn_id: String::new(),
+            tool_call_id: String::new(),
+        })
+        .await
+        .ok()?;
+    response
+        .value
+        .get("goal")
+        .filter(|goal| !goal.is_null())
+        .cloned()
+}
+
+/// The continuation an interactive session owes from a post-fold goal snapshot
+/// (v2 `launchContinuationTurn` behind `blockIfBudgetReached`). Decided on the
+/// engine's own snapshot so the decision does not depend on the host having
+/// folded the usage event yet.
+fn goal_continuation_from_snapshot(snapshot: &serde_json::Value) -> Option<String> {
+    if snapshot.get("status").and_then(|status| status.as_str()) != Some("active") {
+        return None;
+    }
+    let budget = snapshot.get("budget");
+    let reached = budget.is_some_and(|budget| {
+        [
+            "tokenBudgetReached",
+            "turnBudgetReached",
+            "wallClockBudgetReached",
+        ]
+        .iter()
+        .any(|field| {
+            budget
+                .get(*field)
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        })
+    });
+    if reached {
+        return None;
+    }
+    let objective = snapshot
+        .get("objective")
+        .and_then(|objective| objective.as_str())?;
+    let tokens_used = snapshot
+        .get("tokensUsed")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    let token_budget = budget
+        .and_then(|budget| budget.get("tokenBudget"))
+        .and_then(|value| value.as_i64());
+    Some(crate::native::goal::steering::render_continuation(
+        objective,
+        tokens_used,
+        token_budget,
+    ))
 }
 
 /// The goal continuation a print run owes the model after a completed turn,

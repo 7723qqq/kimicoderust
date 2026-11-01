@@ -138,6 +138,39 @@ export interface NativeGoalState {
   outputTokensUsed: number;
 }
 
+/**
+ * The inverse of {@link toGoalSnapshot} for the engine's `goal.updated`
+ * snapshot: the engine owns the goal fold (usage counters, status
+ * transitions), so the host adopts what it reports instead of re-deriving it.
+ * Accepts both spellings the engine has used — camelCase (`goalId`) and the
+ * snake_case GoalState aliases (`goal_id`).
+ */
+export function goalStateFromSnapshot(snapshot: Record<string, unknown>): NativeGoalState {
+  const budget =
+    typeof snapshot['budget'] === 'object' && snapshot['budget'] !== null
+      ? (snapshot['budget'] as Record<string, unknown>)
+      : {};
+  const number = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+  const createdAt =
+    number(snapshot['createdAt']) ?? number(snapshot['created_at']) ?? Date.now();
+  const status = snapshot['status'];
+  return {
+    goalId: text(snapshot['goalId']) || text(snapshot['goal_id']),
+    objective: text(snapshot['objective']),
+    status: typeof status === 'string' ? (status as GoalStatus) : 'active',
+    createdAt,
+    updatedAt: number(snapshot['updatedAt']) ?? number(snapshot['updated_at']) ?? createdAt,
+    turnsUsed: number(snapshot['turnsUsed']) ?? 0,
+    tokensUsed: number(snapshot['tokensUsed']) ?? 0,
+    inputTokensUsed:
+      number(snapshot['inputTokensUsed']) ?? number(budget['inputTokensUsed']) ?? 0,
+    outputTokensUsed:
+      number(snapshot['outputTokensUsed']) ?? number(budget['outputTokensUsed']) ?? 0,
+  };
+}
+
 export function toGoalSnapshot(goal: NativeGoalState): GoalSnapshot {
   return {
     goalId: goal.goalId,

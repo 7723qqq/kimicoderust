@@ -181,6 +181,11 @@
       "text": "Tool execute serialize error: {e}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/callbacks.rs:could not seed the local goal from the host snapshot": {
+      "file": "packages/kimi-agent/src/callbacks.rs",
+      "text": "could not seed the local goal from the host snapshot",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/callbacks.rs:host does not support goal": {
       "file": "packages/kimi-agent/src/callbacks.rs",
       "text": "host does not support goal",

@@ -1607,12 +1607,40 @@ impl HostCallbacks for StateStoreCallbacks {
                 if let Ok(resp) = inner.state_write(request.clone()).await {
                     return Ok(resp);
                 }
+                // The goal lifecycle is host-owned on the native path, but the
+                // engine store is where its side effects land. Seed it from the
+                // host's live snapshot first, so a host-created goal accepts
+                // the model's UpdateGoal / SetGoalBudget and the turn-end usage
+                // fold.
+                if request.domain == "goal"
+                    && let Ok(Some(context)) = inner.goal().await
+                    && let Err(error) = store.seed_goal_from_context(&context)
+                {
+                    tracing::warn!(%error, "could not seed the local goal from the host snapshot");
+                }
                 return match store.apply_write(&request.domain, &request.value) {
                     Ok(outcome) => {
                         // A failed persist must fail the call: reporting
                         // `ok: true` after dropping the write told the host the
                         // state was durable when it was not.
                         store.write_domain(&request.domain, &outcome.stored)?;
+                        if request.domain == "goal"
+                            && outcome
+                                .stored
+                                .get("goal")
+                                .is_some_and(|goal| !goal.is_null())
+                        {
+                            // v2 `goal.updated`: the full snapshot, so the
+                            // host's panel and its per-turn provider see the
+                            // engine's folds (usage counters, status
+                            // transitions) even for turns that never resolved
+                            // a prompt receipt.
+                            inner.emit_event(serde_json::json!({
+                                "type": "goal.updated",
+                                "domain": "goal",
+                                "value": outcome.stored,
+                            }));
+                        }
                         Ok(StateWriteResponse {
                             ok: true,
                             value: outcome.response,

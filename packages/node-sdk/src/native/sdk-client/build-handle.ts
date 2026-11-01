@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 import { EngineSessionHandle, type SessionCallbacks } from '@moonshot-ai/kimi-agent/session-handle';
 import { createKimiDefaultHeaders, parseKimiCodeCustomHeaders } from '@moonshot-ai/kimi-code-oauth';
-import type { CronJobOrigin, TaskInfo } from '@moonshot-ai/protocol';
+import type {
+  CronJobOrigin,
+  GoalSnapshot as ProtocolGoalSnapshot,
+  TaskInfo,
+} from '@moonshot-ai/protocol';
 
 import { type AgentFileDefinition } from '#/agent-file';
 import type { KimiAuthFacade } from '#/auth';
@@ -45,6 +49,8 @@ import {
   applySessionLlmOverrides,
   isExperimentalFlagEnabled,
   engineSwarmTrigger,
+  goalStateFromSnapshot,
+  toGoalSnapshot,
 } from './helpers';
 import type { NativeSessionMeta } from './helpers';
 import {
@@ -444,6 +450,26 @@ export async function buildSessionHandle(
             agentId: eventAgentId,
             type: 'subagent.cancelled',
             subagentId: parsed.subagent_id,
+          });
+        }
+      } else if (parsed.type === 'goal.updated') {
+        // The engine folds the turn into the goal (v2 `incrementGoalTurn` +
+        // `accountTokenUsage`) and reports the snapshot back. The host adopts
+        // it: `meta.goal` is what the per-turn goal provider hands the engine,
+        // so these folds — including the ones from continuation turns that
+        // never resolve a prompt receipt — are what keep budgets and the panel
+        // current. A null goal means the engine store has none; the host's own
+        // goal (created through the RPC) must then stay untouched.
+        const value = parsed.value as { goal?: Record<string, unknown> | null } | undefined;
+        const snapshot = value?.goal;
+        if (snapshot !== undefined && snapshot !== null && typeof snapshot === 'object') {
+          meta.goal = goalStateFromSnapshot(snapshot);
+          deps.persistMeta(meta);
+          deps.receiveEvent({
+            sessionId,
+            agentId: eventAgentId,
+            type: 'goal.updated',
+            snapshot: toGoalSnapshot(meta.goal) as unknown as ProtocolGoalSnapshot,
           });
         }
       } else if (parsed.type === 'event.task.created') {

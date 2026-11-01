@@ -2503,3 +2503,114 @@ async fn a_deny_verdict_keeps_its_reason_on_the_returned_decision() {
         "a deny must not consult the host"
     );
 }
+
+/// A host whose goal lifecycle is host-owned (the native host's `createGoal`
+/// RPC): the engine store starts empty and the host answers `goal()`.
+struct HostOwnedGoalCallbacks {
+    goal: Arc<std::sync::Mutex<Option<GoalContext>>>,
+    events: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+impl HostCallbacks for HostOwnedGoalCallbacks {
+    fn llm_chat(&self, _: LlmChatRequest) -> BoxFuture<'static, Result<LlmChatResponse, String>> {
+        Box::pin(async { Err("not used".into()) })
+    }
+
+    fn execute_tool(
+        &self,
+        _: ToolExecuteRequest,
+    ) -> BoxFuture<'static, Result<ToolExecuteResponse, String>> {
+        Box::pin(async { Err("not used".into()) })
+    }
+
+    fn check_permission(
+        &self,
+        _: PermissionCheckRequest,
+    ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
+        Box::pin(async {
+            Ok(PermissionDecision {
+                decision: "allow".into(),
+                reason: None,
+            })
+        })
+    }
+
+    fn emit_event(&self, event: serde_json::Value) {
+        self.events.lock().unwrap().push(event);
+    }
+
+    fn goal(&self) -> BoxFuture<'static, Result<Option<GoalContext>, String>> {
+        let goal = self.goal.lock().unwrap().clone();
+        Box::pin(async move { Ok(goal) })
+    }
+}
+
+/// A host-created goal has no local record; the first engine-side mutation
+/// seeds one from the host snapshot (so the model's UpdateGoal no longer fails
+/// with "no current goal"), the turn-end fold lands on it, and every change
+/// emits the v2 `goal.updated` snapshot the host folds into its panel.
+#[tokio::test]
+async fn test_goal_write_seeds_from_the_host_snapshot_and_emits_goal_updated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_dir(tmp.path().join("state")).unwrap());
+    let goal = GoalContext {
+        goal_id: "goal-host".into(),
+        objective: "Host goal".into(),
+        status: crate::turn_loop::types::GoalStatus::Active,
+        token_budget: None,
+        turn_budget: Some(2),
+        wall_clock_budget_ms: None,
+        wall_clock_ms: 0,
+        tokens_used: 0,
+        turns_used: 0,
+    };
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let adapter = StateStoreCallbacks {
+        inner: Arc::new(HostOwnedGoalCallbacks {
+            goal: Arc::new(std::sync::Mutex::new(Some(goal))),
+            events: events.clone(),
+        }),
+        store: store.clone(),
+        cron_store: store.clone(),
+    };
+    let write = |value: serde_json::Value| StateWriteRequest {
+        domain: "goal".into(),
+        key: "goal".into(),
+        value,
+        undoable: false,
+        turn_id: String::new(),
+        tool_call_id: String::new(),
+    };
+
+    // The turn-end fold: seeds the host goal, then counts the turn.
+    let fold = adapter
+        .state_write(write(
+            serde_json::json!({ "action": "record_usage", "turns": 1, "output_tokens": 9 }),
+        ))
+        .await
+        .expect("the fold lands on the seeded goal");
+    assert_eq!(fold.value["goal"]["turnsUsed"], 1);
+    assert_eq!(fold.value["goal"]["tokensUsed"], 9);
+
+    // The model completes the host-created goal.
+    let response = adapter
+        .state_write(write(
+            serde_json::json!({ "action": "update", "status": "complete" }),
+        ))
+        .await
+        .expect("a host-created goal accepts the model's transition");
+    assert_eq!(response.value["goal"]["status"], "complete");
+    assert_eq!(
+        store.goal_context().map(|goal| goal.status),
+        Some(crate::rpc::types::GoalStatus::Complete)
+    );
+
+    let events = events.lock().unwrap();
+    let updated: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["type"] == "goal.updated")
+        .collect();
+    assert_eq!(updated.len(), 2, "one event per goal write: {events:?}");
+    assert_eq!(updated[0]["value"]["goal"]["turnsUsed"], 1);
+    assert_eq!(updated[1]["value"]["goal"]["status"], "complete");
+}

@@ -3965,21 +3965,6 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     // offers for live context occupancy (it exposes no direct token count).
     meta.contextTokens = result.inputTokens + result.inputCacheRead + result.inputCacheCreation;
     meta.messageCount += 1;
-    if (meta.goal && meta.goal.status === 'active') {
-      meta.goal.turnsUsed += 1;
-      meta.goal.tokensUsed += result.inputTokens + result.outputTokens;
-      meta.goal.inputTokensUsed +=
-        result.inputTokens + result.inputCacheRead + result.inputCacheCreation;
-      meta.goal.outputTokensUsed += result.outputTokens;
-      meta.goal.updatedAt = Date.now();
-      // Keep the goal panel's counters live (v2 `goal.updated`).
-      this.receiveEvent({
-        sessionId: meta.id,
-        agentId: 'main',
-        type: 'goal.updated',
-        snapshot: toGoalSnapshot(meta.goal) as unknown as ProtocolGoalSnapshot,
-      });
-    }
   }
 
   /**

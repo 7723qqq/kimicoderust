@@ -603,17 +603,45 @@ impl StateStore {
     fn apply_goal_write(&self, value: &Value) -> Result<StateWriteOutcome, String> {
         let Some(action) = value.get("action").and_then(|a| a.as_str()) else {
             return Err(
-                "State write error: [-32003] invalid goal state value: expected { action: \"create\" | \"update\" | \"set_budget\", ... }".into(),
+                "State write error: [-32003] invalid goal state value: expected { action: \"create\" | \"update\" | \"set_budget\" | \"record_usage\", ... }".into(),
             );
         };
         match action {
             "create" => self.goal_create(value),
             "update" => self.goal_update(value),
             "set_budget" => self.goal_set_budget(value),
+            // v2 `incrementGoalTurn` + `accountTokenUsage`: the turn-end fold
+            // the turn driver submits, so an active goal's counters and the
+            // continuation budget stay current without host arithmetic.
+            "record_usage" => self.goal_record_usage_action(value),
             _ => Err(format!(
                 "State write error: [-32003] invalid goal action: {action}"
             )),
         }
+    }
+
+    fn goal_record_usage_action(&self, value: &Value) -> Result<StateWriteOutcome, String> {
+        let turns = value.get("turns").and_then(Value::as_u64).unwrap_or(1);
+        let tokens = value
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let now = now_ms();
+        let Some(mut state) = self.read_goal_state() else {
+            // Every finished turn submits this fold; a session without a goal
+            // is the common case, not an error.
+            return Ok(StateWriteOutcome {
+                stored: json!({ "goal": Value::Null }),
+                response: json!({ "goal": Value::Null }),
+            });
+        };
+        if state.status == GoalStatus::Active {
+            state.turns_used += turns;
+            state.tokens_used += tokens;
+            state.output_tokens_used += tokens;
+            state.updated_at = now;
+        }
+        Ok(goal_outcome(&state, now))
     }
 
     fn goal_create(&self, value: &Value) -> Result<StateWriteOutcome, String> {
@@ -894,6 +922,63 @@ impl StateStore {
             stored: Value::Array(tasks),
             response: entry,
         })
+    }
+
+    /// Seed the local goal from the host's live goal context.
+    ///
+    /// On the native host the goal lifecycle is host-owned, but every engine
+    /// side effect — the turn-end usage fold, the model's `UpdateGoal` /
+    /// `SetGoalBudget` — has to land in one store. Without this seed a
+    /// host-created goal has no local record and the first mutation fails with
+    /// "no current goal". No-op when a goal is already stored (the engine's
+    /// own `CreateGoal` wins) or when the host reports none.
+    pub fn seed_goal_from_context(
+        &self,
+        goal: &crate::rpc::types::GoalContext,
+    ) -> Result<bool, String> {
+        if self.read_goal_state().is_some() {
+            return Ok(false);
+        }
+        use crate::rpc::types::GoalStatus as HostGoalStatus;
+        let status = match goal.status {
+            HostGoalStatus::Active => GoalStatus::Active,
+            HostGoalStatus::Paused => GoalStatus::Paused,
+            HostGoalStatus::Blocked => GoalStatus::Blocked,
+            HostGoalStatus::Complete => GoalStatus::Complete,
+            HostGoalStatus::BudgetLimited => GoalStatus::BudgetLimited,
+            HostGoalStatus::UsageLimited => GoalStatus::UsageLimited,
+        };
+        let now = now_ms();
+        let tokens_used = u64::try_from(goal.tokens_used.max(0)).unwrap_or(0);
+        let wall_clock_ms = u64::try_from(goal.wall_clock_ms.max(0)).unwrap_or(0);
+        let budget_of = |value: Option<i64>| {
+            value
+                .and_then(|value| u64::try_from(value).ok())
+                .filter(|value| *value > 0)
+        };
+        let state = GoalState {
+            goal_id: goal.goal_id.clone(),
+            objective: goal.objective.clone(),
+            completion_criterion: None,
+            status,
+            turns_used: u64::try_from(goal.turns_used.max(0)).unwrap_or(0),
+            tokens_used,
+            input_tokens_used: 0,
+            output_tokens_used: tokens_used,
+            wall_clock_ms,
+            wall_clock_resumed_at: (status == GoalStatus::Active).then_some(now),
+            budget_limits: GoalBudgetLimits {
+                token_budget: budget_of(goal.token_budget),
+                turn_budget: budget_of(goal.turn_budget),
+                wall_clock_budget_ms: budget_of(goal.wall_clock_budget_ms),
+            },
+            terminal_reason: None,
+            created_at: now.saturating_sub(wall_clock_ms),
+            updated_at: now,
+        };
+        let outcome = goal_outcome(&state, now);
+        self.write_domain("goal", &outcome.stored)?;
+        Ok(true)
     }
 
     fn read_goal_state(&self) -> Option<GoalState> {
@@ -2122,5 +2207,97 @@ mod tests {
         assert_eq!(rollback_scoped_state(workspace.path(), "session-a", 5), 0);
         // Another session of the same workspace has its own stack.
         assert_eq!(rollback_scoped_state(workspace.path(), "session-b", 1), 0);
+    }
+}
+
+#[cfg(test)]
+mod goal_usage_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn store() -> (TempDir, StateStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = StateStore::for_dir(tmp.path().join("state")).unwrap();
+        (tmp, store)
+    }
+
+    /// The per-turn fold the turn driver submits: +1 turn and the output tokens
+    /// of the finished turn, into an active goal only.
+    #[test]
+    fn record_usage_folds_turns_and_output_tokens_into_an_active_goal() {
+        let (_tmp, store) = store();
+        // A session without a goal is the common case: a no-op, not an error.
+        let none = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 10 }),
+            )
+            .unwrap();
+        assert!(none.stored["goal"].is_null());
+
+        let created = store
+            .apply_write("goal", &json!({ "action": "create", "objective": "Ship" }))
+            .unwrap();
+        store.write_domain("goal", &created.stored).unwrap();
+
+        let folded = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 7 }),
+            )
+            .unwrap();
+        store.write_domain("goal", &folded.stored).unwrap();
+        assert_eq!(folded.stored["goal"]["turnsUsed"], 1);
+        assert_eq!(folded.stored["goal"]["tokensUsed"], 7);
+        assert_eq!(folded.stored["goal"]["outputTokensUsed"], 7);
+
+        // A terminal goal's counters freeze: the fold still answers with the
+        // snapshot, so the caller sees the goal is no longer active.
+        let completed = store
+            .apply_write("goal", &json!({ "action": "update", "status": "complete" }))
+            .unwrap();
+        store.write_domain("goal", &completed.stored).unwrap();
+        let frozen = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 5 }),
+            )
+            .unwrap();
+        assert_eq!(frozen.stored["goal"]["turnsUsed"], 1);
+        assert_eq!(frozen.stored["goal"]["status"], "complete");
+    }
+
+    /// A host-created goal has no local record until the engine seeds one; the
+    /// seed carries the counters, budgets and status the host reported.
+    #[test]
+    fn seed_goal_from_context_copies_the_host_snapshot() {
+        let (_tmp, store) = store();
+        let context = crate::rpc::types::GoalContext {
+            goal_id: "goal-host".into(),
+            objective: "Host goal".into(),
+            status: crate::rpc::types::GoalStatus::Active,
+            token_budget: Some(5000),
+            turn_budget: Some(3),
+            wall_clock_budget_ms: None,
+            wall_clock_ms: 1200,
+            tokens_used: 42,
+            turns_used: 2,
+        };
+        assert!(store.seed_goal_from_context(&context).unwrap());
+        let stored = store.goal_context().expect("seeded");
+        assert_eq!(stored.goal_id, "goal-host");
+        assert_eq!(stored.turns_used, 2);
+        assert_eq!(stored.tokens_used, 42);
+        assert_eq!(stored.turn_budget, Some(3));
+        assert_eq!(stored.token_budget, Some(5000));
+
+        // A second seed must not overwrite an engine-owned goal.
+        let context = crate::rpc::types::GoalContext {
+            goal_id: "goal-other".into(),
+            objective: "Other".into(),
+            ..context
+        };
+        assert!(!store.seed_goal_from_context(&context).unwrap());
+        assert_eq!(store.goal_context().unwrap().goal_id, "goal-host");
     }
 }

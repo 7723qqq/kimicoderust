@@ -9382,3 +9382,32 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
 - **剩余**：回调要求 server 对浏览器可达（远程部署需传正确的 redirect_uri）；
   设备码与 auth-code 两条流程并存，未按 AS 元数据自动选择；同一服务器并发登录
   未做互斥。
+
+## 40. 2026-10-31 napi 交互式 goal continuation
+
+- 目标域写入补齐 `record_usage` 动作（v2 `incrementGoalTurn` + `accountTokenUsage`）：
+  活跃 goal 累加回合数与输出 token，终态 goal 冻结但仍返回快照；无 goal 时返回
+  `{goal:null}` 而不是报错（每回合都会提交这次折叠）。
+- `StateStoreCallbacks` 的 goal 写入改为「先用宿主快照播种本地库再应用」：napi 上
+  goal 生命周期归宿主所有（`createGoal` RPC 只写 `meta.goal`），本地库原本没有记录，
+  模型调用 `UpdateGoal` / `SetGoalBudget` 会以 "No current goal" 失败；播种后这些
+  写与回合折叠都落在同一处，并在成功时发出 v2 `goal.updated` 全量快照。
+- `EngineSession` pump 在每个完成回合后折叠 goal（经 state bridge），用**折叠后的
+  快照**判定是否继续；交互式会话（`print_background: None`）据此把下一回合排入队列
+  （`system_trigger/goal_continuation`、无 prompt receipt，宿主的 `prompt()` 仍只属于
+  用户回合）。print 运行保持原有 receipt 链与 ceiling/max_turns。
+- SDK：`helpers.goalStateFromSnapshot`（引擎快照 → `meta.goal`），`build-handle`
+  的引擎事件路由折叠 `goal.updated` 并转发面板；`recordTurnOutcome` 删除原先的
+  每 receipt 折叠，避免与引擎折叠重复计数。模型通过 `CreateGoal` 工具创建的目标
+  现在也会经同一事件到达宿主面板与 provider。
+- 测试：`record_usage_folds_turns_and_output_tokens_into_an_active_goal`、
+  `seed_goal_from_context_copies_the_host_snapshot`、
+  `test_goal_write_seeds_from_the_host_snapshot_and_emits_goal_updated`、
+  `test_interactive_session_continues_an_active_goal`（播种→折叠→一次 continuation→
+  预算停止，goal.updated 计数 [1,2]）；`cargo test --lib` 3319 passed。
+- REPL：删除它自己的每回合 `goal_record_usage`（pump 已统一折叠，保留即双计）；
+  交互 continuation 只在带宿主 session id 的会话启用，REPL 保持原有回合模型。
+- **剩余**：SDK 的 `createGoal` 不接受预算（交互式 goal 目前只能靠模型
+  `UpdateGoal complete/blocked` 结束，v2 同语义但缺少预算护栏）；print 模式的
+  continuation 仍读宿主的每回合 provider（未接折叠快照）；`GoalContext` 未携带
+  `blocked_streak`。

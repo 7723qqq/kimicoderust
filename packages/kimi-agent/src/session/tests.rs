@@ -141,6 +141,20 @@ fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
             })
         },
     );
+    // A state write this host does not own answers at once; without a handler
+    // the RPC layer falls back to a stdio round-trip that stalls for the whole
+    // host-state timeout, which would hang every goal fold in these tests.
+    RpcServer::register_arc(
+        &server,
+        crate::rpc::types::methods::HOST_STATE_WRITE,
+        |_params| {
+            Box::pin(async move {
+                Err(crate::rpc::types::JsonRpcError::internal_error(
+                    "host does not support state bridge".to_string(),
+                ))
+            })
+        },
+    );
     Arc::new(RpcHostCallbacks { server })
 }
 
@@ -2110,4 +2124,165 @@ async fn test_interactive_session_wakes_on_a_background_task_completion() {
     tokio::time::timeout(std::time::Duration::from_millis(1000), session.settled())
         .await
         .expect("the notification turn settles the session again");
+}
+
+/// RPC callbacks plus a live host goal and captured engine events — the native
+/// host's shape: the goal lifecycle is host-owned, and the engine reports its
+/// folds back through `goal.updated` events.
+struct HostGoalCallbacks {
+    inner: Arc<dyn HostCallbacks>,
+    goal: crate::rpc::types::GoalContext,
+    events: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+impl HostCallbacks for HostGoalCallbacks {
+    fn llm_chat(
+        &self,
+        request: LlmChatRequest,
+    ) -> futures_util::future::BoxFuture<'static, Result<LlmChatResponse, String>> {
+        self.inner.llm_chat(request)
+    }
+
+    fn execute_tool(
+        &self,
+        request: ToolExecuteRequest,
+    ) -> futures_util::future::BoxFuture<'static, Result<ToolExecuteResponse, String>> {
+        self.inner.execute_tool(request)
+    }
+
+    fn check_permission(
+        &self,
+        request: PermissionCheckRequest,
+    ) -> futures_util::future::BoxFuture<'static, Result<PermissionDecision, String>> {
+        self.inner.check_permission(request)
+    }
+
+    fn state_read(
+        &self,
+        request: StateReadRequest,
+    ) -> futures_util::future::BoxFuture<'static, Result<StateReadResponse, String>> {
+        self.inner.state_read(request)
+    }
+
+    fn state_write(
+        &self,
+        _: StateWriteRequest,
+    ) -> futures_util::future::BoxFuture<'static, Result<StateWriteResponse, String>> {
+        // The native host owns the goal lifecycle but not the engine's state
+        // bridge: it refuses goal writes so the adapter falls back to its
+        // local store (after seeding from `goal()`).
+        Box::pin(async { Err("host does not support state bridge".into()) })
+    }
+
+    fn goal(
+        &self,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<Option<crate::rpc::types::GoalContext>, String>,
+    > {
+        let goal = self.goal.clone();
+        Box::pin(async move { Ok(Some(goal)) })
+    }
+
+    fn emit_event(&self, event: serde_json::Value) {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event.clone());
+        self.inner.emit_event(event);
+    }
+}
+
+/// Interactive sessions continue an active goal themselves (v2
+/// `launchContinuationTurn`): the engine folds the finished turn into the
+/// goal — seeding the local store from the host snapshot first — and queues
+/// the next turn with no prompt receipt. The turn budget, advanced by the fold,
+/// stops the chain after the second turn.
+#[tokio::test]
+async fn test_interactive_session_continues_an_active_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_dir(dir.path().join("state")).unwrap());
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let host = Arc::new(HostGoalCallbacks {
+        inner: rpc_callbacks(Arc::new(RpcServer::new())),
+        goal: crate::rpc::types::GoalContext {
+            goal_id: "goal-host".into(),
+            objective: "ship the thing".into(),
+            status: crate::rpc::types::GoalStatus::Active,
+            token_budget: None,
+            turn_budget: Some(2),
+            wall_clock_budget_ms: None,
+            wall_clock_ms: 0,
+            tokens_used: 0,
+            turns_used: 0,
+        },
+        events: events.clone(),
+    });
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(crate::callbacks::StateStoreCallbacks {
+        inner: host,
+        store: store.clone(),
+        cron_store: store.clone(),
+    });
+    let llm = Arc::new(ScriptedLlm::simple(vec![
+        text_response("first"),
+        text_response("second"),
+    ]));
+    let requests = llm.requests.clone();
+    let config = SessionConfig {
+        llm,
+        callbacks,
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
+        goal: None,
+        on_before_turn: None,
+        agent_cancel_slot: None,
+        steer_slot: None,
+        hook_guard: None,
+        print_background: None,
+        session_id: Some("sess-goal-interactive".into()),
+        task_runner: None,
+        toolset: None,
+        telemetry: None,
+    };
+    let session = EngineSession::new(config).await;
+
+    let mut receipt = session
+        .enqueue_turn(TurnRequest::user(msg("user", "hello"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        receipt.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    tokio::time::timeout(std::time::Duration::from_millis(2000), session.settled())
+        .await
+        .expect("the continuation chain settles");
+
+    let calls = requests.lock().unwrap();
+    assert_eq!(calls.len(), 2, "one goal continuation turn");
+    assert!(
+        calls[1]
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("ship the thing")),
+        "the continuation carries the goal: {:?}",
+        calls[1]
+    );
+    drop(calls);
+
+    // The fold counted both turns; the budget of two then stopped the chain.
+    let goal = store
+        .goal_context()
+        .expect("the goal was seeded and folded");
+    assert_eq!(goal.turns_used, 2);
+    let updated: Vec<u64> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "goal.updated")
+        .filter_map(|event| event["value"]["goal"]["turnsUsed"].as_u64())
+        .collect();
+    assert_eq!(updated, vec![1, 2], "one snapshot per folded turn");
 }
