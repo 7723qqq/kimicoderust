@@ -32,6 +32,9 @@ reports/
 .superpowers/
 /plan/
 
+# Local reference checkout of the bun source tree (24k+ files, read-only)
+bun源码参考/
+
 # Agent scratch / throwaway files - do not commit
 .tmp/
 .commandcode/

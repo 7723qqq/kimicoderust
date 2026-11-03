@@ -841,13 +841,11 @@ fn test_timeout_resolution_precedence() {
 #[tokio::test]
 async fn test_global_defaults_apply_to_servers_without_timeouts() {
     let manager = McpManager::new();
-    manager
-        .set_defaults(crate::config::McpConfig {
-            startup_timeout_ms: Some(2_000),
-            tool_timeout_ms: Some(3_000),
-            default_deferred: None,
-        })
-        .await;
+    manager.set_defaults(crate::config::McpConfig {
+        startup_timeout_ms: Some(2_000),
+        tool_timeout_ms: Some(3_000),
+        default_deferred: None,
+    });
     manager
         .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
         .await
@@ -1563,12 +1561,10 @@ async fn test_bearer_env_var_401_is_failed_not_needs_auth() {
 #[tokio::test]
 async fn test_default_deferred_applies_and_a_per_server_value_wins() {
     let manager = McpManager::new();
-    manager
-        .set_defaults(crate::config::McpConfig {
-            default_deferred: Some(true),
-            ..Default::default()
-        })
-        .await;
+    manager.set_defaults(crate::config::McpConfig {
+        default_deferred: Some(true),
+        ..Default::default()
+    });
     manager
         .configure(
             "inherit",

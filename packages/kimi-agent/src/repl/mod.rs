@@ -431,9 +431,10 @@ pub async fn start_repl(
     // G-6 #6: PreToolUse hooks ride the same snapshot; the guard runs them
     // before native tool calls (the dummy host's own tool execution never
     // fires user hooks).
-    let hook_guard = Arc::new(crate::tools::external_hooks::HookGuard::new(
-        policy_snapshot.pre_tool_hooks.clone(),
-    ));
+    let hook_guard = Arc::new(
+        crate::tools::external_hooks::HookGuard::new(policy_snapshot.pre_tool_hooks.clone())
+            .with_session_cwd(Some(workspace.to_string_lossy().into_owned())),
+    );
     let permission_engine = Arc::new(PermissionEngine::new(policy_snapshot));
     let tool_truncator = Arc::new(ToolResultTruncator::for_workspace(&workspace));
     // `TaskStarted` / `Notification` hook dispatch on the same guard.

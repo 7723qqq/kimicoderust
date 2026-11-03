@@ -47,6 +47,11 @@ pub struct SubagentDefinition {
     #[serde(default)]
     pub summary_policy: Option<SummaryPolicy>,
     pub model: Option<String>,
+    /// The subagent types this profile may itself spawn (v2
+    /// `AgentProfile.subagents`): `None` falls back to the default
+    /// profile's delegation set, `['*']` is unrestricted.
+    #[serde(default)]
+    pub subagents: Option<Vec<String>>,
 }
 
 /// The parent turn's cancellation signal, event-driven (P51): [`Self::trigger`]

@@ -2401,3 +2401,177 @@ fn test_revert_skips_oversize_files_instead_of_deleting_them() {
         "the file must not be deleted when its pre-image was not stored"
     );
 }
+
+/// Every appended wire row carries the protocol version that wrote it, so a
+/// later engine can tell its own rows from a newer one's.
+#[test]
+fn append_wire_event_stamps_the_current_protocol_version() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-stamp", None).unwrap();
+    store
+        .append_wire_event(&RawWireEvent {
+            id: "evt-stamp".into(),
+            session_id: "sess-stamp".into(),
+            event_type: "test".into(),
+            payload: json!({}),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .unwrap();
+
+    let conn = store.conn.lock();
+    let stamped: String = conn
+        .query_row(
+            "SELECT protocol_version FROM wire_events WHERE id = 'evt-stamp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stamped, WIRE_PROTOCOL_VERSION);
+}
+
+/// A journal row written by a newer engine closes every read that would
+/// interpret it: the fold and each slice helper refuse rather than half-read.
+#[test]
+fn the_wire_readers_refuse_a_newer_protocol_version() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-newer", None).unwrap();
+    store
+        .append_wire_event(&RawWireEvent {
+            id: "evt-newer".into(),
+            session_id: "sess-newer".into(),
+            event_type: "prompt.submitted".into(),
+            payload: json!({}),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .unwrap();
+    {
+        let conn = store.conn.lock();
+        conn.execute(
+            "UPDATE wire_events SET protocol_version = '9.9' WHERE session_id = 'sess-newer'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let expect_too_new =
+        |result: Result<Vec<WireEventRecord>, EventStoreError>, reader: &str| match result {
+            Err(EventStoreError::WireProtocolTooNew { found, supported }) => {
+                assert_eq!(found, "9.9");
+                assert_eq!(supported, WIRE_PROTOCOL_VERSION);
+            }
+            other => panic!("{reader} must refuse a newer journal, got {other:?}"),
+        };
+    expect_too_new(
+        store.get_wire_events("sess-newer", 0, 10),
+        "get_wire_events",
+    );
+    expect_too_new(
+        store.interaction_wire_events("sess-newer"),
+        "interaction_wire_events",
+    );
+    expect_too_new(store.prompt_wire_events("sess-newer"), "prompt_wire_events");
+    expect_too_new(store.task_wire_events("sess-newer"), "task_wire_events");
+    match store.fold_projection("sess-newer") {
+        Err(EventStoreError::WireProtocolTooNew { .. }) => {}
+        other => panic!("fold_projection must refuse a newer journal, got {other:?}"),
+    }
+}
+
+/// Rows written before the column existed are NULL and read as this version:
+/// an old database opens without a stamp backfill.
+#[test]
+fn null_protocol_versions_read_as_the_current_version() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-legacy", None).unwrap();
+    store
+        .append_wire_event(&RawWireEvent {
+            id: "evt-legacy".into(),
+            session_id: "sess-legacy".into(),
+            event_type: "prompt.submitted".into(),
+            payload: json!({}),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .unwrap();
+    {
+        let conn = store.conn.lock();
+        conn.execute(
+            "UPDATE wire_events SET protocol_version = NULL WHERE session_id = 'sess-legacy'",
+            [],
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        store.get_wire_events("sess-legacy", 0, 10).unwrap().len(),
+        1
+    );
+    assert_eq!(store.prompt_wire_events("sess-legacy").unwrap().len(), 1);
+    assert!(store.task_wire_events("sess-legacy").unwrap().is_empty());
+    assert!(
+        store
+            .interaction_wire_events("sess-legacy")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.fold_projection("sess-legacy").unwrap().is_empty());
+}
+
+/// The wire write guard (v2 `bindWriteGuard`, upstream #4246): a live foreign
+/// holder closes the journal to this process; a freed one opens it again.
+#[test]
+fn the_wire_write_guard_refuses_a_foreign_held_session() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-wire-guard", None).unwrap();
+    let event = |id: &str| RawWireEvent {
+        id: id.into(),
+        session_id: "sess-wire-guard".into(),
+        event_type: "test".into(),
+        payload: json!({}),
+        is_checkpoint: false,
+        is_compaction: false,
+        created_at: 1,
+    };
+
+    // Baseline: an unheld session accepts its rows.
+    store.append_wire_event(&event("evt-before")).unwrap();
+
+    // Plant a holder the way another live process writes it. The pid must be
+    // alive and not this process's: init on unix, System on Windows — the
+    // guard exempts its own pid, so a same-pid plant cannot exercise it.
+    let foreign_pid: u32 = if cfg!(windows) { 4 } else { 1 };
+    let lock_path = crate::session::lock::SESSION_LOCKS
+        .lock_dir()
+        .join("sess-wire-guard.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let holder = crate::session::lock::SessionLockHolder {
+        version: 1,
+        token: format!("{foreign_pid}:foreign"),
+        pid: foreign_pid,
+        hostname: whoami::fallible::hostname().unwrap_or_else(|_| "unknown-host".into()),
+        started_at: chrono::Utc::now().timestamp_millis(),
+        client_identity: "kimi_code".into(),
+        client_display_name: None,
+    };
+    std::fs::write(&lock_path, serde_json::to_string(&holder).unwrap()).unwrap();
+
+    match store.append_wire_event(&event("evt-blocked")) {
+        Err(EventStoreError::SessionOccupied(message)) => {
+            assert!(
+                message.contains("in use by another Kimi Code process"),
+                "{message}"
+            );
+        }
+        other => panic!("expected SessionOccupied, got {other:?}"),
+    }
+
+    // A takeover (or the foreign process exiting) frees the journal.
+    crate::session::lock::SESSION_LOCKS.takeover("sess-wire-guard");
+    assert!(!lock_path.exists());
+    store.append_wire_event(&event("evt-after")).unwrap();
+}

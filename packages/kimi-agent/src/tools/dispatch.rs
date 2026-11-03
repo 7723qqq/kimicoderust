@@ -322,34 +322,46 @@ impl NativeToolset {
                 // to an empty set made every requested name look like a typo the
                 // model had made, hiding the RPC failure behind "unknown tool".
                 // The catalogue is the FULL set (advertised plus the deferred
-                // tools the table hides — v2 `loadableToolNames`), not the
-                // shaped table `list_tools` serves: the shapes are the very
-                // tools a `select_tools` call exists to load.
-                let available = self.full_tool_catalogue().await;
+                // tools the table hides — v2's registry universe), not the
+                // shaped table `list_tools` serves.
+                let registered = self.full_tool_catalogue().await;
+                // v2 `loadableToolNames`: the deferred set — but only while
+                // disclosure is on; with the switch off the deferred tools sit
+                // in the advertised table and are called directly, so there is
+                // nothing to load and they classify as statically callable.
+                let loadable: std::collections::HashSet<String> = if self.tool_select_enabled {
+                    self.mcp_manager
+                        .as_ref()
+                        .map(|mcp| mcp.deferred_tool_names_blocking())
+                        .unwrap_or_default()
+                } else {
+                    Default::default()
+                };
                 // The loaded set is the toolset's shared, session-scoped one:
                 // a fresh set per call made `already_available` unreachable and
                 // reported every requested tool as newly loaded.
                 let mut loaded = self.loaded_tools.lock().unwrap_or_else(|e| e.into_inner());
-                // Statically callable = in the catalogue but not behind the
-                // deferred-disclosure gate (upstream #3885
-                // `isStaticCallable`): the model can call these directly and
-                // passing them to select_tools is a category error, not a
-                // lookup miss.
-                let deferred = self
-                    .mcp_manager
-                    .as_ref()
-                    .map(|mcp| mcp.deferred_tool_names_blocking())
-                    .unwrap_or_default();
-                let callable: std::collections::HashSet<String> = available
-                    .iter()
-                    .filter(|name| !deferred.contains(*name))
-                    .cloned()
-                    .collect();
+                // Upstream #4190: failure counts live as long as the catalogue
+                // and policy that produced them; a change on either side
+                // resets the streak.
+                let mut tracker = self
+                    .selection_failures
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                tracker.reset_if_environment_changed(
+                    select_tools::selection_environment_fingerprint(
+                        self.tools_filter.as_ref(),
+                        &registered,
+                        &loadable,
+                    ),
+                );
                 Some(select_tools::execute_select_tools(
                     args,
-                    &available,
+                    &loadable,
+                    &registered,
                     &mut loaded,
-                    &callable,
+                    self.tools_filter.as_ref(),
+                    &mut tracker,
                 ))
             }
             "team" => {

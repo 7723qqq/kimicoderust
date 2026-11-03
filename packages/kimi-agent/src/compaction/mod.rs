@@ -38,6 +38,12 @@ const SUMMARY_REQUEST_TOKENS: u32 = 1_000;
 /// request back over it.
 const OVERFLOW_CONTEXT_SAFETY_RATIO: f64 = 0.85;
 
+/// v2 `COMPLETION_BUDGET_ESTIMATE_MARGIN_RATIO` (fullCompactionService.ts:79):
+/// the estimate's error margin added on top of a compaction request's token
+/// count when it is reported as `used_context_tokens`, so the provider's
+/// completion-budget clamp works with the same conservative window.
+const COMPLETION_BUDGET_ESTIMATE_MARGIN_RATIO: f64 = 0.02;
+
 /// v2 `DEFAULT_COMPACTION_CONFIG.maxOverflowCompactionAttempts`
 /// (strategy.ts:23): one turn may compact-and-retry after a context overflow
 /// this many times in a row before the turn is failed. v2's companion
@@ -747,11 +753,29 @@ pub async fn summarize_with_llm_budgeted(
         }
         attempt += 1;
         let mut history: &[LLMMessage] = &current;
+        let prompt = summarization_prompt(history, instruction);
+        // v2 #4456: report the estimated request size as `used_context_tokens`
+        // (with the 2% estimate margin) so the transport clamps the completion
+        // budget to the window actually left — the full history leaves less
+        // room than the configured output cap. Both fields are needed: the
+        // clamp (`llm/http.rs`) only engages on the pair.
+        let estimated_request_tokens = prompt
+            .iter()
+            .map(estimate_message_tokens)
+            .fold(SUMMARY_REQUEST_TOKENS, u32::saturating_add);
+        let used_context_tokens = effective_max_tokens
+            .filter(|tokens| *tokens > 0)
+            .map(|window| {
+                estimated_request_tokens.saturating_add(
+                    (window as f64 * COMPLETION_BUDGET_ESTIMATE_MARGIN_RATIO).ceil() as u32,
+                )
+            });
         let params = LLMChatParams {
-            messages: std::sync::Arc::from(summarization_prompt(history, instruction)),
+            messages: std::sync::Arc::from(prompt),
             tools: std::sync::Arc::from(Vec::new()),
             cancel: cancel.cloned(),
-            ..Default::default()
+            used_context_tokens,
+            max_context_tokens: effective_max_tokens,
         };
         let response = match cancel {
             Some(token) => tokio::select! {
@@ -888,19 +912,27 @@ fn pre_shrink_to_window_budget(
 ) -> Option<Vec<LLMMessage>> {
     let effective_max_tokens = effective_max_tokens.filter(|tokens| *tokens > 0)?;
     let output_reserve = effective_max_tokens / 8;
-    let message_budget =
-        ((effective_max_tokens - output_reserve) as f64 * OVERFLOW_CONTEXT_SAFETY_RATIO) as u32;
-    let message_budget = message_budget.saturating_sub(SUMMARY_REQUEST_TOKENS);
-    if message_budget == 0 {
-        return None;
-    }
+    let input_limit = effective_max_tokens - output_reserve;
 
     let instruction_tokens = instruction.map(estimate_tokens).unwrap_or(0);
     let total: u32 = history
         .iter()
         .map(estimate_message_tokens)
         .fold(instruction_tokens, u32::saturating_add);
-    if total <= message_budget {
+    // v2 #4456: gate on the real input limit (window − output reserve), not
+    // the safety budget. The budget (~0.74·window) sits below the
+    // auto-compaction trigger (min(0.85W, W−50k)), so gating on it dropped
+    // the oldest messages of every auto compaction on windows above ~195k
+    // and broke the prompt-cache prefix for nothing — the request fit.
+    if total.saturating_add(SUMMARY_REQUEST_TOKENS) <= input_limit {
+        return None;
+    }
+
+    // The safety budget stays the shrink *target* once the gate says the
+    // request genuinely overflows (v2 keeps the same split).
+    let message_budget = ((input_limit as f64) * OVERFLOW_CONTEXT_SAFETY_RATIO) as u32;
+    let message_budget = message_budget.saturating_sub(SUMMARY_REQUEST_TOKENS);
+    if message_budget == 0 {
         return None;
     }
 

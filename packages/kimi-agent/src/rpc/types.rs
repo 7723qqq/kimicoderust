@@ -226,6 +226,19 @@ pub mod methods {
     pub const SESSION_BACKGROUND_TASK_STOP: &str = "session/background_task_stop";
 }
 
+/// A Bash command the AGENTS.md reminder wants operand directories for (v2
+/// `extractBashTargetDirs`). Sent to the host before the injection pass; the
+/// host parses with its bash syntax tree and answers the directories the
+/// command's listing operands resolve to, `None` when the command does not
+/// parse. `cwd` is the call's effective working directory (the declared
+/// `cwd` resolved, else the process one); `home` answers a bare `cd`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParseBashRequest {
+    pub command: String,
+    pub cwd: String,
+    pub home: String,
+}
+
 /// Permission check for a mutating tool call the engine wants to execute
 /// natively. Sent to the host before running the tool; the host applies its
 /// full permission machinery (mode, rules, policies, interactive approval).
@@ -705,13 +718,12 @@ pub struct SecondaryModelEntry {
 
 /// The `[secondary_model]` subagent model pool (v2
 /// `session/subagent/configSection.ts`), resolved by the host: the default
-/// alias, whether every spawn is forced onto it, the caller's own alias (for
-/// the `[main model]` marker), and one ready-built LLM per pool entry.
+/// alias, the caller's own alias (for the `[main model]` marker), and one
+/// ready-built LLM per pool entry. v2 #4418 removed `force`: a lone entry
+/// pins every spawn, so the pool only ever offers its own entries.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecondaryModelPool {
-    #[serde(default)]
-    pub force: bool,
     pub default_model: String,
     #[serde(default)]
     pub caller_model_alias: Option<String>,
@@ -969,6 +981,10 @@ pub struct SubagentProfileWire {
     /// Summary distillation policy (v2 `AgentProfileSummaryPolicy`).
     #[serde(default)]
     pub summary_policy: Option<crate::subagent::types::SummaryPolicy>,
+    /// The subagent types this profile may itself spawn (v2
+    /// `AgentProfile.subagents`, from the agent file's frontmatter).
+    #[serde(default)]
+    pub subagents: Option<Vec<String>>,
 }
 
 /// LLM provider definition for MultiLLM.

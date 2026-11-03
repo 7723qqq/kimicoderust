@@ -12,7 +12,7 @@ description:
       
 revision: 932e017600564470d7e43d7b25bb49896c06cca1
 updated_at: "2026-11-01T08:11:47.981Z"
-fingerprint: 416f363a468e38144c21cf0ae5d740e1ed3fd3bb16604fa2ce5824b14a770246
+fingerprint: 19be3eef64725ecaa52ca15d93048be4e1751f710609b4edd956a57b4c8c825c
 source:
   - path: "packages/kimi-agent/src/llm/anthropic.rs"
   - path: "packages/kimi-agent/src/llm/openai_responses.rs"

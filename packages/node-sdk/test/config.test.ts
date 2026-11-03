@@ -409,7 +409,6 @@ default_effort = "high"
 
     const pool = resolveSecondaryModelPool(config, true);
     expect(pool).toMatchObject({
-      force: false,
       defaultModel: 'kimi-code/fast',
       callerModelAlias: 'kimi-code/k3',
     });
@@ -500,6 +499,8 @@ default_model = "kimi-code/missing"
       /not a \[secondary_model\.models\] key/,
     );
 
+    // v2 #4418 removed `force`: a leftover key is ignored (with a warning)
+    // instead of failing the pool — a lone default_model pins every spawn.
     const forceWithTable = parseConfigString(
       `${POOL_TOML}
 [secondary_model]
@@ -511,9 +512,7 @@ force = true
 `,
       'secondary-force.toml',
     );
-    expect(() => resolveSecondaryModelPool(forceWithTable, true)).toThrow(
-      /force cannot be combined/,
-    );
+    expect(resolveSecondaryModelPool(forceWithTable, true)?.models).toHaveLength(1);
 
     const forceWithoutDefault = parseConfigString(
       `${POOL_TOML}
@@ -522,9 +521,7 @@ force = true
 `,
       'secondary-force-without-default.toml',
     );
-    expect(() => resolveSecondaryModelPool(forceWithoutDefault, true)).toThrow(
-      /required when \[secondary_model\]\.force is set/,
-    );
+    expect(resolveSecondaryModelPool(forceWithoutDefault, true)).toBeUndefined();
 
     const forceWithTableNoDefault = parseConfigString(
       `${POOL_TOML}
@@ -537,7 +534,7 @@ force = true
       'secondary-force-table-no-default.toml',
     );
     expect(() => resolveSecondaryModelPool(forceWithTableNoDefault, true)).toThrow(
-      /force cannot be combined/,
+      /default_model is required when \[secondary_model\.models\] is configured/,
     );
 
     const brokenAlias = parseConfigString(

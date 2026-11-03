@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::i18n::LocalizedText;
 use crate::rpc::types::{
     AskQuestionRequest, AskQuestionResponse, AuthTokenResponse, BoxFuture, CheckpointRequest,
-    ListToolsResponse, LlmChatRequest, LlmChatResponse, PermissionCheckRequest, PermissionDecision,
-    StateReadRequest, StateReadResponse, StateWriteRequest, StateWriteResponse, ToolExecuteRequest,
-    ToolExecuteResponse,
+    ListToolsResponse, LlmChatRequest, LlmChatResponse, ParseBashRequest, PermissionCheckRequest,
+    PermissionDecision, StateReadRequest, StateReadResponse, StateWriteRequest, StateWriteResponse,
+    ToolExecuteRequest, ToolExecuteResponse,
 };
 use crate::turn_loop::types::{GoalContext, LLMMessage};
 
@@ -151,6 +151,22 @@ pub trait HostCallbacks: Send + Sync {
     /// budgeting, matching the no-goal fallback.
     fn goal(&self) -> BoxFuture<'static, Result<Option<GoalContext>, String>> {
         Box::pin(async { Err("host does not support goal".into()) })
+    }
+
+    /// Parse a Bash command for the AGENTS.md reminder's operand directories
+    /// (v2 `extractBashTargetDirs`, `host/parse_bash`). The host owns the
+    /// bash syntax tree; the engine has none. The default answers `Ok(None)`
+    /// — a host without a parser (the standalone server has no JS side, the
+    /// REPL wires none) keeps the reminder at its cwd-only shape, which is
+    /// exactly v2's own fallback when a command fails to parse
+    /// (`agentsMdReminderService.ts`: `!parsed.ok || parsed.hasError` keeps
+    /// the declared cwd and nothing more).
+    fn parse_bash(
+        &self,
+        request: ParseBashRequest,
+    ) -> BoxFuture<'static, Result<Option<Vec<String>>, String>> {
+        let _ = request;
+        Box::pin(async { Ok(None) })
     }
 
     /// Fetch a bearer token for an OAuth-managed provider (`host/auth_token`).
@@ -1285,6 +1301,35 @@ impl HostCallbacks for NativeToolCallbacks {
             if let Some(filter) = &filter {
                 tools.retain(|tool| filter.allows(&tool.name));
             }
+            // Rewrite the Agent tool's per-profile `Tools:` lines against the
+            // table that actually exists: `native_tool_defs` rendered them from
+            // each profile's static allowlist, before the host and MCP tables
+            // merged, so a profile could advertise tools this session cannot
+            // call (a disconnected MCP server, a name the global switch
+            // disabled, GitHub tools with no token). The set is deliberately
+            // pre-shape — a deferred MCP tool stays loadable via `select_tools`,
+            // so it still counts as available.
+            let available: std::collections::HashSet<String> =
+                tools.iter().map(|tool| tool.name.clone()).collect();
+            if let Some(slot) = tools.iter_mut().find(|tool| tool.name == "Agent") {
+                let is_available = |pattern: &str| {
+                    available.iter().any(|name| {
+                        crate::tools::tool_policy::matches_profile_tool_pattern(pattern, name)
+                    })
+                };
+                // v2's allowlist-filtered listing: the advertised types are
+                // exactly the ones the spawn gate admits, including the
+                // turn's discovered definitions.
+                let spawn_catalog = match toolset.subagent_manager() {
+                    Some(manager) => manager.spawn_catalog(crate::callbacks::MAIN_AGENT_ID).await,
+                    None => None,
+                };
+                *slot = crate::tools::agent_tool::agent_tool_def_filtered(
+                    toolset.secondary_model().map(|pool| pool.as_ref()),
+                    &is_available,
+                    spawn_catalog.as_ref(),
+                );
+            }
             // Progressive tool disclosure (v2 `shapeTools`): with the
             // `tool_select` switch on and the model declaring
             // `dynamically_loaded_tools`, deferred MCP tools leave the table
@@ -1296,6 +1341,13 @@ impl HostCallbacks for NativeToolCallbacks {
 
     fn goal(&self) -> BoxFuture<'static, Result<Option<GoalContext>, String>> {
         self.inner.goal()
+    }
+
+    fn parse_bash(
+        &self,
+        request: ParseBashRequest,
+    ) -> BoxFuture<'static, Result<Option<Vec<String>>, String>> {
+        self.inner.parse_bash(request)
     }
 
     fn auth_token(
@@ -1420,6 +1472,13 @@ impl HostCallbacks for CountingCallbacks {
 
     fn goal(&self) -> BoxFuture<'static, Result<Option<GoalContext>, String>> {
         self.inner.goal()
+    }
+
+    fn parse_bash(
+        &self,
+        request: ParseBashRequest,
+    ) -> BoxFuture<'static, Result<Option<Vec<String>>, String>> {
+        self.inner.parse_bash(request)
     }
 
     fn auth_token(
@@ -1734,6 +1793,13 @@ impl HostCallbacks for StateStoreCallbacks {
                 Err(_) => Ok(store.goal_context().or_else(|| legacy_store.goal_context())),
             }
         })
+    }
+
+    fn parse_bash(
+        &self,
+        request: ParseBashRequest,
+    ) -> BoxFuture<'static, Result<Option<Vec<String>>, String>> {
+        self.inner.parse_bash(request)
     }
 
     fn auth_token(

@@ -169,7 +169,11 @@
 
 **仍未做**：**Bash 操作数目录**（`extractBashTargetDirs` 的那一半）。它需要**完整 bash 语法树**，而本引擎没有解析器——`Cargo.toml` 依赖表里无 tree-sitter / shell parser，`packages/bash-parser`（v2 侧 `bashTargets.ts` 依赖的解析器）已在本 fork 删除，现存的 `packages/tree-sitter-bash` 是 **TypeScript** 写的递归下降解析器（3700+ 行，带对着官方 wasm 的差分测试），Rust 侧够不着。`native/permission_engine/dangerous_command.rs:11-18` 已把"Rust 无 tree-sitter 语义、用朴素分词器保守退化"记为**既有且被接受**的状态，本项按同一先例处理：**宁可少报一个目录，也不猜错一个**。若要补齐只有两条路——把解析器与 walker 移植到 Rust（数千行，还要移植其对 tree-sitter-bash 0.25.0 的差分契约），或加一个宿主回调让 TS 侧算（`HostCallbacks` + napi 契约变更）。**(6) fs 变更通告**依赖 `instructions.onDidChange`，本 fork 无监听地基，同样未做。
 
-> **⚠ 子代理 profile 契约断链（2026-10-01 扫描发现，未修）**：v2 的 agent profile 有 `subagents` 字段（内置 `agent` profile 声明 `subagents: ['coder', 'explore', 'plan']`），`subagentService.planSpawn` 用 `subagentAllowlistFor` 强制它，越界即 `AGENT_TYPE_NOT_ALLOWED`，另有 `rootDelegationExtras` / `withoutDelegatingTargets` 用于约束「嵌套派生的可达范围不超过根 agent」。fork 侧该链路在第一跳就断：`packages/node-sdk/src/agent-file.ts:12,130` **解析了** `subagents`，但全仓无人消费（`grep '.subagents'` 零命中），于是它既没进 `SubagentProfileWire`（无该字段）也没进 `SubagentDefinition`（无该字段），`register_profile_snapshot` 逐字段拷贝自然也带不过来。**后果**：任何持有 `Agent` 工具的 agent 都能派生**任意**已注册 profile（含插件/自定义），没有 v2 的升级边界。**修法安全**：v2 自身判据是 `if (allowlist !== undefined && !allowlist.includes(...))`，即「未声明 = 不限制」，所以补齐三跳管道（agent-file → SDK profile → `SubagentProfileWire` → `SubagentDefinition`）并仅在声明时强制，对现有未声明的 profile 零行为变化。**未做**，等确认。
+> **Bash 操作数目录已解（2026-11-02，走宿主回调路）**：`HostCallbacks::parse_bash`（trait 默认 `Ok(None)`）+ napi `parse_bash_cb` 通道 + `node-sdk/src/native/sdk-client/bash-target-dirs.ts`（照 v2 `bashTargets.ts` 的 walker，用 `packages/tree-sitter-bash` 供树，预算 500ms/10_000 节点与 v2 `BASH_PARSE_OPTIONS` 同值）。`run_turn.rs` 的 Bash 臂在注入 pass 前向宿主取操作数目录并入 `step_access.dirs`。**降级臂与 v2 自己的 `!parsed.ok || parsed.hasError` 完全同形**：回调缺席（server/daemon 无 JS 宿主、REPL、legacy one-shot 入口）、宿主解析失败（`'null'`）、通道错误——一律落回 declared cwd-only，不丢既有提醒、不改任何判定。`dangerous_command` 一侧**刻意未动**（权限放宽单独成批）。判定：`turn_loop::run_turn::tests` 的 `bash_operand_dirs_reach_the_agents_md_reminder_through_the_host_parser`（全链 e2e）+ `bash_operands_contribute_nothing_when_the_host_has_no_parser` / `the_declared_cwd_still_probes_when_the_host_has_no_parser` / `a_failed_parse_keeps_the_cwd_only_shape`（三条降级臂）+ `node-sdk/test/bash-target-dirs.test.ts` 14 例 walker 语义。
+
+> **⚠ 子代理 profile 契约断链（2026-10-01 扫描发现，未修）**：v2 的 agent profile 有 `subagents` 字段（内置 `agent` profile 声明 `subagents: ['coder', 'explore', 'plan']`），`subagentService.planSpawn` 用 `subagentAllowlistFor` 强制它，越界即 `AGENT_TYPE_NOT_ALLOWED`，另有 `rootDelegationExtras` / `withoutDelegatingTargets` 用于约束「嵌套派生的可达范围不超过根 agent」。fork 侧该链路在第一跳就断：`packages/node-sdk/src/agent-file.ts:12,130` **解析了** `subagents`，但全仓无人消费（`grep '.subagents'` 零命中），于是它既没进 `SubagentProfileWire`（无该字段）也没进 `SubagentDefinition`（无该字段），`register_profile_snapshot` 逐字段拷贝自然也带不过来。**后果**：任何持有 `Agent` 工具的 agent 都能派生**任意**已注册 profile（含插件/自定义），没有 v2 的升级边界。**修法安全**：v2 自身判据是 `if (allowlist !== undefined && !allowlist.includes(...))`，即「未声明 = 不限制」，所以补齐三跳管道（agent-file → SDK profile → `SubagentProfileWire` → `SubagentDefinition`）并仅在声明时强制，对现有未声明的 profile 零行为变化。~~**未做**，等确认。~~
+
+> **已解决（2026-11-02）**：三跳管道与闸口全部落地，本段的「未做」声明作废。(1) **管道**：`SubagentProfileWire.subagents`（rpc/types.rs）→ `JsSubagentProfile.subAgents`（napi_bindings/params.rs，napi 按字段名精确映射故用 camelCase）→ `SubagentDefinition.subagents` → `AgentProfile.subagents`（prompt/profiles.rs，内建 'agent' 默认表 `['coder','explore','plan']`）四跳贯通；宿主侧 `build-handle.ts` 显式投影 profile 字段——**顺带修复了比本段记载更大的断流**：napi 字段名映射把 `AgentFileDefinition.prompt` 静默丢弃，discovered profile 的 system_prompt 正文此前从未到达引擎。(2) **强制**：`subagent/allowlist.rs` 移植 v2 四件套（`subagent_allowlist_for`、`profile_can_delegate`、`without_delegating_targets`、`AGENT_TYPE_NOT_ALLOWED` 文案）；`SubagentManager::spawn_allowlist`（main agent 的 extras = discovered_types − 'agent' − 'tower-worker'）与 `check_spawn_allowed` 构成闸口，agent_tool 与 swarm_tool 两侧装在**定义检查之后**（引擎未知的插件 profile 要先走宿主回退，闸口在前会误杀）。(3) **公告**：Agent 工具描述经 `SpawnCatalog` 按 allowlist 过滤内建 + 追加去重后的 discovered，无 catalog 时静态回退默认表且不再公告 'agent'。判定测试：`the_spawn_gate_enforces_the_callers_allowlist`（拒绝文案精确断言 + extras 放行 + 声明收窄三臂）、`agent_def_lists_discovered_types_the_gate_admits`（公告过滤），及 allowlist.rs 三测（`the_callers_declaration_wins_and_star_unrestricts`、`delegating_targets_are_filtered_for_undeclared_callers`、`the_denial_message_names_the_allowed_set`）。
 
 | **Team 辩论共识引擎** | 无上游对应物（fork 自创，§6.40.2 已登记） | `kimi-agent/src/team/` | ✅ **100% 原生** | 原生实现多 Agent 轮换辩论、跨评估与共识收敛协议。**2026-10-02 更正**：上游全树 `*team*` 零命中，本行原写「Fork 特色增强功能」却未标出处，现补记为 fork 自创。 |
 | **Goal 目标状态机** | `agent-core-v2/src/features/goal/` | `kimi-agent/src/goal/`<br>`src/tools/goal_tools.rs` | ✅ **100% 原生** | 完备实现 Token、Turn 与 Wall-Clock 三维预算管理，支持状态变更事件与 Deadline 调度器。**2026-10-02 修正表格结构**：本行原与上一行挤在同一物理行（双竖线分隔），渲染时会被并成一个单元格。 |
@@ -184,7 +188,7 @@
 |---|---|---|:---:|---|
 | **会话与状态持久化** | `packages/minidb/`<br>`agent-core-v2/src/persistence/` | `kimi-agent/src/session/sqlite_store.rs`<br>`src/storage/state_store.rs` | ✅ **100% 原生** | 采用嵌入式 SQLite（`rusqlite`）替代 TS 内存加 WAL 的 minidb，实现事务级一致性与跨进程多路访问。**（2026-10-02 补注：minidb 读模型整层未接线）** `packages/minidb/src/` 是 **61 个 `.ts` 文件**的实现（WAL + 快照 + trigram 全文索引 + 复合索引 + 压缩 + cluster），但**引擎侧零引用**——`minidb` / `IQueryStore` / `read_model` 在 `packages/kimi-agent/src/**/*.rs` 全仓零命中（仓内仅 `apps/kimi-code/src/native/minidb-worker.ts` 一条 smoke 路径）；`[database]` config section 亦不存在。上游 `persistence/interface/queryStore.ts` 是 `ISessionIndex`、projector、mirror、dirty-journal 与全局搜索 worker 的共同基底。与 §6.41.2 的登记一致（该节同时把「fork 是否需要会话全文检索」列为待裁决项）。**（2026-10-04 订正文件数）** 原写「50 个文件」：实测 `find packages/minidb/src -name "*.ts" \| wc -l` = 61，与 `git ls-tree -r upstream/main packages/minidb/src/` 的 61 一致。 |
 | **状态增量更新** | `agent-core-v2/src/state/` | `kimi-agent/src/session/patch.rs` | ✅ **100% 原生** | 严格实现 RFC 6902 JSON Patch 与 RFC 6901 JSON Pointer（`session/patch.rs:1-4`，1,043 行，含双向 diff 与反向 patch 生成）。**（2026-10-02 更正）** 原文的「毫秒级输出最小增量变更集」是无测试支撑的性能断言，已删除。另注：本行只覆盖 `patch.rs` 这个**算法模块**；fork 的 `StateStore` 本身是固定 6 名的 JSON 文件存储 + 整店快照，与 v2 的 per-participant 事件溯源折叠**不是同一个模型**（§6.41.5 已详述）。**（2026-10-02 补注：§6.40.1 记的 undo 缺口已闭合）** §6.40.1 曾把「undo 后的 state 对齐」记为 partial（服务器 `POST /undo` 从不调 `StateStore::rollback`）；§6.45.4 记其已修；代码里可指到 ——`rollback_state_for_undo` 在 `src/server/mod.rs:7371`（内部 `store.rollback()` 于 `:7380`），由 undo 路由 `:5594` 调用。**该缺口不再是开放项。** |
-| **转录流数据层** | `packages/transcript/` | `kimi-agent/src/native/event_store/`<br>`kimi-agent/src/events/` | ✅ **100% 原生** | 原生 EventStore 与事件分类模型，实现跨平台同构事件折叠。**（2026-10-02 补注：wire 记录无版本概念）** 上游 `wire/record.ts:23-27,38-44` 有 `WIRE_PROTOCOL_VERSION='1.5'`、五级迁移（`wire/migration/`，v1.0→v1.5）、`isNewerWireVersion` 前向拒绝，`metadata` 记录携带 `protocol_version`。fork 的 `wire_events` 表（`session/sqlite_store.rs:439`）**无版本列**，`WIRE_PROTOCOL_VERSION` / `schema_version` 在 `packages/kimi-agent/src/**/*.rs` 零命中（唯一的 `protocol_version` 命中是 ACP 自己的握手，`acp/types.rs:86`，与本表无关）。后果：旧版本会话被新引擎读到时**既不能迁移、也不能识别、也不能拒绝**，只能尽力解析。与 §6.41.2 的登记一致。 |
+| **转录流数据层** | `packages/transcript/` | `kimi-agent/src/native/event_store/`<br>`kimi-agent/src/events/` | ✅ **100% 原生** | 原生 EventStore 与事件分类模型，实现跨平台同构事件折叠。**（2026-10-02 补注：wire 记录无版本概念）** ~~上游 `wire/record.ts:23-27,38-44` 有 `WIRE_PROTOCOL_VERSION='1.5'`、五级迁移（`wire/migration/`，v1.0→v1.5）、`isNewerWireVersion` 前向拒绝，`metadata` 记录携带 `protocol_version`。fork 的 `wire_events` 表（`session/sqlite_store.rs:439`）**无版本列**，`WIRE_PROTOCOL_VERSION` / `schema_version` 在 `packages/kimi-agent/src/**/*.rs` 零命中（唯一的 `protocol_version` 命中是 ACP 自己的握手，`acp/types.rs:86`，与本表无关）。后果：旧版本会话被新引擎读到时**既不能迁移、也不能识别、也不能拒绝**，只能尽力解析。与 §6.41.2 的登记一致。~~ **（2026-11-02 已关闭，见 §6.41.2 首行）**：行级版本戳 + 共享前向拒绝闸口已落地，写入双路打戳、五个读取面全过闸；迁移链判为不适用（fork 表自始为 1.5 形状）。 |
 
 ### 2026-10-02 本轮复核范围（第二段：板块 4、7、8、9、10）
 
@@ -290,18 +294,18 @@
 | 退避序列 | `agent/stepRetry/stepRetry.test.ts`（24 行）+ `_base/utils/retry.ts` | `retryBackoffDelay(i) = min(500·2^i, 32000) + rand()·0.25·base`；`delays[0]∈[500,625]`、`[1]∈[1000,1250]`、`[6]`/`[8]∈[32000,40000]`；长度 = `maxAttempts-1` | `turn_loop/retry.rs:70-77` | **一致**。唯一差异：fork 用 `fastrand::u64(0..=delay/4)`，上界含端点（多 1ms）；上游 `Math.random()` 不含端点。 |
 | 默认免审工具 | `agent/permissionPolicy/policies/default-tool-approve.test.ts`（88 行）+ `default-tool-approve.ts` | 源码名单 **24** 项（含 `WaitFor`、`select_tools`）；测试断言 22 项 approve、6 项不 approve | `permission/mod.rs:42-100` | **一致且为超集**：fork 多出 `ListDirectory` 与 fork 自有只读工具（Lsp / memory_* / Tower*），代码注释已写明理由。**另注：上游测试只覆盖 24 项里的 22 项**（漏了 `WaitFor` 与 `select_tools`），拿它当规格时不要以为 22 就是全集。 |
 | 工具并发调度 | `agent/toolExecutor/toolScheduler.test.ts`（307 行，11 例） | 其中两例：「仅大小写不同的路径要串行」（`C:\Repo\a.ts` vs `c:/repo/A.ts`）、「recursive 访问覆盖后代」 | `turn_loop/types.rs:373-419` | **一致**：`normalize_path` 与上游 `toolContract.ts:228-235` 的 `normalizePath` 四个步骤（反斜杠→斜杠、折叠重复斜杠、`toLowerCase`、去一个尾斜杠）逐条对应；`file_accesses_overlap` 的 recursive 前缀判定与上游 `:218-226` 对应。**但 fork 没有这两条语义的测试**——`tool_scheduler.rs` 里搜不到大小写用例，上游有。 |
-| 计划模式门禁 | `features/plan/planGuard.test.ts`（552 行） | 6 条 guard 用例 + 12 条 exit-review 用例 | `tools/plan_mode.rs:45-94`、`tools/exit_plan_mode.rs` | **部分不一致**，见下。 |
+| 计划模式门禁 | `features/plan/planGuard.test.ts`（552 行） | 6 条 guard 用例 + 12 条 exit-review 用例 | `tools/plan_mode.rs:45-94`、`tools/exit_plan_mode.rs` | ~~**部分不一致**，见下。~~ **已对齐（2026-11-03）**：判据换成 accesses，见下。 |
 
-**计划模式门禁的具体差异（本轮唯一确认的行为差异）**
+**计划模式门禁的具体差异（本轮唯一确认的行为差异）——已于 2026-11-03 修复**
 
 上游判据 `writesOnlyPlanFile(event, plan.path)`（`features/plan/planService.ts:259-270`）：取事件**声明的写访问**（`execution.accesses` 中 `operation` 为 `write`/`readwrite` 的项），**无写访问即否决**，否则要求**每一条**都等于计划文件路径。
 
-fork 判据 `args.get("path")`（`tools/plan_mode.rs:58`）：只看**参数**，且取不到时 `?` 直接返回 `None`（放行）。
+fork 判据 ~~`args.get("path")`（`tools/plan_mode.rs:58`）：只看**参数**，且取不到时 `?` 直接返回 `None`（放行）~~ **已换为 accesses 判据（2026-11-03）**：`plan_mode.rs` 的 write/edit 臂改走 `infer_tool_accesses(tool_name, args)`，过滤 `operation` 为 `Write`/`ReadWrite` 的文件访问——无写访问即否决（对齐上游用例 1），每一条都须解析等于计划文件路径（循环逐条比较，混合写访问同样否决，对齐上游用例 2）；`candidate_path` 的 shell 方言解析与组件级比较保留。
 
-由此两条上游用例在 fork 上会失败：
+由此两条上游用例在 fork 上会失败（**已转绿**，判定：`test_plan_denial_denies_writes_without_a_path_argument`）：
 
-1. **无 `path` 参数**：上游否决（`planGuard.test.ts:269-279` 的 `blocks Write and Edit with no file write access while plan mode is active` 断言 `veto.isError === true`）；fork 放行。
-2. **参数是计划文件、但另有其他写访问**：上游否决（`:281-297` 的 `blocks mixed plan-file and non-plan-file write accesses`）；fork 放行。
+1. **无 `path` 参数**：上游否决（`planGuard.test.ts:269-279` 的 `blocks Write and Edit with no file write access while plan mode is active` 断言 `veto.isError === true`）；fork ~~放行~~ **已否决（2026-11-03）**。
+2. **参数是计划文件、但另有其他写访问**：上游否决（`:281-297` 的 `blocks mixed plan-file and non-plan-file write accesses`）；fork ~~放行~~ **已否决（2026-11-03，循环逐条比较覆盖；fork 的 Write/Edit 经 `infer_tool_accesses` 只声明单条访问，混合场景由判据结构兜底）**。
 
 **实际可达性**：单发 `Write`/`Edit` 通常只声明一条访问，第 2 条在真实调用里不易触发；第 1 条在模型漏 `path` 时会触发（此时工具本身也会因 schema 报错，用户可见结果相近，但**否决原因不同**）。**结论：门禁的判据基础不同（args vs accesses），不是文案或顺序问题。**
 
@@ -3631,7 +3635,7 @@ provider 的 `FakeRegistry`，而它们测的本来就是 provider 而非 regist
 | §6.23.2 | `4fbe065442` #4054 | tracked | NotifyUser 需要"宿主有更新面板"的能力位，Rust 无此概念 |
 | §6.23.3 | `a940f2ff04` #4057 | **ported**（2026-10-03 改判） | 引擎早已发 `agent.status.updated` **且带 `permission` 字段**（`server/engine.rs:1003-1026`，2026-09-12 `21403bf956` 落地，早于本条记录 19 天），profile 写入后还会刷新该事实（`src/server/route_session_io.rs:154`）。原判「引擎无该事件、无 `permission` 字段」与代码相反。余项仅时序：走会话配置路由改模式要等下一轮开始才重新发布。见 §11 |
 | §6.23.4 | `09af3b483f` #3998 | tracked | tower 六簇加固 + wake 打断，全部是新面；仅 tmp+rename 判不适用 |
-| §6.23.5 | `e3bf50c083` #4076 | tracked | undo 需按 prompt 归属撤销；fork 的 undo 只按轮数 |
+| §6.23.5 | `e3bf50c083` #4076 | **not-applicable**（2026-11-03 改判） | fork 的提醒是回合内注入、随当回合折进历史并被 undo_turns 按 turn 整删，无上游的游离形态（详见 allowlist note） |
 | §6.23.6 | `395d537237` #4056 | tracked | workspace trust 披露服务**部分**接线（§10.41）；`gatedMcpServers` 不再是空的，但 v2 还有 `additionalDirs`/`warnings`/`instructionSources` 三类未做，且项目 `.mcp.json` 的取路径不对——见 §10.49 |
 | §6.23.7 | `06ebfc821e` #4081 | tracked | hook 输出不入 prompt，且内容块缺 `meta` 契约 |
 
@@ -4537,7 +4541,7 @@ has_errors = state == "error"     // 两者不再互相矛盾
 
 | 子系统 | 判定 | 出处 | 说明 |
 |---|---|---|---|
-| **wire 协议版本与迁移链** | **missing（本轮我亲自核实）** | `wire/migration/migration.ts:19,29-35`、`wire/record.ts:23-27,38-44` | v2 有 `WIRE_PROTOCOL_VERSION='1.5'` + 五级迁移（v1.0→v1.5）+ `isNewerWireVersion` 前向拒绝（`:37-39`）+ `metadata` 记录携带 `protocol_version`（`record.ts:25,41`）。**fork 的 `wire_events` 表（`session/sqlite_store.rs:439-443`）无版本列，全仓 `protocol_version` / `schema_version` / `WIRE_PROTOCOL_VERSION` 零命中，`native/event_store` 也不认 `metadata` 记录。**后果：旧版本会话被新引擎读到时**既不能迁移、也不能识别、也不能拒绝**，只能尽力解析 |
+| ~~**wire 协议版本与迁移链**~~ | **已移植（2026-11-02；本行原判「missing」已作废）** | `wire/migration/migration.ts:19,29-35`、`wire/record.ts:23-27,38-44` | v2 有 `WIRE_PROTOCOL_VERSION='1.5'` + 五级迁移（v1.0→v1.5）+ `isNewerWireVersion` 前向拒绝（`:37-39`）+ `metadata` 记录携带 `protocol_version`（`record.ts:25,41`）。**fork 侧落点（行存储而非 JSONL，版本是行级戳而非前导 metadata 记录）**：`native/event_store/mod.rs` 有 `WIRE_PROTOCOL_VERSION="1.5"`、`compare_wire_versions`、`is_newer_wire_version`、`WireProtocolTooNew` 与共享闸口 `refuse_newer_wire_version`；写入侧 `SqliteStore::append_wire_event_json` 与 `SqliteEventStore` 双双打戳；读取侧冷投影（`read_fold_rows`）与四个 journal 切片 helper（`get_wire_events`/`interaction_wire_events`/`prompt_wire_events`/`task_wire_events`）全部过闸，新版行拒绝而非半读；列出现前的 NULL 行按本版本读取（fork 的表自始只有 1.5 一个形状）。**五级迁移链刻意为空**：那些迁移变换的是 upstream 自己的历史 JSONL 形状（v1.0→v1.4），fork 的 SQLite store 从第一天就是 1.5 形状，无旧形状可迁——§10.34（2026-10-03）早已给出三条不适用理由，本行判定与其一致。**（2026-11-02 更正本行原判）**：原判「missing……全仓零命中」成文时版本列与 event_store 闸口已存在（§10.34 的产出），属失真登记；本轮补齐的是写入打戳与四个切片 helper 的闸口。判定测试：`append_wire_event_stamps_the_current_protocol_version`、`the_wire_readers_refuse_a_newer_protocol_version`、`null_protocol_versions_read_as_the_current_version`（sqlite_store/tests.rs）+ event_store 既有三测 |
 | **`app/sessionExport/` 产物偏薄** | **partial（仅引擎 REST 路径，见 §10.30）** | `app/sessionExport/sessionExportService.ts:42-279`、`manifest.ts:28-51`、`wire-scan.ts` | fork 的 `build_session_export_zip`（`src/server/mod.rs:1680-1721`）只打包**两个成员**：`session.json` + `transcript.md`；v2 打整个会话目录 + `manifest.json`（16 字段：版本、协议版本、os、shellEnv、首末活动时间、installSource…）+ **四个日志文件** + wire 扫描。**而 `locales/en.json:2600` 正在叫用户出错时跑 `/export-debug-zip` 把文件交给诊断**——用户按提示交出的档案缺 manifest、缺日志、缺版本溯源。另 v2 导出前会 flush 活会话，fork 不做 |
 | **`IQueryStore` / minidb 读模型未接线** | **missing（最大单点）** | `persistence/interface/queryStore.ts:96-118`、`persistence/configSection.ts:12-62` | `packages/minidb/` 是完整的 61 个 `.ts` 文件实现（WAL + 快照 + trigram 全文索引 + 复合索引 + 压缩 + cluster），但**引擎侧零引用**（`minidb`/`read_model` 在 Rust 全仓零命中；仓内仅 `apps/kimi-code/src/native/minidb-worker.ts` 一条 smoke 路径）。`IQueryStore` 是 v2 `ISessionIndex`、其 projector、mirror、dirty-journal 与全局搜索 worker 的共同基底。连带 `[database]` config section 整个不存在（`config/mod.rs` 无 `database`/`MINIDB`）。**（2026-10-04 订正）** 原文的「44 文件」与 `queryStore.ts:87-115` 均不成立：实测 `find packages/minidb/src -name "*.ts" \| wc -l` = **61**（与 `git ls-tree -r upstream/main packages/minidb/src/` 的 61 一致），`IQueryStore` 接口在 `:96-118`（`:87-115` 落在接口之前的 `ColumnPageQuery` 定义上） |
 | **遥测事件目录 ~10/60 → 13/79（引擎侧；含宿主 22/79）** | **前三项本轮已补（§10.39）；分母与分子已于 2026-10-03 订正，见 §11** | `app/telemetry/events.ts:599-1359` | 缝隙本身可用（`callbacks.rs:199-207` 的 `telemetry`、`src/server/mod.rs:307-334` 的 `TelemetrySink`），缺的是目录。**最值得补的是解释故障的那批**：`api_error`、`compaction_failed`、`tool_call_dedup_detected`、`tool_call_repeat`、`permission_approval_result`、`session_load_failed`、`agent_create_failed`、`context_projection_repaired`。注意 fork 的 TS 宿主侧独立上报了其中若干（`model_switch`/`thinking_toggle`/`plugin_toggle`），所以缺的是**引擎侧**覆盖而非管道 |
@@ -4917,7 +4921,7 @@ usage 累积 + detect() + 遥测  ← 三合一（见上表）
 |---|---|---|---|
 | 3 | **14 个 hook 事件** | 模板 `notify_pre_compact`（`external_hooks.rs:303-318`）是 16 行（原写「`:298-313` 是 15 行」——行号已漂移，且该区间的真实行数是 16 不是 15）；`notify_session_lifecycle`（`:326`）已支持任意事件名 + 三个参数，**14 个事件里 11 个可用它实现**（各加一个 8-15 行包装）。另 3 个需新方法：`SessionHeartbeat`（要 session 心跳定时器，+30 行）、`SubagentStart/Stop`（挂在 `subagent/manager.rs` 生命周期上）。插桩点已现成：`permission/mod.rs:483` `evaluate`（覆盖 Permission 两个）、`run_turn.rs:1218` `emit_step_begin_event`（覆盖 TurnStarted）、`tool_scheduler` 工具完成处（覆盖 TaskStarted）。**无否决风险**：上游 `agentExternalHooksService.ts:118-132` 的 `fireAndForget` 丢弃返回值并 `catch {}`，纯观察。**（2026-10-04 行号重定位：原引 `:298-313`/`:321`/`:475`/`:1203` 均已漂移——该项本身已于 2026-10-03 完成，见 §10.27）** | **2-3 人天** |
 | 1 | **frontmatter 真 YAML** | 引入 `serde_yaml`，替换 `skills/mod.rs:98-172`（约 75 行）与 `tower/frontmatter.rs:19-48`（30 行）两处手写解析；需保留现有 9 项 skills 测试行为并补 4 条失败用例的回归。**风险点**：`scopes` 当前的块列表解析（`skills/mod.rs:188+`）与 `_` 别名拼写（`:129-146`）不能被 YAML 库的行为覆盖。**（2026-10-04 行号重定位：该项已于 2026-10-02 完成，见 §10.24——两处手写解析已换成 `frontmatter.rs` 的 `parse_frontmatter`（`skills/mod.rs:136` 与 `tower/frontmatter.rs:56-73` 都委托它）；`scopes` 现由 `parse_scopes_value`（`skills/mod.rs:54-83`）从真 YAML 的 `Value` 读，`_`/`-` 两种拼写在 `:154-164` 手工比对——即「风险点」两条都由 YAML 库承担了，不再是风险）** | **2-3 人天** |
-| 2 | **分叉 turn_index** | `sqlite_store.rs:834-863` 加参数 + 按 v2 `forkTurnSlice.ts:80-99` 的 `origin.kind` 分类切边界 + promptId 配对（`:118-176`）；调用方两处（`src/server/mod.rs:5165` 解析 body 的 `turnIndex`、`acp/mod.rs:1015`）；**注意 fork 的历史按 `save_turn` 分行存储，切分要按 turn 而非按 message**。**（2026-10-04 行号重定位：该项已于 2026-10-02 完成，见 §10.23——`fork_session` 现在 `sqlite_store.rs:1042`；REST 解析在 `server/route_sessions.rs:459`；ACP 调用在 `acp/mod.rs:1020`。v2 侧 `origin.kind` 分类的真实位置是 `forkTurnSlice.ts:86-103` 的 `isUserVisibleTurnRecord`、promptId 配对在 `:185-190`；原引的 `:80-99`/`:118-176` 已漂移）** | **3-4 人天** |
+| 2 | **分叉 turn_index** | `sqlite_store.rs:834-863` 加参数 + 按 v2 `forkTurnSlice.ts:80-99` 的 `origin.kind` 分类切边界 + promptId 配对（`:118-176`）；调用方两处（`src/server/mod.rs:5165` 解析 body 的 `turnIndex`、`acp/mod.rs:1015`）；**注意 fork 的历史按 `save_turn` 分行存储，切分要按 turn 而非按 message**。**（2026-10-04 行号重定位：该项已于 2026-10-02 完成，见 §10.23——`fork_session` 现在 `sqlite_store.rs:1042`；REST 解析在 `server/route_sessions.rs:470`；ACP 调用在 `acp/mod.rs:1020`。v2 侧 `origin.kind` 分类的真实位置是 `forkTurnSlice.ts:86-103` 的 `isUserVisibleTurnRecord`、promptId 配对在 `:185-190`；原引的 `:80-99`/`:118-176` 已漂移）** | **3-4 人天** |
 | 5+15 | **micro `detect()` + 遥测 `api_error`** | 新增一个跨 step 的 usage 累积结构（`input_cache_read` / `input_cache_creation` / tokens），`server/engine.rs:1348` 前加判据，配置面加 2 个常量；遥测侧同源数据报 `api_error`。**（2026-10-04 状态与行号）** 两项都已完成：P1-5 见 §10.25（`compaction/micro.rs:132-155` 的 `detect_micro_compaction`，调用点 `server/engine.rs:1416-1429`），`api_error` 见 §10.39。**原估的「新增跨 step 的 usage 累积结构」被证伪**——cache-miss 判据读的是「距上次 assistant 输出的空闲时长」而非 usage（判据在**退役副本** `.tmp/v2-ref/…/agent/microCompaction/microCompactionService.ts:94-95`；**上游无该模块**，见 §1 「上下文智能压缩」行的裁定与 §6.44.1），故本行后半的合并理由不成立（§6.45.2 已记）。`server/engine.rs:1348` 现在是注释块中部，与判据无关 | **2-3 人天**（已完成） |
 | 6 | ~~**wire 版本 + metadata + 迁移链**~~ **已完成 2026-10-03**（§10.34） | 版本列 + 打戳 + 前向拒绝已落地；**五个迁移经证据核验无物可迁**（见 §10.34 三条理由），故不建空迁移链 | **已完成**（原 4-6 人天为五个迁移定价，那些迁移不适用） |
 | 7 | ~~**磁盘日志 + 导出 ZIP**~~ **原描述不成立（§10.30）**；两半残余**均已完成 2026-10-03**：引擎 REST 导出见 §10.31，会话级日志接线见 §10.33 | 引擎侧 REST 导出补 manifest + 日志成员 + 遍历会话树，参照 `packages/node-sdk/src/native/sdk-rpc-client-native.ts` 的 `exportSession`（现 `:1760-1861`，manifest 构造在 `:1802`、会话树遍历在 `:1819-1840`）。**（2026-10-04 状态与行号重定位：原引 `:3642-3698` 已漂移——那现在是 fork 的 turnIndex 越界检查，与导出无关；本行原列的「残余只剩」两项都已在 §10.31/§10.33 落地）** | **已完成** |
@@ -4975,7 +4979,7 @@ Windows 备注由常量变为 `windows_notes(shell_name)`，按 pwsh / powershel
 因此本地化它不构成对 v2 措辞的偏离。
 
 **修复**：新增 `tools/mod.rs` 的 `arg_error_text` / `arg_error` 两个辅助函数
-（`packages/kimi-agent/src/tools/mod.rs:797`），把句式的可变部分做成 `{{tool}}` / `{{field}}` 参数，
+（`packages/kimi-agent/src/tools/mod.rs:806`），把句式的可变部分做成 `{{tool}}` / `{{field}}` 参数，
 句式本身收敛为 6 个键：`engine.tools.argMustBe{String,Boolean,Number,Array}`、`argMustNotBeEmpty`、
 `argRequired`（`packages/i18n-catalog/src/locales/en.ts` 与 `zh.ts` 同步，占位符一致）。
 **实测 20 处调用点**改为按**句式**取键，而不是按（工具, 字段）组合生键，因此目录只增长 6 条。
@@ -7872,7 +7876,7 @@ variant and no `permission` field on any event ⋯⋯ **no wire representation a
 | `20a2cea72f` #4061 WaitFor | tracked | **部分**（上限已落地） | `WAIT_FOR_MAX_TIMEOUT_S`=90、`1..=90` 校验、schema `maximum:90`、steer 中断均在；**余 3 项**：`collect_extras` / `[completed_during_wait]` 在生产代码零命中（只有 `packages/kimi-agent/src/tools/task_tools.rs:846,849,1925,1952` 的注释）、重复等待告警零命中、子代理描述变体零命中 |
 | `06ebfc821e` #4081 hook 折叠 | tracked | **仍 tracked** | `packages/kimi-agent/src/tools/external_hooks.rs:271-293` 只有观察路径，`:275-276` 自陈「Known partial parity」；`ContentBlock` 无 `meta`（`packages/kimi-agent/src/rpc/types.rs` 零命中） |
 | `395d537237` #4056 trust 披露 | tracked | **部分（≈1/5）** | `gatedMcpServers` 已通；`additionalDirSources` / `instructionSources` / `describeGatedActivation` 在引擎与 `packages/node-sdk/src` **均零命中** |
-| `e3bf50c083` #4076 undo 移除提醒 | tracked | **仍 tracked** | `owner_prompt_id` / `isUndoAnchor` 零命中；提醒只在 `packages/kimi-agent/src/session/mod.rs:1146,1843` 记录，undo 路径不清理 |
+| `e3bf50c083` #4076 undo 移除提醒 | tracked | **not-applicable**（2026-11-03 改判） | 上游修的是游离提醒（TurnEnded 即入史、不属任何回合）；fork 提醒注入当回合 messages、随当回合折进历史，undo_turns 按 turn_id 整删（sqlite_store.rs:1341），无悬挂 |
 | `a940f2ff04` #4057 | tracked | ❌ **误判 → 已改判 `ported`** | 见 §11.5 |
 | `4fbe065442` #4054 NotifyUser 门禁 | tracked | **仍 tracked** | `notifyUserAvailable` / `update_panel` 零命中（宿主能力位不存在） |
 | `09af3b483f` #3998 tower 硬化 | tracked | **仍 tracked（6 簇全缺）** | 独立只读审计逐簇核实并给出上游对照；本轮抽验其关键断言：`packages/kimi-agent/src/tools/tower/mod.rs:728,740` 只吃 `force:bool`、schema `:1300` 只有 `force`；`packages/kimi-agent/src/tools/tower/store.rs:403` 的 `mark_agent_dead(agent_id)` 单参；`packages/kimi-agent/src/tools/tower/types.rs:37,39` 的 `death_status`/`death_reason` 只有 `None` 初始化；`last_inbox_read_at` 零命中；锁是进程内 `store.rs:28-43` |
@@ -8203,7 +8207,7 @@ EngineSessionHandle.dispose()          session-handle.ts:486-488   → Promise<v
   → Session::shutdown(&self)           session/mod.rs:530-536       → store(true) + notify_one()
 ```
 
-契约文档自己写的是「the pump task is **signalled** to stop」（`packages/kimi-agent/napi-contract.d.ts:1587`），
+契约文档自己写的是「the pump task is **signalled** to stop」（`packages/kimi-agent/napi-contract.d.ts:1616`），
 而 `shutdown` 的文档写明释放发生在「pump **在下一轮循环顶部、in-flight turn 结束后**」。
 **所以 `await handle.dispose()` 之后调用 `rmSync` 是在赌一个没人承诺的时序。**
 
@@ -8277,7 +8281,7 @@ D1 是契约问题，会让每个"close 之后删数据目录"的宿主动作都
 | 结论 | 位置／命令 |
 |---|---|
 | dispose 只发信号 | `packages/kimi-agent/session-handle.ts:486-488,729-731`；`src/napi_bindings.rs:3178-3193`；`src/session/mod.rs:530-536` |
-| 契约措辞是 signalled | `packages/kimi-agent/napi-contract.d.ts:1587` |
+| 契约措辞是 signalled | `packages/kimi-agent/napi-contract.d.ts:1616` |
 | 无"停全部任务"原语 | `git grep -n 'stop_all_on_exit\|stop_all_tasks\|terminate_all'` → 零命中 |
 | `stop` 只被单测调用 | `src/storage/task_runner.rs:2080,2094,2147,2157,2222,2306,2328,2364,2391,2402` |
 | runner 是进程级 | `src/storage/task_runner.rs:1007-1008` |
@@ -8573,11 +8577,12 @@ HRESULT -2147024891`、以及由它们级联的 `assertion left == right failed`
 （`agent-core-v2` / `kap-server` / `klient` / `acp-server`）的提交共 **99 条**（含此前 12 条已记录项）。
 逐条判定落在 `scripts/upstream-v2-delta-allowlist.json`，由
 `bun scripts/check-upstream-v2-delta.mjs --update` 维护：
-**ported 13 / tracked 62 / not-applicable 24**，`bun run check:upstream-v2-delta` 全绿
-（20b59915bb / b2603264ec 两条 Gemini 4、6e7cc909da `dangerous_command_guard` 全量关闭
-已在同一轮补完后改判 ported；f28c51c01f 的引擎侧已实现，但 napi 通道未通，仍记 tracked）。
-62 条 tracked = 本节新增的 **55 条** + §6.1 / §6.8.2 / §6.25 已记录的 7 条。
+**ported 14 / tracked 61 / not-applicable 24**，`bun run check:upstream-v2-delta` 全绿
+（20b59915bb / b2603264ec 两条 Gemini 4、6e7cc909da `dangerous_command_guard` 全量关闭、
+f28c51c01f `[mcp] defaultDeferred`（含 napi/SDK 通道）已在同一轮补完后改判 ported）。
+61 条 tracked = 本节新增的 **54 条** + §6.1 / §6.8.2 / §6.25 已记录的 7 条。
 每条「缺什么、上游行为在哪」写在 allowlist 的 `note`；本节点只做分组与排期。
+（2026-11-02 起逐条移植推进，上方计数为初检时点快照；实时 verdict 计数以 allowlist 为准——2026-11-03 为 ported 35 / tracked 40 / not-applicable 24。）
 
 **发布同步提交是行为的唯一载体**：`d18a7bcd31`（2.3.3）、`1011d8b63f`（2.3.2）、
 `0c63065fbd`（2.4.0）、`cca9bae3d7`（2.4.0 第二轮）内部的 release 分支提交在 main 上没有
@@ -8587,19 +8592,20 @@ HRESULT -2147024891`、以及由它们级联的 `assertion left == right failed`
 **A. 引擎行为（小改，可先排期）**
 
 - 待办提醒：`47a518ed4e`（按步骤计数、放宽文案）、`da5918c0c8`（进度/最后一项/下一步提示）。
-- 子代理：`93137cad20`（停止后回传部分输出）、`85077a4190`（Tools 列表按可用性过滤）、
-  `f0bc988bbc`（继承父 profile 以对齐请求前缀）、`e3efbb9d3b`（限定 model pool）。
+- 子代理：`93137cad20`（停止后回传部分输出）、`85077a4190`（Tools 列表按可用性过滤）；
+  `f0bc988bbc`（继承父 profile 以对齐请求前缀）、`e3efbb9d3b`（限定 model pool）已移植（2026-11-02，B-1 #6/#7）。
 - 权限：`6e7cc909da`（`dangerous_command_guard=false` 同时关两条 ask 策略）已补完。
-- 钩子：`c1459a6184`（在会话工作目录运行）。
+- 钩子：`c1459a6184`（在会话工作目录运行）已移植（2026-11-03，B-4 #43）。
 - MCP：`4be3f0b741`（瞬时失败自动重连，**与 AGENTS.md 的「无重连」政策冲突，待裁决**）、
-  `7ccac2b45b`（公告前等首次发现）、`0c63065fbd`（#4492 抑制重连状态重复）、
-  `f28c51c01f`（`[mcp] defaultDeferred`：**引擎侧与 CLI 路径已实现**，缺 napi/SDK 的 `[mcp]`
-  通道——与全局超时同一缺口，补通道后才能改判 ported）。
-- `select_tools`：`e4c99a3bad`（区分失效/策略禁用/未知并解释连续失败）。
-- 压缩 / 媒体：`68a2838941`（压缩保住 prompt cache）、`a9dc3a9af4`（压缩请求保留动态工具上下文）、
-  `c15638b0a1`（中断时取消在途上传）、`8dabf4a10e`（媒体降级状态跨轮/跨压缩保留）。
-- LLM：`88c3becefc`（历史思考键与 usage 回退）、`c151d5a3d0`（`KIMI_CODE_LLM_HEADERS_TIMEOUT_MS`）、`9f0693becb`
-  （统一 `/models` schema，落点在宿主 `packages/oauth`）、`0327e8e9a8`（模型迁移元数据，宿主）。
+  `7ccac2b45b`（公告前等首次发现）已移植（2026-11-02，B-1 #8）、`0c63065fbd`（#4492 抑制重连状态重复）。
+  `f28c51c01f`（`[mcp] defaultDeferred` + 全局超时的 napi 通道）已补完。
+- `select_tools`：`e4c99a3bad`（区分失效/策略禁用/未知并解释连续失败）已移植（2026-11-02，B-4 #31）。
+- 压缩 / 媒体：`68a2838941`（压缩保住 prompt cache）、`c15638b0a1`（中断时取消在途上传）、
+  `8dabf4a10e`（媒体降级状态跨轮/跨压缩保留）已移植（2026-11-02，B-1 #2/#3/#10）；
+  `a9dc3a9af4`（压缩请求保留动态工具上下文）复核改判 not-applicable（2026-11-02，B-1 #1）。
+- LLM：`88c3becefc`（历史思考键与 usage 回退）、`c151d5a3d0`（`KIMI_CODE_LLM_HEADERS_TIMEOUT_MS`）已移植（2026-11-02，B-1 #9/#11）；`9f0693becb`
+  （统一 `/models` schema）已移植（2026-11-03，B-3 #39：宿主 `packages/oauth` + Rust `provider_refresh.rs` 双源同步）、`0327e8e9a8`（模型迁移元数据：
+  **数据面已落地**（§27.4，TS/Rust 双层 `upgrade` 字段 + parity）；剩余 TUI 迁移提示流与退役切换解析属产品面特性，建议单独立项——2026-11-03 核实）。
   Gemini 4 的 `20b59915bb` / `b2603264ec` 已补完（thinkingLevel + `off` fail-fast）。
 - prompt：`39d149eb64`（按请求类型决定交付物）、`3154ec41f0`（验证范围限定本次改动）、
   `cca9bae3d7`（2.4.0 成批改写，**需先定 prompt 政策**）。
@@ -8609,9 +8615,11 @@ HRESULT -2147024891`、以及由它们级联的 `assertion left == right failed`
 
 **B. 会话 / 存储 / 服务 / 工作区**
 
-- 跨进程会话锁：`3079e9515f`（补上后 `0a90e2e8a2` / `e7f1a99fc5` 由 not-applicable 重新适用）、
-  `366fafbf92`（空闲会话回收）、`5710c5496a`（close/archive 驱逐广播状态）、
-  `67325c1b25`（turn ordinal / wedged 标记）、`256ce61f0c`（大会话恢复性能，先做基准）。
+- ~~跨进程会话锁：`3079e9515f`~~ **已移植（2026-11-02）**：`session/lock.rs` 全量移植 #4246（claim/reclaim/存活判定/env 开关/降级），
+  持锁三缝（server `execute()`、undo/compact 路由、napi/CLI pump）+ 写守卫 + takeover 双落点；
+  `0a90e2e8a2`（僵尸回收）随之一并 ported，`e7f1a99fc5` 重新适用为 tracked（引擎/SDK 链已通，剩 TUI 占用提示流）。
+  余下：`366fafbf92`（空闲会话回收）、`67325c1b25`（turn ordinal / wedged 标记）、`256ce61f0c`（大会话恢复性能，先做基准）。
+  `5710c5496a`（close/archive 驱逐广播事件状态）已移植（2026-11-03）：`EventHub.evict_lane` 接 archive/delete 三处路由，fork 无 close 事件与 transcript 缓存对应物。
 - fs / git 协议：`5b93669767`（`allow_ignored_globs`）、`1853dae4ff`（目录级 git status）、
   `e2ad1dcf21`（符号链接目录的预算与根前缀检测）。
 - 默认工作区：`47002256a0` + `e5e56bc5fe`；模型切换确认 / effort 提示 / `/compact` 排队由
@@ -8622,17 +8630,17 @@ HRESULT -2147024891`、以及由它们级联的 `assertion left == right failed`
 - Plan 模式：`0325b755db`（**删 EnterPlanMode，属工具/协议面改动，需批准**）。
 - 远程执行环境：`5f3ab5fac8`（**与仍保留的 `packages/kaos` 冲突，待裁决**）。
 - remote control：`c69bd6c5a0`、`b510fa9aec`；评分：`ce0834a8f3`；
-  区域/telemetry：`273ddb077a`、`da4e2f57a3`；技能布局：`759958afdf`。
+  区域/telemetry：`273ddb077a`（未登录安装的 local-signals 区域推断链 + resolver + telemetry resolveRegion 通道）与 `da4e2f57a3`（global 遥测端点）均已移植（2026-11-03，B-3 #39）；技能布局：`759958afdf`。
 
 **C. 需要用户裁决的政策面**：MCP 自动重连（`4be3f0b741`）、远程环境与 kaos
 （`5f3ab5fac8`）、Plan 协议（`0325b755db`）、prompt 成批改写（`cca9bae3d7`）、
 多根工作区落层（`093e8f46c4`）。
 
-**D. 本轮判定为 ported 的 9 条（另有 4 条旧账已是 ported，合计 13）**：`eb1205c402`（码点截断）、
+**D. 本轮判定为 ported 的 10 条（另有 4 条旧账已是 ported，合计 14）**：`eb1205c402`（码点截断）、
 `8a5a4307cb`（同轮刷新工具目录）、`afd95f64a5`（技能提示/steering）、`89e07b81df`
 （任务通知进 transcript）、`78b72fe456`（prompt swarm_mode）、`461c6e92d5`（interaction ops 回填）、
 `20b59915bb`（Gemini 4 thinkingLevel）、`b2603264ec`（Gemini 4 `off` fail-fast）、
-`6e7cc909da`（guard=false 关闭全部内置 ask 策略）。
+`6e7cc909da`（guard=false 关闭全部内置 ask 策略）、`f28c51c01f`（`[mcp]` 默认值全链路）。
 `4bad441fef` / `a9e764db61` / `f8925ab95e` 等发布载体按「内容已被已记录条目覆盖」记
 not-applicable；24 条 n/a 的逐条理由见 allowlist 的 `note`。
 

@@ -74,10 +74,11 @@ pub fn fork_incompatibility(
     }
     if let Some(m) = model {
         let trimmed = m.trim();
-        if !trimmed.is_empty()
-            && trimmed != PRIMARY_SUBAGENT_MODEL_CHOICE
-            && caller_model.map(|cm| cm != trimmed).unwrap_or(true)
-        {
+        // v2 #4418 removed the implicit `primary` choice, so it is no longer
+        // an inherit synonym here — any explicit model is an override
+        // attempt unless it names the caller's own model (v2
+        // `forkIncompatibility`: `args.model !== own.modelAlias`).
+        if !trimmed.is_empty() && caller_model.map(|cm| cm != trimmed).unwrap_or(true) {
             return Some(FORK_WITH_MODEL_UNAVAILABLE);
         }
     }
@@ -310,10 +311,11 @@ mod tests {
             fork_incompatibility(None, None, Some("other-model"), "coder", Some("my-model")),
             Some(FORK_WITH_MODEL_UNAVAILABLE)
         );
-        // 'primary' model passes
+        // v2 #4418: 'primary' is no longer an inherit synonym — it is an
+        // override attempt like any other value.
         assert_eq!(
             fork_incompatibility(None, None, Some("primary"), "coder", Some("my-model")),
-            None
+            Some(FORK_WITH_MODEL_UNAVAILABLE)
         );
         // Matching caller_model passes
         assert_eq!(

@@ -3,6 +3,7 @@
 //! Provides in-process native subagent definitions, concurrent task spawning,
 //! inter-agent messaging, and lifecycle management without Node/Bun dependencies.
 
+pub mod allowlist;
 pub mod btw;
 pub mod fork;
 pub mod manager;

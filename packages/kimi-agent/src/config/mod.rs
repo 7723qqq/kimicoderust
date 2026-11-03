@@ -1049,26 +1049,23 @@ impl KimiConfig {
         let Some(section) = self.secondary_model.as_ref() else {
             return Ok(None);
         };
-        let force = section.force == Some(true);
+        // v2 #4418 removed `force`: a lone `default_model` already pins every
+        // spawn, so the key is ignored with a warning instead of failing
+        // session startup (v2 `SECONDARY_MODEL_FORCE_REMOVED_MESSAGE`).
+        if section.force == Some(true) {
+            tracing::warn!(
+                "[secondary_model] 'force' is no longer supported and is ignored: a lone \
+                 default_model already pins every Agent and AgentSwarm subagent to that model, \
+                 and a [secondary_model.models] table only offers its own entries. Remove the key."
+            );
+        }
         let table = section.models.as_ref();
         let default_model = section
             .default_model
             .as_deref()
             .or(section.model.as_deref());
 
-        if force && table.is_some() {
-            return Err(
-                "[secondary_model].force cannot be combined with [secondary_model.models]: the pool table only exists to offer the main agent a choice, and force removes that choice"
-                    .into(),
-            );
-        }
         if table.is_none() && default_model.is_none() {
-            if force {
-                return Err(
-                    "[secondary_model].default_model is required when [secondary_model].force is set"
-                        .into(),
-                );
-            }
             return Ok(None);
         }
         let entries: Vec<(String, String)> = match table {
@@ -1087,8 +1084,9 @@ impl KimiConfig {
             .iter()
             .any(|(alias, _)| alias == crate::subagent::secondary::PRIMARY_MODEL_CHOICE)
         {
+            // v2 `SECONDARY_MODEL_PRIMARY_MODEL_RESERVED_MESSAGE`.
             return Err(format!(
-                "[secondary_model.models] key \"{}\" is reserved: it always binds the caller's own model. Rename the pool entry.",
+                "[secondary_model.models] key \"{}\" is reserved. Rename the pool entry.",
                 crate::subagent::secondary::PRIMARY_MODEL_CHOICE
             ));
         }
@@ -1139,7 +1137,6 @@ impl KimiConfig {
         )?;
 
         Ok(Some(SecondaryModelPool {
-            force,
             default_model: default_model.to_string(),
             caller_model_alias: target_model
                 .map(str::to_string)

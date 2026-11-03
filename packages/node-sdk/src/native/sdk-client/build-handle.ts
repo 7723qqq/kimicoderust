@@ -41,6 +41,7 @@ import {
 } from '../native-llm-resolver';
 import type { SDKRpcClientNative } from '../sdk-rpc-client-native';
 import { isApprovedForSession, rememberSessionApproval } from '../session-approvals';
+import { bashTargetDirs } from './bash-target-dirs';
 import {
   toTokenUsage,
   normalizeEngineTurnId,
@@ -845,6 +846,25 @@ export async function buildSessionHandle(
         updated_at: goal.updatedAt,
       });
     },
+    parseBash: async (request: string) => {
+      // `host/parse_bash`: the AGENTS.md reminder's operand directories for a
+      // Bash call (v2 `extractBashTargetDirs`). The host owns the bash syntax
+      // tree; the engine has none. `'null'` when the request or the command
+      // does not parse — the engine keeps the declared cwd and nothing more,
+      // v2's own fallback shape, so a parse failure never costs the reminder
+      // nor the turn.
+      try {
+        const { command, cwd, home } = JSON.parse(request) as {
+          command: string;
+          cwd: string;
+          home: string;
+        };
+        const dirs = bashTargetDirs(command, cwd, home);
+        return dirs === null ? 'null' : JSON.stringify(dirs);
+      } catch {
+        return 'null';
+      }
+    },
     turnEvent: (eventJson: string) => {
       let parsed;
       try {
@@ -950,6 +970,24 @@ export async function buildSessionHandle(
   const githubCreds = resolveGithubCredentials(config);
   const mcpConfig = await deps.loadSessionMcpConfig(workDir);
   const mcpServers = resolveMcpServersForEngine(mcpConfig);
+  // `[mcp]` defaults never had a transport before: per-server values rode
+  // `mcpServers`, but the section itself (both timeouts and #4210's
+  // `defaultDeferred`) stopped at the host, so SDK/TUI sessions silently
+  // ignored it. The engine applies per-server > section > built-in.
+  const mcpDefaults =
+    config.mcp === undefined
+      ? undefined
+      : {
+          ...(config.mcp.startupTimeoutMs !== undefined
+            ? { startupTimeoutMs: config.mcp.startupTimeoutMs }
+            : {}),
+          ...(config.mcp.toolTimeoutMs !== undefined
+            ? { toolTimeoutMs: config.mcp.toolTimeoutMs }
+            : {}),
+          ...(config.mcp.defaultDeferred !== undefined
+            ? { defaultDeferred: config.mcp.defaultDeferred }
+            : {}),
+        };
   const subagentTimeoutMs = resolveSubagentTimeoutMs(config);
   const swarmTimeoutMs = resolveSwarmTimeoutMs(config);
   const maxAttempts = resolveMaxAttemptsPerStep(config);
@@ -1057,8 +1095,21 @@ export async function buildSessionHandle(
     towerEnabled,
     // Session profile catalog snapshot (P46): the native `Agent` tool spawns
     // only profiles registered here; without it every `Agent` call falls
-    // back to the host, which has no tool runtime on this transport.
-    subagentProfiles: agentProfiles.length > 0 ? [...agentProfiles] : undefined,
+    // back to the host, which has no tool runtime on this transport. The
+    // projection is explicit: the napi boundary maps by field name, and the
+    // record's `prompt` / `subagents` only reach the engine when they are
+    // named `systemPrompt` / `subAgents` here.
+    subagentProfiles:
+      agentProfiles.length > 0
+        ? agentProfiles.map((profile) => ({
+            name: profile.name,
+            description: profile.description,
+            systemPrompt: profile.prompt,
+            tools: profile.tools,
+            disallowedTools: profile.disallowedTools,
+            subAgents: profile.subagents,
+          }))
+        : undefined,
     // The concurrent-provider race (`[agent].multi_llm`). Non-empty outranks
     // `nativeLlm` in the engine's LLM selection.
     providers: multiLlmProviders ? [...multiLlmProviders] : undefined,
@@ -1081,6 +1132,7 @@ export async function buildSessionHandle(
     ...(githubCreds.githubBaseUrl ? { githubBaseUrl: githubCreds.githubBaseUrl } : {}),
     ...(nativeLlm ? { nativeLlm } : {}),
     ...(mcpServers.length > 0 ? { mcpServers } : {}),
+    ...(mcpDefaults !== undefined ? { mcpDefaults } : {}),
     // The engine installs its OAuth service from this directory, so stored
     // grants are injected and refreshed on the same connection.
     mcpOauthDir: deps.mcpOAuthDir,

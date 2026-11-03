@@ -366,6 +366,14 @@ export const McpConfigSchema = z.object({
    * the client built-in default when unset.
    */
   toolTimeoutMs: McpTimeoutMsSchema.optional(),
+  /**
+   * Global default for on-demand tool disclosure (v2 #4210,
+   * `[mcp] defaultDeferred`). A server that does not declare `deferred`
+   * inherits this value; an explicit per-server `deferred` wins. Takes effect
+   * only when the `tool_select` experiment is on and the model declares
+   * `dynamically_loaded_tools`.
+   */
+  defaultDeferred: z.boolean().optional(),
 });
 
 export type McpConfig = z.infer<typeof McpConfigSchema>;

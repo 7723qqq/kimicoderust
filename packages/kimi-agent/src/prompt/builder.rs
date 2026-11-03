@@ -16,6 +16,10 @@ pub const DEFAULT_REPLY_STYLE_GUIDE: &str = "Your text replies render as Markdow
 
 pub const NOTIFY_USER_GUIDANCE: &str = "When `NotifyUser` is available, use it proactively to keep the end user informed while you work. For a multi-step task, send an early update describing your approach, then report meaningful findings, phase conclusions, long waits, and blockers. Keep each update to one or two sentences in the end user's language; avoid repeating unchanged status. The UI adds the source label automatically. If you are working as a subagent, report only your own subtask's progress, do not present its completion as completion of the whole task, and do not ask the end user questions or request decisions. Updates do not automatically reach your parent agent: include every important finding in your final handoff. Updates remain visible until the main agent starts its next turn, so your final reply must still stand on its own.";
 
+/// v2 `TODO_LIST_GUIDANCE` (`profile-shared.ts`): injected before the
+/// final-reply checklist while the `TodoList` tool is active.
+pub const TODO_LIST_GUIDANCE: &str = "When you track work in `TodoList`, keep it in step with what you have actually done: mark an item done as soon as it is finished, before you start the next one, and make sure the list matches what you did before you write your final message.";
+
 pub const SYSTEM_PROMPT_TEMPLATE: &str = include_str!("./system.md");
 
 /// Memory section, injected only when the memory filesystem is available.
@@ -46,6 +50,7 @@ pub struct SystemPromptBuilder {
     /// to the documented `true`.
     merge_all_available_skills: bool,
     notify_user_active: bool,
+    todo_list_active: bool,
     memory_active: bool,
 }
 
@@ -66,6 +71,7 @@ impl SystemPromptBuilder {
             skill_dirs: Vec::new(),
             merge_all_available_skills: true,
             notify_user_active: false,
+            todo_list_active: false,
             memory_active: false,
         }
     }
@@ -74,6 +80,14 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn with_notify_user(mut self, active: bool) -> Self {
         self.notify_user_active = active;
+        self
+    }
+
+    /// Set whether the `TodoList` guidance line is injected into the system
+    /// prompt (v2 gates it on the tool being active for the profile).
+    #[must_use]
+    pub fn with_todo_list(mut self, active: bool) -> Self {
+        self.todo_list_active = active;
         self
     }
 
@@ -273,6 +287,14 @@ impl SystemPromptBuilder {
             String::new()
         };
 
+        // v2 `systemPromptVars`: the guidance line carries its own trailing
+        // blank line and sits directly before the final-reply checklist.
+        let todo_list_guidance = if self.todo_list_active {
+            format!("{TODO_LIST_GUIDANCE}\n\n")
+        } else {
+            String::new()
+        };
+
         let memory_section = if self.memory_active {
             MEMORY_SECTION.to_string()
         } else {
@@ -314,6 +336,7 @@ impl SystemPromptBuilder {
             ("${role_additional}", role_additional.as_str()),
             ("${reply_style_guide}", self.reply_style_guide.as_str()),
             ("${notify_user_guidance}", notify_user_guidance.as_str()),
+            ("${todo_list_guidance}", todo_list_guidance.as_str()),
             ("${os}", env.os_kind.as_str()),
             ("${shell}", shell_desc.as_str()),
             ("${windows_notes}", env.windows_notes.as_str()),
@@ -553,6 +576,30 @@ mod tests {
         assert!(prompt_enabled.contains(NOTIFY_USER_GUIDANCE));
         assert!(prompt_enabled.contains("When `NotifyUser` is available, use it proactively"));
         assert!(!prompt_enabled.contains("${notify_user_guidance}"));
+    }
+
+    #[test]
+    fn test_builder_todo_list_toggle() {
+        let temp = tempdir().unwrap();
+        let prompt_disabled = SystemPromptBuilder::new(temp.path())
+            .with_todo_list(false)
+            .build();
+        assert!(!prompt_disabled.contains(TODO_LIST_GUIDANCE));
+        assert!(!prompt_disabled.contains("${todo_list_guidance}"));
+
+        let prompt_enabled = SystemPromptBuilder::new(temp.path())
+            .with_todo_list(true)
+            .build();
+        assert!(prompt_enabled.contains(TODO_LIST_GUIDANCE));
+        assert!(!prompt_enabled.contains("${todo_list_guidance}"));
+        // v2 `system.md`: the guidance sits directly before the final-reply
+        // checklist, separated by its own blank line.
+        assert!(
+            prompt_enabled.contains(&format!(
+                "{TODO_LIST_GUIDANCE}\n\nBefore you finalize a reply"
+            )),
+            "the guidance must precede the final-reply checklist"
+        );
     }
 
     #[test]

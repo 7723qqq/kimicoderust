@@ -15,9 +15,38 @@ use crate::rpc::types::{StateReadRequest, StateWriteRequest};
 use crate::tools::todo_item::{read_todo_items, render_todo_list};
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// v2 `TODO_LIST_WRITE_REMINDER` (todo-list-write-reminder.md): appended to
-/// every non-empty write output.
-const TODO_LIST_WRITE_REMINDER: &str = "Ensure that you continue to use the todo list to track progress. Mark tasks done immediately after finishing them, and keep exactly one task in_progress when work is underway.";
+/// The next-step hint appended to a non-empty write output (v2 `nextStepHint`
+/// from `da5918c0c8`, which deleted the static `todo-list-write-reminder.md`
+/// echo): it steers the list toward exactly one in_progress item and names
+/// what to do next. `None` when the write closed every item.
+fn next_step_hint(stored: &[crate::tools::todo_item::TodoItem]) -> Option<String> {
+    let progress = crate::tools::todo_item::todo_progress(stored);
+    if progress.open == 0 {
+        return None;
+    }
+    let mut in_progress = progress.in_progress.iter();
+    let Some(current) = in_progress.next() else {
+        return Some(
+            "No item is in_progress. Mark the one you are working on as in_progress.".into(),
+        );
+    };
+    if in_progress.next().is_some() {
+        return Some(
+            "Several items are in_progress. Keep only the one you are working on now in_progress."
+                .into(),
+        );
+    }
+    if progress.open == 1 {
+        return Some(format!(
+            "\"{}\" is the last open item. Once it is finished, mark it done before you write your final message; if it stays blocked or unfinished, keep it in_progress and say what remains in your reply.",
+            current.title
+        ));
+    }
+    Some(format!(
+        "When \"{}\" is finished, mark it done and set the next item in_progress; that update can go in the same response as your next tool call.",
+        current.title
+    ))
+}
 
 /// Failure message when the connected host does not implement the state
 /// bridge. The model must not retry the tool — the host cannot persist todo
@@ -243,10 +272,11 @@ async fn write_todo_list(
             if stored.is_empty() {
                 ok_result("Todo list cleared.".into())
             } else {
-                ok_result(format!(
-                    "Todo list updated.\n{}\n\n{TODO_LIST_WRITE_REMINDER}",
-                    render_todo_list(&stored)
-                ))
+                let updated = format!("Todo list updated.\n{}", render_todo_list(&stored));
+                match next_step_hint(&stored) {
+                    Some(hint) => ok_result(format!("{updated}\n\n{hint}")),
+                    None => ok_result(updated),
+                }
             }
         }
         Err(error) => map_state_error(error),
@@ -293,7 +323,7 @@ fn map_state_error(error: String) -> ExecutableToolResult {
 pub fn todo_list_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "TodoList".into(),
-        description: "Use this tool to maintain a structured TODO list as you work through a multi-step task. Use it proactively and often when progress tracking helps the current work. This is especially useful in long-running investigations and implementation tasks with several tool calls; in plan mode, write the plan to the plan file rather than tracking it here.\n\n**When to use:**\n- Multi-step tasks that span several tool calls\n- Tracking investigation progress across a large codebase search\n- Planning a sequence of edits before making them\n- After receiving new multi-step instructions, capture the requirements as todos\n- Before starting a tracked task, mark exactly one item as `in_progress`\n- Immediately after finishing a tracked task, mark it `done`; do not batch completions at the end\n\n**When NOT to use:**\n- Single-shot answers that complete in one or two tool calls\n- Trivial requests where tracking adds no clarity\n- Purely conversational or informational replies\n\n**Granularity — split to the smallest verifiable unit:**\n- A leaf task must be one minimal, independently verifiable unit: read one file, change one function, run one command.\n- If finishing an item takes several distinct tool calls, split it further before starting it.\n- Splitting is not busywork: a fine-grained list is your working reference — each turn starts with a digest of the items you are tracking, so the granularity you record is the granularity you plan against. Finer items also make progress reportable (see below), which is how you signal and verify forward motion.\n\n**Milestone structure (tiered):**\n- Work of 3 steps or fewer: a flat list of fine-grained tasks, no milestones.\n- Work of 4 steps or more: first lay out a milestone skeleton — the first milestone is the starting point (confirm context / environment), 1..n middle milestones are coherent phases, the last milestone is the finish line (verify / wrap up) — then attach fine-grained leaf tasks under each milestone.\n- Milestones use `kind: \"milestone\"` with `parentId: null`; leaf tasks reference their milestone via `parentId`. The full list stays a flat array with parent links.\n\n**Progress reporting:**\n- On every meaningful update of an `in_progress` leaf task, include its `progress` (0-100). It is persisted and rendered — it is the signal your work is advancing.\n- Never set `progress` on milestones — it is computed from their children automatically.\n- `done` implies 100; omit `progress` on done items.\n\n**Keep updates cheap:**\n- For small changes — marking one item done, bumping a progress percent, reordering a status — prefer `updates: [{ id, ... }]` over rewriting the whole list. Only the fields you pass change; unknown ids are an error naming the current ids.\n- Use `todos` only when the structure itself changes (add/remove items, re-tier milestones).\n\n**Avoid churn:**\n- Do not re-call this tool when nothing meaningful has changed since the last call — update the list only after real progress.\n- When unsure of the current state, call query mode first (omit `todos`) to check the list before deciding what to update.\n- If no available tool can move any task forward, tell the user where you are stuck instead of repeatedly re-ordering the same todos.\n\n**How to use:**\n- Call with `updates: [{ id, status?, progress?, title?, description?, parentId?, kind? }]` to patch existing items in place — the cheap path for daily progress.\n- Call with `todos: [...]` to replace the full list (when structure changes). Each item has `title`, `status`, and optionally `id`, `parentId`, `kind`, `progress`, `description`.\n- Call with no arguments to retrieve the current list without changing it.\n- Call with `todos: []` to clear the list.\n- `todos` and `updates` are mutually exclusive.\n- Keep titles short and actionable (e.g. \"Read session-control.ts\", \"Add planMode flag to TurnManager\").\n- Update statuses as you make progress.".into(),
+        description: "Use this tool to maintain a structured TODO list as you work through a multi-step task. Use it proactively and often when progress tracking helps the current work. The list is shown to the user as a live progress panel, so keep it in step with what you have actually done. This is especially useful in long-running investigations and implementation tasks with several tool calls; in plan mode, write the plan to the plan file rather than tracking it here.\n\n**When to use:**\n- Multi-step tasks that span several tool calls\n- Tracking investigation progress across a large codebase search\n- Planning a sequence of edits before making them\n- After receiving new multi-step instructions, capture the requirements as todos\n\n**When NOT to use:**\n- Single-shot answers that complete in one or two tool calls\n- Trivial requests where tracking adds no clarity\n- Purely conversational or informational replies\n\n**Granularity — split to the smallest verifiable unit:**\n- A leaf task must be one minimal, independently verifiable unit: read one file, change one function, run one command.\n- If finishing an item takes several distinct tool calls, split it further before starting it.\n- Splitting is not busywork: a fine-grained list is your working reference — each turn starts with a digest of the items you are tracking, so the granularity you record is the granularity you plan against. Finer items also make progress reportable (see below), which is how you signal and verify forward motion.\n\n**Milestone structure (tiered):**\n- Work of 3 steps or fewer: a flat list of fine-grained tasks, no milestones.\n- Work of 4 steps or more: first lay out a milestone skeleton — the first milestone is the starting point (confirm context / environment), 1..n middle milestones are coherent phases, the last milestone is the finish line (verify / wrap up) — then attach fine-grained leaf tasks under each milestone.\n- Milestones use `kind: \"milestone\"` with `parentId: null`; leaf tasks reference their milestone via `parentId`. The full list stays a flat array with parent links.\n\n**Progress reporting:**\n- On every meaningful update of an `in_progress` leaf task, include its `progress` (0-100). It is persisted and rendered — it is the signal your work is advancing.\n- Never set `progress` on milestones — it is computed from their children automatically.\n- `done` implies 100; omit `progress` on done items.\n\n**Keep updates cheap:**\n- For small changes — marking one item done, bumping a progress percent, reordering a status — prefer `updates: [{ id, ... }]` over rewriting the whole list. Only the fields you pass change; unknown ids are an error naming the current ids.\n- Use `todos` only when the structure itself changes (add/remove items, re-tier milestones).\n\n**Keeping it current:**\n- Before you start a tracked task, mark it `in_progress`; while work is underway, keep exactly one task `in_progress`.\n- As soon as a task is finished, mark it `done`, before you start the next one. Do not batch completions at the end.\n- Before you write your final message, make sure the list matches what you actually did.\n- An update can go in the same response as your next tool call; it does not need a step of its own.\n- Do not re-send an unchanged list. If you are stuck and no available tool can move any task forward, tell the user instead of re-ordering the same todos.\n\n**How to use:**\n- Call with `updates: [{ id, status?, progress?, title?, description?, parentId?, kind? }]` to patch existing items in place — the cheap path for daily progress.\n- Call with `todos: [...]` to replace the full list (when structure changes). Each item has `title`, `status`, and optionally `id`, `parentId`, `kind`, `progress`, `description`.\n- Call with no arguments to retrieve the current list without changing it.\n- Call with `todos: []` to clear the list.\n- `todos` and `updates` are mutually exclusive.\n- Keep titles short and actionable (e.g. \"Read session-control.ts\", \"Add planMode flag to TurnManager\").".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -503,9 +533,7 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(
             result.content,
-            format!(
-                "Todo list updated.\nCurrent todo list: (overall 1/2 · 70%)\n  [in_progress] T1: Read session-control.ts (40%)\n  [done] T2: Write tests\n\n{TODO_LIST_WRITE_REMINDER}"
-            )
+            "Todo list updated.\nCurrent todo list: (overall 1/2 · 70%)\n  [in_progress] T1: Read session-control.ts (40%)\n  [done] T2: Write tests\n\n\"Read session-control.ts\" is the last open item. Once it is finished, mark it done before you write your final message; if it stays blocked or unfinished, keep it in_progress and say what remains in your reply."
         );
         assert!(read_received.lock().unwrap().is_none());
         let request = write_received.lock().unwrap().clone().unwrap();
@@ -550,6 +578,74 @@ mod tests {
         let request = write_received.lock().unwrap().clone().unwrap();
         assert_eq!(request.value, serde_json::json!([]));
         assert!(request.undoable);
+    }
+
+    /// The write echo's next-step hint (v2 `nextStepHint`): it reacts to the
+    /// stored list — no in_progress item, several, the last open one, or the
+    /// ordinary case — and disappears once every item is done.
+    #[tokio::test]
+    async fn test_write_echo_next_step_hint_variants() {
+        let cases: [(Value, &str); 4] = [
+            (
+                serde_json::json!([
+                    { "id": "T1", "kind": "task", "title": "only pending", "status": "pending" }
+                ]),
+                "No item is in_progress. Mark the one you are working on as in_progress.",
+            ),
+            (
+                serde_json::json!([
+                    { "id": "T1", "kind": "task", "title": "one", "status": "in_progress" },
+                    { "id": "T2", "kind": "task", "title": "two", "status": "in_progress" }
+                ]),
+                "Several items are in_progress. Keep only the one you are working on now in_progress.",
+            ),
+            (
+                serde_json::json!([
+                    { "id": "T1", "kind": "task", "title": "current", "status": "in_progress" },
+                    { "id": "T2", "kind": "task", "title": "next", "status": "pending" }
+                ]),
+                "When \"current\" is finished, mark it done and set the next item in_progress; that update can go in the same response as your next tool call.",
+            ),
+            (
+                serde_json::json!([
+                    { "id": "T1", "kind": "task", "title": "last", "status": "in_progress" },
+                    { "id": "T2", "kind": "task", "title": "closed", "status": "done" }
+                ]),
+                "\"last\" is the last open item. Once it is finished, mark it done before you write your final message; if it stays blocked or unfinished, keep it in_progress and say what remains in your reply.",
+            ),
+        ];
+        for (stored, hint) in cases {
+            let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(stored));
+            let result = execute_todo_list(
+                &callbacks,
+                &serde_json::json!({ "todos": [{ "title": "x", "status": "pending" }] }),
+            )
+            .await;
+            assert!(!result.is_error);
+            assert!(
+                result.content.ends_with(hint),
+                "expected the hint {hint:?} in: {}",
+                result.content
+            );
+        }
+
+        // All done: the updated echo carries no hint.
+        let (callbacks, _, _) = scripted(
+            read_ok(Value::Null),
+            write_ok(serde_json::json!([
+                { "id": "T1", "kind": "task", "title": "closed", "status": "done" }
+            ])),
+        );
+        let result = execute_todo_list(
+            &callbacks,
+            &serde_json::json!({ "todos": [{ "title": "x", "status": "done" }] }),
+        )
+        .await;
+        assert!(!result.is_error);
+        assert_eq!(
+            result.content,
+            "Todo list updated.\nCurrent todo list: (overall 1/1 · 100%)\n  [done] T1: closed"
+        );
     }
 
     /// The `updates` path used to fall through to the read branch (the schema

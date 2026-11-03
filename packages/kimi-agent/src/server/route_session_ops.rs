@@ -489,7 +489,7 @@ impl HttpServer {
                     .get_session(session_id)
                     .ok()
                     .flatten()
-                    .map(|s| s.workspace_id);
+                    .and_then(|s| s.workspace_id);
                 match self.store.delete_session(session_id) {
                     Ok(true) => {
                         self.interaction_manager.cancel_session(session_id);
@@ -497,9 +497,17 @@ impl HttpServer {
                         // deleting the session archives it —the close
                         // reason is `archive` (REPL exit is `exit`).
                         // Observational: the deletion proceeds regardless.
+                        // Session-level hooks run in the session's workspace
+                        // (v2 #4242's session cwd, which session hooks always
+                        // had upstream).
+                        let session_cwd = workspace_id
+                            .as_deref()
+                            .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
+                            .map(|w| w.root);
                         let guard = crate::tools::external_hooks::HookGuard::new(
                             self.config().await.hooks.clone(),
-                        );
+                        )
+                        .with_session_cwd(session_cwd);
                         guard
                             .notify_session_lifecycle(
                                 "SessionEnd",
@@ -515,6 +523,9 @@ impl HttpServer {
                         self.hub
                             .bus_for("global")
                             .publish(&crate::events::EngineEvent::Custom(del_event));
+                        // v2 #4281: deletion evicts the session's event state
+                        // (after the deletion notice went out).
+                        self.hub.evict_lane(session_id);
                         HttpResponse::ok(&json!({ "deleted": true, "sessionId": session_id }))
                     }
                     Ok(false) => HttpResponse::not_found(),

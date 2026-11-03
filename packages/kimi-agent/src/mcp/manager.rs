@@ -219,7 +219,7 @@ pub struct McpManager {
     timeouts: Arc<RwLock<HashMap<String, McpTimeouts>>>,
     /// Global defaults from the `[mcp]` config section (v2
     /// `resolveDefaultTimeouts`).
-    defaults: Arc<RwLock<crate::config::McpConfig>>,
+    defaults: Arc<std::sync::RwLock<crate::config::McpConfig>>,
     /// In-flight reconnects (v2 `inFlightReconnects`): late callers join the
     /// running one via its Notify instead of double-spawning.
     in_flight: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
@@ -261,7 +261,7 @@ impl McpManager {
             servers: Arc::new(RwLock::new(HashMap::new())),
             filters: Arc::new(RwLock::new(HashMap::new())),
             timeouts: Arc::new(RwLock::new(HashMap::new())),
-            defaults: Arc::new(RwLock::new(crate::config::McpConfig::default())),
+            defaults: Arc::new(std::sync::RwLock::new(crate::config::McpConfig::default())),
             in_flight: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             oauth: std::sync::RwLock::new(None),
             attachments: Arc::new(RwLock::new(FileStore::new())),
@@ -528,9 +528,10 @@ impl McpManager {
     }
 
     /// Set the global `[mcp]` defaults that per-server timeouts and the
-    /// disclosure default fall back to.
-    pub async fn set_defaults(&self, defaults: crate::config::McpConfig) {
-        *self.defaults.write().await = defaults;
+    /// disclosure default fall back to. Sync on purpose: the napi path installs
+    /// them while building the manager, before `connect_all` spawns its task.
+    pub fn set_defaults(&self, defaults: crate::config::McpConfig) {
+        *self.defaults.write().unwrap_or_else(|e| e.into_inner()) = defaults;
     }
 
     /// Register an initialized MCP client, indexing only the tools its filter
@@ -967,7 +968,7 @@ impl McpManager {
     /// `resolveDefaultTimeouts`; per-server failures are isolated so one
     /// crashed entry never blocks the others).
     pub async fn spawn_from_config(&self, config: &crate::config::KimiConfig) {
-        self.set_defaults(config.mcp.clone()).await;
+        self.set_defaults(config.mcp.clone());
         let tasks = config
             .mcp_servers
             .iter()
@@ -1008,7 +1009,11 @@ impl McpManager {
             options.disabled_tools,
         )
         .await;
-        let defaults = self.defaults.read().await.clone();
+        let defaults = self
+            .defaults
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         // v2 #4210: a server that declares no `deferred` inherits the `[mcp]
         // defaultDeferred` section value; an explicit per-server value wins.
         let deferred = options

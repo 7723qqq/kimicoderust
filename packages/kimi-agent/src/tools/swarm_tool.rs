@@ -281,24 +281,12 @@ pub async fn execute_agent_swarm(
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> Option<ExecutableToolResult> {
     // The engine absorbs the `model` parameter with or without a pool: with
-    // one it binds the requested alias, without one only `primary` (or no
-    // model) is legal — anything else is the v2 no-pool error.
+    // one it binds the requested alias; without one only omitting the
+    // parameter is legal — any value, `primary` included (v2 #4418), is the
+    // no-pool error. The binding resolves after the fork gate, the way v2's
+    // `planSpawn` inherits before it ever consults the pool.
     let requested = args.get("model").and_then(|value| value.as_str());
     let runtime = manager.runtime().await?;
-    let item_llm = match pool {
-        Some(pool) => match pool.resolve(&runtime.llm, requested) {
-            Ok(binding) => Some(binding.llm),
-            Err(message) => return Some(err_result(message)),
-        },
-        None => {
-            if let Err(message) =
-                crate::subagent::secondary::SecondaryModelRuntime::resolve_without_pool(requested)
-            {
-                return Some(err_result(message));
-            }
-            None
-        }
-    };
 
     let input: AgentSwarmToolInput = match serde_json::from_value(args.clone()) {
         Ok(parsed) => parsed,
@@ -334,12 +322,31 @@ pub async fn execute_agent_swarm(
         .as_deref()
         .unwrap_or(DEFAULT_SUBAGENT_TYPE)
         .trim();
+    let is_fork = input.fork.unwrap_or(false);
+    let caller_agent_id = crate::tools::CALLER_AGENT_ID
+        .try_with(|id| id.clone())
+        .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
     if item_count > 0
         && subagent_type != "self"
         && manager.get_definition(subagent_type).await.is_none()
     {
         // Unknown profile: fall back to host so plugin-defined profiles work.
         return None;
+    }
+    // v2 `planSpawn`: the member type must be inside the caller's allowlist
+    // (a profile's `subagents` declaration, else the default profile's set
+    // plus the main agent's discovered extras); forks and `self` skip it —
+    // both inherit a type the caller was already admitted as. The gate runs
+    // after the unknown-profile check so types the engine never registered
+    // keep their host fallback.
+    if item_count > 0
+        && !is_fork
+        && subagent_type != "self"
+        && let Err(message) = manager
+            .check_spawn_allowed(&caller_agent_id, subagent_type, false)
+            .await
+    {
+        return Some(err_result(message));
     }
     let total_count = resume_count + item_count;
 
@@ -378,9 +385,6 @@ pub async fn execute_agent_swarm(
     // makes the swarm a feature the agent is *in*, rather than one more tool
     // it called; the turn-end hook in `run_turn` closes it again. Entering
     // emits the mode event pair, so the host's indicator tracks it.
-    let caller_agent_id = crate::tools::CALLER_AGENT_ID
-        .try_with(|id| id.clone())
-        .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
     crate::swarm::mode::enter_tool_swarm(runtime.callbacks.as_ref(), &caller_agent_id);
     // Host-resolved swarm timeout (v2 `resolveSwarmTimeoutMs`): a dedicated
     // knob — unlike `Agent` turns, swarms never inherit the subagent
@@ -437,7 +441,6 @@ pub async fn execute_agent_swarm(
         });
     }
 
-    let is_fork = input.fork.unwrap_or(false);
     if is_fork {
         // v2 refuses `fork` outright when the flag is off
         // (`FORK_EXPERIMENTAL_UNAVAILABLE`); the flag defaults ON here (see
@@ -459,16 +462,48 @@ pub async fn execute_agent_swarm(
                 crate::subagent::fork::FORK_WITH_RESUME_UNAVAILABLE,
             ));
         }
+        let caller_profile = manager
+            .caller_profile_name(&caller_agent_id)
+            .await
+            .unwrap_or_else(|| DEFAULT_SUBAGENT_TYPE.to_string());
         if let Some(err) = crate::subagent::fork_incompatibility(
             None,
             input.subagent_type.as_deref(),
             requested,
-            DEFAULT_SUBAGENT_TYPE,
+            &caller_profile,
             None,
         ) {
             return Some(err_result(err));
         }
     }
+    // v2 #4152: fork members inherit the caller's model and thinking
+    // verbatim — a pool binding would move them onto the pool default and
+    // break the request prefix they share with the caller.
+    let item_llm = if is_fork {
+        Some(
+            manager
+                .instance_llm_of(&caller_agent_id)
+                .await
+                .unwrap_or_else(|| runtime.llm.clone()),
+        )
+    } else {
+        match pool {
+            Some(pool) => match pool.resolve(requested) {
+                Ok(binding) => Some(binding.llm),
+                Err(message) => return Some(err_result(message)),
+            },
+            None => {
+                if let Err(message) =
+                    crate::subagent::secondary::SecondaryModelRuntime::resolve_without_pool(
+                        requested,
+                    )
+                {
+                    return Some(err_result(message));
+                }
+                None
+            }
+        }
+    };
     let inherited_history = if is_fork {
         crate::tools::CURRENT_CONVERSATION_HISTORY
             .try_with(|slot| slot.lock().unwrap().clone())
@@ -567,8 +602,9 @@ Use enough subagents to keep the work focused and parallel. AgentSwarm supports 
 
 If `AgentSwarm` is called, that call must be the only tool call in the response."#
         .to_string();
-    // v2 `buildSubagentModelDescriptions`: a forced pool exposes no choice,
-    // so it appends neither the listing nor (below) the `model` parameter.
+    // v2 `buildSubagentModelDescriptions`: the listing and the `model`
+    // parameter appear only when the pool offers a real choice (v2
+    // `exposesSubagentModelChoice`); a single entry pins every spawn.
     if let Some(pool) = pool
         && pool.exposes_choice()
     {
@@ -617,7 +653,7 @@ If `AgentSwarm` is called, that call must be the only tool call in the response.
             "model".into(),
             serde_json::json!({
                 "type": "string",
-                "description": "Which model to run the item-spawned subagents on: one of the aliases listed under \"Available models\" in this tool description, or \"primary\" for the main model you are running on. When omitted, the configured default model is used."
+                "description": "Which model to run the item-spawned subagents on: one of the aliases listed under \"Available models\" in this tool description. When omitted, the configured default model is used."
             }),
         );
     }
@@ -656,25 +692,30 @@ mod tests {
         assert!(def.input_schema.get("properties").is_some());
     }
 
+    /// v2 #4418 `exposesSubagentModelChoice`: only a pool with a real choice
+    /// advertises the listing and the `model` parameter — a single entry
+    /// pins every spawn and hides both.
     #[test]
     fn test_swarm_def_advertises_the_pool_only_when_a_choice_is_offered() {
-        fn pool(force: bool) -> crate::subagent::secondary::SecondaryModelRuntime {
+        fn entry(alias: &str) -> crate::rpc::types::SecondaryModelEntry {
+            crate::rpc::types::SecondaryModelEntry {
+                alias: alias.into(),
+                hint: String::new(),
+                llm: Default::default(),
+            }
+        }
+        fn pool(aliases: &[&str]) -> crate::subagent::secondary::SecondaryModelRuntime {
             crate::subagent::secondary::SecondaryModelRuntime::new(
                 crate::rpc::types::SecondaryModelPool {
-                    force,
-                    default_model: "fast".into(),
+                    default_model: aliases[0].into(),
                     caller_model_alias: None,
-                    models: vec![crate::rpc::types::SecondaryModelEntry {
-                        alias: "fast".into(),
-                        hint: String::new(),
-                        llm: Default::default(),
-                    }],
+                    models: aliases.iter().map(|alias| entry(alias)).collect(),
                 },
                 std::collections::HashMap::new(),
             )
         }
 
-        let offered = agent_swarm_tool_def(Some(&pool(false)));
+        let offered = agent_swarm_tool_def(Some(&pool(&["fast", "strong"])));
         assert!(
             offered
                 .description
@@ -688,14 +729,14 @@ mod tests {
                 .is_some()
         );
 
-        let forced = agent_swarm_tool_def(Some(&pool(true)));
+        let pinned = agent_swarm_tool_def(Some(&pool(&["fast"])));
         assert!(
-            !forced.description.contains("Available models"),
+            !pinned.description.contains("Available models"),
             "{}",
-            forced.description
+            pinned.description
         );
         assert!(
-            forced
+            pinned
                 .input_schema
                 .get("properties")
                 .and_then(|properties| properties.get("model"))
@@ -726,7 +767,8 @@ mod tests {
             .expect("no-pool model overrides are error results, not host fallbacks");
         assert!(res.is_error);
         assert!(
-            res.content.contains("no [secondary_model.models] pool"),
+            res.content
+                .contains("no [secondary_model] pool is configured"),
             "{}",
             res.content
         );
@@ -934,6 +976,7 @@ mod tests {
             prompt_prefix: None,
             summary_policy: None,
             model: None,
+            subagents: None,
         })
         .await;
         mgr.set_runtime(Arc::new(TestSummaryLlm), Arc::new(TestNoopCallbacks), None)
@@ -945,7 +988,7 @@ mod tests {
     /// default (`coder`) and reach the fork compatibility gate.
     async fn manager_with_runtime_with_profiles() -> Arc<SubagentManager> {
         let mgr = manager_with_runtime().await;
-        mgr.register_definition(crate::subagent::types::SubagentDefinition {
+        mgr.register_discovered_definition(crate::subagent::types::SubagentDefinition {
             name: "reviewer".into(),
             description: "Reviewer subagent".into(),
             system_prompt: "You review.".into(),
@@ -954,6 +997,7 @@ mod tests {
             prompt_prefix: None,
             summary_policy: None,
             model: None,
+            subagents: None,
         })
         .await;
         mgr
@@ -1082,6 +1126,7 @@ mod tests {
             prompt_prefix: None,
             summary_policy: None,
             model: None,
+            subagents: None,
         })
         .await;
         mgr.set_runtime(
@@ -1513,7 +1558,6 @@ mod tests {
         let mgr = manager_with_runtime().await;
         let pool = crate::subagent::secondary::SecondaryModelRuntime::new(
             crate::rpc::types::SecondaryModelPool {
-                force: false,
                 default_model: "fast".into(),
                 caller_model_alias: None,
                 models: vec![crate::rpc::types::SecondaryModelEntry {
@@ -1545,6 +1589,75 @@ mod tests {
                 .contains("Cannot override the model when forking"),
             "{}",
             res.content
+        );
+    }
+
+    /// v2 #4152: fork members inherit the caller's model — a pool-bound
+    /// caller's swarm binds the same entry, not the session model.
+    #[tokio::test]
+    async fn fork_members_inherit_the_callers_model() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingLlm(Arc<AtomicU32>);
+        impl LLM for CountingLlm {
+            fn system_prompt(&self) -> &str {
+                "test"
+            }
+            fn model_name(&self) -> &str {
+                "caller-model"
+            }
+            fn is_retryable_error(&self, _: &str) -> bool {
+                false
+            }
+            fn chat(
+                &self,
+                _params: LLMChatParams,
+            ) -> BoxFuture<'_, Result<TurnChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(TurnChatResponse {
+                        content: "done".into(),
+                        thinking: vec![],
+                        tool_calls: vec![],
+                        finish_reason: Some("stop".into()),
+                        usage: TokenUsage::default(),
+                        timing: None,
+                    })
+                })
+            }
+        }
+
+        let mgr = manager_with_runtime().await;
+        let calls = Arc::new(AtomicU32::new(0));
+        let caller_id = crate::tools::CALLER_AGENT_ID
+            .scope(
+                crate::callbacks::MAIN_AGENT_ID.to_string(),
+                mgr.spawn("coder", "pool-bound parent"),
+            )
+            .await
+            .unwrap();
+        mgr.set_instance_llm(&caller_id, Arc::new(CountingLlm(calls.clone())))
+            .await;
+
+        let args = serde_json::json!({
+            "description": "fork batch",
+            "items": ["a", "b"],
+            "prompt_template": "check {{item}}",
+            "fork": true,
+        });
+        let res = crate::tools::CALLER_AGENT_ID
+            .scope(
+                caller_id.clone(),
+                execute_agent_swarm(&mgr, &args, None, None, None, None),
+            )
+            .await
+            .expect("the fork batch runs natively");
+        assert!(!res.is_error, "{}", res.content);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "both fork members ran on the caller's model"
         );
     }
 

@@ -43,6 +43,42 @@ fn test_swarm_timeout_zero_is_explicit_no_timeout() {
     assert_eq!(manager.swarm_timeout_ms(), None);
 }
 
+#[test]
+fn test_partial_output_section_picks_the_last_assistant_text() {
+    use crate::turn_loop::types::{LLMMessage, LoopTurnStopReason, TurnResult};
+    let turn = |messages: Vec<LLMMessage>| TurnResult {
+        stop_reason: LoopTurnStopReason::Aborted,
+        steps: 1,
+        usage: Default::default(),
+        events_emitted: 0,
+        llm_retries: 0,
+        llm_transport: String::new(),
+        native_tool_calls: 0,
+        messages,
+        last_request_usage: None,
+        stop_hook_continuation: None,
+    };
+    let assistant = |content: &str| LLMMessage {
+        role: "assistant".into(),
+        content: content.into(),
+        ..Default::default()
+    };
+
+    // No assistant text yet — the report stays the bare stopped message.
+    assert!(partial_output_section(&turn(vec![])).is_none());
+    assert!(partial_output_section(&turn(vec![assistant("   ")])).is_none());
+
+    // The last non-empty assistant text rides in a marked block.
+    let section = partial_output_section(&turn(vec![
+        assistant("first draft"),
+        assistant("second draft"),
+    ]))
+    .unwrap();
+    assert!(section.starts_with("\n\n[partial output]\n"));
+    assert!(section.contains("second draft"));
+    assert!(!section.contains("first draft"));
+}
+
 #[tokio::test]
 async fn test_subagent_lifecycle() {
     let manager = SubagentManager::new();
@@ -980,6 +1016,7 @@ fn profile_policy_matches_mcp_tool_names_as_globs() {
         prompt_prefix: None,
         summary_policy: None,
         model: None,
+        subagents: None,
     });
     assert!(!denied.allows("mcp__slack__post"));
     assert!(denied.allows("mcp__github__search"));
@@ -1402,6 +1439,7 @@ async fn spawning_records_the_calling_agent_as_the_parent() {
             prompt_prefix: None,
             summary_policy: None,
             model: None,
+            subagents: None,
         })
         .await;
 

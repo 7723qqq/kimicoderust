@@ -94,6 +94,10 @@ pub enum EventStoreError {
     /// ones, and a silently truncated projection is worse than a visible error.
     #[error("Wire protocol {found} is newer than this engine supports ({supported})")]
     WireProtocolTooNew { found: String, supported: String },
+    /// A live foreign process holds the session's occupancy lock (v2
+    /// `session.occupied`, upstream #4246). The message is v2's exact wording.
+    #[error("{0}")]
+    SessionOccupied(String),
 }
 
 pub trait EventStore: Send + Sync {
@@ -106,6 +110,33 @@ pub trait EventStore: Send + Sync {
 /// One `wire_events` row a cold projection folds: `(event_type, payload,
 /// is_compaction)` with the payload already parsed.
 pub type WireEventFoldRow = (String, serde_json::Value, bool);
+
+/// Refuse a log from a newer engine before reading any of it (v2
+/// `isNewerWireVersion` at the journal-open seam). Rows written before the
+/// column existed are NULL and mean *this* version — the table has only ever
+/// had one shape, so a NULL cannot be hiding an older record. Every reader
+/// that interprets row payloads — the cold fold and the journal-slice
+/// helpers alike — must pass this gate first.
+pub fn refuse_newer_wire_version(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<(), EventStoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT protocol_version FROM wire_events WHERE session_id = ?1 \
+         AND protocol_version IS NOT NULL",
+    )?;
+    let mut rows = stmt.query(params![session_id])?;
+    while let Some(row) = rows.next()? {
+        let version: String = row.get(0)?;
+        if is_newer_wire_version(&version) {
+            return Err(EventStoreError::WireProtocolTooNew {
+                found: version,
+                supported: WIRE_PROTOCOL_VERSION.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Read the rows a cold projection folds, skipping rows whose payload is not
 /// valid JSON. Returns the usable rows and how many were dropped.
@@ -120,31 +151,7 @@ pub fn read_fold_rows(
     conn: &Connection,
     session_id: &str,
 ) -> Result<(Vec<WireEventFoldRow>, usize), EventStoreError> {
-    // Refuse a log from a newer engine before folding any of it. Rows written
-    // before the column existed are NULL and mean *this* version — the table
-    // has only ever had one shape, so a NULL cannot be hiding an older record.
-    let newer = {
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT protocol_version FROM wire_events WHERE session_id = ?1 \
-             AND protocol_version IS NOT NULL",
-        )?;
-        let mut rows = stmt.query(params![session_id])?;
-        let mut found: Option<String> = None;
-        while let Some(row) = rows.next()? {
-            let version: String = row.get(0)?;
-            if is_newer_wire_version(&version) {
-                found = Some(version);
-                break;
-            }
-        }
-        found
-    };
-    if let Some(found) = newer {
-        return Err(EventStoreError::WireProtocolTooNew {
-            found,
-            supported: WIRE_PROTOCOL_VERSION.to_string(),
-        });
-    }
+    refuse_newer_wire_version(conn, session_id)?;
 
     let mut stmt = conn.prepare(
         "SELECT seq, event_type, payload, is_compaction FROM wire_events WHERE session_id = ?1 \

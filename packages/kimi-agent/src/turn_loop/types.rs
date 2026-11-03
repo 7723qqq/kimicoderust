@@ -943,6 +943,12 @@ pub struct RunTurnInput<'a> {
     /// stateless, so the caller owns the record and the budget writes every
     /// new omission through to it).
     pub media_dropped: Option<crate::llm::media_budget::DroppedMedia>,
+    /// The session's media recovery record (v2 #4413 `llmRequester.mediaRecovery`):
+    /// a degrade/strip the provider forced on an earlier turn is re-applied to
+    /// this turn's requests instead of re-sending the full media and paying
+    /// the rejection round-trip again. `None` makes every turn start from the
+    /// full projection — the pre-#4413 behavior.
+    pub media_recovery: Option<crate::llm::media_budget::SharedMediaRecovery>,
     /// The pipeline's native toolset, when native tools are on. The
     /// turn-start disclosure announcement (v2 `toolSelectAnnouncementsService`)
     /// reads the deferred set and the announced diff from it; `None` skips

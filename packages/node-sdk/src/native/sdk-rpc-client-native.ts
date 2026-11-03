@@ -18,6 +18,7 @@ import type {
   SessionPrompt,
   SessionTurnOutcome,
 } from '@moonshot-ai/kimi-agent/session-handle';
+import { takeoverSessionLock } from '@moonshot-ai/kimi-agent/session-handle';
 import type {
   CustomRegistryProviderEntry,
   CustomRegistrySource,
@@ -1299,6 +1300,15 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     };
   }
 
+  /**
+   * v2 `takeOverSessionLock` (upstream #4246/#4328): evict a foreign
+   * occupancy holder so this process's next turn can claim the session. The
+   * engine's lock service is process-wide, so no live handle is needed.
+   */
+  override async takeOverSessionLock(input: SessionIdRpcInput): Promise<void> {
+    takeoverSessionLock(input.sessionId);
+  }
+
   override async clearContext(input: SessionIdRpcInput): Promise<void> {
     const meta = this.requireSession(input.sessionId);
     if (meta.handle) {
@@ -2410,7 +2420,9 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     const commandId = input.commandId ?? randomUUID();
     try {
       const { nativeBashSpawn, nativeBashWait } = await import('@moonshot-ai/kimi-agent/native');
-      const shell = probeShellPath() ?? 'bash';
+      // Same probe the handle builder caches: a live `!` command must not pay
+      // the Windows `where pwsh` + `where powershell` spawn pair every time.
+      const shell = this.resolvedShellPath() ?? 'bash';
       let stdout = '';
       let stderr = '';
       let taskId: string | undefined;

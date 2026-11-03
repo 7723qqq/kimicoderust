@@ -233,6 +233,7 @@ async fn test_run_turn_no_tool_calls() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -304,6 +305,7 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -391,6 +393,7 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -446,6 +449,7 @@ async fn test_previous_turn_aborted_reaches_the_interruption_reminder() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -465,10 +469,11 @@ async fn test_previous_turn_aborted_reaches_the_interruption_reminder() {
     );
 }
 
-/// The stale-todo reminder must reach a real turn: ten assistant turns
+/// The stale-todo reminder must reach a real turn: ten assistant steps
 /// after the last `TodoList` write, the main agent's next step carries the
-/// v2 reminder. This pins the run_turn wiring (main-agent gate, tool-active
-/// gate, used gate, state read) rather than the module's own unit tests.
+/// v2 reminder while the list still has an open item. This pins the run_turn
+/// wiring (main-agent gate, tool-active gate, state read) rather than the
+/// module's own unit tests.
 #[tokio::test]
 async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
     let llm = PredictTestLlm {
@@ -480,6 +485,22 @@ async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
 
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
+    // Overwrite the no-op state_read (a HashMap insert, so this wins) and
+    // answer the todo domain with a list that still has an open item — the
+    // reminder stays silent for an empty or all-done list.
+    RpcServer::register_arc(&server, types::methods::HOST_STATE_READ, |params| {
+        Box::pin(async move {
+            let value = if params.get("domain").and_then(|v| v.as_str()) == Some("todo") {
+                serde_json::json!([
+                    { "id": "t1", "title": "Ship it", "status": "in_progress" }
+                ])
+            } else {
+                serde_json::Value::Null
+            };
+            let resp = types::StateReadResponse { value };
+            serde_json::to_value(&resp).map_err(|e| JsonRpcError::internal_error(e.to_string()))
+        })
+    });
 
     let mut messages = vec![LLMMessage::new("user", "Start")];
     messages.push(LLMMessage {
@@ -517,6 +538,7 @@ async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -524,7 +546,7 @@ async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
     assert!(
         turn.messages.iter().any(|message| message
             .content
-            .contains("The TodoList tool has not been updated recently.")),
+            .contains("The todo list has not been updated in the last 10 steps (0/1 done, \"Ship it\" still in_progress).")),
         "the stale-todo reminder must reach the main agent's turn: {:?}",
         turn.messages
             .iter()
@@ -583,6 +605,7 @@ async fn test_todo_stale_reminder_is_main_agent_only() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -590,7 +613,7 @@ async fn test_todo_stale_reminder_is_main_agent_only() {
     assert!(
         !turn.messages.iter().any(|message| message
             .content
-            .contains("The TodoList tool has not been updated recently.")),
+            .contains("The todo list has not been updated in the last ")),
         "a subagent must not receive the main agent's todo reminder"
     );
 }
@@ -646,6 +669,7 @@ async fn test_turn_lifecycle_hooks_do_not_disturb_turn() {
         hook_guard: Some(guard),
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -717,6 +741,7 @@ async fn test_stop_hook_veto_surfaces_continuation() {
         hook_guard: Some(stop_hook_guard()),
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -771,6 +796,7 @@ async fn test_stop_hook_allow_leaves_no_continuation() {
         hook_guard: Some(guard),
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -817,6 +843,7 @@ async fn stop_hook_outcome(
             hook_guard: Some(stop_hook_guard()),
             media: None,
             media_dropped: None,
+            media_recovery: None,
             toolset: None,
         },
         &callbacks,
@@ -923,6 +950,7 @@ async fn test_run_turn_continued_consumes_stop_veto() {
         hook_guard: Some(stop_hook_guard()),
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -994,6 +1022,7 @@ async fn test_max_steps_exhaustion_reports_max_steps() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -1063,6 +1092,7 @@ async fn a_swarm_tool_call_rides_its_display_on_the_started_event() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -1141,6 +1171,7 @@ async fn a_tool_without_a_display_ships_none() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -1217,6 +1248,7 @@ async fn test_tool_call_lifecycle_events_bracket_execution() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -1310,6 +1342,7 @@ async fn step_boundaries_are_paired_one_begin_and_one_end_per_step() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -1412,6 +1445,7 @@ async fn test_filtered_finish_surfaces_filtered_reason() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -1575,6 +1609,7 @@ async fn stop_reason_of_a_single_response(
             hook_guard: None,
             media: None,
             media_dropped: None,
+            media_recovery: None,
             toolset: None,
         },
         &callbacks,
@@ -1711,6 +1746,7 @@ async fn test_turn_binds_start_goal_for_stale_check() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -1760,6 +1796,7 @@ async fn test_turn_binds_no_goal_when_goalless() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -1973,6 +2010,7 @@ async fn a_turn_resends_with_the_strict_projection_after_a_shape_rejection() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -2043,6 +2081,7 @@ async fn a_turn_retries_through_empty_provider_responses_and_answers() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -2107,6 +2146,7 @@ async fn a_turn_fails_when_every_response_is_empty() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -2165,6 +2205,7 @@ async fn test_run_turn_no_tool_calls_with_messages() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -2293,6 +2334,7 @@ async fn test_finish_reason_length_maps_to_max_tokens() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let turn = run_turn(input, &callbacks).await.unwrap();
@@ -2328,6 +2370,7 @@ async fn test_finish_reason_max_tokens_maps_to_max_tokens() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let turn = run_turn(input, &callbacks).await.unwrap();
@@ -2363,6 +2406,7 @@ async fn test_finish_reason_content_filter_maps_to_filtered() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let turn = run_turn(input, &callbacks).await.unwrap();
@@ -2451,6 +2495,7 @@ async fn test_truncation_on_exhausted_steps_surfaces_max_tokens() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let turn = run_turn(input, &callbacks).await.unwrap();
@@ -2558,6 +2603,7 @@ async fn test_cache_usage_accumulates_across_steps() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let turn = run_turn(input, &callbacks).await.unwrap();
@@ -2665,6 +2711,7 @@ async fn test_history_accumulates_across_steps() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     run_turn(input, &callbacks).await.unwrap();
@@ -2785,6 +2832,7 @@ async fn a_failed_tool_result_reaches_the_model_wrapped() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     run_turn(input, &callbacks).await.unwrap();
@@ -2901,6 +2949,7 @@ async fn a_tool_note_reaches_the_model_after_the_status() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     run_turn(input, &callbacks).await.unwrap();
@@ -2991,6 +3040,7 @@ async fn test_tool_result_history_carries_wall_time_header_for_the_set() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let outcome = run_turn(input, &callbacks).await.unwrap();
@@ -3107,6 +3157,7 @@ async fn test_thinking_blocks_round_trip_into_assistant_history() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     run_turn(input, &callbacks).await.unwrap();
@@ -3233,6 +3284,7 @@ async fn test_same_step_duplicate_executes_once() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let result = run_turn(input, &callbacks).await.unwrap();
@@ -3356,6 +3408,7 @@ async fn test_same_step_duplicate_of_host_tool_still_executes_twice() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     run_turn(input, &callbacks).await.unwrap();
@@ -3447,6 +3500,7 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let result = run_turn(input, &callbacks).await.unwrap();
@@ -3567,6 +3621,7 @@ async fn test_turn_result_llm_retry_counter() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -3637,6 +3692,7 @@ async fn test_max_attempts_caps_llm_retries() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -3702,6 +3758,7 @@ async fn test_inactive_goal_runs_the_turn_as_ordinary_chat() {
             hook_guard: None,
             media: None,
             media_dropped: None,
+            media_recovery: None,
             toolset: None,
         };
 
@@ -3764,6 +3821,7 @@ async fn test_goal_token_budget_exhausted() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -3832,6 +3890,7 @@ async fn test_goal_turn_budget_exhausted() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -3891,6 +3950,7 @@ async fn test_goal_active_with_budget_completes() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -3991,6 +4051,7 @@ async fn test_goal_wall_clock_deadline_triggers_budget_limit() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4044,6 +4105,7 @@ async fn test_cancellation_set_before_turn_aborts() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4148,6 +4210,7 @@ async fn test_cancellation_during_tool_execution_aborts() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4225,6 +4288,7 @@ async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4315,6 +4379,7 @@ async fn test_tool_result_stop_turn_ends_turn_completed() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4361,6 +4426,7 @@ async fn test_cancellation_cleared_runs_normally() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4464,6 +4530,7 @@ async fn test_goal_steering_injected_into_system_prompt() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4546,6 +4613,7 @@ async fn test_max_steps_enforcement() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4758,6 +4826,7 @@ async fn test_context_compaction_before_llm_call() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -4924,6 +4993,7 @@ async fn test_auto_compaction_summary_carries_the_todo_list() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -5026,6 +5096,7 @@ async fn test_injections_appended_before_llm_call() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -5077,6 +5148,7 @@ async fn test_permission_mode_reminders_follow_the_mode_transitions() {
             hook_guard: None,
             media: None,
             media_dropped: None,
+            media_recovery: None,
             toolset: None,
             previous_turn_aborted: false,
         }
@@ -5181,6 +5253,7 @@ async fn test_run_turn_with_telemetry_emits_started_and_ended() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let telemetry = TelemetryContext {
@@ -5249,6 +5322,7 @@ async fn test_run_turn_with_telemetry_omits_an_absent_plugin_snapshot() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let telemetry = TelemetryContext {
@@ -5312,6 +5386,7 @@ async fn test_run_turn_with_telemetry_consumes_stop_hook_continuation() {
         hook_guard: Some(stop_hook_guard()),
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let telemetry = TelemetryContext {
@@ -5376,6 +5451,7 @@ async fn test_run_turn_with_telemetry_reports_cancellation_as_interrupted() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     let telemetry = TelemetryContext {
@@ -5536,6 +5612,7 @@ async fn test_list_tools_refreshes_table_per_step() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     run_turn(input, &callbacks).await.unwrap();
@@ -5632,6 +5709,7 @@ async fn test_list_tools_failure_falls_back_to_snapshot() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     run_turn(input, &callbacks).await.unwrap();
@@ -5724,6 +5802,7 @@ async fn test_list_tools_skipped_in_host_proxy_mode() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
     run_turn(input, &callbacks).await.unwrap();
@@ -5896,6 +5975,7 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
         hook_guard,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -6033,6 +6113,7 @@ async fn test_compaction_attempt_cap_reaches_the_turn_loop_summarizer() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -6158,6 +6239,7 @@ async fn context_overflow_recovery_retries_the_step() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -6296,6 +6378,7 @@ async fn overflow_without_a_split_point_reports_cancelled_not_completed() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -6415,6 +6498,7 @@ async fn a_failing_summarizer_reports_compaction_failed() {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -6585,6 +6669,7 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
         hook_guard: None,
         media: Some(&resolver),
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -6600,6 +6685,319 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
         llm.seen_media.lock().unwrap().as_slice(),
         &[4, 2, 0],
         "the degrade keeps the two newest, the strip takes the rest"
+    );
+}
+
+/// v2 #4183: interrupting the turn cancels an in-flight media upload — the
+/// resolve future is dropped, taking the upload's HTTP request with it —
+/// and an already-cancelled turn never starts one at all.
+#[tokio::test]
+async fn an_interruption_cancels_an_in_flight_media_upload() {
+    struct UploadLlm {
+        target: crate::llm::media_resolver::MediaTarget,
+    }
+    impl LLM for UploadLlm {
+        fn system_prompt(&self) -> &str {
+            "sys"
+        }
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+        fn is_retryable_error(&self, _error: &str) -> bool {
+            false
+        }
+        fn media_target(&self) -> Option<crate::llm::media_resolver::MediaTarget> {
+            Some(self.target.clone())
+        }
+        fn media_upload_credential(
+            &self,
+        ) -> Option<crate::llm::files_upload::CredentialFuture<'_>> {
+            Some(Box::pin(async { Ok("token".to_string()) }))
+        }
+        fn chat(
+            &self,
+            _params: LLMChatParams,
+        ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            unreachable!("the upload never completes, so no chat request is built")
+        }
+    }
+
+    // A server that reports each connection and never answers: the upload
+    // stays in flight until the client gives up on it. The sockets are held
+    // so accepting one does not close it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (conn_tx, mut conn_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+            let _ = conn_tx.send(());
+        }
+    });
+
+    let dir = std::env::temp_dir().join(format!("kimi-upload-cancel-{}", fastrand::u64(..)));
+    let store = crate::server::files::FileStore::with_root(dir);
+    let meta = store
+        .save("clip.mp4", "video/mp4", None, b"MP4DATA")
+        .unwrap();
+    let resolver = crate::llm::media_resolver::MediaResolver::with_store(store);
+    let llm = UploadLlm {
+        target: crate::llm::media_resolver::MediaTarget {
+            protocol: "openai".into(),
+            base_url: format!("http://{addr}"),
+            provider_key: "kimi".into(),
+            image_in: true,
+            video_in: true,
+            audio_in: true,
+            uploads_media: true,
+        },
+    };
+    let messages = vec![LLMMessage {
+        role: "user".into(),
+        content: String::new(),
+        blocks: vec![crate::turn_loop::types::ContentBlock::MediaRef {
+            file_id: meta.id.clone(),
+            kind: crate::rpc::types::MediaKind::Video,
+        }],
+        ..Default::default()
+    }];
+    let server_rpc = Arc::new(RpcServer::new());
+    let callbacks = rpc_callbacks(server_rpc);
+    let mut budget = crate::llm::media_budget::MediaBudget::default();
+
+    // Mid-upload cancellation: the resolve returns promptly with nothing,
+    // instead of the turn waiting the upload out.
+    {
+        let token = tokio_util::sync::CancellationToken::new();
+        let call = budgeted_request(
+            &mut budget,
+            Some(&resolver),
+            &llm,
+            &messages,
+            callbacks.as_ref(),
+            Some(&token),
+        );
+        tokio::pin!(call);
+        tokio::select! {
+            _ = conn_rx.recv() => {}
+            _ = &mut call => panic!("the upload must still be in flight"),
+        }
+        token.cancel();
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), &mut call)
+            .await
+            .expect("a cancelled upload must not be waited out")
+            .unwrap();
+        assert!(
+            out.is_none(),
+            "a cancelled resolve yields no request messages"
+        );
+    }
+
+    // An already-cancelled token never starts the upload at all (v2's
+    // `throwIfAborted` at entry).
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let out = budgeted_request(
+        &mut budget,
+        Some(&resolver),
+        &llm,
+        &messages,
+        callbacks.as_ref(),
+        Some(&token),
+    )
+    .await
+    .unwrap();
+    assert!(out.is_none());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), conn_rx.recv())
+            .await
+            .is_err(),
+        "a cancelled turn must not start an upload"
+    );
+    server.abort();
+}
+
+/// v2 #4413: a media recovery the provider forced on one turn is agent-level
+/// state — the next turn starts from the recovered projection instead of
+/// re-sending the rejected media, and a history rewrite (undo) or a model
+/// switch invalidates it.
+#[tokio::test]
+async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
+    struct RecoveringLlm {
+        step_calls: AtomicU32,
+        seen_media: std::sync::Mutex<Vec<usize>>,
+        model: std::sync::Mutex<String>,
+    }
+    impl LLM for RecoveringLlm {
+        fn system_prompt(&self) -> &str {
+            "sys"
+        }
+        fn model_name(&self) -> &str {
+            // The Mutex guard cannot escape; leak once per switch — tests run
+            // a handful of switches at most.
+            let name = self.model.lock().unwrap().clone();
+            Box::leak(name.into_boxed_str())
+        }
+        fn is_retryable_error(&self, _error: &str) -> bool {
+            false
+        }
+        fn transport(&self) -> &'static str {
+            "native-http"
+        }
+        fn chat(
+            &self,
+            params: LLMChatParams,
+        ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            let media = params
+                .messages
+                .iter()
+                .flat_map(|message| message.blocks.iter())
+                .filter(|block| !matches!(block, crate::rpc::types::ContentBlock::Text { .. }))
+                .count();
+            self.seen_media.lock().unwrap().push(media);
+            let call = self.step_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if call == 0 {
+                    Err(Box::new(std::io::Error::other(
+                        "llm http status 413: request too large",
+                    ))
+                        as Box<dyn std::error::Error + Send + Sync>)
+                } else {
+                    Ok(LLMChatResponse {
+                        content: "ok".into(),
+                        thinking: vec![],
+                        tool_calls: vec![],
+                        finish_reason: Some("stop".into()),
+                        usage: TokenUsage::default(),
+                        timing: None,
+                    })
+                }
+            })
+        }
+    }
+
+    let llm = Arc::new(RecoveringLlm {
+        step_calls: AtomicU32::new(0),
+        seen_media: std::sync::Mutex::new(Vec::new()),
+        model: std::sync::Mutex::new("rec-model".to_string()),
+    });
+    let server = Arc::new(RpcServer::new());
+    let callbacks = rpc_callbacks(server);
+    let dir = tempfile::tempdir().unwrap();
+    let files = crate::server::files::FileStore::with_root(dir.path().to_path_buf());
+    let mut file_ids = Vec::new();
+    for index in 0..4 {
+        let meta = files
+            .save(
+                &format!("img-{index}.png"),
+                "image/png",
+                None,
+                format!("PNGDATA-{index}").as_bytes(),
+            )
+            .unwrap();
+        file_ids.push(meta.id);
+    }
+    let resolver = crate::llm::media_resolver::MediaResolver::with_store(files);
+    let recovery = crate::llm::media_budget::SharedMediaRecovery::default();
+
+    // The session history keeps the original references; each turn gets a
+    // fresh copy (production re-reads the store per turn).
+    let history = |prompt: &str| {
+        let mut messages = vec![LLMMessage {
+            role: "system".into(),
+            content: "sys".into(),
+            ..Default::default()
+        }];
+        for file_id in &file_ids {
+            messages.push(LLMMessage {
+                role: "user".into(),
+                content: "look".into(),
+                blocks: vec![crate::rpc::types::ContentBlock::MediaRef {
+                    file_id: file_id.clone(),
+                    kind: crate::rpc::types::MediaKind::Image,
+                }],
+                ..Default::default()
+            });
+        }
+        messages.push(LLMMessage {
+            role: "user".into(),
+            content: prompt.into(),
+            ..Default::default()
+        });
+        messages
+    };
+    let input_for = |messages: Vec<LLMMessage>, turn_id: &str| RunTurnInput {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: turn_id.into(),
+        llm: llm.as_ref(),
+        messages,
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: Some(&resolver),
+        media_dropped: None,
+        media_recovery: Some(recovery.clone()),
+        toolset: None,
+    };
+
+    // Turn 1: the 413 fires the degrade (4 → 2) and records the recovery.
+    let result = run_turn(input_for(history("one"), "t1"), &callbacks).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(llm.step_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(llm.seen_media.lock().unwrap().as_slice(), &[4, 2]);
+    assert_eq!(
+        recovery
+            .lock()
+            .unwrap()
+            .recovery
+            .as_ref()
+            .map(|r| &r.action),
+        Some(&crate::llm::media_budget::MediaRecoveryAction::Degraded(2)),
+    );
+
+    // Turn 2: the recovery applies before the first request — no rejection
+    // needed, the projection is already degraded.
+    let result = run_turn(input_for(history("two"), "t2"), &callbacks).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(llm.step_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        llm.seen_media.lock().unwrap().as_slice(),
+        &[4, 2, 2],
+        "the second turn must start degraded instead of re-sending 4 media"
+    );
+
+    // A model switch invalidates the recovery (v2 keys it by model alias).
+    *llm.model.lock().unwrap() = "other-model".to_string();
+    let result = run_turn(input_for(history("three"), "t3"), &callbacks).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(llm.seen_media.lock().unwrap().as_slice(), &[4, 2, 2, 4]);
+
+    // Back on the original model the recovery applies again (it was keyed
+    // for it and never invalidated by the switch).
+    *llm.model.lock().unwrap() = "rec-model".to_string();
+    let result = run_turn(input_for(history("four"), "t4"), &callbacks).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(llm.seen_media.lock().unwrap().as_slice(), &[4, 2, 2, 4, 2]);
+
+    // A history rewrite (undo / set_history / clear_history) advances the
+    // revision and invalidates the recovery.
+    recovery.lock().unwrap().advance_revision();
+    let result = run_turn(input_for(history("five"), "t5"), &callbacks).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        llm.seen_media.lock().unwrap().as_slice(),
+        &[4, 2, 2, 4, 2, 4]
     );
 }
 
@@ -6716,6 +7114,7 @@ async fn an_image_format_rejection_strips_the_media_and_retries() {
         hook_guard: None,
         media: Some(&resolver),
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -6819,6 +7218,7 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
     };
 
@@ -6873,4 +7273,323 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
         "Conversation media exceeded the 20 MB per-request budget; \
              2 older media item(s) were omitted."
     );
+}
+
+// ── AGENTS.md bash operand dirs (`host/parse_bash`) ─────────────────────
+
+/// The process cwd for the whole turn, restored on drop — the seam and the
+/// reminder both anchor at `current_dir`, so the fixture drives them into a
+/// temp workspace (the same shape the CLI runs in).
+struct CwdGuard(std::path::PathBuf);
+impl CwdGuard {
+    fn enter(path: &std::path::Path) -> Self {
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(path).unwrap();
+        Self(previous)
+    }
+}
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+/// Serializes this file's chdir-driving tests: each holds a temp workspace
+/// as the process cwd for a whole turn, and two such windows overlapping
+/// mis-resolves each other's relative probe. (The suite's other chdir user,
+/// the tower-denial test, keeps its own shorter window.)
+static BASH_TARGET_CWD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// One scripted exchange: step 1 emits the configured Bash call, step 2
+/// stops. Every request's messages are captured so the injection pass that
+/// follows the Bash call is observable.
+struct BashThenStopLlm {
+    bash_args: serde_json::Value,
+    requests: Arc<Mutex<Vec<Vec<LLMMessage>>>>,
+}
+impl LLM for BashThenStopLlm {
+    fn system_prompt(&self) -> &str {
+        "base"
+    }
+    fn model_name(&self) -> &str {
+        "scripted"
+    }
+    fn is_retryable_error(&self, _: &str) -> bool {
+        false
+    }
+    fn chat(
+        &self,
+        params: LLMChatParams,
+    ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>> {
+        let requests = self.requests.clone();
+        let bash_args = self.bash_args.clone();
+        Box::pin(async move {
+            requests.lock().unwrap().push(params.messages.to_vec());
+            let first = requests.lock().unwrap().len() == 1;
+            let usage = TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                total_tokens: 2,
+                ..Default::default()
+            };
+            if first {
+                Ok(LLMChatResponse {
+                    content: String::new(),
+                    thinking: vec![],
+                    tool_calls: vec![ToolCall {
+                        id: "tc-bash".into(),
+                        name: "Bash".into(),
+                        arguments: bash_args,
+                        extras: None,
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    usage,
+                    timing: None,
+                })
+            } else {
+                Ok(LLMChatResponse {
+                    content: "done".into(),
+                    thinking: vec![],
+                    tool_calls: vec![],
+                    finish_reason: Some("stop".into()),
+                    usage,
+                    timing: None,
+                })
+            }
+        })
+    }
+}
+
+/// A `HostCallbacks` wrapper whose `parse_bash` answer is scripted, with the
+/// requests recorded for inspection.
+struct ParseBashStub {
+    inner: Arc<dyn HostCallbacks>,
+    requests: Arc<Mutex<Vec<crate::rpc::types::ParseBashRequest>>>,
+    answer: Result<Option<Vec<String>>, String>,
+}
+impl HostCallbacks for ParseBashStub {
+    fn llm_chat(
+        &self,
+        request: crate::rpc::types::LlmChatRequest,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::LlmChatResponse, String>>
+    {
+        self.inner.llm_chat(request)
+    }
+    fn execute_tool(
+        &self,
+        request: crate::rpc::types::ToolExecuteRequest,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::ToolExecuteResponse, String>>
+    {
+        self.inner.execute_tool(request)
+    }
+    fn check_permission(
+        &self,
+        request: crate::rpc::types::PermissionCheckRequest,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::PermissionDecision, String>>
+    {
+        self.inner.check_permission(request)
+    }
+    fn parse_bash(
+        &self,
+        request: crate::rpc::types::ParseBashRequest,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<Option<Vec<String>>, String>> {
+        self.requests.lock().unwrap().push(request);
+        let answer = self.answer.clone();
+        Box::pin(async move { answer })
+    }
+}
+
+fn bash_turn_input<'a>(llm: &'a BashThenStopLlm) -> RunTurnInput<'a> {
+    RunTurnInput {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: "test-bash-targets".into(),
+        llm,
+        messages: vec![LLMMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            ..Default::default()
+        }],
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: None,
+        media_dropped: None,
+        media_recovery: None,
+        toolset: None,
+    }
+}
+
+fn stub_tool_server() -> Arc<RpcServer> {
+    let server = Arc::new(RpcServer::new());
+    RpcServer::register_arc(&server, types::methods::HOST_EXECUTE_TOOL, |_params| {
+        Box::pin(async move {
+            let resp = ToolExecuteResponse {
+                delivery: None,
+                stop_turn: false,
+                content: "stub".into(),
+                is_error: false,
+                note: None,
+            };
+            serde_json::to_value(&resp).map_err(|e| JsonRpcError::internal_error(e.to_string()))
+        })
+    });
+    server
+}
+
+fn reminder_in(request: &[LLMMessage]) -> Option<&LLMMessage> {
+    request
+        .iter()
+        .find(|m| m.content.contains("AGENTS.md file(s) apply"))
+}
+
+/// The full chain: the seam asks the host parser, the returned operand dirs
+/// feed the reminder, and the next request names the discovered files.
+#[tokio::test]
+async fn bash_operand_dirs_reach_the_agents_md_reminder_through_the_host_parser() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("AGENTS.md"), "root rules").unwrap();
+    std::fs::write(root.join("sub").join("AGENTS.md"), "sub rules").unwrap();
+    let _serialize = BASH_TARGET_CWD_LOCK.lock().await;
+    let _cwd = CwdGuard::enter(root);
+
+    let requests: Arc<Mutex<Vec<crate::rpc::types::ParseBashRequest>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let stub = ParseBashStub {
+        inner: rpc_callbacks(stub_tool_server()),
+        requests: requests.clone(),
+        answer: Ok(Some(vec![root.join("sub").to_string_lossy().into_owned()])),
+    };
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(stub);
+    let captured: Arc<Mutex<Vec<Vec<LLMMessage>>>> = Arc::new(Mutex::new(Vec::new()));
+    let llm = BashThenStopLlm {
+        bash_args: serde_json::json!({ "command": "ls sub" }),
+        requests: captured.clone(),
+    };
+
+    let turn = run_turn(bash_turn_input(&llm), &callbacks).await.unwrap();
+    assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
+
+    // The seam asked exactly once, with the command and the call's
+    // effective cwd (no declared `cwd` → the process one).
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].command, "ls sub");
+    assert_eq!(
+        std::path::PathBuf::from(&requests[0].cwd),
+        std::env::current_dir().unwrap()
+    );
+    assert!(!requests[0].home.is_empty());
+
+    // The returned operand dir fed the reminder: the chain lists the root
+    // file and the one in `sub`.
+    let captured = captured.lock().unwrap();
+    let reminder = reminder_in(&captured[1]).expect("the operand dir must inject");
+    assert!(reminder.content.contains("AGENTS.md"), "{reminder:?}");
+    assert!(reminder.content.contains("sub"), "{reminder:?}");
+}
+
+/// Degradation arm one: no parser wired (the server's shape — the trait
+/// default) means the operands contribute nothing, while the turn runs on
+/// undisturbed.
+#[tokio::test]
+async fn bash_operands_contribute_nothing_when_the_host_has_no_parser() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    // The only AGENTS.md sits where *only* an operand could reach it.
+    std::fs::write(root.join("sub").join("AGENTS.md"), "sub rules").unwrap();
+    let _serialize = BASH_TARGET_CWD_LOCK.lock().await;
+    let _cwd = CwdGuard::enter(root);
+
+    let callbacks = rpc_callbacks(stub_tool_server());
+    let captured: Arc<Mutex<Vec<Vec<LLMMessage>>>> = Arc::new(Mutex::new(Vec::new()));
+    let llm = BashThenStopLlm {
+        bash_args: serde_json::json!({ "command": "ls sub" }),
+        requests: captured.clone(),
+    };
+
+    let turn = run_turn(bash_turn_input(&llm), &callbacks).await.unwrap();
+    assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
+    let captured = captured.lock().unwrap();
+    assert!(
+        reminder_in(&captured[1]).is_none(),
+        "no parser, no operand dirs: {:?}",
+        captured[1]
+    );
+}
+
+/// Degradation arm two: without a parser the Bash call's own declared `cwd`
+/// still probes, exactly as before this seam existed.
+#[tokio::test]
+async fn the_declared_cwd_still_probes_when_the_host_has_no_parser() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub").join("AGENTS.md"), "sub rules").unwrap();
+    let _serialize = BASH_TARGET_CWD_LOCK.lock().await;
+    let _cwd = CwdGuard::enter(root);
+
+    let callbacks = rpc_callbacks(stub_tool_server());
+    let captured: Arc<Mutex<Vec<Vec<LLMMessage>>>> = Arc::new(Mutex::new(Vec::new()));
+    let llm = BashThenStopLlm {
+        bash_args: serde_json::json!({ "command": "ls", "cwd": "sub" }),
+        requests: captured.clone(),
+    };
+
+    let turn = run_turn(bash_turn_input(&llm), &callbacks).await.unwrap();
+    assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
+    let captured = captured.lock().unwrap();
+    let reminder = reminder_in(&captured[1]).expect("the declared cwd must still inject");
+    assert!(reminder.content.contains("sub"), "{reminder:?}");
+}
+
+/// Degradation arm three: a wired host whose parse fails (`Ok(None)`, v2's
+/// `!parsed.ok` arm) or whose channel errors keeps the cwd-only shape —
+/// the declared cwd probes, the operands do not.
+#[tokio::test]
+async fn a_failed_parse_keeps_the_cwd_only_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::create_dir(root.join("other")).unwrap();
+    std::fs::write(root.join("sub").join("AGENTS.md"), "sub rules").unwrap();
+    std::fs::write(root.join("other").join("AGENTS.md"), "other rules").unwrap();
+    let _serialize = BASH_TARGET_CWD_LOCK.lock().await;
+    let _cwd = CwdGuard::enter(root);
+
+    for answer in [Ok(None), Err("channel dead".to_string())] {
+        let requests: Arc<Mutex<Vec<crate::rpc::types::ParseBashRequest>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let stub = ParseBashStub {
+            inner: rpc_callbacks(stub_tool_server()),
+            requests: requests.clone(),
+            answer,
+        };
+        let callbacks: Arc<dyn HostCallbacks> = Arc::new(stub);
+        let captured: Arc<Mutex<Vec<Vec<LLMMessage>>>> = Arc::new(Mutex::new(Vec::new()));
+        let llm = BashThenStopLlm {
+            bash_args: serde_json::json!({ "command": "ls other", "cwd": "sub" }),
+            requests: captured.clone(),
+        };
+
+        let turn = run_turn(bash_turn_input(&llm), &callbacks).await.unwrap();
+        assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
+        let captured = captured.lock().unwrap();
+        let reminder = reminder_in(&captured[1]).expect("the declared cwd must still inject");
+        assert!(reminder.content.contains("sub"), "{reminder:?}");
+        assert!(
+            !reminder.content.contains("other"),
+            "a failed parse must not leak operand dirs: {reminder:?}"
+        );
+    }
 }

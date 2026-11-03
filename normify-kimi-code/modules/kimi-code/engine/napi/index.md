@@ -10,12 +10,20 @@ description:
   en: >
       The engine's JS boundary: napi exports (session creation, plugin registry, tool callbacks) and the JS-side type contract.
       
-revision: 932e017600564470d7e43d7b25bb49896c06cca1
-updated_at: "2026-11-01T08:11:47.990Z"
-fingerprint: a03373e4a17182f837950b15443b3f8fe6507c8bad018c94601f0ed27d7dd86f
+revision: b2c89a8fe8d80ce9b97a5f08206c20f28072e4b0
+updated_at: "2026-11-02T00:33:59.541Z"
+fingerprint: faa16a2612b916426e0e0f338ac7591d2f2942281257202d618e098307a8b290
 source:
-  - path: "packages/kimi-agent/src/napi_bindings.rs"
   - path: "packages/kimi-agent/index.native.d.ts"
+  - path: "packages/kimi-agent/src/napi_bindings/callbacks.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/mcp.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/misc.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/mod.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/params.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/plugins.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/session.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/tests.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/turn.rs"
 deps:
   - kind: call
     to: kimi-code.engine.core

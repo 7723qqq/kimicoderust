@@ -2,7 +2,6 @@ import {
   createKimiDeviceId,
   KIMI_CODE_PROVIDER_NAME,
   KIMI_REGION_PROFILES,
-  resolveKimiRegion,
 } from '@moonshot-ai/kimi-code-oauth';
 import {
   KimiAuthFacade,
@@ -19,6 +18,8 @@ import {
   track,
 } from '@moonshot-ai/kimi-telemetry';
 import * as vscode from 'vscode';
+
+import { resolveExtensionRegion } from './utils/region';
 
 const SHUTDOWN_TIMEOUT_MS = 2000;
 
@@ -38,6 +39,8 @@ export function activateExtensionTelemetry(options: ExtensionTelemetryOptions): 
   const configPath = resolveConfigPath({ homeDir });
   const config = readTelemetryConfig(configPath);
   const auth = new KimiAuthFacade({ homeDir, configPath });
+  const resolveRegion = () => resolveExtensionRegion({ homeDir });
+  const resolution = resolveRegion();
 
   initializeTelemetry({
     homeDir,
@@ -48,7 +51,10 @@ export function activateExtensionTelemetry(options: ExtensionTelemetryOptions): 
     version: options.version,
     uiMode: 'vscode',
     model: config.defaultModel,
-    endpoint: () => telemetryEndpoint(homeDir),
+    region: resolution.region,
+    regionSource: resolution.source,
+    resolveRegion,
+    endpoint: () => KIMI_REGION_PROFILES[resolveRegion().region].telemetryEndpoint,
     getAccessToken: async () => (await auth.getCachedAccessToken(KIMI_CODE_PROVIDER_NAME)) ?? null,
     onUnexpectedError: (error) => options.log(`Telemetry dropped a property: ${error.message}`),
   });
@@ -73,17 +79,4 @@ function readTelemetryConfig(configPath: string): Pick<KimiConfig, 'telemetry' |
   } catch {
     return {};
   }
-}
-
-function telemetryEndpoint(homeDir: string): string | undefined {
-  const oauth = loadRuntimeConfigSafe(resolveConfigPath({ homeDir })).config.providers?.[
-    KIMI_CODE_PROVIDER_NAME
-  ]?.oauth;
-  const region = resolveKimiRegion({
-    configuredOAuthHost: oauth?.oauthHost,
-    configuredOAuthKey: oauth?.key,
-    homeDir,
-    readMarker: process.env['KIMI_CODE_REGION_MARKER'] !== 'off',
-  });
-  return KIMI_REGION_PROFILES[region].telemetryEndpoint;
 }

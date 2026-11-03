@@ -344,6 +344,18 @@ impl EventHub {
             .contains_key(session_id)
     }
 
+    /// Drop the session's lane outright (v2 #4281 `evictSession` on
+    /// archive/delete): the event state goes away with the session, so a client
+    /// holding the old cursor sees a fresh epoch instead of resuming a dead
+    /// session's stream. The idle/cap path (`evict_idle_lane`) keeps covering
+    /// lanes whose sessions simply went quiet.
+    pub fn evict_lane(&self, session_id: &str) {
+        self.lanes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
+    }
+
     /// How many lanes have been opened, for observability.
     pub fn lane_count(&self) -> usize {
         self.lanes
@@ -739,6 +751,28 @@ mod tests {
         // history; this one published after attach, so it arrived live.
         drop(sub);
         assert_eq!(hub.subscriber_count(), 0, "dropping leaked a slot");
+    }
+
+    #[tokio::test]
+    async fn evict_lane_drops_the_lane_and_restarts_its_numbering() {
+        let hub = EventHub::new();
+        let (_, epoch_before) = hub.ensure_lane_cursor("sess-1");
+        hub.bus_for("sess-1").publish(&step_event(1));
+        assert!(hub.lane_exists("sess-1"));
+
+        hub.evict_lane("sess-1");
+        assert!(!hub.lane_exists("sess-1"));
+
+        // The next publish opens a fresh lane: numbering restarts under a new
+        // epoch, so a client holding the old cursor detects the restart (v2
+        // #4281: the event state goes away with the session).
+        let mut sub = hub.attach();
+        let (_, epoch_after) = hub.ensure_lane_cursor("sess-1");
+        assert_ne!(epoch_before, epoch_after);
+        hub.bus_for("sess-1").publish(&step_event(7));
+        let first = sub.recv().await.unwrap();
+        assert_eq!(first.seq, 1, "a fresh lane restarts seq numbering");
+        assert_eq!(first.epoch.as_ref(), epoch_after.as_ref());
     }
 
     #[tokio::test]

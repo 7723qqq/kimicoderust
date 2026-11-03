@@ -69,6 +69,33 @@ pub struct TodoProgressReport {
     pub by_id: HashMap<String, u32>,
 }
 
+/// Flat status tallies, mirroring v2 `todoProgress` (`todoItem.ts`): the
+/// stale reminder's open gate and the write echo's next-step hint read these.
+/// v2 has no milestone kind, so every item counts by its declared status.
+pub struct TodoProgress<'a> {
+    pub total: usize,
+    pub done: usize,
+    pub open: usize,
+    pub in_progress: Vec<&'a TodoItem>,
+}
+
+/// Compute the flat tallies, mirroring v2 `todoProgress`.
+pub fn todo_progress(todos: &[TodoItem]) -> TodoProgress<'_> {
+    let done = todos
+        .iter()
+        .filter(|todo| todo.status == TodoStatus::Done)
+        .count();
+    TodoProgress {
+        total: todos.len(),
+        done,
+        open: todos.len() - done,
+        in_progress: todos
+            .iter()
+            .filter(|todo| todo.status == TodoStatus::InProgress)
+            .collect(),
+    }
+}
+
 /// Normalize raw wire values into todo items, mirroring v2 `readTodoItems`:
 /// non-array input yields an empty list, invalid entries are skipped,
 /// progress is clamped to 0-100 and rounded, and missing ids are assigned

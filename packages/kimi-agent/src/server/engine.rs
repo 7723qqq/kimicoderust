@@ -222,6 +222,9 @@ pub enum EngineError {
     Turn(String),
     /// Persisting the turn failed.
     Store(rusqlite::Error),
+    /// A live foreign process holds the session's occupancy lock (v2
+    /// `session.occupied`, upstream #4246); the message is v2's wording.
+    Occupied(String),
 }
 
 impl std::fmt::Display for EngineError {
@@ -230,6 +233,7 @@ impl std::fmt::Display for EngineError {
             Self::NoModel(why) => write!(f, "no model configured: {why}"),
             Self::Turn(why) => write!(f, "turn failed: {why}"),
             Self::Store(error) => write!(f, "session store error: {error}"),
+            Self::Occupied(message) => f.write_str(message),
         }
     }
 }
@@ -316,6 +320,10 @@ pub struct ServerEngine {
     /// `media.budgetDropped` is agent state; the engine keeps the same
     /// lifetime — the process, not the turn).
     media_dropped: Mutex<HashMap<String, crate::llm::media_budget::DroppedMedia>>,
+    /// Per-session media recovery record (v2 #4413 `llmRequester.mediaRecovery`):
+    /// a provider-forced degrade/strip re-applies to the session's later
+    /// turns; [`Self::record_context_truncation`] advances its revision.
+    media_recovery: Mutex<HashMap<String, crate::llm::media_budget::SharedMediaRecovery>>,
 }
 
 /// Builds the host callbacks for one session.
@@ -365,6 +373,7 @@ impl ServerEngine {
             media: crate::llm::media_resolver::MediaResolver::new()
                 .with_upload_cache(store.clone()),
             media_dropped: Mutex::new(HashMap::new()),
+            media_recovery: Mutex::new(HashMap::new()),
             session_mcp: Mutex::new(HashMap::new()),
         }
     }
@@ -393,6 +402,19 @@ impl ServerEngine {
     /// The session's cross-turn record of omitted media, created on first use.
     fn media_dropped_for(&self, session_id: &str) -> crate::llm::media_budget::DroppedMedia {
         self.media_dropped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(session_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// The session's media recovery cell (v2 #4413), created on first use.
+    fn media_recovery_for(
+        &self,
+        session_id: &str,
+    ) -> crate::llm::media_budget::SharedMediaRecovery {
+        self.media_recovery
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(session_id.to_string())
@@ -1486,6 +1508,19 @@ impl ServerEngine {
         let mut state = self.token_counting(session_id);
         state.truncate(&history, history.len());
         self.save_token_counting(session_id, &state);
+        // v2 #4413: a history rewrite (undo) invalidates the session's media
+        // recovery — the media it captured may no longer be where they were.
+        if let Some(cell) = self
+            .media_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned()
+        {
+            cell.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .advance_revision();
+        }
     }
 
     /// Replace the counting state after a compaction: the transcript is now
@@ -1979,6 +2014,15 @@ impl ServerEngine {
         origin: Option<Value>,
         message_callbacks: Option<Arc<crate::server::message_events::MessageCallbacks>>,
     ) -> Result<TurnReport, EngineError> {
+        // The occupancy gate (v2 `runGate.begin()`, upstream #4246): a turn
+        // may only start under this process's session lock, and the hold
+        // rides the guard below to the turn's end so a second process is
+        // refused for the whole run rather than interleaving wire rows.
+        // First thing: a refused turn must not mark itself active, publish
+        // busy, or snapshot undo state.
+        let _occupancy = crate::session::lock::SESSION_LOCKS
+            .hold_guard(session_id)
+            .map_err(|error| EngineError::Occupied(error.to_string()))?;
         let turn_id = format!("turn-{}", fastrand::u64(..));
         // The model this turn's usage belongs to (v2 groups `UsageRecord`s by
         // the request's model). Read before the LLM moves into `RunTurnInput`.
@@ -2120,6 +2164,7 @@ impl ServerEngine {
             hook_guard,
             media: Some(&self.media),
             media_dropped: Some(self.media_dropped_for(session_id)),
+            media_recovery: Some(self.media_recovery_for(session_id)),
             // The toolset this pipeline just built: its disclosed-tool
             // announcement state must span the session's turns, and it is the
             // same handle the turn loop's select_tools arm executes through.

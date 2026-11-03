@@ -10,11 +10,19 @@ description:
   en: >
       The napi export surface: session creation, plugin registry exports, tool callbacks and telemetry wiring.
       
-revision: 932e017600564470d7e43d7b25bb49896c06cca1
-updated_at: "2026-11-01T08:11:47.987Z"
-fingerprint: f66aa486659294c4e55adeea98bf57335757cad524cf88ca86449e937e257ac2
+revision: b2c89a8fe8d80ce9b97a5f08206c20f28072e4b0
+updated_at: "2026-11-02T00:33:59.541Z"
+fingerprint: fe954146e12d0056bfbc9d33255c2680361695e5d00da300da6bdbe9600b2822
 source:
-  - path: "packages/kimi-agent/src/napi_bindings.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/callbacks.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/mcp.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/misc.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/mod.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/params.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/plugins.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/session.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/tests.rs"
+  - path: "packages/kimi-agent/src/napi_bindings/turn.rs"
 apis:
   - protocol: rpc
     path: "initPluginStore"

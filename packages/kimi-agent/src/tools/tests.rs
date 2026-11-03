@@ -304,18 +304,42 @@ fn tool_info(name: &str) -> crate::turn_loop::types::ToolInfo {
 #[tokio::test]
 async fn select_tools_remembers_loaded_names_and_announces_them() {
     let (_dir, ts) = setup();
-    let ts = ts.with_callbacks(std::sync::Arc::new(ToolTableHost(vec![
-        tool_info("Read"),
-        tool_info("mcp__github__search"),
-    ])));
+    // Loading targets the deferred set (v2 `loadableToolNames`), so the test
+    // wires a deferred MCP server and switches disclosure on — with the
+    // switch off, a registered name is statically callable instead.
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    manager
+        .configure(
+            "github",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_client(crate::mcp::client::McpClient::mock("github"))
+        .await;
+    let ts = ts
+        .with_callbacks(std::sync::Arc::new(ToolTableHost(vec![tool_info("Read")])))
+        .with_mcp(manager)
+        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_tool_select_enabled(true);
 
     let first = ts
-        .execute_tool("select_tools", &json!({ "names": ["mcp__github__search"] }))
+        .execute_tool(
+            "select_tools",
+            &json!({ "names": ["mcp__github__github_sample_tool"] }),
+        )
         .await
         .expect("select_tools is a native tool");
     assert!(!first.is_error, "{}", first.content);
     assert!(
-        first.content.contains("Loaded: mcp__github__search"),
+        first
+            .content
+            .contains("Loaded: mcp__github__github_sample_tool"),
         "{}",
         first.content
     );
@@ -329,17 +353,23 @@ async fn select_tools_remembers_loaded_names_and_announces_them() {
         })
         .expect("a text block");
     assert!(announced.contains("<tools_added>"), "{announced}");
-    assert!(announced.contains("mcp__github__search"), "{announced}");
+    assert!(
+        announced.contains("mcp__github__github_sample_tool"),
+        "{announced}"
+    );
 
     // Second call for the same name: remembered, not re-loaded.
     let second = ts
-        .execute_tool("select_tools", &json!({ "names": ["mcp__github__search"] }))
+        .execute_tool(
+            "select_tools",
+            &json!({ "names": ["mcp__github__github_sample_tool"] }),
+        )
         .await
         .expect("select_tools is a native tool");
     assert!(
         second
             .content
-            .contains("Already available: mcp__github__search"),
+            .contains("Already available: mcp__github__github_sample_tool"),
         "{}",
         second.content
     );
@@ -485,6 +515,40 @@ async fn disclosure_refuses_a_call_to_a_deferred_unloaded_tool() {
         .await
         .expect("now loaded, the toolset still handles it");
     assert!(!executed.is_error, "{}", executed.content);
+}
+
+/// v2 #4364: the disclosure wait blocks until the manager's initial load
+/// settles, and is a no-op when disclosure is off or no manager is wired.
+#[tokio::test]
+async fn disclosure_waits_for_the_initial_mcp_discovery() {
+    let (_dir, ts) = setup();
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    let ts = ts
+        .with_mcp(manager.clone())
+        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_tool_select_enabled(true);
+
+    // No load ever started (the ready channel still holds its initial
+    // `true`): the wait returns at once.
+    ts.wait_for_mcp_discovery_before_disclosure().await;
+
+    // A load in flight settles, then the wait completes.
+    let handle = manager.connect_all(vec![(
+        "github".into(),
+        crate::mcp::manager::McpServerRecipe::Mock,
+        crate::mcp::manager::McpServerOptions::default(),
+    )]);
+    handle.await.expect("connect_all settles");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ts.wait_for_mcp_discovery_before_disclosure(),
+    )
+    .await
+    .expect("the wait settles once the connects do");
+
+    // Disclosure off: no wait even with a manager mid-load.
+    let ts = ts.with_tool_select_enabled(false);
+    ts.wait_for_mcp_discovery_before_disclosure().await;
 }
 
 /// Locate a bash for native-Bash tests; `None` skips them (Windows CI

@@ -446,6 +446,22 @@ impl StreamAccumulator {
     pub fn feed(&mut self, v: &Value) -> Option<StreamDelta> {
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
+        // v2 #4485 (`openai-responses/decode.ts:462-475`): usage is read on
+        // every event, not only the terminal ones — an ordinary event
+        // contributes the nested response's usage when it has one and its
+        // own top-level usage otherwise; the two terminal events read the
+        // nested usage only, so a stale top-level figure cannot overwrite
+        // the terminal accounting.
+        let nested_usage = v.get("response").and_then(|resp| resp.get("usage"));
+        let usage = if event_type == "response.completed" || event_type == "response.incomplete" {
+            nested_usage
+        } else {
+            nested_usage.or_else(|| v.get("usage"))
+        };
+        if let Some(usage) = usage {
+            self.usage = parse_usage(Some(usage));
+        }
+
         match event_type {
             "response.output_text.delta" | "response.text.delta" | "response.output_item.delta" => {
                 if let Some(delta) = v.get("delta").and_then(|d| d.as_str()) {
@@ -514,9 +530,9 @@ impl StreamAccumulator {
                     .get("status")
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
-                if let Some(usage) = resp.get("usage") {
-                    self.usage = parse_usage(Some(usage));
-                }
+                // Usage is read for every event at the top of `feed` (v2
+                // #4485): terminal events take the nested figure, ordinary
+                // events fall back to their own top-level usage.
             }
             "response.failed" => {
                 let resp = v.get("response").unwrap_or(v);
@@ -905,6 +921,40 @@ mod tests {
         assert_eq!(resp.usage.output_tokens, 5);
         assert_eq!(resp.usage.total_tokens, 20);
         assert_eq!(resp.thinking.len(), 1);
+    }
+
+    /// v2 #4485's other half: an ordinary Responses event contributes its
+    /// own top-level usage when the nested response carries none, while a
+    /// terminal event reads the nested figure only — a stale top-level
+    /// `usage` on the completed event must not overwrite the accounting.
+    #[test]
+    fn ordinary_events_fall_back_to_top_level_usage_terminal_events_do_not() {
+        let mut acc = StreamAccumulator::new();
+        // Ordinary delta with no nested response: the top-level usage counts.
+        acc.feed(&json!({
+            "type": "response.output_text.delta",
+            "delta": "Hello",
+            "usage": { "input_tokens": 7, "output_tokens": 1, "total_tokens": 8 }
+        }));
+        // Ordinary delta WITH a nested usage: the nested figure wins over
+        // its own top-level one (v2 `responseUsage ?? event.usage`).
+        acc.feed(&json!({
+            "type": "response.output_text.delta",
+            "delta": " world",
+            "response": { "usage": { "input_tokens": 9, "output_tokens": 2, "total_tokens": 11 } },
+            "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 }
+        }));
+        // A terminal event carrying only a top-level figure contributes
+        // nothing: the ordinary events' accounting survives it.
+        acc.feed(&json!({
+            "type": "response.completed",
+            "usage": { "input_tokens": 100, "output_tokens": 50, "total_tokens": 150 }
+        }));
+
+        let resp = acc.finish();
+        assert_eq!(resp.usage.input_tokens, 9);
+        assert_eq!(resp.usage.output_tokens, 2);
+        assert_eq!(resp.usage.total_tokens, 11);
     }
 
     #[test]

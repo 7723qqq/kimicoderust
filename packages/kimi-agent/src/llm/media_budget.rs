@@ -267,6 +267,20 @@ pub fn degrade_older_media(
     keep_recent: usize,
 ) -> usize {
     let to_degrade = entries.len().saturating_sub(keep_recent);
+    degrade_leading_media(messages, entries, to_degrade)
+}
+
+/// v2 `degradeLeadingMediaParts` (#4456): replace exactly the leading `count`
+/// media parts. Unlike [`degrade_older_media`] the count is pinned by the
+/// caller — the recovery captured at the 413 — instead of being recomputed
+/// per request, so a media added later does not push an older kept one out
+/// and break the prompt-cache prefix.
+pub fn degrade_leading_media(
+    messages: &mut [LLMMessage],
+    entries: &[Entry],
+    count: usize,
+) -> usize {
+    let to_degrade = count.min(entries.len());
     for entry in entries.iter().take(to_degrade) {
         replace_with_media_tag(messages, entry);
     }
@@ -282,6 +296,122 @@ pub fn strip_all_media(messages: &mut [LLMMessage], entries: &[Entry]) -> usize 
         replaced += 1;
     }
     replaced
+}
+
+/// v2 #4413 `llmRequester.mediaRecovery` (agent/loop/requester.ts): one
+/// agent-level media recovery, keyed by model alias and context prefix
+/// revision, applied to every later request until the model changes or the
+/// history is rewritten. Before this, the fork's recovery was a pair of
+/// per-turn flags in `run_turn` — the next turn resent the full media,
+/// was rejected again, and paid the degrade/strip round-trip twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaRecovery {
+    /// The model the recovery was captured under (v2 `modelAlias`; the fork
+    /// keys by `LLM::model_name`): a model switch invalidates the recovery —
+    /// the new model may accept the media the old one rejected.
+    pub model: String,
+    /// The history revision at capture time (v2 `contextRevision`). Undo /
+    /// `set_history` / `clear_history` advance the revision, invalidating
+    /// the recovery; compaction does not (the media it removed are simply
+    /// absent from the keys below, so applying is a no-op).
+    pub context_revision: u64,
+    pub action: MediaRecoveryAction,
+}
+
+/// What the recovery does to a request (v2's recovery `action`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaRecoveryAction {
+    /// `degraded` with the count pinned at capture time (v2 #4456
+    /// `degradeCount`): degrade exactly this many leading media parts.
+    /// Recomputing "all but the newest N" per request would let a media
+    /// added later push an older kept one out and break the prompt-cache
+    /// prefix.
+    Degraded(usize),
+    /// `stripped` with the captured key set: strip exactly these media keys,
+    /// so media added after the capture stay visible until a rejection of
+    /// their own (v2 keeps the captured `MediaStripSnapshot` keys).
+    Stripped(Vec<String>),
+}
+
+/// The cell a session shares with its turns (v2 keeps the recovery in agent
+/// state). `revision` advances on every history rewrite; a recovery captured
+/// under an older revision is ignored (and cleared on the next capture).
+#[derive(Debug, Default)]
+pub struct MediaRecoveryState {
+    pub revision: u64,
+    pub recovery: Option<MediaRecovery>,
+}
+
+/// Shared handle to a session's [`MediaRecoveryState`] (the same Arc pattern
+/// as [`DroppedMedia`]).
+pub type SharedMediaRecovery = std::sync::Arc<std::sync::Mutex<MediaRecoveryState>>;
+
+impl MediaRecoveryState {
+    /// v2's `recoveredMedia(request)` gate: the recovery applies only to the
+    /// model and history revision it was captured under.
+    pub fn applicable(&self, model: &str) -> Option<&MediaRecovery> {
+        match &self.recovery {
+            Some(recovery)
+                if recovery.model == model && recovery.context_revision == self.revision =>
+            {
+                Some(recovery)
+            }
+            _ => None,
+        }
+    }
+
+    /// Record the recovery a successful fallback just paid for (v2
+    /// `markMediaRecovery`), overwriting whatever an older rejection left.
+    pub fn mark(&mut self, model: String, action: MediaRecoveryAction) {
+        self.recovery = Some(MediaRecovery {
+            model,
+            context_revision: self.revision,
+            action,
+        });
+    }
+
+    /// Advance the context revision after a history rewrite (v2 advances
+    /// `contextRevision` when context state is restored): any recovery
+    /// captured before the rewrite stops applying.
+    pub fn advance_revision(&mut self) {
+        self.revision += 1;
+    }
+}
+
+/// Apply an applicable recovery to this turn's working messages, the fork's
+/// in-place spelling of v2's per-request projection rewrite. Returns the
+/// ladder flags the turn should start with: the spent budget, so a fresh
+/// rejection this turn continues from where the recovery left off instead of
+/// re-paying the same round.
+///
+/// `entries` are the resolver's media entries for the current messages. The
+/// bool pair is `(media_degraded, media_stripped)`: after a degraded recovery
+/// the degrade round is spent but a strip can still fire (v2: a 413 under a
+/// recovered `degraded` escalates to strip); after a strip recovery the strip
+/// round is spent only when no visible media remain (v2 stops recapturing
+/// once an inherited snapshot leaves no visible media).
+pub fn apply_media_recovery(
+    messages: &mut [LLMMessage],
+    entries: &[Entry],
+    recovery: &MediaRecovery,
+) -> (bool, bool) {
+    match &recovery.action {
+        MediaRecoveryAction::Degraded(count) => {
+            degrade_leading_media(messages, entries, *count);
+            (true, false)
+        }
+        MediaRecoveryAction::Stripped(keys) => {
+            let mut remaining = 0usize;
+            for entry in entries {
+                if keys.iter().any(|key| key == &entry.key) {
+                    replace_with_media_tag(messages, entry);
+                } else {
+                    remaining += 1;
+                }
+            }
+            (true, remaining == 0)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -658,6 +788,100 @@ mod tests {
                  1 older media item(s) were omitted."
             )
         );
+    }
+
+    /// v2 #4413: a recovery captured on one turn applies to the next turn's
+    /// messages — a strip strips exactly the captured keys, so media added
+    /// later stay visible and the strip round stays armed for them.
+    #[test]
+    fn a_strip_recovery_applies_to_later_turns_by_key() {
+        let recovery = MediaRecovery {
+            model: "kimi".into(),
+            context_revision: 0,
+            action: MediaRecoveryAction::Stripped(vec!["f-old".into()]),
+        };
+        let mut messages = vec![
+            media_message(inline_image("old")),
+            media_message(inline_image("new")),
+        ];
+        let entries = vec![ref_entry(0, "f-old", 100), ref_entry(1, "f-new", 100)];
+
+        let (degraded, stripped) = apply_media_recovery(&mut messages, &entries, &recovery);
+
+        // The captured key was replaced with its path tag; the newer media
+        // is untouched and the strip budget is still armed for it.
+        assert!(matches!(
+            &messages[0].blocks[0],
+            ContentBlock::Text { text } if text.contains("/blobs/files/f-old")
+        ));
+        assert!(matches!(&messages[1].blocks[0], ContentBlock::Image { .. }));
+        assert!(degraded);
+        assert!(!stripped);
+    }
+
+    /// A strip recovery whose captured keys cover every visible media marks
+    /// the strip round spent (v2 stops recapturing once an inherited snapshot
+    /// leaves no visible media).
+    #[test]
+    fn a_strip_recovery_with_no_visible_media_spends_the_strip_round() {
+        let recovery = MediaRecovery {
+            model: "kimi".into(),
+            context_revision: 0,
+            action: MediaRecoveryAction::Stripped(vec!["f-old".into()]),
+        };
+        let mut messages = vec![media_message(inline_image("old"))];
+        let entries = vec![ref_entry(0, "f-old", 100)];
+
+        let (_, stripped) = apply_media_recovery(&mut messages, &entries, &recovery);
+        assert!(stripped);
+    }
+
+    /// v2 #4413: the recovery is keyed by model alias and context revision —
+    /// a model switch or a history rewrite (undo) invalidates it.
+    #[test]
+    fn a_recovery_applies_only_to_its_model_and_revision() {
+        let mut state = MediaRecoveryState::default();
+        state.mark("kimi".into(), MediaRecoveryAction::Degraded(2));
+        assert!(state.applicable("kimi").is_some());
+        assert!(state.applicable("other-model").is_none());
+        state.advance_revision();
+        assert!(state.applicable("kimi").is_none());
+        // A capture under the new revision applies again.
+        state.mark("kimi".into(), MediaRecoveryAction::Degraded(2));
+        assert!(state.applicable("kimi").is_some());
+    }
+
+    /// A degraded recovery keeps the two newest media and leaves the strip
+    /// round armed (v2: a 413 under a recovered `degraded` escalates to
+    /// strip).
+    #[test]
+    fn a_degraded_recovery_degrades_and_keeps_strip_armed() {
+        let recovery = MediaRecovery {
+            model: "kimi".into(),
+            context_revision: 0,
+            action: MediaRecoveryAction::Degraded(1),
+        };
+        let mut messages = vec![
+            media_message(inline_image("a")),
+            media_message(inline_image("b")),
+            media_message(inline_image("c")),
+        ];
+        let entries = vec![
+            ref_entry(0, "f-a", 100),
+            ref_entry(1, "f-b", 100),
+            ref_entry(2, "f-c", 100),
+        ];
+
+        let (degraded, stripped) = apply_media_recovery(&mut messages, &entries, &recovery);
+
+        assert!(matches!(
+            &messages[0].blocks[0],
+            ContentBlock::Text { text } if text.contains("/blobs/files/f-a")
+        ));
+        assert!(matches!(&messages[1].blocks[0], ContentBlock::Image { .. }));
+        assert!(matches!(&messages[2].blocks[0], ContentBlock::Image { .. }));
+        assert!(degraded);
+        assert!(!stripped);
     }
 
     #[test]

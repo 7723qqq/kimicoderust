@@ -1,17 +1,19 @@
 //! The todo-list stale reminder, ported from v2's
-//! `agent-core-v2/src/features/todo/todoListReminder.ts`.
+//! `agent-core-v2/src/features/todo/todoListReminder.ts` at upstream
+//! `47a518ed4e` (on top of the `da5918c0c8` rewrite).
 //!
-//! v2 registers the provider only for the main agent, only while `TodoList` is
-//! an active tool, and only after the todo service has been used at least once
-//! (`todoService.ts`'s actor `used` flag). The engine is stateless across
-//! turns, so a `TodoList` call in the conversation history stands in for that
-//! process-local flag — the same history-scan adaptation the interruption and
-//! permission-mode reminders use for state v2 keeps in memory.
+//! v2 registers the provider only for the main agent and only while
+//! `TodoList` is an active tool. The `da5918c0c8` rewrite dropped the
+//! first-use arming gate (`todoService`'s actor `used` flag): the reminder
+//! stays silent on its own while the list has no open items, so an agent
+//! that never used `TodoList` is never reminded — compaction and /undo can
+//! no longer arm it either.
 //!
-//! The counters are recomputed from the live history on every step, exactly as
-//! v2's provider reads `memory.get()`: only assistant messages advance either
-//! counter, and the backwards scan stops once it has found both the most recent
-//! `TodoList` write and the most recent this-variant injection.
+//! The counters are recomputed from the live history on every step, exactly
+//! as v2's provider reads `memory.get()`: only assistant messages advance
+//! either counter (v2 calls one assistant message a "step"), and the
+//! backwards scan stops once it has found both the most recent `TodoList`
+//! write and the most recent this-variant injection.
 
 use serde_json::Value;
 
@@ -24,19 +26,22 @@ pub const TODO_LIST_TOOL_NAME: &str = "TodoList";
 /// v2 `TODO_LIST_REMINDER_VARIANT`.
 pub const TODO_LIST_REMINDER_VARIANT: &str = "todo_list_reminder";
 
-/// v2 `TODO_LIST_REMINDER_TURNS_SINCE_WRITE`: only assistant messages count.
-const TURNS_SINCE_WRITE: usize = 10;
+/// v2 `TODO_LIST_REMINDER_STEPS_SINCE_WRITE` (`47a518ed4e`: back to 10 after
+/// the rewrite's short-lived 5): only assistant messages count.
+const STEPS_SINCE_WRITE: usize = 10;
 
-/// v2 `TODO_LIST_REMINDER_TURNS_BETWEEN_REMINDERS`.
-const TURNS_BETWEEN_REMINDERS: usize = 10;
+/// v2 `TODO_LIST_REMINDER_STEPS_BETWEEN_REMINDERS`.
+const STEPS_BETWEEN_REMINDERS: usize = 10;
 
-/// The reminder body, verbatim from v2 `renderTodoListReminder`.
-pub const TODO_LIST_REMINDER: &str = "The TodoList tool has not been updated recently. If you are working on tasks that benefit from progress tracking, consider using TodoList to update task status. Also consider clearing or rewriting the todo list if it has become stale and no longer matches the current work. Only use it if relevant. This is a gentle reminder; ignore it if not applicable. Make sure that you NEVER mention this reminder to the user.";
-
-/// Opening sentence of the reminder, used to recognize the variant in history.
+/// Opening of the reminder, used to recognize the variant in history.
 /// Engine-built injections do not carry `origin`, so the wrapper plus this
 /// marker is the only identity v2's `origin.variant` check has here.
-const TODO_LIST_REMINDER_MARKER: &str = "The TodoList tool has not been updated recently.";
+const TODO_LIST_REMINDER_MARKER: &str = "The todo list has not been updated in the last ";
+
+/// Opening of the pre-rewrite reminder. Sessions persisted before the
+/// rewrite may still carry it in history; recognizing it keeps the spacing
+/// counter honest across the upgrade instead of re-reminding early.
+const LEGACY_TODO_LIST_REMINDER_MARKER: &str = "The TodoList tool has not been updated recently.";
 
 /// The title line v2 appends before the current list.
 const CURRENT_TODO_LIST_HEADER: &str = "Current todo list:";
@@ -76,6 +81,24 @@ fn read_reminder_items(raw: &Value) -> Vec<ReminderTodo> {
         .collect()
 }
 
+/// The flat tallies the reminder's gate and body read (v2 `todoProgress`
+/// narrowed to the reminder's item shape): how many items are done, how many
+/// are still open, and which one is in progress.
+struct ReminderProgress<'a> {
+    done: usize,
+    open: usize,
+    current: Option<&'a ReminderTodo>,
+}
+
+fn reminder_progress(todos: &[ReminderTodo]) -> ReminderProgress<'_> {
+    let done = todos.iter().filter(|todo| todo.status == "done").count();
+    ReminderProgress {
+        done,
+        open: todos.len() - done,
+        current: todos.iter().find(|todo| todo.status == "in_progress"),
+    }
+}
+
 /// Whether a tool name is `TodoList` in any spelling the engine accepts. v2
 /// compares the canonical name exactly; the engine's history may hold the
 /// lowercase wire spelling depending on the provider path.
@@ -104,9 +127,10 @@ fn has_todo_list_write(message: &LLMMessage) -> bool {
     })
 }
 
-/// v2 `isTodoListReminder`: a prior injection of this variant. The origin check
-/// covers host-persisted messages; the wrapper-plus-marker check covers
-/// injections this engine built, which carry no origin.
+/// v2 `isTodoListReminder`: a prior injection of this variant. The origin
+/// check covers host-persisted messages; the wrapper-plus-marker check covers
+/// injections this engine built, which carry no origin. Both the current and
+/// the pre-rewrite openings are accepted (see the marker constants).
 pub fn is_todo_list_reminder(message: &LLMMessage) -> bool {
     let origin_matches = message.origin.as_ref().is_some_and(|origin| {
         origin.get("kind").and_then(Value::as_str) == Some("injection")
@@ -116,16 +140,18 @@ pub fn is_todo_list_reminder(message: &LLMMessage) -> bool {
         return true;
     }
     let content = message.content.as_str();
-    crate::injection::is_system_reminder(content) && content.contains(TODO_LIST_REMINDER_MARKER)
+    crate::injection::is_system_reminder(content)
+        && (content.contains(TODO_LIST_REMINDER_MARKER)
+            || content.contains(LEGACY_TODO_LIST_REMINDER_MARKER))
 }
 
-/// v2 `getTodoListReminderTurnCounts`: `(turns since the last write, turns
-/// since the last reminder)`, where a "turn" is one assistant message.
-pub fn todo_list_turn_counts(history: &[LLMMessage]) -> (usize, usize) {
+/// v2 `getTodoListReminderStepCounts`: `(steps since the last write, steps
+/// since the last reminder)`, where a "step" is one assistant message.
+pub fn todo_list_step_counts(history: &[LLMMessage]) -> (usize, usize) {
     let mut found_write = false;
     let mut found_reminder = false;
-    let mut turns_since_write = 0usize;
-    let mut turns_since_reminder = 0usize;
+    let mut steps_since_write = 0usize;
+    let mut steps_since_reminder = 0usize;
 
     for message in history.iter().rev() {
         if message.role == "assistant" {
@@ -133,10 +159,10 @@ pub fn todo_list_turn_counts(history: &[LLMMessage]) -> (usize, usize) {
                 found_write = true;
             }
             if !found_write {
-                turns_since_write += 1;
+                steps_since_write += 1;
             }
             if !found_reminder {
-                turns_since_reminder += 1;
+                steps_since_reminder += 1;
             }
             continue;
         }
@@ -150,42 +176,32 @@ pub fn todo_list_turn_counts(history: &[LLMMessage]) -> (usize, usize) {
         }
     }
 
-    (turns_since_write, turns_since_reminder)
+    (steps_since_write, steps_since_reminder)
 }
 
-/// Whether the todo feature has been used in this conversation (v2's actor
-/// `used` flag): any assistant call to `TodoList`, read or write. A failed call
-/// also counts; only a successful state read activates the reminder, so a host
-/// without the state bridge never reaches this gate.
-pub fn todo_list_used(history: &[LLMMessage]) -> bool {
-    history.iter().any(|message| {
-        message.role == "assistant"
-            && message
-                .tool_calls
-                .iter()
-                .any(|call| is_todo_list_tool(&call.name))
-    })
-}
-
-/// v2 `renderTodoListReminder`: the fixed body plus the current list when it is
-/// non-empty. The list is flat — index, status, title — not the tree the tool
-/// renders.
-fn render_todo_list_reminder(todos: &[ReminderTodo]) -> String {
-    let mut message = TODO_LIST_REMINDER.to_string();
-    if todos.is_empty() {
-        return message;
-    }
+/// v2 `renderTodoListReminder` (at `47a518ed4e`): the body names the step
+/// count, the progress, and the item still in progress; the current list
+/// follows. The gate guarantees a non-empty list with open items.
+fn render_todo_list_reminder(todos: &[ReminderTodo], steps_since_last_write: usize) -> String {
+    let progress = reminder_progress(todos);
+    let progress_text = format!("{}/{} done", progress.done, todos.len());
+    let status = match progress.current {
+        None => format!("{progress_text}, none in_progress"),
+        Some(current) => format!("{progress_text}, \"{}\" still in_progress", current.title),
+    };
     let items = todos
         .iter()
         .enumerate()
         .map(|(index, todo)| format!("{}. [{}] {}", index + 1, todo.status, todo.title))
         .collect::<Vec<_>>()
         .join("\n");
-    message.push_str("\n\n");
-    message.push_str(CURRENT_TODO_LIST_HEADER);
-    message.push('\n');
-    message.push_str(&items);
-    message
+    format!(
+        "The todo list has not been updated in the last {steps_since_last_write} steps ({status}). \
+If an item is finished, mark it done; the TodoList call can go in the same response as your next tool call. \
+If the list no longer matches the current work, rewrite or clear it. \
+If the list still matches your progress, no update is needed; this is just a gentle reminder. \
+Never mention this reminder to the user.\n\n{CURRENT_TODO_LIST_HEADER}\n{items}"
+    )
 }
 
 fn todo_list_stale_reminder_for_items(
@@ -196,11 +212,16 @@ fn todo_list_stale_reminder_for_items(
     if !active {
         return None;
     }
-    let (turns_since_write, turns_since_reminder) = todo_list_turn_counts(history);
-    if turns_since_write < TURNS_SINCE_WRITE || turns_since_reminder < TURNS_BETWEEN_REMINDERS {
+    // v2 `todoListStaleReminder`: remind only while the list still has
+    // pending or in_progress items — an empty or all-done list stays silent.
+    if reminder_progress(todos).open == 0 {
         return None;
     }
-    Some(render_todo_list_reminder(todos))
+    let (steps_since_write, steps_since_reminder) = todo_list_step_counts(history);
+    if steps_since_write < STEPS_SINCE_WRITE || steps_since_reminder < STEPS_BETWEEN_REMINDERS {
+        return None;
+    }
+    Some(render_todo_list_reminder(todos, steps_since_write))
 }
 
 /// v2 `todoListStaleReminder`, taking the host's raw todo domain value.
@@ -212,10 +233,10 @@ pub fn todo_list_stale_reminder(
     todo_list_stale_reminder_for_items(active, history, &read_reminder_items(todos))
 }
 
-/// Register the stale-todo provider. The caller has already applied v2's three
-/// registration gates (main agent, `TodoList` active, todo feature used) and
-/// resolved the current todo state; the provider re-evaluates the counters from
-/// the live history on every step.
+/// Register the stale-todo provider. The caller has already applied v2's
+/// registration gates (main agent, `TodoList` active, state bridge present)
+/// and resolved the current todo state; the provider re-evaluates the
+/// counters from the live history on every step.
 pub fn register_todo_reminder(registry: &mut InjectionRegistry, todos: Value) {
     let items = read_reminder_items(&todos);
     registry.register(
@@ -269,7 +290,10 @@ mod tests {
     fn prior_todo_reminder() -> LLMMessage {
         LLMMessage {
             role: "user".into(),
-            content: wrap_system_reminder(TODO_LIST_REMINDER),
+            content: wrap_system_reminder(&render_todo_list_reminder(
+                &read_reminder_items(&todos_value()),
+                10,
+            )),
             origin: Some(serde_json::json!({
                 "kind": "injection",
                 "variant": TODO_LIST_REMINDER_VARIANT,
@@ -299,19 +323,27 @@ mod tests {
     }
 
     #[test]
-    fn test_injects_after_enough_assistant_turns_since_the_last_write() {
+    fn test_injects_after_enough_assistant_steps_since_the_last_write() {
         let mut history = vec![todo_list_write(&todos_value())];
         history.extend(std::iter::repeat_with(assistant_message).take(10));
 
         let text =
             todo_list_stale_reminder(true, &history, &todos_value()).expect("the reminder fires");
+        assert!(
+            text.contains("The todo list has not been updated in the last 10 steps (0/2 done, \"Read current TodoList implementation\" still in_progress)."),
+            "{text}"
+        );
+        assert!(
+            text.contains("If the list still matches your progress, no update is needed"),
+            "{text}"
+        );
         assert!(text.contains(CURRENT_TODO_LIST_HEADER));
         assert!(text.contains("1. [in_progress] Read current TodoList implementation"));
         assert!(text.contains("2. [pending] Add reminder injector tests"));
     }
 
     #[test]
-    fn test_does_not_inject_before_the_assistant_turn_threshold() {
+    fn test_does_not_inject_before_the_assistant_step_threshold() {
         let mut history = vec![todo_list_write(&todos_value())];
         history.extend(std::iter::repeat_with(assistant_message).take(9));
         assert_eq!(
@@ -333,15 +365,61 @@ mod tests {
     }
 
     #[test]
+    fn test_injects_again_once_the_spacing_threshold_has_passed() {
+        let mut history = vec![todo_list_write(&todos_value())];
+        history.extend(std::iter::repeat_with(assistant_message).take(10));
+        history.push(prior_todo_reminder());
+        history.extend(std::iter::repeat_with(assistant_message).take(10));
+        let text =
+            todo_list_stale_reminder(true, &history, &todos_value()).expect("the reminder fires");
+        assert!(
+            text.contains("in the last 20 steps"),
+            "both thresholds passed; the body names the write distance: {text}"
+        );
+    }
+
+    #[test]
     fn test_does_not_treat_a_query_as_a_write() {
         let mut history = vec![todo_list_write(&todos_value())];
-        history.extend(std::iter::repeat_with(assistant_message).take(5));
+        history.extend(std::iter::repeat_with(assistant_message).take(8));
         history.push(todo_list_query());
-        history.extend(std::iter::repeat_with(assistant_message).take(4));
+        history.extend(std::iter::repeat_with(assistant_message).take(1));
         assert!(
             todo_list_stale_reminder(true, &history, &todos_value()).is_some(),
             "the query neither resets the write counter nor counts as a write"
         );
+    }
+
+    #[test]
+    fn test_stays_silent_once_every_item_is_done() {
+        let done = serde_json::json!([
+            { "title": "Read code", "status": "done" },
+            { "title": "Write tests", "status": "done" }
+        ]);
+        let mut history = vec![todo_list_write(&done)];
+        history.extend(std::iter::repeat_with(assistant_message).take(12));
+        assert_eq!(todo_list_stale_reminder(true, &history, &done), None);
+    }
+
+    #[test]
+    fn test_stays_silent_while_the_list_is_empty() {
+        let history = assistant_messages(12);
+        assert_eq!(
+            todo_list_stale_reminder(true, &history, &serde_json::json!([])),
+            None
+        );
+    }
+
+    #[test]
+    fn test_names_no_current_item_when_nothing_is_in_progress() {
+        let pending = serde_json::json!([
+            { "title": "Read code", "status": "pending" },
+            { "title": "Write tests", "status": "pending" }
+        ]);
+        let mut history = vec![todo_list_write(&pending)];
+        history.extend(std::iter::repeat_with(assistant_message).take(10));
+        let text = todo_list_stale_reminder(true, &history, &pending).expect("the reminder fires");
+        assert!(text.contains("(0/2 done, none in_progress)"), "{text}");
     }
 
     #[test]
@@ -353,43 +431,45 @@ mod tests {
         earlier.extend(assistant_messages(2));
         // The second write is itself an assistant message, so it advances the
         // reminder counter until the scan reaches the reminder behind it.
-        assert_eq!(todo_list_turn_counts(&earlier), (2, 3));
+        assert_eq!(todo_list_step_counts(&earlier), (2, 3));
 
         let mut with_reminder = vec![todo_list_write(&todos_value())];
         with_reminder.extend(std::iter::repeat_with(assistant_message).take(10));
         with_reminder.push(prior_todo_reminder());
         with_reminder.extend(std::iter::repeat_with(assistant_message).take(3));
-        assert_eq!(todo_list_turn_counts(&with_reminder), (13, 3));
+        assert_eq!(todo_list_step_counts(&with_reminder), (13, 3));
     }
 
     #[test]
     fn test_reminder_marker_recognizes_engine_built_injections() {
         let built = LLMMessage {
             role: "user".into(),
-            content: wrap_system_reminder(TODO_LIST_REMINDER),
+            content: wrap_system_reminder(&render_todo_list_reminder(
+                &read_reminder_items(&todos_value()),
+                10,
+            )),
             ..Default::default()
         };
         assert!(is_todo_list_reminder(&built));
 
+        // A reminder persisted before the rewrite still counts toward the
+        // spacing threshold.
+        let legacy = LLMMessage {
+            role: "user".into(),
+            content: wrap_system_reminder(LEGACY_TODO_LIST_REMINDER_MARKER),
+            ..Default::default()
+        };
+        assert!(is_todo_list_reminder(&legacy));
+
         let quoted = LLMMessage {
             role: "user".into(),
-            content: TODO_LIST_REMINDER.into(),
+            content: "The todo list has not been updated in the last 10 steps.".into(),
             ..Default::default()
         };
         assert!(
             !is_todo_list_reminder(&quoted),
             "an unwrapped user message is not an injection"
         );
-    }
-
-    #[test]
-    fn test_todo_list_used_covers_reads_and_writes() {
-        assert!(!todo_list_used(&[]));
-        assert!(!todo_list_used(&[assistant_message()]));
-        assert!(todo_list_used(&[todo_list_query()]));
-        let mut history = vec![assistant_message()];
-        history.push(todo_list_write(&todos_value()));
-        assert!(todo_list_used(&history));
     }
 
     #[test]
@@ -409,17 +489,10 @@ mod tests {
         assert!(is_system_reminder(&texts[0]));
         assert_eq!(
             texts[0],
-            wrap_system_reminder(&render_todo_list_reminder(&read_reminder_items(
-                &todos_value()
-            )))
+            wrap_system_reminder(&render_todo_list_reminder(
+                &read_reminder_items(&todos_value()),
+                10
+            ))
         );
-    }
-
-    #[test]
-    fn test_reminder_omits_the_list_when_the_state_is_empty() {
-        let history = assistant_messages(10);
-        let text = todo_list_stale_reminder(true, &history, &Value::Null)
-            .expect("the body still fires without a list");
-        assert_eq!(text, TODO_LIST_REMINDER);
     }
 }

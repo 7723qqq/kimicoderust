@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::native::event_store::{
-    EventStore, EventStoreError, Message, RawWireEvent, fold_wire_events, read_fold_rows,
+    EventStore, EventStoreError, Message, RawWireEvent, WIRE_PROTOCOL_VERSION, fold_wire_events,
+    read_fold_rows, refuse_newer_wire_version,
 };
 use crate::rpc::types::TokenUsage;
 use crate::turn_loop::types::LLMMessage;
@@ -2173,10 +2174,19 @@ impl SqliteSessionStore {
         is_compaction: bool,
         created_at: i64,
     ) -> Result<u64, EventStoreError> {
+        // The occupancy write guard (v2 `bindWriteGuard`, upstream #4246): a
+        // live foreign holder closes the journal to us. Checks rather than
+        // v2's acquire — the turn seams hold the lock for their duration, so
+        // this seam's job is refusal (see session::lock's module note).
+        if let Some(holder) = crate::session::lock::SESSION_LOCKS.occupied_by_other(session_id) {
+            return Err(EventStoreError::SessionOccupied(
+                crate::session::lock::session_occupied_message(Some(&holder)),
+            ));
+        }
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO wire_events (id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO wire_events (id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at, protocol_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 id,
                 session_id,
@@ -2184,7 +2194,8 @@ impl SqliteSessionStore {
                 payload_json,
                 is_checkpoint,
                 is_compaction,
-                created_at
+                created_at,
+                WIRE_PROTOCOL_VERSION,
             ],
         )?;
         Ok(conn.last_insert_rowid() as u64)
@@ -2196,8 +2207,9 @@ impl SqliteSessionStore {
         session_id: &str,
         since_seq: u64,
         limit: usize,
-    ) -> Result<Vec<WireEventRecord>, rusqlite::Error> {
+    ) -> Result<Vec<WireEventRecord>, EventStoreError> {
         let conn = self.conn.lock();
+        refuse_newer_wire_version(&conn, session_id)?;
         let mut stmt = conn.prepare(
             "SELECT seq, id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at
              FROM wire_events
@@ -2219,7 +2231,8 @@ impl SqliteSessionStore {
                 created_at: row.get(7)?,
             })
         })?;
-        rows.collect()
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(EventStoreError::from)
     }
 
     /// The session's interaction lifecycle events (`event.approval.*` /
@@ -2230,7 +2243,7 @@ impl SqliteSessionStore {
     pub fn interaction_wire_events(
         &self,
         session_id: &str,
-    ) -> Result<Vec<WireEventRecord>, rusqlite::Error> {
+    ) -> Result<Vec<WireEventRecord>, EventStoreError> {
         const TYPES: [&str; 6] = [
             "event.approval.requested",
             "event.approval.resolved",
@@ -2247,6 +2260,7 @@ impl SqliteSessionStore {
              ORDER BY seq ASC"
         );
         let conn = self.conn.lock();
+        refuse_newer_wire_version(&conn, session_id)?;
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
             params![
@@ -2267,7 +2281,8 @@ impl SqliteSessionStore {
                 })
             },
         )?;
-        rows.collect()
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(EventStoreError::from)
     }
 
     /// The session's prompt-lifecycle events (`prompt.submitted` /
@@ -2279,7 +2294,7 @@ impl SqliteSessionStore {
     pub fn prompt_wire_events(
         &self,
         session_id: &str,
-    ) -> Result<Vec<WireEventRecord>, rusqlite::Error> {
+    ) -> Result<Vec<WireEventRecord>, EventStoreError> {
         const TYPES: [&str; 4] = [
             "prompt.submitted",
             "prompt.completed",
@@ -2294,6 +2309,7 @@ impl SqliteSessionStore {
              ORDER BY seq ASC"
         );
         let conn = self.conn.lock();
+        refuse_newer_wire_version(&conn, session_id)?;
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
             params![session_id, TYPES[0], TYPES[1], TYPES[2], TYPES[3]],
@@ -2312,7 +2328,8 @@ impl SqliteSessionStore {
                 })
             },
         )?;
-        rows.collect()
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(EventStoreError::from)
     }
 
     /// The session's task-relevant events (subagent lifecycle, task
@@ -2323,7 +2340,7 @@ impl SqliteSessionStore {
     pub fn task_wire_events(
         &self,
         session_id: &str,
-    ) -> Result<Vec<WireEventRecord>, rusqlite::Error> {
+    ) -> Result<Vec<WireEventRecord>, EventStoreError> {
         const TYPES: [&str; 8] = [
             "subagent.spawned",
             "subagent.completed",
@@ -2342,6 +2359,7 @@ impl SqliteSessionStore {
              ORDER BY seq ASC"
         );
         let conn = self.conn.lock();
+        refuse_newer_wire_version(&conn, session_id)?;
         let mut stmt = conn.prepare(&sql)?;
         let mut params: Vec<&dyn rusqlite::types::ToSql> = vec![&session_id];
         params.extend(TYPES.iter().map(|t| t as &dyn rusqlite::types::ToSql));
@@ -2359,7 +2377,8 @@ impl SqliteSessionStore {
                 created_at: row.get(7)?,
             })
         })?;
-        rows.collect()
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(EventStoreError::from)
     }
 
     /// Count total wire events recorded for a session.

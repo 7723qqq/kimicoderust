@@ -171,6 +171,7 @@ async fn run_turn_sync(
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
         previous_turn_aborted: false,
     };

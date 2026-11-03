@@ -191,6 +191,11 @@ export const EXEMPT_PATHS = [
     reason:
       'upstream kap-server file cited in abbreviated form; the package it lives in is deleted, so nothing local can ever resolve',
   },
+  {
+    path: 'src/napi_bindings.rs',
+    reason:
+      'split into the src/napi_bindings/ directory as a pure move on 2026-11-02; the dated ledger entries citing it were accurate when written and the content now lives under napi_bindings/{params,session,turn,mcp,callbacks,plugins,misc}.rs',
+  },
 ];
 
 /** Markers the ledger uses to retire a claim in place. */

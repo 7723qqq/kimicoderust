@@ -10,9 +10,9 @@ description:
   en: >
       Registered tool names: Agent, AgentSwarm, define_subagent, invoke_subagent, manage_subagents.
       
-revision: 932e017600564470d7e43d7b25bb49896c06cca1
-updated_at: "2026-11-01T08:11:47.998Z"
-fingerprint: 949edefdfebc8b445f5206c3caf1705fb3b3440e9cb8dfdbe64d26d56f0031b1
+revision: b2c89a8fe8d80ce9b97a5f08206c20f28072e4b0
+updated_at: "2026-11-02T01:57:28.866Z"
+fingerprint: 43ff3b5ef7dba37d2a7164160d4a9e92561a7b35d1411d6beaa30f57262fe5be
 source:
   - path: "packages/kimi-agent/src/tools/agent_tool.rs"
   - path: "packages/kimi-agent/src/tools/subagent_tools.rs"

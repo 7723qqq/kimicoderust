@@ -101,13 +101,13 @@
       "note": "§6.25/§6.43.1 — the watcher is a standalone service, not a capability. Abbreviated path."
     },
     {
-      "cited": "server/route_sessions.rs:459",
+      "cited": "server/route_sessions.rs:470",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/server/route_sessions.rs",
-      "line": 459,
+      "line": 470,
       "context": "REST 解析在 `",
       "expect": "let turn_index = match body.get(\"turnIndex\") {",
-      "note": "§10.23 REST turnIndex parse; M1 re-located this from :5165, then the mod.rs → dispatch.rs → route_sessions.rs splits moved it again."
+      "note": "§10.23 REST turnIndex parse; M1 re-located this from :5165, then the mod.rs → dispatch.rs → route_sessions.rs splits moved it again. 2026-11-02: the session-occupancy takeover route + hold guards pushed it :459 → :470."
     },
     {
       "cited": "compaction/micro.rs:132-155",
@@ -177,22 +177,22 @@
       "note": "§12 — the pwsh → powershell → Git Bash → cmd chain"
     },
     {
-      "cited": "packages/kimi-agent/napi-contract.d.ts:1587",
+      "cited": "packages/kimi-agent/napi-contract.d.ts:1616",
       "origin": "worktree",
       "path": "packages/kimi-agent/napi-contract.d.ts",
-      "line": 1587,
+      "line": 1616,
       "context": "to stop」（`",
       "expect": "pump task is signalled to stop",
       "note": "§10.42 — the contract wording 'signalled' the dispose note cites"
     },
     {
-      "cited": "packages/kimi-agent/src/tools/mod.rs:797",
+      "cited": "packages/kimi-agent/src/tools/mod.rs:806",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/tools/mod.rs",
-      "line": 797,
+      "line": 806,
       "context": "`），把句式的可变部",
       "expect": "pub(crate) fn arg_error_text(",
-      "note": "§10 — the {{tool}}/{{field}} parameterized arg-error helper; moved down when tools/mod.rs tests left the file"
+      "note": "§10 — the {{tool}}/{{field}} parameterized arg-error helper; moved down when tools/mod.rs tests left the file, then again when the select_tools failure-tracker fields joined NativeToolset"
     },
     {
       "cited": ":1760-1861",

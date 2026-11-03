@@ -81,6 +81,9 @@ pub struct EnginePipeline {
     /// The pipeline's cross-turn record of omitted media (v2
     /// `media.budgetDropped`).
     pub media_dropped: crate::llm::media_budget::DroppedMedia,
+    /// The pipeline's media recovery record (v2 #4413
+    /// `llmRequester.mediaRecovery`), shared with every turn it drives.
+    pub media_recovery: crate::llm::media_budget::SharedMediaRecovery,
     /// The pipeline's own background-task runner (native tools over a
     /// workspace state store). `None` when native tools are off or the store
     /// could not open — hosts install the #3717 liveness predicate on it.
@@ -336,7 +339,11 @@ pub async fn build_engine_pipeline(
             .map(|snapshot| snapshot.pre_tool_hooks.clone())
             .unwrap_or_default();
         hooks.extend(plugin_hooks.iter().cloned());
-        Some(Arc::new(HookGuard::new(hooks)))
+        // v2 #4242: hooks run in the session's working directory, not the
+        // directory the engine process was started from.
+        Some(Arc::new(
+            HookGuard::new(hooks).with_session_cwd(spec.workspace_root.clone()),
+        ))
     };
     // The pool's default model, hoisted out of the native-tool arm so the
     // engine can reach it without downcasting the callback chain.
@@ -666,6 +673,7 @@ pub async fn build_engine_pipeline(
         mcp_manager,
         media: crate::llm::media_resolver::MediaResolver::new(),
         media_dropped: Default::default(),
+        media_recovery: Default::default(),
         task_runner: pipeline_task_runner,
         toolset: pipeline_toolset,
     })

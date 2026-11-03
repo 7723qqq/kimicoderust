@@ -165,6 +165,18 @@ pub(crate) fn final_assistant_summary(messages: &[crate::turn_loop::types::LLMMe
         .unwrap_or_default()
 }
 
+/// The partial-output section of a stopped subagent's report: the last
+/// assistant text an aborted turn produced, rendered as a `[partial output]`
+/// block (leading newlines included, ready to append). A stop used to throw
+/// that work away — the caller got the bare stopped message and the turn's
+/// messages were only kept for resume. `None` when the turn died before any
+/// assistant text, so the report stays the bare v2 message then.
+pub(crate) fn partial_output_section(turn: &crate::turn_loop::types::TurnResult) -> Option<String> {
+    let partial = final_assistant_summary(&turn.messages);
+    let partial = partial.trim();
+    (!partial.is_empty()).then(|| format!("\n\n[partial output]\n{partial}"))
+}
+
 /// A profile's tool policy (v2 `resolveActiveToolNames` subset semantics):
 /// an explicit allowlist wins; an empty allowlist means every tool except
 /// the disallowed names.
@@ -201,11 +213,7 @@ impl ToolPolicyFilter {
     /// while profile tables spell them `Read`).
     pub fn allows(&self, tool_name: &str) -> bool {
         let matches = |pattern: &str| {
-            if pattern.starts_with("mcp__") {
-                crate::tools::tool_policy::matches_tool_pattern(pattern, tool_name)
-            } else {
-                pattern.eq_ignore_ascii_case(tool_name)
-            }
+            crate::tools::tool_policy::matches_profile_tool_pattern(pattern, tool_name)
         };
         if !self.allowlist.is_empty() {
             return self.allowlist.iter().any(|pattern| matches(pattern));
@@ -225,11 +233,7 @@ impl ToolPolicyFilter {
     /// boundary around it.
     pub fn blocks_call(&self, tool_name: &str) -> bool {
         let matches = |pattern: &str| {
-            if pattern.starts_with("mcp__") {
-                crate::tools::tool_policy::matches_tool_pattern(pattern, tool_name)
-            } else {
-                pattern.eq_ignore_ascii_case(tool_name)
-            }
+            crate::tools::tool_policy::matches_profile_tool_pattern(pattern, tool_name)
         };
         if !self.allowlist.is_empty() {
             return !self.allowlist.iter().any(|pattern| matches(pattern));
@@ -452,6 +456,20 @@ pub struct SubagentRuntime {
     /// The runtime's cross-turn record of omitted media (v2
     /// `media.budgetDropped`).
     pub media_dropped: crate::llm::media_budget::DroppedMedia,
+    /// The runtime's media recovery record (v2 #4413): subagent turns are
+    /// their own agent scope, so the recovery does not leak into the parent's.
+    pub media_recovery: crate::llm::media_budget::SharedMediaRecovery,
+}
+
+/// The advertise-hop raw material for the `Agent` tool description (v2's
+/// allowlist-filtered profile listing): the caller's effective spawn
+/// allowlist plus the turn's discovered definitions.
+#[derive(Clone)]
+pub struct SpawnCatalog {
+    /// `None` = unrestricted (`['*']`).
+    pub allowlist: Option<Vec<String>>,
+    /// The turn's host-pushed (discovered) definitions, already registered.
+    pub discovered: Vec<SubagentDefinition>,
 }
 
 pub struct SubagentManager {
@@ -493,6 +511,15 @@ pub struct SubagentManager {
     /// an evicted scope's entry goes with it, and the persisted resume record
     /// carries the parent across a restart.
     parents: Arc<RwLock<HashMap<String, SubagentParent>>>,
+    /// The main agent's bound profile for this turn (`RunTurnParams.
+    /// agent_profile`, refreshed next to the catalog snapshot; `None` keeps
+    /// the default `agent`). A fork inherits the caller's profile (v2 #4152),
+    /// so the main agent's name must be known engine-side.
+    main_profile_name: RwLock<Option<String>>,
+    /// The current turn's host-pushed profile names (v2's
+    /// `isDiscoveredAgentProfileSource` set): the spawn allowlist's
+    /// delegation extras for the main agent.
+    discovered_types: RwLock<Vec<String>>,
 }
 
 /// A foreground subagent's resume record (P55).
@@ -706,6 +733,7 @@ async fn run_one(
         hook_guard,
         media: Some(&runtime.media),
         media_dropped: Some(runtime.media_dropped.clone()),
+        media_recovery: Some(runtime.media_recovery.clone()),
         toolset: None,
     };
     let run_future = crate::turn_loop::run_turn::run_turn_continued(run_input, callbacks);
@@ -756,6 +784,7 @@ impl SubagentManager {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             },
         );
 
@@ -779,6 +808,7 @@ impl SubagentManager {
                     tools: p.tools.iter().map(|t| t.to_lowercase()).collect(),
                     disallowed_tools: Vec::new(),
                     prompt_prefix: None,
+                    subagents: p.subagents.clone(),
                     summary_policy: None,
                     model: None,
                 },
@@ -842,6 +872,7 @@ worktree root the tower assigns you as your full authority scope.";
                 tools: tower_worker_tools,
                 disallowed_tools: Vec::new(),
                 prompt_prefix: None,
+                subagents: None,
                 summary_policy: Some(crate::subagent::types::SummaryPolicy {
                     min_chars: 200,
                     continuation_prompt: "Your summary was too brief. Expand it: what you \
@@ -867,6 +898,8 @@ worktree root the tower assigns you as your full authority scope.";
             scope_cache: Mutex::new(ScopeCache::from_env()),
             usage_by_instance: Arc::new(Mutex::new(HashMap::new())),
             parents: Arc::new(RwLock::new(HashMap::new())),
+            main_profile_name: RwLock::new(None),
+            discovered_types: RwLock::new(Vec::new()),
         }
     }
 
@@ -961,6 +994,7 @@ worktree root the tower assigns you as your full authority scope.";
                 tools: p.tools.iter().map(|t| t.to_lowercase()).collect(),
                 disallowed_tools: Vec::new(),
                 prompt_prefix: None,
+                subagents: p.subagents.clone(),
                 summary_policy: None,
                 model: None,
             })
@@ -980,6 +1014,138 @@ worktree root the tower assigns you as your full authority scope.";
         self.instance_llms.read().await.get(id).cloned()
     }
 
+    /// The LLM a specific instance is bound to, if any (v2 #4152: a fork
+    /// inherits the caller's model verbatim, so a pool-bound caller's fork
+    /// must bind the same pool entry, not the session model).
+    pub async fn instance_llm_of(&self, id: &str) -> Option<Arc<dyn crate::turn_loop::types::LLM>> {
+        self.instance_llm(id).await
+    }
+
+    /// Refresh the main agent's bound profile for this turn (called next to
+    /// [`Self::register_profile_snapshot`]).
+    pub async fn set_main_profile_name(&self, name: Option<&str>) {
+        *self.main_profile_name.write().await = name
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_string);
+    }
+
+    /// The caller's profile name for a spawn (v2 `profile.data().profileName`):
+    /// the main agent's bound profile (default `agent`), or a subagent
+    /// caller's own type.
+    pub async fn caller_profile_name(&self, caller_id: &str) -> Option<String> {
+        if caller_id == crate::callbacks::MAIN_AGENT_ID {
+            return Some(
+                self.main_profile_name
+                    .read()
+                    .await
+                    .clone()
+                    .unwrap_or_else(|| "agent".to_string()),
+            );
+        }
+        self.instances
+            .read()
+            .await
+            .get(caller_id)
+            .map(|(instance, _)| instance.type_name.clone())
+    }
+
+    /// The caller's effective spawn allowlist (v2 `planSpawn`'s
+    /// `subagentAllowlistFor` + `withoutDelegatingTargets` halves, and the
+    /// bind-time `rootDelegationExtras` for the main agent): the caller's
+    /// own declared `subagents`, else the default profile's delegation set;
+    /// the main agent additionally gains the turn's discovered types unless
+    /// a custom main profile declared its own list. An undeclared caller
+    /// may not chain delegation — targets that can themselves spawn are
+    /// filtered out. `None` means unrestricted (`['*']`).
+    pub async fn spawn_allowlist(&self, caller_id: &str) -> Option<Vec<String>> {
+        use crate::subagent::allowlist as gate;
+        let caller_profile = self.caller_profile_name(caller_id).await?;
+        let is_main = caller_id == crate::callbacks::MAIN_AGENT_ID;
+        let definitions = self.definitions.read().await;
+        let own = definitions
+            .get(&caller_profile)
+            .and_then(|def| def.subagents.clone());
+        let extras = if is_main && !(caller_profile != "agent" && own.is_some()) {
+            // v2 `rootDelegationExtras`: the discovered set excludes the
+            // default profile itself and the tower worker (v2's `feature:`
+            // source) — builtins dedupe against the declared list anyway.
+            Some(
+                self.discovered_types
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|name| {
+                        // The tower worker is v2's `feature:` source — never
+                        // a delegation extra (the const is private to
+                        // tools/tower, so the filter names the literal).
+                        name.as_str() != "agent" && name.as_str() != "tower-worker"
+                    })
+                    .cloned()
+                    .collect::<Vec<String>>(),
+            )
+        } else {
+            None
+        };
+        let default_subagents = definitions
+            .get("agent")
+            .and_then(|def| def.subagents.clone());
+        let mut allowlist = gate::subagent_allowlist_for(
+            default_subagents.as_deref(),
+            own.as_deref(),
+            extras.as_deref(),
+        )?;
+        if own.is_none() {
+            allowlist = gate::without_delegating_targets(&definitions, &allowlist);
+        }
+        Some(allowlist)
+    }
+
+    /// v2 `planSpawn`'s `AGENT_TYPE_NOT_ALLOWED` arm: a non-fork spawn whose
+    /// requested type is outside the caller's allowlist is refused with the
+    /// guidance text. Forks skip the gate — a fork inherits the caller's own
+    /// type, which the caller's allowlist already admitted once.
+    pub async fn check_spawn_allowed(
+        &self,
+        caller_id: &str,
+        requested: &str,
+        is_fork: bool,
+    ) -> Result<(), String> {
+        if is_fork {
+            return Ok(());
+        }
+        if let Some(allowlist) = self.spawn_allowlist(caller_id).await
+            && !allowlist.iter().any(|name| name == requested)
+        {
+            return Err(
+                crate::subagent::allowlist::subagent_type_not_allowed_message(
+                    requested, &allowlist,
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// The advertise-hop raw material for the `Agent` description (v2's
+    /// allowlist-filtered profile listing): the caller's effective
+    /// allowlist plus the discovered definitions. `None` when the caller's
+    /// profile is unknown.
+    pub async fn spawn_catalog(&self, caller_id: &str) -> Option<SpawnCatalog> {
+        let allowlist = self.spawn_allowlist(caller_id).await;
+        let discovered = {
+            let definitions = self.definitions.read().await;
+            self.discovered_types
+                .read()
+                .await
+                .iter()
+                .filter_map(|name| definitions.get(name).cloned())
+                .collect()
+        };
+        Some(SpawnCatalog {
+            allowlist,
+            discovered,
+        })
+    }
+
     /// Inject the execution runtime (LLM + callbacks) so subagents can run
     /// autonomous turns. Called after the callback pipeline is assembled.
     pub async fn set_runtime(
@@ -994,6 +1160,7 @@ worktree root the tower assigns you as your full authority scope.";
             session_id,
             media: crate::llm::media_resolver::MediaResolver::new(),
             media_dropped: Default::default(),
+            media_recovery: Default::default(),
         }));
     }
 
@@ -1008,14 +1175,34 @@ worktree root the tower assigns you as your full authority scope.";
         defs.insert(def.name.clone(), def);
     }
 
+    /// Register a definition AS a host-discovered profile (the per-turn
+    /// snapshot path in miniature): the name also joins the spawn gate's
+    /// delegation extras (v2 `rootDelegationExtras`). Runtime-registered
+    /// custom subagents need this or the gate refuses their own spawns.
+    pub async fn register_discovered_definition(&self, def: SubagentDefinition) {
+        {
+            let mut discovered = self.discovered_types.write().await;
+            if !discovered.contains(&def.name) {
+                discovered.push(def.name.clone());
+            }
+        }
+        self.register_definition(def).await;
+    }
+
     /// Register the host-pushed profile catalog snapshot (P46). Called per
     /// turn with the session's profiles; same-name entries overwrite, so
     /// the freshest snapshot wins (session-level snapshot semantics, same
-    /// as the policy snapshot).
+    /// as the policy snapshot). The names are also the spawn gate's
+    /// discovered set (v2 `isDiscoveredAgentProfileSource`): the main
+    /// agent's allowlist gains them as delegation extras.
     pub async fn register_profile_snapshot(
         &self,
         profiles: &[crate::rpc::types::SubagentProfileWire],
     ) {
+        *self.discovered_types.write().await = profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect();
         for profile in profiles {
             self.register_definition(SubagentDefinition {
                 name: profile.name.clone(),
@@ -1024,6 +1211,7 @@ worktree root the tower assigns you as your full authority scope.";
                 tools: profile.tools.clone(),
                 disallowed_tools: profile.disallowed_tools.clone(),
                 prompt_prefix: profile.prompt_prefix.clone(),
+                subagents: profile.subagents.clone(),
                 summary_policy: profile.summary_policy.clone(),
                 model: None,
             })
@@ -1202,6 +1390,7 @@ worktree root the tower assigns you as your full authority scope.";
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             });
 
         let mgr = self.clone();
@@ -1260,6 +1449,7 @@ worktree root the tower assigns you as your full authority scope.";
                 hook_guard,
                 media: None,
                 media_dropped: None,
+                media_recovery: None,
                 toolset: None,
                 previous_turn_aborted: false,
             };
@@ -1383,6 +1573,10 @@ worktree root the tower assigns you as your full authority scope.";
                 session_id: runtime.session_id.clone(),
                 media: crate::llm::media_resolver::MediaResolver::new(),
                 media_dropped: runtime.media_dropped.clone(),
+                // v2 #4413 keys the recovery by model: an instance on its own
+                // pool model gets its own cell — sharing the session's would
+                // let one model's capture clobber the other's.
+                media_recovery: Default::default(),
             }),
             None => runtime,
         };
@@ -2007,6 +2201,7 @@ worktree root the tower assigns you as your full authority scope.";
             hook_guard,
             media: None,
             media_dropped: None,
+            media_recovery: None,
             toolset: None,
             previous_turn_aborted: false,
         };
@@ -2181,6 +2376,7 @@ worktree root the tower assigns you as your full authority scope.";
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
     }
 

@@ -23,6 +23,7 @@
 //! telemetry is served by the `host/telemetry` callback (M1c, emitted from
 //! `run_turn`), `host/list_tools` is M1d.
 
+pub mod lock;
 pub mod patch;
 pub mod sqlite_store;
 pub mod title;
@@ -466,6 +467,11 @@ struct SessionContext {
     /// The session's cross-turn record of omitted media (v2
     /// `media.budgetDropped`).
     media_dropped: crate::llm::media_budget::DroppedMedia,
+    /// The session's media recovery record (v2 #4413 `llmRequester.mediaRecovery`):
+    /// a degrade/strip forced by the provider on an earlier turn re-applies to
+    /// the next turn's requests. Shared with the owning `EngineSession`, whose
+    /// history rewrites advance its revision.
+    media_recovery: crate::llm::media_budget::SharedMediaRecovery,
     /// Host-injected turn-telemetry context; see
     /// [`SessionConfig::telemetry`].
     telemetry: Option<crate::turn_loop::types::TelemetryContext>,
@@ -502,6 +508,10 @@ pub struct EngineSession {
     /// `EngineSession` (the non-pump side) can fire the events the enqueue
     /// path owns, like `UserPromptQueued`.
     hook_guard: Option<Arc<crate::tools::external_hooks::HookGuard>>,
+    /// The session's media recovery cell (v2 #4413), shared with the pump's
+    /// turns; [`Self::set_history`] / [`Self::clear_history`] advance its
+    /// revision so an undo invalidates a recovery captured before the cut.
+    media_recovery: crate::llm::media_budget::SharedMediaRecovery,
 }
 
 impl EngineSession {
@@ -541,6 +551,10 @@ impl EngineSession {
             usage: initial_usage,
         }));
         let steer_queue = Arc::new(Mutex::new(Vec::new()));
+        // v2 #4413: the media recovery record lives one level above the pump
+        // so `set_history` / `clear_history` (undo, `/resume`, `/clear`) can
+        // advance its revision; the pump's turns share the same cell.
+        let media_recovery: crate::llm::media_budget::SharedMediaRecovery = Default::default();
         let ctx = Arc::new(SessionContext {
             llm: config.llm,
             callbacks: Arc::new(
@@ -565,6 +579,7 @@ impl EngineSession {
             print_run: std::sync::Mutex::new(PrintRunState::default()),
             media: crate::llm::media_resolver::MediaResolver::new(),
             media_dropped: Default::default(),
+            media_recovery: media_recovery.clone(),
             telemetry: config.telemetry,
             last_turn_aborted: Arc::new(AtomicBool::new(false)),
             created_at: std::time::Instant::now(),
@@ -589,6 +604,7 @@ impl EngineSession {
             agent_cancel_slot: config.agent_cancel_slot,
             steer_slot: config.steer_slot,
             hook_guard: config.hook_guard.clone(),
+            media_recovery,
         }
     }
 
@@ -958,6 +974,13 @@ impl EngineSession {
     /// REPL's `/resume` and `/clear` slash commands between turns.
     pub fn set_history(&self, history: Vec<LLMMessage>) {
         self.core.lock().unwrap_or_else(|e| e.into_inner()).history = history;
+        // v2 #4413: a history rewrite invalidates the media recovery
+        // captured before it (v2 advances `contextRevision` when context
+        // state is restored).
+        self.media_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .advance_revision();
     }
 
     /// Clear the session's history (the next enqueued turn starts fresh).
@@ -967,6 +990,10 @@ impl EngineSession {
             .unwrap_or_else(|e| e.into_inner())
             .history
             .clear();
+        self.media_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .advance_revision();
     }
 
     /// Append messages to the history without starting a turn (REPL cron path:
@@ -1234,8 +1261,21 @@ async fn pump(
         // Kept past the move into `run_session_turn` so the print settle can
         // observe a cancel that arrives while it holds the receipt.
         let turn_cancel = cancel.clone();
-        let outcome =
-            run_session_turn(&ctx, turn_id, prompt, origin.clone(), cancel, history).await;
+        // The occupancy gate (v2 `runGate.begin()`, upstream #4246): the turn
+        // runs under this process's session lock so a second process cannot
+        // interleave its turns into the same journal. The guard lives to the
+        // end of this loop iteration — turn plus settle. A refused turn
+        // settles as a failure carrying v2's wording; a session with no id
+        // (a stateless one-shot context) has no journal to protect and runs
+        // unlocked.
+        let occupancy = ctx
+            .session_id
+            .as_deref()
+            .map(|session_id| crate::session::lock::SESSION_LOCKS.hold_guard(session_id));
+        let outcome = match &occupancy {
+            Some(Err(error)) => Err(error.to_string()),
+            _ => run_session_turn(&ctx, turn_id, prompt, origin.clone(), cancel, history).await,
+        };
         // Captured before the print settle: a drain can hold the receipt for a
         // long time and must not inflate the turn's own reported duration.
         let turn_duration_ms = started.elapsed().as_millis() as u64;
@@ -2118,6 +2158,7 @@ async fn run_session_turn(
         hook_guard: ctx.hook_guard.clone(),
         media: Some(&ctx.media),
         media_dropped: Some(ctx.media_dropped.clone()),
+        media_recovery: Some(ctx.media_recovery.clone()),
         toolset: ctx.toolset.clone(),
     };
     let result = match &ctx.telemetry {
@@ -2257,6 +2298,13 @@ impl HostCallbacks for SteerQueueCallbacks {
         &self,
     ) -> futures_util::future::BoxFuture<'static, Result<Option<GoalContext>, String>> {
         self.inner.goal()
+    }
+
+    fn parse_bash(
+        &self,
+        request: crate::rpc::types::ParseBashRequest,
+    ) -> futures_util::future::BoxFuture<'static, Result<Option<Vec<String>>, String>> {
+        self.inner.parse_bash(request)
     }
 
     fn auth_token(

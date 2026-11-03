@@ -3310,8 +3310,8 @@ async fn test_http_provider_refresh_discovers_managed_models() {
     // A mock `GET /models` whose payload the test can swap between calls.
     let payload = Arc::new(std::sync::Mutex::new(json!({
         "data": [
-            { "id": "k3", "context_length": 200000, "display_name": "K3", "supports_thinking_type": "both" },
-            { "id": "k3-fast", "context_length": 128000 }
+            { "id": "k3", "limit": { "context": 200000 }, "display_name": "K3", "reasoning": { "type": "both" } },
+            { "id": "k3-fast", "limit": { "context": 128000 } }
         ]
     })));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3413,7 +3413,7 @@ async fn test_http_provider_refresh_discovers_managed_models() {
     *payload
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = json!({
-        "data": [{ "id": "k3", "context_length": 200000 }]
+        "data": [{ "id": "k3", "limit": { "context": 200000 } }]
     });
     let res = server
         .handle_request(&request("/api/v1/providers:refresh"))

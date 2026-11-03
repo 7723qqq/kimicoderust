@@ -202,4 +202,15 @@ describe('engine MCP wire shape', () => {
   it('skips entries that cannot name a transport', () => {
     expect(resolveMcpServersForEngine({ empty: {}, bad: { args: ['x'] } })).toEqual([]);
   });
+
+  it('forwards an explicit deferred=false so it beats [mcp] defaultDeferred', () => {
+    const servers = resolveMcpServersForEngine({
+      inherit: { command: 'a' },
+      inline: { command: 'b', deferred: false },
+      deferred: { command: 'c', deferred: true },
+    });
+    expect(servers[0]).not.toHaveProperty('deferred');
+    expect(servers[1]).toMatchObject({ name: 'inline', deferred: false });
+    expect(servers[2]).toMatchObject({ name: 'deferred', deferred: true });
+  });
 });

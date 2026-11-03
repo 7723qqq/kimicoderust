@@ -159,7 +159,10 @@ export function resolveMcpServersForEngine(
       ...(srv.disabledTools ? { disabledTools: srv.disabledTools } : {}),
       ...(srv.startupTimeoutMs ? { startupTimeoutMs: srv.startupTimeoutMs } : {}),
       ...(srv.toolTimeoutMs ? { toolTimeoutMs: srv.toolTimeoutMs } : {}),
-      ...(srv.deferred === true ? { deferred: true } : {}),
+      // Tri-state, not just `true`: an explicit `deferred: false` must beat
+      // `[mcp] defaultDeferred` engine-side, and dropping it would read as
+      // "not declared".
+      ...(srv.deferred !== undefined ? { deferred: srv.deferred } : {}),
     };
     if (transport === 'stdio' && srv.command) {
       result.push({

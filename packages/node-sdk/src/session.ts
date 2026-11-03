@@ -135,6 +135,16 @@ export class Session {
     this.rpc.setQuestionHandler(this.id, handler);
   }
 
+  /**
+   * Evict a foreign session-occupancy holder so this process's next turn can
+   * claim the session (v2 `takeOverLock`, upstream #4328). Pair with a retry
+   * of the rejected prompt: the caller owns the UX of that choice.
+   */
+  async takeOverLock(): Promise<void> {
+    this.ensureOpen();
+    await this.rpc.takeOverSessionLock({ sessionId: this.id });
+  }
+
   async prompt(input: string | PromptInput, options?: { promptId?: string }): Promise<void> {
     this.ensureOpen();
     if (options?.promptId !== undefined && options.promptId.length === 0) {

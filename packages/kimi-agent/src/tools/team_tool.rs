@@ -327,6 +327,7 @@ mod tests {
                 tools: vec![],
                 disallowed_tools: vec![],
                 prompt_prefix: None,
+                subagents: None,
                 summary_policy: None,
                 model: None,
             })

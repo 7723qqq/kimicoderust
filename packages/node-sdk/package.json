@@ -64,6 +64,8 @@
   },
   "dependencies": {
     "@antfu/utils": "^9.3.0",
+    "@moonshot-ai/tree-sitter-bash": "workspace:^",
+    "pathe": "^2.0.3",
     "smol-toml": "^1.6.1",
     "socks": "^2.8.9",
     "yazl": "^3.3.1",

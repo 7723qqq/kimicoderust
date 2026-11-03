@@ -28,6 +28,10 @@ pub struct AgentProfile {
     pub description: String,
     pub role_additional: String,
     pub tools: Vec<String>,
+    /// The subagent types this profile may itself spawn (v2
+    /// `AgentProfile.subagents`; the builtin `agent` declares
+    /// `['coder', 'explore', 'plan']`, every other builtin declares none).
+    pub subagents: Option<Vec<String>>,
 }
 
 /// Catalog holding registered AgentProfiles.
@@ -78,6 +82,9 @@ impl ProfileCatalog {
                 "UpdateGoal".into(),
                 "mcp__*".into(),
             ],
+            // v2 `session/agentLifecycle/profile/profiles.ts:91`: the main
+            // agent's declared delegation set.
+            subagents: Some(vec!["coder".into(), "explore".into(), "plan".into()]),
         };
 
         let coder = AgentProfile {
@@ -107,6 +114,7 @@ impl ProfileCatalog {
                 "Write".into(),
                 "mcp__*".into(),
             ],
+            subagents: None,
         };
 
         let explore = AgentProfile {
@@ -121,6 +129,7 @@ impl ProfileCatalog {
                 "WebSearch".into(),
                 "FetchURL".into(),
             ],
+            subagents: None,
         };
 
         let plan = AgentProfile {
@@ -134,6 +143,7 @@ impl ProfileCatalog {
                 "WebSearch".into(),
                 "FetchURL".into(),
             ],
+            subagents: None,
         };
 
         Self {

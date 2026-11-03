@@ -16,6 +16,11 @@
 //! agentExternalHooksService.ts:412). Together with `SessionStart` /
 //! `SessionEnd` and the gating `PreToolUse`, that covers all 20 of v2's
 //! `HOOK_EVENT_TYPES`.
+//!
+//! Hooks run in the session's working directory, not the engine process's
+//! cwd (v2 #4242): the guard carries the session cwd, a hook's own `cwd`
+//! still wins over it (v2 `hook.cwd ?? triggerCwd`), and every payload's
+//! `cwd` field reports it.
 
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -67,6 +72,11 @@ pub struct HookGuard {
     /// stdout and whether it blocked. Set once after construction; emission is
     /// fire-and-forget and must never affect the verdict.
     hook_result: std::sync::OnceLock<HookResultSink>,
+    /// The session's working directory (v2 #4242 `sessionContext.cwd`):
+    /// the spawn cwd for hooks that do not declare their own `cwd`, and the
+    /// payload's `cwd` field. `None` keeps the pre-#4242 fork behavior
+    /// (the engine process's cwd).
+    session_cwd: Option<String>,
 }
 
 pub type TelemetrySink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
@@ -130,7 +140,29 @@ impl HookGuard {
             invalid,
             telemetry: std::sync::OnceLock::new(),
             hook_result: std::sync::OnceLock::new(),
+            session_cwd: None,
         }
+    }
+
+    /// v2 #4242: agent-level hooks run in the session's working directory,
+    /// not the directory the engine process was started from. A server
+    /// hosting several workspaces (or a CLI that changed directory after
+    /// start) otherwise ran every hook in the wrong place.
+    pub fn with_session_cwd(mut self, cwd: Option<String>) -> Self {
+        self.session_cwd = cwd.filter(|dir| !dir.is_empty());
+        self
+    }
+
+    /// The payload `cwd` (v2 `toHookInputData` always carries one): the
+    /// session cwd when wired, else the process cwd as before #4242.
+    /// The spawn-side equivalent lives at the `spawn_hooks` call sites
+    /// (`hook.cwd ?? session_cwd`, v2 `runMatchedHooks`).
+    fn payload_cwd(&self) -> String {
+        self.session_cwd.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
     }
 
     /// Install the usage-telemetry sink (v2 #3897
@@ -182,11 +214,11 @@ impl HookGuard {
         if matched.is_empty() {
             return None;
         }
-        let payload = hook_payload(request);
+        let payload = hook_payload(request, &self.payload_cwd());
         let results = futures_util::future::join_all(
             matched
                 .iter()
-                .map(|hook| run_pre_tool_use_hook(hook, &payload)),
+                .map(|hook| run_pre_tool_use_hook(hook, &payload, self.session_cwd.as_deref())),
         )
         .await;
         // Host-facing `hook.result`: one event per hook run, carrying its
@@ -265,6 +297,7 @@ impl HookGuard {
             matched,
             payload,
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -289,6 +322,7 @@ impl HookGuard {
             matched,
             payload,
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -314,6 +348,7 @@ impl HookGuard {
             matched,
             payload,
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -328,7 +363,13 @@ impl HookGuard {
         if matched.is_empty() {
             return;
         }
-        spawn_hooks(event, matched, payload, self.hook_result.get().cloned());
+        spawn_hooks(
+            event,
+            matched,
+            payload,
+            self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
+        );
     }
 
     /// Whether any configured hook listens for `event` — the agent-side
@@ -370,6 +411,7 @@ impl HookGuard {
             matched,
             payload,
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -405,6 +447,7 @@ impl HookGuard {
             matched,
             payload,
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -433,6 +476,7 @@ impl HookGuard {
             matched,
             payload,
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -449,6 +493,7 @@ impl HookGuard {
             matched,
             serde_json::json!({ "turn_id": turn_id, "reason": "cancelled" }),
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -469,6 +514,7 @@ impl HookGuard {
                 "error_message": error_message,
             }),
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -494,6 +540,7 @@ impl HookGuard {
                 "queue_length": queue_length,
             }),
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -520,6 +567,7 @@ impl HookGuard {
                 "estimated_token_count": estimated_token_count,
             }),
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -548,6 +596,7 @@ impl HookGuard {
                 "started_at": started_at,
             }),
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -579,6 +628,7 @@ impl HookGuard {
                 "ended_at": ended_at,
             }),
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -598,6 +648,7 @@ impl HookGuard {
                 "session_title": "",
             }),
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -620,6 +671,7 @@ impl HookGuard {
                 "session_title": "",
             }),
             self.hook_result.get().cloned(),
+            self.session_cwd.as_deref(),
         );
     }
 
@@ -648,9 +700,12 @@ impl HookGuard {
             "tool_name": tool_name,
             "tool_call_id": tool_call_id,
             "stop_reason": reason,
+            "cwd": self.payload_cwd(),
         });
         let results = futures_util::future::join_all(
-            matched.iter().map(|hook| run_stop_hook(hook, &payload)),
+            matched
+                .iter()
+                .map(|hook| run_stop_hook(hook, &payload, self.session_cwd.as_deref())),
         )
         .await;
         if let Some(sink) = self.hook_result.get() {
@@ -667,17 +722,33 @@ impl HookGuard {
 /// Fire-and-forget hook executions sharing one payload: observe-only
 /// notifies whose outcome the turn never reads. The payload gains the
 /// `hook_event_name` field (v2 `toHookInputData` always carries it, and
-/// hook scripts commonly switch on it).
-fn spawn_hooks(event: &str, matched: Vec<HookDef>, payload: Value, sink: Option<HookResultSink>) {
+/// hook scripts commonly switch on it) and, when the caller did not set
+/// one, the `cwd` field (v2 `toHookInputData` always carries the trigger
+/// cwd — #4242 made it the session's working directory).
+fn spawn_hooks(
+    event: &str,
+    matched: Vec<HookDef>,
+    payload: Value,
+    sink: Option<HookResultSink>,
+    session_cwd: Option<&str>,
+) {
+    let payload_cwd = session_cwd.map(str::to_string).unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default()
+    });
     for hook in matched {
         let mut p = payload.clone();
         if let Some(obj) = p.as_object_mut() {
             obj.insert("hook_event_name".into(), Value::String(event.to_string()));
+            obj.entry("cwd".to_string())
+                .or_insert_with(|| Value::String(payload_cwd.clone()));
         }
         let sink = sink.clone();
         let event = event.to_string();
+        let session_cwd = session_cwd.map(str::to_string);
         tokio::spawn(async move {
-            let (reason, stdout) = run_pre_tool_use_hook(&hook, &p).await;
+            let (reason, stdout) = run_pre_tool_use_hook(&hook, &p, session_cwd.as_deref()).await;
             // Host-facing `hook.result`: the observe-only notifies still report
             // what the hook printed (v2 emits it for every run).
             if let Some(sink) = sink {
@@ -698,15 +769,16 @@ fn spawn_hooks(event: &str, matched: Vec<HookDef>, payload: Value, sink: Option<
 /// host's `hook.result` event.
 type HookOutcome = (Option<String>, String);
 
-async fn run_stop_hook(hook: &HookDef, payload: &Value) -> HookOutcome {
-    run_hook_with_denial(hook, payload, "Stop").await
+async fn run_stop_hook(hook: &HookDef, payload: &Value, session_cwd: Option<&str>) -> HookOutcome {
+    run_hook_with_denial(hook, payload, "Stop", session_cwd).await
 }
 
 /// The snake_case stdin payload (v2 `runPreToolUse` → `toHookInputData`):
 /// the fields the engine can truthfully provide. `session_title` is host
-/// metadata the engine does not track (empty), and `client_type` uses the
-/// node-platform spelling v2 sends.
-fn hook_payload(request: &ToolExecuteRequest) -> Value {
+/// metadata the engine does not track (empty), `client_type` uses the
+/// node-platform spelling v2 sends, and `cwd` is the session's working
+/// directory (v2 #4242 — the process cwd only when no session is wired).
+fn hook_payload(request: &ToolExecuteRequest, cwd: &str) -> Value {
     let tool_input = request
         .arguments
         .as_object()
@@ -715,9 +787,7 @@ fn hook_payload(request: &ToolExecuteRequest) -> Value {
     serde_json::json!({
         "hook_event_name": "PreToolUse",
         "session_id": request.turn_id,
-        "cwd": std::env::current_dir()
-            .map(|d| d.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        "cwd": cwd,
         "client_type": platform_string(),
         "session_title": "",
         "tool_name": request.tool_name,
@@ -736,26 +806,40 @@ fn platform_string() -> &'static str {
     }
 }
 
-/// Run one hook (v2 `runHook.ts`): platform shell, inherited cwd/env, the
-/// payload JSON on stdin, timeout with kill. Returns the block reason, or
-/// `None` for an allow verdict. Named for its callers: every path through
-/// here reports a `PreToolUse`-shaped verdict, including the observe-only
-/// notifies (which discard it) — pass an explicit event only via
-/// [`run_hook_with_denial`].
-async fn run_pre_tool_use_hook(hook: &HookDef, payload: &Value) -> HookOutcome {
-    run_hook_with_denial(hook, payload, "PreToolUse").await
+/// Run one hook (v2 `runHook.ts`): platform shell, inherited env, the
+/// payload JSON on stdin, timeout with kill. The spawn cwd is the hook's
+/// own `cwd` when declared, else the session cwd (v2 #4242
+/// `hook.cwd ?? triggerCwd`), else the engine process's cwd. Returns the
+/// block reason, or `None` for an allow verdict. Named for its callers:
+/// every path through here reports a `PreToolUse`-shaped verdict, including
+/// the observe-only notifies (which discard it) — pass an explicit event
+/// only via [`run_hook_with_denial`].
+async fn run_pre_tool_use_hook(
+    hook: &HookDef,
+    payload: &Value,
+    session_cwd: Option<&str>,
+) -> HookOutcome {
+    run_hook_with_denial(hook, payload, "PreToolUse", session_cwd).await
 }
 
 /// [`run_pre_tool_use_hook`] with the v2 `matchHooks.ts` fallback for the triggering
 /// event: an empty block reason becomes `Blocked by {event} hook`.
-async fn run_hook_with_denial(hook: &HookDef, payload: &Value, event: &str) -> HookOutcome {
+async fn run_hook_with_denial(
+    hook: &HookDef,
+    payload: &Value,
+    event: &str,
+    session_cwd: Option<&str>,
+) -> HookOutcome {
     let timeout = Duration::from_secs(
         hook.timeout
             .unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS)
             .clamp(1, MAX_HOOK_TIMEOUT_SECS),
     );
-    let mut child = match spawn_hook_command(&hook.command, hook.cwd.as_deref(), hook.env.as_ref())
-    {
+    let mut child = match spawn_hook_command(
+        &hook.command,
+        hook.cwd.as_deref().or(session_cwd),
+        hook.env.as_ref(),
+    ) {
         Ok(child) => child,
         Err(e) => return (Some(format!("{FAILED_TO_SPAWN}{e}")), String::new()),
     };
@@ -1294,6 +1378,108 @@ mod tests {
         );
     }
 
+    /// v2 #4242: a hook without its own `cwd` runs in the session's working
+    /// directory, not the engine process's cwd.
+    #[tokio::test]
+    async fn hooks_run_in_the_session_cwd_when_they_declare_none() {
+        let dir = tempfile::tempdir().unwrap();
+        if skip_if_path_has_spaces(dir.path()) {
+            return;
+        }
+        let guard = HookGuard::new(vec![HookDef {
+            event: "PreToolUse".into(),
+            matcher: String::new(),
+            command: cwd_report_command().into(),
+            timeout: None,
+            cwd: None,
+            env: None,
+        }])
+        .with_session_cwd(Some(dir.path().to_string_lossy().to_string()));
+        let denial = guard.denial(&request("Write")).await;
+        let name = dir.path().file_name().unwrap().to_string_lossy();
+        assert!(
+            denial
+                .as_deref()
+                .is_some_and(|reason| reason.contains(name.as_ref())),
+            "session cwd not observed in hook stderr: {denial:?}"
+        );
+    }
+
+    /// v2 `runMatchedHooks`: `hook.cwd ?? triggerCwd` — a hook's own `cwd`
+    /// still wins over the session cwd.
+    #[tokio::test]
+    async fn a_hooks_own_cwd_wins_over_the_session_cwd() {
+        let own = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        if skip_if_path_has_spaces(own.path()) || skip_if_path_has_spaces(session.path()) {
+            return;
+        }
+        let guard = HookGuard::new(vec![HookDef {
+            event: "PreToolUse".into(),
+            matcher: String::new(),
+            command: cwd_report_command().into(),
+            timeout: None,
+            cwd: Some(own.path().to_string_lossy().to_string()),
+            env: None,
+        }])
+        .with_session_cwd(Some(session.path().to_string_lossy().to_string()));
+        let denial = guard.denial(&request("Write")).await;
+        let own_name = own.path().file_name().unwrap().to_string_lossy();
+        let session_name = session.path().file_name().unwrap().to_string_lossy();
+        assert!(
+            denial
+                .as_deref()
+                .is_some_and(|reason| reason.contains(own_name.as_ref())
+                    && !reason.contains(session_name.as_ref())),
+            "the hook's own cwd must win: {denial:?}"
+        );
+    }
+
+    /// v2 #4242 covers the observe-only notifies too (the event-bus triggers
+    /// got the same `cwd`): a fire-and-forget hook runs in the session cwd.
+    #[tokio::test]
+    async fn fire_and_forget_hooks_also_run_in_the_session_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        if skip_if_path_has_spaces(dir.path()) {
+            return;
+        }
+        // A relative redirect lands in the child's cwd: the file appears in
+        // the session directory only if the hook ran there.
+        let guard = HookGuard::new(vec![hook("PostToolUse", "Write", "echo 1 >> hook-ran.txt")])
+            .with_session_cwd(Some(dir.path().to_string_lossy().to_string()));
+        guard
+            .notify_post_tool_use("Write", "c1", &serde_json::json!({}), "content", false)
+            .await;
+        let marker = dir.path().join("hook-ran.txt");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let ran = loop {
+            if std::fs::read_to_string(&marker)
+                .unwrap_or_default()
+                .contains('1')
+            {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert!(ran, "the hook never wrote into the session directory");
+    }
+
+    /// The payload `cwd` follows the session cwd (v2 #4242); without one the
+    /// process cwd fills in, matching the pre-#4242 fork behavior.
+    #[test]
+    fn the_payload_cwd_is_the_session_cwd_or_the_process_cwd() {
+        let guard = HookGuard::new(vec![]).with_session_cwd(Some("/session/dir".to_string()));
+        assert_eq!(guard.payload_cwd(), "/session/dir");
+        // An empty session cwd is treated as absent.
+        let guard = HookGuard::new(vec![]).with_session_cwd(Some(String::new()));
+        assert!(!guard.payload_cwd().is_empty());
+        let guard = HookGuard::new(vec![]);
+        assert!(!guard.payload_cwd().is_empty());
+    }
+
     #[tokio::test]
     async fn hook_env_reaches_the_child() {
         let guard = HookGuard::new(vec![HookDef {
@@ -1377,13 +1563,13 @@ mod tests {
 
     #[test]
     fn payload_uses_the_snake_case_wire_shape() {
-        let payload = hook_payload(&request("Write"));
+        let payload = hook_payload(&request("Write"), "/session/dir");
         assert_eq!(payload["hook_event_name"], "PreToolUse");
         assert_eq!(payload["session_id"], "turn-1");
         assert_eq!(payload["tool_name"], "Write");
         assert_eq!(payload["tool_call_id"], "call-1");
         assert_eq!(payload["tool_input"]["path"], "a.txt");
-        assert!(payload["cwd"].as_str().is_some_and(|c| !c.is_empty()));
+        assert_eq!(payload["cwd"], "/session/dir");
         assert!(
             payload["client_type"]
                 .as_str()
@@ -1401,7 +1587,7 @@ mod tests {
             tool_name: "Bash".into(),
             arguments: json!("just a string"),
         };
-        assert_eq!(hook_payload(&req)["tool_input"], json!({}));
+        assert_eq!(hook_payload(&req, "/session/dir")["tool_input"], json!({}));
     }
 
     #[tokio::test]

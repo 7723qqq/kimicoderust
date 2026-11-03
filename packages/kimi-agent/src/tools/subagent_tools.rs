@@ -249,7 +249,7 @@ pub async fn execute_define_subagent(
         .unwrap_or_default();
 
     manager
-        .register_definition(SubagentDefinition {
+        .register_discovered_definition(SubagentDefinition {
             name: name.clone(),
             description,
             system_prompt,
@@ -258,6 +258,7 @@ pub async fn execute_define_subagent(
             prompt_prefix: None,
             summary_policy: None,
             model: None,
+            subagents: None,
         })
         .await;
 

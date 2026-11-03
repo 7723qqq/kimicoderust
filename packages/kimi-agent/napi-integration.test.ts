@@ -519,6 +519,7 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — goal context', () => {
           wallClockMs: 5000,
           tokensUsed: 0,
           turnsUsed: 0,
+          updatedAt: Date.now(),
         },
       },
       makeCallback(mod, (_req) =>
@@ -549,6 +550,7 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — goal context', () => {
           tokensUsed: 10,
           turnsUsed: 0,
           wallClockMs: 0,
+          updatedAt: Date.now(),
         },
       },
       makeCallback(mod, (_req) =>

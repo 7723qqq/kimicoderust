@@ -53,6 +53,7 @@ pub async fn start_btw(
             prompt_prefix: None,
             summary_policy: None,
             model: None,
+            subagents: None,
         })
         .await;
 

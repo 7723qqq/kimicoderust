@@ -419,8 +419,14 @@ fn completion_from_turn(
     use crate::turn_loop::types::LoopTurnStopReason;
 
     if matches!(turn.stop_reason, LoopTurnStopReason::Aborted) {
+        let mut message = "The subagent was stopped before it finished.".to_string();
+        // A stopped member's partial work still reaches the aggregate: the
+        // turn kept everything up to the cancellation checkpoint.
+        if let Some(section) = crate::subagent::manager::partial_output_section(&turn) {
+            message.push_str(&section);
+        }
         return Err(AgentRunError {
-            message: "The subagent was stopped before it finished.".into(),
+            message,
             is_rate_limit: false,
             cancelled: true,
         });

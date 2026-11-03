@@ -184,14 +184,12 @@
     "packages/kimi-agent/src/callbacks.rs:could not clear the local goal": {
       "file": "packages/kimi-agent/src/callbacks.rs",
       "text": "could not clear the local goal",
-      "reason": "diagnostic",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/callbacks.rs:could not sync the local goal from the host snapshot": {
       "file": "packages/kimi-agent/src/callbacks.rs",
       "text": "could not sync the local goal from the host snapshot",
-      "reason": "diagnostic",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/callbacks.rs:host does not support goal": {
       "file": "packages/kimi-agent/src/callbacks.rs",
@@ -283,9 +281,9 @@
       "text": "[secondary_model.models] entry \"{alias}\" could not be resolved: add it to [models] with a provider that has credentials.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/config/mod.rs:[secondary_model.models] key \"{}\" is reserved: it always binds the caller's own model. Rename the pool entry.": {
+    "packages/kimi-agent/src/config/mod.rs:[secondary_model.models] key \"{}\" is reserved. Rename the pool entry.": {
       "file": "packages/kimi-agent/src/config/mod.rs",
-      "text": "[secondary_model.models] key \"{}\" is reserved: it always binds the caller's own model. Rename the pool entry.",
+      "text": "[secondary_model.models] key \"{}\" is reserved. Rename the pool entry.",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/config/mod.rs:[secondary_model].default_effort \"{effort}\" is not supported by model \"{alias}\". Supported efforts: {supported}.": {
@@ -301,16 +299,6 @@
     "packages/kimi-agent/src/config/mod.rs:[secondary_model].default_model is required when [secondary_model.models] is configured": {
       "file": "packages/kimi-agent/src/config/mod.rs",
       "text": "[secondary_model].default_model is required when [secondary_model.models] is configured",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/config/mod.rs:[secondary_model].default_model is required when [secondary_model].force is set": {
-      "file": "packages/kimi-agent/src/config/mod.rs",
-      "text": "[secondary_model].default_model is required when [secondary_model].force is set",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/config/mod.rs:[secondary_model].force cannot be combined with [secondary_model.models]: the pool table only exists to offer the main agent a choice, and force removes that choice": {
-      "file": "packages/kimi-agent/src/config/mod.rs",
-      "text": "[secondary_model].force cannot be combined with [secondary_model.models]: the pool table only exists to offer the main agent a choice, and force removes that choice",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/config/mod.rs:a pool default is required without a table": {
@@ -511,56 +499,47 @@
     "packages/kimi-agent/src/goal/mod.rs:Blocked after goal budget reached": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "Blocked after goal budget reached",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:LLM not set, send \"/login\" to login": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "LLM not set, send \"/login\" to login",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:Paused after goal continuation failure": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "Paused after goal continuation failure",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:Paused after interruption": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "Paused after interruption",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:Paused after model configuration error": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "Paused after model configuration error",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:Paused after provider API error": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "Paused after provider API error",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:Paused after provider authentication error": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "Paused after provider authentication error",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:Paused after provider safety policy block": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "Paused after provider safety policy block",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:Paused after runtime error": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "Paused after runtime error",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:time {}/{} (remaining {})": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
@@ -570,8 +549,7 @@
     "packages/kimi-agent/src/goal/mod.rs:token budget {token_budget}": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "token budget {token_budget}",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:tokens {}/{} (remaining {})": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
@@ -581,8 +559,7 @@
     "packages/kimi-agent/src/goal/mod.rs:turn budget {turn_budget}": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "turn budget {turn_budget}",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/goal/mod.rs:turns {}/{} (remaining {})": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
@@ -592,8 +569,7 @@
     "packages/kimi-agent/src/goal/mod.rs:wall-clock budget {wall_clock_budget_ms}ms": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "wall-clock budget {wall_clock_budget_ms}ms",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/injection/goal_plan.rs:## Re-entering Plan Mode": {
       "file": "packages/kimi-agent/src/injection/goal_plan.rs",
@@ -805,6 +781,11 @@
       "text": "The TodoList tool has not been updated recently.",
       "reason": "model-input"
     },
+    "packages/kimi-agent/src/injection/todo_reminder.rs:The todo list has not been updated in the last": {
+      "file": "packages/kimi-agent/src/injection/todo_reminder.rs",
+      "text": "The todo list has not been updated in the last",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/knowledge/mod.rs:DB lock: {e}": {
       "file": "packages/kimi-agent/src/knowledge/mod.rs",
       "text": "DB lock: {e}",
@@ -955,16 +936,6 @@
     "packages/kimi-agent/src/llm/http.rs:check your account balance": {
       "file": "packages/kimi-agent/src/llm/http.rs",
       "text": "check your account balance",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/llm/http.rs:config.invalid: api_key_env is mutually exclusive with api_key and auth_provider": {
-      "file": "packages/kimi-agent/src/llm/http.rs",
-      "text": "config.invalid: api_key_env is mutually exclusive with api_key and auth_provider",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/llm/http.rs:config.invalid: api_key_env {env_name:?} environment variable is not set or is empty (a Unicode value is required)": {
-      "file": "packages/kimi-agent/src/llm/http.rs",
-      "text": "config.invalid: api_key_env {env_name:?} environment variable is not set or is empty (a Unicode value is required)",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/llm/http.rs:exceeded your current quota": {
@@ -1752,190 +1723,200 @@
       "text": "No target post URL configured for MCP SSE",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:(callbackId: number) => void": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "(callbackId: number) => void",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:ask_question parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:ask_question parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "ask_question parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:auth_token parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:auth_token parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "auth_token parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:callback resolved with no result": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:callback resolved with no result": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "callback resolved with no result",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:dropping unparseable {what}: {error}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:dropping unparseable {what}: {error}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "dropping unparseable {what}: {error}",
       "reason": "diagnostic"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:execute_tool parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:execute_tool parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "execute_tool parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:goal parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:goal parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "goal parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:history parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "history parse: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:history serialize: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "history serialize: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:host does not support goal": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:host does not support goal": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "host does not support goal",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:host does not support list_tools": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:host does not support list_tools": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "host does not support list_tools",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:host does not support oauth token fetch": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:host does not support oauth token fetch": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "host does not support oauth token fetch",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:internal panic in async napi export": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:internal panic in async napi export": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "internal panic in async napi export",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:internal panic in sync napi export": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:internal panic in sync napi export": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "internal panic in sync napi export",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:invalid MCP OAuth tokens: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "invalid MCP OAuth tokens: {e}",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:kimi-agent tracing smoke event": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "kimi-agent tracing smoke event",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:list_tools parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:list_tools parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "list_tools parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:llm_chat parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:llm_chat parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "llm_chat parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:message tool calls": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "message tool calls",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:parse_bash parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
+      "text": "parse_bash parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:native policy snapshot accepted": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "native policy snapshot accepted",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:plugin store not initialized; call initPluginStore(dataDir) first": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "plugin store not initialized; call initPluginStore(dataDir) first",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:parse_bash serialize: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
+      "text": "parse_bash serialize: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:prompt parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "prompt parse: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:run_turn failed: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "run_turn failed: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:serialize MCP roster: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "serialize MCP roster: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:serialize session warnings: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "serialize session warnings: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:serialize skill catalog: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "serialize skill catalog: {e}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:skipping MCP server: unsupported or unenabled transport": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "skipping MCP server: unsupported or unenabled transport",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:skipping plugin MCP server: unsupported transport": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "skipping plugin MCP server: unsupported transport",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:state_read parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:state_read parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "state_read parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:state_write parse: {e}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:state_write parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "state_write parse: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:tool schema parse failed for tool `{}`: {error}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:tool schema parse failed for tool `{}`: {error}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "tool schema parse failed for tool `{}`: {error}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:unknown admission mode: {other}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "unknown admission mode: {other}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:unknown btw side-channel instance: {agent_id}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "unknown btw side-channel instance: {agent_id}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:unknown search engine": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "unknown search engine",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:{error}; falling back to the most restrictive mode": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
-      "text": "{error}; falling back to the most restrictive mode",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/napi_bindings.rs:{label} call: {status:?}": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:{label} call: {status:?}": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "{label} call: {status:?}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/napi_bindings.rs:{label} closed: receiver dropped": {
-      "file": "packages/kimi-agent/src/napi_bindings.rs",
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:{label} closed: receiver dropped": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "{label} closed: receiver dropped",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/mcp.rs:invalid MCP OAuth tokens: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/mcp.rs",
+      "text": "invalid MCP OAuth tokens: {e}",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/napi_bindings/misc.rs:unknown search engine": {
+      "file": "packages/kimi-agent/src/napi_bindings/misc.rs",
+      "text": "unknown search engine",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/plugins.rs:plugin store not initialized; call initPluginStore(dataDir) first": {
+      "file": "packages/kimi-agent/src/napi_bindings/plugins.rs",
+      "text": "plugin store not initialized; call initPluginStore(dataDir) first",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:(callbackId: number) => void": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "(callbackId: number) => void",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:history parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "history parse: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:history serialize: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "history serialize: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:prompt parse: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "prompt parse: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:serialize MCP roster: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "serialize MCP roster: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:serialize session warnings: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "serialize session warnings: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:serialize skill catalog: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "serialize skill catalog: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:unknown admission mode: {other}": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "unknown admission mode: {other}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/session.rs:unknown btw side-channel instance: {agent_id}": {
+      "file": "packages/kimi-agent/src/napi_bindings/session.rs",
+      "text": "unknown btw side-channel instance: {agent_id}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/turn.rs:(callbackId: number) => void": {
+      "file": "packages/kimi-agent/src/napi_bindings/turn.rs",
+      "text": "(callbackId: number) => void",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/turn.rs:message tool calls": {
+      "file": "packages/kimi-agent/src/napi_bindings/turn.rs",
+      "text": "message tool calls",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/turn.rs:native policy snapshot accepted": {
+      "file": "packages/kimi-agent/src/napi_bindings/turn.rs",
+      "text": "native policy snapshot accepted",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/napi_bindings/turn.rs:run_turn failed: {e}": {
+      "file": "packages/kimi-agent/src/napi_bindings/turn.rs",
+      "text": "run_turn failed: {e}",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/turn.rs:skipping MCP server: unsupported or unenabled transport": {
+      "file": "packages/kimi-agent/src/napi_bindings/turn.rs",
+      "text": "skipping MCP server: unsupported or unenabled transport",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/napi_bindings/turn.rs:skipping plugin MCP server: unsupported transport": {
+      "file": "packages/kimi-agent/src/napi_bindings/turn.rs",
+      "text": "skipping plugin MCP server: unsupported transport",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/napi_bindings/turn.rs:{error}; falling back to the most restrictive mode": {
+      "file": "packages/kimi-agent/src/napi_bindings/turn.rs",
+      "text": "{error}; falling back to the most restrictive mode",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/native/bash_spawn.rs:Failed to spawn process: {e}": {
       "file": "packages/kimi-agent/src/native/bash_spawn.rs",
@@ -2621,6 +2602,11 @@
       "file": "packages/kimi-agent/src/prompt/builder.rs",
       "text": "Kimi Code CLI",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/prompt/builder.rs:When you track work in `TodoList`, keep it in step with what you have actually done: mark an item done as soon as it is finished, before you start the next one, and make sure the list matches what you did before you write your final message.": {
+      "file": "packages/kimi-agent/src/prompt/builder.rs",
+      "text": "When you track work in `TodoList`, keep it in step with what you have actually done: mark an item done as soon as it is finished, before you start the next one, and make sure the list matches what you did before you write your final message.",
+      "reason": "model-input"
     },
     "packages/kimi-agent/src/prompt/builder.rs:You have a persistent memory filesystem": {
       "file": "packages/kimi-agent/src/prompt/builder.rs",
@@ -3943,6 +3929,11 @@
       "text": "Failed to list Kimi Code models: {error}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/provider_refresh.rs:Kimi Code model \"{id}\" must include a positive limit.context.": {
+      "file": "packages/kimi-agent/src/server/provider_refresh.rs",
+      "text": "Kimi Code model \"{id}\" must include a positive limit.context.",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/provider_refresh.rs:no registry sources configured": {
       "file": "packages/kimi-agent/src/server/provider_refresh.rs",
       "text": "no registry sources configured",
@@ -4743,6 +4734,31 @@
       "text": "terminals not supported",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/session/lock.rs:This session is in use by another Kimi Code process. Stop the session in that process or exit it, then try again.": {
+      "file": "packages/kimi-agent/src/session/lock.rs",
+      "text": "This session is in use by another Kimi Code process. Stop the session in that process or exit it, then try again.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/session/lock.rs:This session is in use by another {display} instance. Stop the session in that instance or exit it, then try again.": {
+      "file": "packages/kimi-agent/src/session/lock.rs",
+      "text": "This session is in use by another {display} instance. Stop the session in that instance or exit it, then try again.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/session/lock.rs:session lock takeover could not unlink": {
+      "file": "packages/kimi-agent/src/session/lock.rs",
+      "text": "session lock takeover could not unlink",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/session/lock.rs:session lock unavailable; continuing without lock": {
+      "file": "packages/kimi-agent/src/session/lock.rs",
+      "text": "session lock unavailable; continuing without lock",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/session/lock.rs:taking over session lock": {
+      "file": "packages/kimi-agent/src/session/lock.rs",
+      "text": "taking over session lock",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/session/mod.rs:<cron-fire jobId=\"{}\" cron=\"{}\" recurring=\"{}\" coalescedCount=\"{coalesced_count}\" stale=\"{stale}\"> <prompt> {} </prompt> </cron-fire>": {
       "file": "packages/kimi-agent/src/session/mod.rs",
       "text": "<cron-fire jobId=\"{}\" cron=\"{}\" recurring=\"{}\" coalescedCount=\"{coalesced_count}\" stale=\"{stale}\"> <prompt> {} </prompt> </cron-fire>",
@@ -5007,8 +5023,7 @@
     "packages/kimi-agent/src/storage/state_store.rs:State write error: [-32004] Cannot pause a goal in status \"{}\"": {
       "file": "packages/kimi-agent/src/storage/state_store.rs",
       "text": "State write error: [-32004] Cannot pause a goal in status \"{}\"",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/storage/state_store.rs:State write error: [-32004] Cannot resume a goal in status \"{}\"": {
       "file": "packages/kimi-agent/src/storage/state_store.rs",
@@ -5171,6 +5186,11 @@
       "text": "You are {}. Complete the user's task accurately.",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/subagent/manager.rs:[partial output] {partial}": {
+      "file": "packages/kimi-agent/src/subagent/manager.rs",
+      "text": "[partial output] {partial}",
+      "reason": "format-scaffolding"
+    },
     "packages/kimi-agent/src/subagent/manager.rs:{SUBAGENT_SCOPE_CACHE_SIZE_ENV} must be an integer, got {raw:?}.": {
       "file": "packages/kimi-agent/src/subagent/manager.rs",
       "text": "{SUBAGENT_SCOPE_CACHE_SIZE_ENV} must be an integer, got {raw:?}.",
@@ -5231,14 +5251,9 @@
       "text": "Invalid model \"{alias}\". Available models: {}.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/subagent/secondary.rs:[main model]": {
+    "packages/kimi-agent/src/subagent/secondary.rs:[secondary_model.models] key \"{PRIMARY_MODEL_CHOICE}\" is reserved. Rename the pool entry.": {
       "file": "packages/kimi-agent/src/subagent/secondary.rs",
-      "text": "[main model]",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/secondary.rs:[secondary_model.models] key \"{PRIMARY_MODEL_CHOICE}\" is reserved: it always binds the caller's own model. Rename the pool entry.": {
-      "file": "packages/kimi-agent/src/subagent/secondary.rs",
-      "text": "[secondary_model.models] key \"{PRIMARY_MODEL_CHOICE}\" is reserved: it always binds the caller's own model. Rename the pool entry.",
+      "text": "[secondary_model.models] key \"{PRIMARY_MODEL_CHOICE}\" is reserved. Rename the pool entry.",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/swarm/agent_run_batch.rs:Aborted by the user": {
@@ -5914,6 +5929,11 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- 'symbols': Get a hierarchical symbol tree (functions, classes, traits) for the target file.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- 'symbols': Get a hierarchical symbol tree (functions, classes, traits) for the target file.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- **Images and videos** (max 100MB) are sent to the model as multimodal media instead of text; this requires a model with the matching vision capability (`image_in` / `video_in`). `region` and `full_resolution` apply only to images; `line_offset` and `n_lines` apply only to text files.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "- **Images and videos** (max 100MB) are sent to the model as multimodal media instead of text; this requires a model with the matching vision capability (`image_in` / `video_in`). `region` and `full_resolution` apply only to images; `line_offset` and `n_lines` apply only to text files.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line and byte counts, truncation, line-ending notes) and is not part of the file itself.": {
@@ -7756,25 +7776,25 @@
       "text": "Invalid arguments: 'names' must contain at least one tool name.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/select_tools.rs:Unknown tool: {name}. Did you mean: {}?": {
+    "packages/kimi-agent/src/tools/select_tools.rs:Loadable tools: {}.": {
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
-      "text": "Unknown tool: {name}. Did you mean: {}?",
+      "text": "Loadable tools: {}.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/select_tools.rs:Unknown tool: {name}. Loadable tools: {}.": {
+    "packages/kimi-agent/src/tools/select_tools.rs:No additional tools can be loaded right now; use the tools you already have.": {
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
-      "text": "Unknown tool: {name}. Loadable tools: {}.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/select_tools.rs:Unknown tool: {name}. Pick from the latest announced tools list.": {
-      "file": "packages/kimi-agent/src/tools/select_tools.rs",
-      "text": "Unknown tool: {name}. Pick from the latest announced tools list.",
+      "text": "No additional tools can be loaded right now; use the tools you already have.",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/select_tools.rs:{name}\"] first, then call the tool.": {
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
       "text": "{name}\"] first, then call the tool.",
       "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/select_tools.rs:{reason}Did you mean: {}? Use an exact listed name.": {
+      "file": "packages/kimi-agent/src/tools/select_tools.rs",
+      "text": "{reason}Did you mean: {}? Use an exact listed name.",
+      "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/skill.rs:<plugin-instructions plugin=\"{escaped_id}\"> {trimmed} </plugin-instructions> {content}": {
       "file": "packages/kimi-agent/src/tools/skill.rs",
@@ -8226,9 +8246,9 @@
       "text": "Todo list cleared.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/todo_list.rs:Todo list updated. {} {TODO_LIST_WRITE_REMINDER}": {
+    "packages/kimi-agent/src/tools/todo_list.rs:Todo list updated. {}": {
       "file": "packages/kimi-agent/src/tools/todo_list.rs",
-      "text": "Todo list updated. {} {TODO_LIST_WRITE_REMINDER}",
+      "text": "Todo list updated. {}",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/todo_list.rs:Unknown todo id \"{id}\" — current ids: {}. Read the list first (call TodoList with no arguments) to see the ids you are tracking.": {

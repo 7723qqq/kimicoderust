@@ -679,6 +679,14 @@ export abstract class SDKRpcClientBase {
     });
   }
 
+  async takeOverSessionLock(input: SessionIdRpcInput): Promise<void> {
+    const rpc = await this.getRpc();
+    return rpc.takeOverSessionLock({
+      sessionId: input.sessionId,
+      agentId: this.interactiveAgentId,
+    });
+  }
+
   async importContext(input: ImportContextRpcInput): Promise<void> {
     const rpc = await this.getRpc();
     return rpc.importContext({

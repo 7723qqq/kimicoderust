@@ -339,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
                 hook_guard: pipeline.hook_guard.clone(),
                 media: Some(&pipeline.media),
                 media_dropped: Some(pipeline.media_dropped.clone()),
+                media_recovery: Some(pipeline.media_recovery.clone()),
                 toolset: pipeline.toolset.clone(),
                 previous_turn_aborted,
             };
@@ -1700,6 +1701,7 @@ async fn run_self_test() -> anyhow::Result<()> {
         hook_guard: None,
         media: None,
         media_dropped: None,
+        media_recovery: None,
         toolset: None,
         previous_turn_aborted: false,
     };

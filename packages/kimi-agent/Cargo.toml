@@ -70,10 +70,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 ureq = { version = "2", features = ["json"] }
 parking_lot = "0.12"
 async-trait = "0.1"
-dialoguer = "0.11"
 which = "6.0"
-tower-lsp = "0.20"
-lsp-types = "0.95"
 rquickjs = { version = "0.9", features = ["full-async", "futures", "macro", "array-buffer"], optional = true }
 portable-pty = "0.9"
 # Plugin archives: a catalog `source` that is a GitHub repo or a zip URL is

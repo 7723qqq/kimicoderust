@@ -269,6 +269,8 @@
       "version": "0.20.0",
       "dependencies": {
         "@antfu/utils": "^9.3.0",
+        "@moonshot-ai/tree-sitter-bash": "workspace:^",
+        "pathe": "^2.0.3",
         "smol-toml": "^1.6.1",
         "socks": "^2.8.9",
         "yazl": "^3.3.1",
@@ -2670,8 +2672,6 @@
 
     "marked": ["marked@18.0.5", "https://registry.npmmirror.com/marked/-/marked-18.0.5.tgz", { "bin": { "marked": "bin/marked.js" } }, "sha512-S6GcvALHg6K4ohtu4E7x0a1AqhAjp6cV8KhLSyN9qVapnzJkusVBxZRcIU9AeYsbe6P1hKDusSbEOzGyyuce6w=="],
 
-    "marked-terminal": ["marked-terminal@7.3.0", "https://registry.npmmirror.com/marked-terminal/-/marked-terminal-7.3.0.tgz", { "dependencies": { "ansi-escapes": "7.3.0", "ansi-regex": "6.2.2", "chalk": "5.6.2", "cli-highlight": "2.1.11", "cli-table3": "0.6.5", "node-emoji": "2.2.0", "supports-hyperlinks": "3.2.0" }, "peerDependencies": { "marked": ">=1 <16" } }, "sha512-t4rBvPsHc57uE/2nJOLmMbZCQ4tgAccAED3ngXQqW6g+TxA488JzJ+FK3lQkzBQOI1mRV/r/Kq+1ZlJ4D0owQw=="],
-
     "math-intrinsics": ["math-intrinsics@1.1.0", "https://registry.npmmirror.com/math-intrinsics/-/math-intrinsics-1.1.0.tgz", {}, "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g=="],
 
     "math-random": ["math-random@2.0.1", "https://registry.npmmirror.com/math-random/-/math-random-2.0.1.tgz", {}, "sha512-oIEbWiVDxDpl5tIF4S6zYS9JExhh3bun3uLb3YAinHPTlRtW4g1S66LtJrJ4Npq8dgIa8CLK5iPVah5n4n0s2w=="],
@@ -3604,6 +3604,8 @@
 
     "@arethetypeswrong/cli/marked": ["marked@9.1.6", "https://registry.npmmirror.com/marked/-/marked-9.1.6.tgz", { "bin": { "marked": "bin/marked.js" } }, "sha512-jcByLnIFkd5gSXZmjNvS1TlmRhCXZjIzHYlaGkPlLIekG55JDR2Z4va9tZwCiP+/RDERiNhMOFu01xd6O5ct1Q=="],
 
+    "@arethetypeswrong/cli/marked-terminal": ["marked-terminal@7.3.0", "https://registry.npmmirror.com/marked-terminal/-/marked-terminal-7.3.0.tgz", { "dependencies": { "ansi-escapes": "7.3.0", "ansi-regex": "6.2.2", "chalk": "5.6.2", "cli-highlight": "2.1.11", "cli-table3": "0.6.5", "node-emoji": "2.2.0", "supports-hyperlinks": "3.2.0" }, "peerDependencies": { "marked": ">=1 <16" } }, "sha512-t4rBvPsHc57uE/2nJOLmMbZCQ4tgAccAED3ngXQqW6g+TxA488JzJ+FK3lQkzBQOI1mRV/r/Kq+1ZlJ4D0owQw=="],
+
     "@arethetypeswrong/cli/semver": ["semver@7.7.4", "https://registry.npmmirror.com/semver/-/semver-7.7.4.tgz", { "bin": { "semver": "bin/semver.js" } }, "sha512-vFKC2IEtQnVhpT78h1Yp8wzwrf8CM+MzKMHGJZfBtzhZNycRFnXsHk6E5TxIkkMsgNS7mdX3AGB7x2QM2di4lA=="],
 
     "@arethetypeswrong/core/lru-cache": ["lru-cache@11.3.3", "https://registry.npmmirror.com/lru-cache/-/lru-cache-11.3.3.tgz", {}, "sha512-JvNw9Y81y33E+BEYPr0U7omo+U9AySnsMsEiXgwT6yqd31VQWTLNQqmT4ou5eqPFUrTfIDFta2wKhB1hyohtAQ=="],
@@ -3990,8 +3992,6 @@
 
     "markdown-it/argparse": ["argparse@2.0.1", "https://registry.npmmirror.com/argparse/-/argparse-2.0.1.tgz", {}, "sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q=="],
 
-    "marked-terminal/marked": ["marked@9.1.6", "https://registry.npmmirror.com/marked/-/marked-9.1.6.tgz", { "bin": { "marked": "bin/marked.js" } }, "sha512-jcByLnIFkd5gSXZmjNvS1TlmRhCXZjIzHYlaGkPlLIekG55JDR2Z4va9tZwCiP+/RDERiNhMOFu01xd6O5ct1Q=="],
-
     "mdast-util-find-and-replace/escape-string-regexp": ["escape-string-regexp@5.0.0", "https://registry.npmmirror.com/escape-string-regexp/-/escape-string-regexp-5.0.0.tgz", {}, "sha512-/veY75JbMK4j1yjvuUxuVsiS/hr/4iHs9FTT6cgTexxdE0Ly/glccBAkloH/DofkjRbZU3bnoj38mOmhkZ0lHw=="],
 
     "mdast-util-frontmatter/escape-string-regexp": ["escape-string-regexp@5.0.0", "https://registry.npmmirror.com/escape-string-regexp/-/escape-string-regexp-5.0.0.tgz", {}, "sha512-/veY75JbMK4j1yjvuUxuVsiS/hr/4iHs9FTT6cgTexxdE0Ly/glccBAkloH/DofkjRbZU3bnoj38mOmhkZ0lHw=="],
@@ -4165,6 +4165,8 @@
     "yazl/buffer-crc32": ["buffer-crc32@1.0.0", "https://registry.npmmirror.com/buffer-crc32/-/buffer-crc32-1.0.0.tgz", {}, "sha512-Db1SbgBS/fg/392AblrMJk97KggmvYhr4pB5ZIMTWtaivCPMWLkmb7m21cJvpvgK+J3nsU2CmmixNBZx4vFj/w=="],
 
     "@arethetypeswrong/cli/chalk/supports-color": ["supports-color@7.2.0", "https://registry.npmmirror.com/supports-color/-/supports-color-7.2.0.tgz", { "dependencies": { "has-flag": "4.0.0" } }, "sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw=="],
+
+    "@arethetypeswrong/cli/marked-terminal/chalk": ["chalk@5.6.2", "https://registry.npmmirror.com/chalk/-/chalk-5.6.2.tgz", {}, "sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA=="],
 
     "@azure/identity/open/wsl-utils": ["wsl-utils@0.1.0", "https://registry.npmmirror.com/wsl-utils/-/wsl-utils-0.1.0.tgz", { "dependencies": { "is-wsl": "3.1.1" } }, "sha512-h3Fbisa2nKGPxCpm89Hk33lBLsnaGBvctQopaBSOW/uIs6FTe1ATyAnKFJrzVs9vpGdsTe73WF3V4lIsk4Gacw=="],
 

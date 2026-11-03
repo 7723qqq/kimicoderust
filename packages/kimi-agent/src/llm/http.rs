@@ -21,6 +21,40 @@ use crate::turn_loop::types::{LLM, LLMChatParams, LLMChatResponse};
 /// the connect/idle behavior of the pool.
 const REQUEST_TIMEOUT_SECS: u64 = 600;
 
+/// v2 `LLM_HEADERS_TIMEOUT_ENV` (`llm-requester/timeout.ts`): an explicit
+/// cap on the wait for a provider's response headers, for the gateway
+/// clients it supports — a gateway that accepts the socket and then goes
+/// silent otherwise burns the whole request budget before the retry layer
+/// can act.
+pub const LLM_HEADERS_TIMEOUT_ENV: &str = "KIMI_CODE_LLM_HEADERS_TIMEOUT_MS";
+
+/// v2 `MAX_HEADERS_TIMEOUT_MS` (2**31-1, the undici ceiling).
+const MAX_HEADERS_TIMEOUT_MS: u64 = 2_147_483_647;
+
+/// v2 `resolveLlmHeadersTimeoutMs`: unset or blank means no cap; anything
+/// else must be a positive integer within range, and a bad value fails the
+/// request the way v2 fails client construction. The `config.invalid` class
+/// keeps the retry layer from treating a deterministic mistake as transient.
+fn resolve_llm_headers_timeout_ms() -> Result<Option<std::time::Duration>, String> {
+    let Ok(raw) = std::env::var(LLM_HEADERS_TIMEOUT_ENV) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let valid = trimmed
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0 && *value <= MAX_HEADERS_TIMEOUT_MS);
+    match valid {
+        Some(ms) => Ok(Some(std::time::Duration::from_millis(ms))),
+        None => Err(format!(
+            "config.invalid: {LLM_HEADERS_TIMEOUT_ENV} must be a positive integer no greater than {MAX_HEADERS_TIMEOUT_MS}, got {raw:?}."
+        )),
+    }
+}
+
 /// `KIMI_SSE_DUMP=<path>`: append each raw SSE frame to a file while a
 /// request streams. Diagnostic for gateway field behavior — e.g. reasoning
 /// text re-emitted as content — that the typed event surface cannot show.
@@ -85,6 +119,15 @@ impl Accumulator {
         }
     }
 
+    /// The reasoning dialect the stream was observed using (v2
+    /// `detectedReasoningKeys`); only the OpenAI accumulator detects.
+    fn detected_reasoning_key(&self) -> Option<&'static str> {
+        match self {
+            Self::OpenAI(acc) => acc.detected_reasoning_key(),
+            _ => None,
+        }
+    }
+
     /// Terminal accumulation failure (e.g. truncated Responses function-call
     /// arguments). Only the Responses accumulator can produce one today.
     fn take_error(&mut self) -> Option<String> {
@@ -140,6 +183,37 @@ pub struct NativeHttpLlm {
     /// OpenAI-compatible wires send it as `prompt_cache_key`, anthropic as
     /// `metadata.user_id`. `None` for a transport with no session.
     cache_key: Option<String>,
+}
+
+/// v2 `protocolAdapterRegistry.detectedReasoningKeys`: the reasoning dialect
+/// each connection was first observed streaming in, remembered for the
+/// process's life so the NEXT request's replay of unmarked history think
+/// parts uses the current model's own field. Keyed `base#model` (v2
+/// `modelKey`); the first observation wins — the registry never overwrites,
+/// so a later chunk speaking a second dialect cannot re-key the history.
+static DETECTED_REASONING_KEYS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = once_cell::sync::Lazy::new(Default::default);
+
+/// The dialect recorded for this connection, if any (v2
+/// `detectedReasoningKeys.get(modelKey)`).
+fn detected_reasoning_key_for(base_url: &str, model: &str) -> Option<String> {
+    DETECTED_REASONING_KEYS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&format!("{base_url}#{model}"))
+        .cloned()
+}
+
+/// v2 `onReasoningKey`: record the first dialect a connection is observed
+/// streaming in. Only an accumulator without a declared key reports one, so
+/// a model with a config-declared field never lands here.
+fn record_detected_reasoning_key(base_url: &str, model: &str, key: &str) {
+    DETECTED_REASONING_KEYS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(format!("{base_url}#{model}"))
+        .or_insert_with(|| key.to_string());
 }
 
 /// Whether the transport config asked for thinking, in either wire dialect:
@@ -466,6 +540,7 @@ impl NativeHttpLlm {
                 self.config.provider_type.as_deref(),
                 self.cache_key.as_deref(),
                 Some(completion_cap),
+                detected_reasoning_key_for(&self.config.base_url, &self.config.model).as_deref(),
             )
         };
 
@@ -673,7 +748,15 @@ impl NativeHttpLlm {
             );
         }
 
+        // v2 #4485 `detectedReasoningKeys`: the dialect this connection was
+        // observed streaming in is remembered (first-seen wins) and replayed
+        // as the reasoning key of unmarked history think parts on the next
+        // request — before this, only the config-declared key was consulted.
+        let observed_reasoning_key = acc.detected_reasoning_key();
         let mut response = acc.finish();
+        if let Some(key) = observed_reasoning_key {
+            record_detected_reasoning_key(&self.config.base_url, &self.config.model, key);
+        }
         // The calls that enter history carry the ids their fragments streamed
         // under, so the host joins one tool-call entity for the whole call
         // (v2 `remapFinalizedCalls`). An id the provider left empty is skipped:
@@ -783,14 +866,38 @@ impl NativeHttpLlm {
         let send = req
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .send();
-        let response = match cancel {
+        // v2 #4092 (`llm-requester/timeout.ts`): an explicit cap on the wait
+        // for the response headers — `send()` resolves as they arrive, so
+        // wrapping it ports the undici `headersTimeout`. Upstream arms it on
+        // the openai / openai-responses / anthropic clients only; the Google
+        // wire is out of scope there and stays so here.
+        let headers_cap = if is_google {
+            None
+        } else {
+            resolve_llm_headers_timeout_ms()?
+        };
+        let send = async move {
+            let result = match headers_cap {
+                Some(cap) => match tokio::time::timeout(cap, send).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => {
+                        return Err(format!(
+                            "llm transport error headers_timeout: no response headers within {}ms",
+                            cap.as_millis()
+                        ));
+                    }
+                },
+                None => send.await,
+            };
+            result.map_err(|e| format!("{}: {e}", transport_error_message(&e)))
+        };
+        match cancel {
             Some(cancel) => tokio::select! {
-                _ = cancel.cancelled() => return Err(CANCELLED_MESSAGE.into()),
+                _ = cancel.cancelled() => Err(CANCELLED_MESSAGE.into()),
                 sent = send => sent,
             },
             None => send.await,
-        };
-        response.map_err(|e| format!("{}: {e}", transport_error_message(&e)))
+        }
     }
 
     /// The credential for this request: the cached OAuth token (fetched once,
@@ -1237,6 +1344,12 @@ impl LLM for NativeHttpLlm {
         // non-retryable. The transport step stamps a stable kind instead.
         if let Some(rest) = error.strip_prefix("llm transport error ") {
             return !rest.starts_with("invalid_request");
+        }
+        // A config error is deterministic — no retry succeeds with it. The
+        // keyword list below would otherwise catch the "timeout" inside the
+        // `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS` name.
+        if error.starts_with("config.invalid:") {
+            return false;
         }
         // Fallback keyword list for errors produced by older code paths
         // (e.g. SSE decode failures, which carry their own prefix).
@@ -1782,6 +1895,262 @@ mod tests {
         assert!(json["thinking"].get("budget_tokens").is_none());
         assert_eq!(json["metadata"]["user_id"], "sess-2");
         assert_eq!(json["max_tokens"], 40_000);
+        server.abort();
+    }
+
+    /// The detected-dialect store is connection-scoped (v2 `modelKey` =
+    /// `base#model`) and first-seen wins. Unique model names keep the
+    /// process-global map from leaking between tests.
+    #[test]
+    fn detected_reasoning_keys_are_recorded_once_per_connection() {
+        let base = "http://detected-keys.test/v1";
+        assert_eq!(detected_reasoning_key_for(base, "m-record"), None);
+        record_detected_reasoning_key(base, "m-record", "reasoning");
+        record_detected_reasoning_key(base, "m-record", "reasoning_content");
+        assert_eq!(
+            detected_reasoning_key_for(base, "m-record").as_deref(),
+            Some("reasoning")
+        );
+        assert_eq!(detected_reasoning_key_for(base, "m-other"), None);
+    }
+
+    /// v2 #4092 `resolveLlmHeadersTimeoutMs`: unset and blank mean no cap,
+    /// a positive integer within the undici range is the cap, and anything
+    /// else is a `config.invalid` failure.
+    #[test]
+    fn headers_timeout_env_parses_like_v2() {
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(LLM_HEADERS_TIMEOUT_ENV) };
+            }
+        }
+        let _guard = EnvGuard;
+
+        // One fn holds every leg so the shared process env is never raced.
+        unsafe { std::env::remove_var(LLM_HEADERS_TIMEOUT_ENV) };
+        assert_eq!(resolve_llm_headers_timeout_ms().unwrap(), None);
+        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "  ") };
+        assert_eq!(resolve_llm_headers_timeout_ms().unwrap(), None);
+        for (raw, expect_ms) in [("45000", 45_000), ("2147483647", 2_147_483_647), ("+5", 5)] {
+            unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, raw) };
+            assert_eq!(
+                resolve_llm_headers_timeout_ms()
+                    .unwrap()
+                    .map(|d| d.as_millis() as u64),
+                Some(expect_ms),
+                "{raw}"
+            );
+        }
+        for raw in ["0", "-5", "abc", "1.5", "2147483648"] {
+            unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, raw) };
+            let error = resolve_llm_headers_timeout_ms().unwrap_err();
+            assert!(
+                error.starts_with(
+                    "config.invalid: KIMI_CODE_LLM_HEADERS_TIMEOUT_MS must be a positive integer no greater than 2147483647,"
+                ),
+                "{raw}: {error}"
+            );
+        }
+    }
+
+    /// v2 #4092: the env cap fires on a gateway that never answers, while an
+    /// ordinary exchange is unaffected — and a bad value fails the request
+    /// as a deterministic config error, never a retryable one.
+    #[tokio::test]
+    async fn headers_timeout_env_caps_the_header_wait() {
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(LLM_HEADERS_TIMEOUT_ENV) };
+            }
+        }
+        let _guard = EnvGuard;
+        let chat_params = || LLMChatParams {
+            messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+            tools: Arc::from(Vec::new()),
+            ..Default::default()
+        };
+
+        // Armed and generous: an ordinary exchange is unaffected.
+        let (addr, server, body) = spawn_capturing_server().await;
+        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "45000") };
+        let llm = NativeHttpLlm::new(
+            config("openai", &format!("http://{addr}/v1")),
+            String::new(),
+        );
+        let ok = llm.chat(chat_params()).await;
+        assert!(ok.is_ok(), "{:?}", ok.err());
+        let _ = body.await;
+        server.abort();
+
+        // A silent gateway: the 2s cap fires instead of the 600s request
+        // budget, and the failure classifies as transient.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hang_addr = listener.local_addr().unwrap();
+        let hang = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "2000") };
+        let llm = NativeHttpLlm::new(
+            config("openai", &format!("http://{hang_addr}/v1")),
+            String::new(),
+        );
+        let started = std::time::Instant::now();
+        let error = llm
+            .chat(chat_params())
+            .await
+            .expect_err("a silent gateway trips the headers cap")
+            .to_string();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the 2s cap must beat the 600s request budget"
+        );
+        assert!(
+            error.starts_with("llm transport error headers_timeout"),
+            "{error}"
+        );
+        assert!(
+            llm.is_retryable_error(&error),
+            "a headers timeout is transient: {error}"
+        );
+
+        // A bad value fails before any connection attempt and is never
+        // retryable — the env name carries "timeout", so the keyword list
+        // alone would get this wrong.
+        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "abc") };
+        let llm = NativeHttpLlm::new(
+            config("openai", &format!("http://{hang_addr}/v1")),
+            String::new(),
+        );
+        let error = llm
+            .chat(chat_params())
+            .await
+            .expect_err("a bad env value fails the request")
+            .to_string();
+        assert!(
+            error.starts_with("config.invalid: KIMI_CODE_LLM_HEADERS_TIMEOUT_MS"),
+            "{error}"
+        );
+        assert!(
+            !llm.is_retryable_error(&error),
+            "a bad env value is deterministic: {error}"
+        );
+        hang.abort();
+    }
+
+    /// v2 #4485 end to end: a stream speaking the `reasoning` dialect
+    /// records it on the connection, and the NEXT request — built by a
+    /// fresh transport, the way every turn rebuilds one — replays unmarked
+    /// history thinking under that dialect instead of dropping it into the
+    /// assistant text.
+    #[tokio::test]
+    async fn a_detected_dialect_replays_unmarked_history_on_the_next_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut calls = 0usize;
+            while let Ok((mut sock, _)) = listener.accept().await {
+                calls += 1;
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&raw[..header_end]).to_ascii_lowercase();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if raw.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                let body_start = raw
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|i| i + 4)
+                    .unwrap_or(raw.len());
+                let _ = tx.send(String::from_utf8_lossy(&raw[body_start..]).into_owned());
+                let body = if calls == 1 {
+                    "data: {\"choices\":[{\"delta\":{\"reasoning\":\"live dialect\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+                } else {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let base = format!("http://{addr}/v1");
+        let model = "m-detect-dialect-e2e";
+        let mut cfg = config("openai", &base);
+        cfg.model = model.into();
+
+        // Turn 1: the model streams its reasoning in the `reasoning`
+        // dialect; the transport records it on the connection.
+        let llm = NativeHttpLlm::new(cfg.clone(), String::new());
+        let first = llm
+            .chat(LLMChatParams {
+                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                tools: Arc::from(Vec::new()),
+                ..Default::default()
+            })
+            .await;
+        assert!(first.is_ok(), "{:?}", first.err());
+        assert_eq!(
+            detected_reasoning_key_for(&base, model).as_deref(),
+            Some("reasoning")
+        );
+        let _ = rx.recv().await;
+
+        // Turn 2 (a fresh transport, as built per turn): an unmarked
+        // history think part replays under the detected dialect.
+        let llm = NativeHttpLlm::new(cfg, String::new());
+        let history = crate::turn_loop::types::LLMMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            blocks: vec![crate::turn_loop::types::ContentBlock::Think {
+                think: "earlier reasoning".into(),
+                encrypted: None,
+                details_index: None,
+                reasoning_key: None,
+                details_summary: None,
+            }],
+            ..Default::default()
+        };
+        let second = llm
+            .chat(LLMChatParams {
+                messages: Arc::from(vec![
+                    history,
+                    crate::turn_loop::types::LLMMessage::user("and now?"),
+                ]),
+                tools: Arc::from(Vec::new()),
+                ..Default::default()
+            })
+            .await;
+        assert!(second.is_ok(), "{:?}", second.err());
+        let body = rx.recv().await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["messages"][0]["reasoning"], "earlier reasoning");
+        assert!(json["messages"][0].get("reasoning_content").is_none());
         server.abort();
     }
 

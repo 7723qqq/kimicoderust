@@ -193,7 +193,14 @@ function rustRouteFor(endpoint, routes) {
 /** Rust `#[napi] pub (async) fn` names, by module. */
 function collectRustNapiFns() {
   const names = new Set();
-  for (const file of ['src/napi_bindings.rs', 'src/native/native_tool_bindings.rs']) {
+  const files = ['src/native/native_tool_bindings.rs'];
+  const bindingsDir = join(AGENT, 'src/napi_bindings');
+  if (existsSync(bindingsDir)) {
+    for (const entry of readdirSync(bindingsDir).sort()) {
+      if (entry.endsWith('.rs')) files.push(join('src/napi_bindings', entry));
+    }
+  }
+  for (const file of files) {
     const path = join(AGENT, file);
     if (!existsSync(path)) continue;
     const lines = read(path).split('\n');

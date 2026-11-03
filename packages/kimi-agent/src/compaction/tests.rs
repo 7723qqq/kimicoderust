@@ -102,6 +102,74 @@ fn pre_shrink_falls_back_to_the_full_history_when_nothing_fits() {
     );
 }
 
+/// v2 #4456: the pre-shrink gate is the real input limit (window − output
+/// reserve), not the safety-budget target. A history between the two used to
+/// be shrunk on every auto compaction — breaking the prompt-cache prefix of
+/// a request that would have fit.
+#[test]
+fn pre_shrink_gates_on_the_input_limit_not_the_safety_budget() {
+    // 4000 chars ≈ 1000 tokens per message under the module's 4:1 estimate
+    // (fixed-width content — a repeated counter would scale with its digits).
+    let window = 1_000_000u32;
+    // 800 messages ≈ 800 000 tokens: over the safety budget
+    // (875 000 × 0.85 − 1 000 = 742 750) but under the input limit
+    // (875 000) even with the summary scaffolding.
+    let history: Vec<LLMMessage> = (0..800).map(|_| msg("user", &"x".repeat(4000))).collect();
+    assert!(
+        pre_shrink_to_window_budget(&history, None, Some(window)).is_none(),
+        "a history that fits the input limit must be sent whole"
+    );
+    // 900 messages ≈ 900 000 tokens: over the input limit, so the shrink
+    // runs and lands under the safety-budget target.
+    let history: Vec<LLMMessage> = (0..900).map(|_| msg("user", &"x".repeat(4000))).collect();
+    let shrunken = pre_shrink_to_window_budget(&history, None, Some(window))
+        .expect("a history over the input limit shrinks");
+    assert!(shrunken.len() < history.len());
+    let tokens: u32 = shrunken.iter().map(estimate_message_tokens).sum();
+    assert!(
+        tokens <= 742_750,
+        "the shrink targets the safety budget: {tokens}"
+    );
+    assert_eq!(
+        shrunken.last().map(|message| message.content.clone()),
+        history.last().map(|message| message.content.clone())
+    );
+}
+
+/// v2 #4456: the summarization request reports its estimated size as
+/// `used_context_tokens` (with the 2% estimate margin) alongside the window,
+/// so the transport clamps the completion budget to what is actually left.
+#[tokio::test]
+async fn summary_request_reports_used_context_tokens() {
+    let history = compactable_messages();
+    let llm = SummarizerMockLlm::ok("summary");
+    let window = 1_000_000u32;
+
+    let summary = summarize_with_llm_budgeted(&history, &llm, None, None, None, Some(window))
+        .await
+        .expect("summary");
+    assert_eq!(summary, "summary");
+
+    let expected_estimate = summarization_prompt(&history, None)
+        .iter()
+        .map(estimate_message_tokens)
+        .fold(SUMMARY_REQUEST_TOKENS, u32::saturating_add);
+    let expected_used = expected_estimate + (window as f64 * 0.02).ceil() as u32;
+    assert_eq!(
+        *llm.last_used_context_tokens.lock().unwrap(),
+        Some(expected_used),
+    );
+    assert_eq!(*llm.last_max_context_tokens.lock().unwrap(), Some(window));
+
+    // No window → no estimate (the clamp cannot engage without both).
+    let llm = SummarizerMockLlm::ok("summary");
+    summarize_with_llm_budgeted(&history, &llm, None, None, None, None)
+        .await
+        .expect("summary");
+    assert_eq!(*llm.last_used_context_tokens.lock().unwrap(), None);
+    assert_eq!(*llm.last_max_context_tokens.lock().unwrap(), None);
+}
+
 fn assert_messages_eq(actual: &[LLMMessage], expected: &[LLMMessage]) {
     assert_eq!(
         actual.len(),
@@ -1149,6 +1217,8 @@ struct SummarizerMockLlm {
     fail_message: String,
     calls: std::sync::atomic::AtomicU32,
     last_user_content: std::sync::Mutex<Option<String>>,
+    last_used_context_tokens: std::sync::Mutex<Option<u32>>,
+    last_max_context_tokens: std::sync::Mutex<Option<u32>>,
 }
 
 impl SummarizerMockLlm {
@@ -1161,6 +1231,8 @@ impl SummarizerMockLlm {
             fail_message: "summarizer unavailable".into(),
             calls: std::sync::atomic::AtomicU32::new(0),
             last_user_content: std::sync::Mutex::new(None),
+            last_used_context_tokens: std::sync::Mutex::new(None),
+            last_max_context_tokens: std::sync::Mutex::new(None),
         }
     }
 
@@ -1173,6 +1245,8 @@ impl SummarizerMockLlm {
             fail_message: "summarizer unavailable".into(),
             calls: std::sync::atomic::AtomicU32::new(0),
             last_user_content: std::sync::Mutex::new(None),
+            last_used_context_tokens: std::sync::Mutex::new(None),
+            last_max_context_tokens: std::sync::Mutex::new(None),
         }
     }
 
@@ -1186,6 +1260,8 @@ impl SummarizerMockLlm {
             fail_message: "summarizer unavailable".into(),
             calls: std::sync::atomic::AtomicU32::new(0),
             last_user_content: std::sync::Mutex::new(None),
+            last_used_context_tokens: std::sync::Mutex::new(None),
+            last_max_context_tokens: std::sync::Mutex::new(None),
         }
     }
 
@@ -1200,6 +1276,8 @@ impl SummarizerMockLlm {
             fail_message: "llm http status 400 Bad Request: context_length_exceeded".into(),
             calls: std::sync::atomic::AtomicU32::new(0),
             last_user_content: std::sync::Mutex::new(None),
+            last_used_context_tokens: std::sync::Mutex::new(None),
+            last_max_context_tokens: std::sync::Mutex::new(None),
         }
     }
 
@@ -1251,6 +1329,14 @@ impl LLM for SummarizerMockLlm {
             .last_user_content
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = user_content;
+        *self
+            .last_used_context_tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = params.used_context_tokens;
+        *self
+            .last_max_context_tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = params.max_context_tokens;
         Box::pin(async move {
             if fails {
                 Err(fail_message.into())

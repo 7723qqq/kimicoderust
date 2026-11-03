@@ -101,6 +101,20 @@ pub fn matches_tool_pattern(pattern: &str, name: &str) -> bool {
     glob_match(pattern, name)
 }
 
+/// The per-profile allowlist match rule (v2 `isToolActive`): MCP patterns
+/// are globs; built-ins match exactly and case-insensitively, because the
+/// engine dispatches on the lowercase wire name while profile tables spell
+/// them `Read`. Shared by the subagent policy filter and by the runtime
+/// availability filter behind the Agent tool's `Tools:` listing, so the
+/// advertised table and the gate can never drift apart on matching.
+pub fn matches_profile_tool_pattern(pattern: &str, tool_name: &str) -> bool {
+    if pattern.starts_with("mcp__") {
+        matches_tool_pattern(pattern, tool_name)
+    } else {
+        pattern.eq_ignore_ascii_case(tool_name)
+    }
+}
+
 /// Compiled `mcp__` globs. Patterns come from user config and are matched
 /// once per tool per policy layer, so the compiled form is cached
 /// process-wide (the same `LazyLock` shape as `native/catalog.rs`).

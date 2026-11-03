@@ -621,6 +621,15 @@ pub struct NativeToolset {
     /// current deferred set against this, so a mid-session MCP change
     /// announces only the delta instead of the full list every turn.
     announced_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Upstream #4190: whether the empty loadable state ("No tools are
+    /// currently available for dynamic loading…") has already been announced.
+    /// Set when it goes out, cleared when a non-empty announcement follows,
+    /// so a session hears it once per transition into the empty state.
+    empty_disclosure_announced: Arc<std::sync::atomic::AtomicBool>,
+    /// Upstream #4190 `failedSelectionAttempts` + `consecutiveFailures`:
+    /// per-name failed-selection counts and the consecutive-failure streak
+    /// for `select_tools`, session-scoped like [`Self::loaded_tools`].
+    selection_failures: Arc<std::sync::Mutex<crate::tools::select_tools::SelectionFailureTracker>>,
     /// The user's global `[tools]` enable/disable lists (v2 tool policy):
     /// applied to the advertised table and enforced again before execution.
     tools_filter: Option<tool_policy::ToolsFilter>,

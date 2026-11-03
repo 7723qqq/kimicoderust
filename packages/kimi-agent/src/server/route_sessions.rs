@@ -70,7 +70,18 @@ impl HttpServer {
                         "usage": report.usage,
                         "prompt": prompt,
                     })),
-                    Err(error) => HttpResponse::internal_error(error.to_string()),
+                    Err(error) => match error {
+                        crate::server::engine::EngineError::Occupied(message) => {
+                            HttpResponse::json(
+                                409,
+                                &json!({
+                                    "code": crate::server::envelope::error_codes::SESSION_OCCUPIED,
+                                    "msg": message,
+                                }),
+                            )
+                        }
+                        other => HttpResponse::internal_error(other.to_string()),
+                    },
                 }
             }
             ("GET", p) if extract_session_action(p, "status").is_some() => {
@@ -519,7 +530,13 @@ impl HttpServer {
             ("POST", p) if extract_session_action(p, "archive").is_some() => {
                 let session_id = extract_session_action(p, "archive").unwrap();
                 match self.store.archive_session(session_id) {
-                    Ok(true) => HttpResponse::ok(&json!({ "archived": true })),
+                    Ok(true) => {
+                        // v2 #4281: archiving evicts the session's event state —
+                        // the lane's numbering restarts under a fresh epoch, so
+                        // no client can resume the archived session's stream.
+                        self.hub.evict_lane(session_id);
+                        HttpResponse::ok(&json!({ "archived": true }))
+                    }
                     Ok(false) => HttpResponse::not_found(),
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
                 }
@@ -531,13 +548,21 @@ impl HttpServer {
                     .get_session(session_id)
                     .ok()
                     .flatten()
-                    .map(|s| s.workspace_id);
+                    .and_then(|s| s.workspace_id);
                 match self.store.delete_session(session_id) {
                     Ok(true) => {
                         self.interaction_manager.cancel_session(session_id);
+                        // Session-level hooks run in the session's workspace
+                        // (v2 #4242's session cwd, which session hooks always
+                        // had upstream).
+                        let session_cwd = workspace_id
+                            .as_deref()
+                            .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
+                            .map(|w| w.root);
                         let guard = crate::tools::external_hooks::HookGuard::new(
                             self.config().await.hooks.clone(),
-                        );
+                        )
+                        .with_session_cwd(session_cwd);
                         guard
                             .notify_session_lifecycle(
                                 "SessionEnd",
@@ -553,6 +578,9 @@ impl HttpServer {
                         self.hub
                             .bus_for("global")
                             .publish(&crate::events::EngineEvent::Custom(del_event));
+                        // v2 #4281: deletion evicts the session's event state
+                        // (after the deletion notice went out).
+                        self.hub.evict_lane(session_id);
                         HttpResponse::ok(&json!({ "deleted": true, "sessionId": session_id }))
                     }
                     Ok(false) => HttpResponse::not_found(),
@@ -670,6 +698,21 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
+                // v2 `runGate.begin()` at compaction (fullCompactionService,
+                // upstream #4246): the history rewrite runs under this
+                // process's occupancy hold.
+                let _occupancy = match crate::session::lock::SESSION_LOCKS.hold_guard(session_id) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        return HttpResponse::json(
+                            409,
+                            &json!({
+                                "code": crate::server::envelope::error_codes::SESSION_OCCUPIED,
+                                "msg": error.to_string(),
+                            }),
+                        );
+                    }
+                };
                 // Never rewrite history under a running turn (v2 raises
                 // SESSION_BUSY before beginning a compaction).
                 if let Some(engine) = self.engine.as_ref()
@@ -823,11 +866,37 @@ impl HttpServer {
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
                 }
             }
+            ("POST", p) if extract_session_action(p, "takeover").is_some() => {
+                let session_id = extract_session_action(p, "takeover").unwrap();
+                if self.store.get_session(session_id).ok().flatten().is_none() {
+                    return HttpResponse::not_found();
+                }
+                // v2 `takeoverSessionAction` (upstream #4246): evict a foreign
+                // holder so the next claim succeeds; a hold of ours is left
+                // alone.
+                crate::session::lock::SESSION_LOCKS.takeover(session_id);
+                HttpResponse::ok(&json!({ "taken_over": true }))
+            }
             ("POST", p) if extract_session_action(p, "undo").is_some() => {
                 let session_id = extract_session_action(p, "undo").unwrap();
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
+                // v2 `runGate.begin()` at undo (undoService, upstream #4246):
+                // the row delete and state rollback run under this process's
+                // occupancy hold.
+                let _occupancy = match crate::session::lock::SESSION_LOCKS.hold_guard(session_id) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        return HttpResponse::json(
+                            409,
+                            &json!({
+                                "code": crate::server::envelope::error_codes::SESSION_OCCUPIED,
+                                "msg": error.to_string(),
+                            }),
+                        );
+                    }
+                };
                 let body: Value = if req.body.is_empty() {
                     json!({})
                 } else {

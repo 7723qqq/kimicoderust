@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 
 import type { KimiConfig, ModelAlias } from '#/config-local';
 import { ErrorCodes, KimiError } from '#/error-protocol';
+import { log } from '#/logging';
 import { effectiveModelAlias } from '#/model-alias';
 
 // The engine's transports own these headers (openai/anthropic auth, the
@@ -449,7 +450,6 @@ export interface SecondaryModelEntryWire {
 
 /** The `[secondary_model]` pool in the engine's wire shape. */
 export interface SecondaryModelPoolWire {
-  force: boolean;
   defaultModel: string;
   callerModelAlias?: string;
   models: SecondaryModelEntryWire[];
@@ -504,25 +504,20 @@ export function resolveSecondaryModelPool(
   const envEffort = nonBlank(env['KIMI_SECONDARY_EFFORT']);
   const defaultModel = envModel ?? section.defaultModel ?? section.model;
   const defaultEffort = envEffort ?? section.defaultEffort;
-  const force = section.force === true;
   const table = section.models;
   const hints = new Map<string, string>();
 
-  // `force` only pins the choice the pool table would offer; the two keys are
-  // mutually exclusive and force still needs something to bind (v2
-  // `assertValidSubagentModelConfig`'s ordering: force checks first).
-  if (force && table !== undefined) {
-    throw invalidConfig(
-      '[secondary_model].force cannot be combined with [secondary_model.models]: the pool table only exists to offer the main agent a choice, and force removes that choice',
+  // v2 #4418 removed `force`: a lone `default_model` already pins every
+  // Agent and AgentSwarm subagent, so a leftover key is ignored with a
+  // warning instead of failing session startup (v2
+  // `SECONDARY_MODEL_FORCE_REMOVED_MESSAGE`).
+  if (section.force === true) {
+    log.warn(
+      "[secondary_model] 'force' is no longer supported and is ignored: a lone default_model already pins every Agent and AgentSwarm subagent to that model, and a [secondary_model.models] table only offers its own entries. Remove the key; run /update-config to fix it.",
     );
   }
   if (table === undefined) {
     if (defaultModel === undefined) {
-      if (force) {
-        throw invalidConfig(
-          '[secondary_model].default_model is required when [secondary_model].force is set',
-        );
-      }
       // A section with no pool keys (patch-only recipe) stays inert.
       return undefined;
     }
@@ -540,9 +535,10 @@ export function resolveSecondaryModelPool(
       );
     }
   }
+  // v2 `SECONDARY_MODEL_PRIMARY_MODEL_RESERVED_MESSAGE`.
   if (hints.has(PRIMARY_SUBAGENT_MODEL_CHOICE)) {
     throw invalidConfig(
-      `[secondary_model.models] key "${PRIMARY_SUBAGENT_MODEL_CHOICE}" is reserved: it always binds the caller's own model. Rename the pool entry.`,
+      `[secondary_model.models] key "${PRIMARY_SUBAGENT_MODEL_CHOICE}" is reserved. Rename the pool entry.`,
     );
   }
 
@@ -557,7 +553,6 @@ export function resolveSecondaryModelPool(
   });
 
   return {
-    force,
     defaultModel,
     callerModelAlias: config.defaultModel,
     models,

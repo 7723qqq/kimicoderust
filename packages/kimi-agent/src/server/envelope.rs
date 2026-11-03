@@ -37,6 +37,9 @@ pub mod error_codes {
 
     pub const SESSION_BUSY: u32 = 40901;
     pub const APPROVAL_ALREADY_RESOLVED: u32 = 40902;
+    /// v2 `session.occupied` (upstream #4246): a live foreign process holds
+    /// the session's occupancy lock.
+    pub const SESSION_OCCUPIED: u32 = 40903;
     pub const PROMPT_ID_CONFLICT: u32 = 40927;
     pub const QUESTION_DISMISSED: u32 = 40909;
     pub const PROVIDER_ALREADY_EXISTS: u32 = 40921;

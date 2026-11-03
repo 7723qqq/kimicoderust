@@ -123,7 +123,14 @@ for (const rel of listFiles()) {
   // whose contents no pattern below can match, and reading them is the whole
   // cost of this gate.
   if (base !== 'package.json' && !isCode && !isBuildWiring) continue;
-  const text = readFileSync(file, 'utf8');
+  // `git ls-files --cached` still lists files whose deletion is not yet staged;
+  // they are gone from the live surface, so skip them instead of crashing.
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    continue;
+  }
 
   if (base === 'package.json') {
     if (DEP_ENTRY_PATTERN.test(text)) {

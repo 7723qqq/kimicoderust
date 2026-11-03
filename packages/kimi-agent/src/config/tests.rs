@@ -464,7 +464,6 @@ default_effort = "high"
     ))
     .unwrap();
     let pool = config.extract_secondary_model_pool(None).unwrap().unwrap();
-    assert!(!pool.force);
     assert_eq!(pool.default_model, "fast");
     assert_eq!(pool.caller_model_alias.as_deref(), Some("kimi-k2"));
 
@@ -663,6 +662,8 @@ default_model = "missing"
         "{error}"
     );
 
+    // v2 #4418 removed `force`: a leftover key is ignored (with a warning)
+    // instead of failing the pool.
     let force_with_table = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
 [secondary_model]
@@ -674,10 +675,11 @@ force = true
 "#
     ))
     .unwrap();
-    let error = force_with_table
+    let pool = force_with_table
         .extract_secondary_model_pool(None)
-        .unwrap_err();
-    assert!(error.contains("force cannot be combined"), "{error}");
+        .unwrap()
+        .expect("a leftover force key no longer kills the pool");
+    assert_eq!(pool.models.len(), 1);
 
     let force_without_default = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
@@ -686,12 +688,12 @@ force = true
 "#
     ))
     .unwrap();
-    let error = force_without_default
-        .extract_secondary_model_pool(None)
-        .unwrap_err();
     assert!(
-        error.contains("required when [secondary_model].force is set"),
-        "{error}"
+        force_without_default
+            .extract_secondary_model_pool(None)
+            .unwrap()
+            .is_none(),
+        "force alone is not a pool"
     );
 
     let reserved = KimiConfig::from_str(&format!(

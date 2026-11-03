@@ -10,9 +10,9 @@ description:
   en: >
       CI and pre-commit gates: architecture drift fingerprints, locale-key consistency, Rust-TS parity, upstream delta triage.
       
-revision: 932e017600564470d7e43d7b25bb49896c06cca1
-updated_at: "2026-11-01T08:11:48.025Z"
-fingerprint: 4aa2de8359bd1e197a9bff393e34bf8233b3a23d42a1b81bf9604e9c1db65cc2
+revision: b2c89a8fe8d80ce9b97a5f08206c20f28072e4b0
+updated_at: "2026-11-02T00:33:59.541Z"
+fingerprint: 29c0ae93fa7833b6ee76e6ad6db5505ada1a548a765d7aa96164f0813acfbd20
 source:
   - path: "scripts/check-architecture-drift.mjs"
   - path: "scripts/scan-parity.mjs"

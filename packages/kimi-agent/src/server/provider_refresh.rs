@@ -49,24 +49,52 @@ fn string_array(value: Option<&Value>) -> Option<Vec<String>> {
     })
 }
 
-/// `parseThinkEfforts`: `support` gates the whole object.
-fn parse_think_efforts(value: Option<&Value>) -> (Option<Vec<String>>, Option<String>) {
+/// `parseModelReasoning`: the unified `reasoning` object —
+/// `{ type: "only"|"both"|"none", effort: { valid: [...], default: "..." } }`.
+/// A missing object and `type: "none"` both mean the model cannot think and
+/// map to the internal 'no' state so a stale thinking default gets cleared;
+/// an unrecognized type stays None. A default not listed in `valid` is
+/// dropped.
+fn parse_model_reasoning(
+    value: Option<&Value>,
+) -> (bool, Option<String>, Option<Vec<String>>, Option<String>) {
     let Some(record) = value.and_then(Value::as_object) else {
-        return (None, None);
+        return (false, Some("no".to_string()), None, None);
     };
-    if record.get("support").and_then(Value::as_bool) != Some(true) {
-        return (None, None);
-    }
-    let support_efforts = string_array(record.get("valid_efforts"));
-    let default_effort = record
-        .get("default_effort")
+    let supports_thinking_type = match record.get("type").and_then(Value::as_str) {
+        Some("only") => Some("only".to_string()),
+        Some("both") => Some("both".to_string()),
+        // The unified schema names the non-thinking state 'none'; the internal
+        // three-state keeps the legacy 'no'.
+        Some("none") => Some("no".to_string()),
+        _ => None,
+    };
+    let effort = record.get("effort").and_then(Value::as_object);
+    let support_efforts = effort.and_then(|effort| string_array(effort.get("valid")));
+    let default_effort = effort
+        .and_then(|effort| effort.get("default"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    (support_efforts, default_effort)
+        .map(str::to_string)
+        .filter(|default| {
+            support_efforts
+                .as_ref()
+                .is_none_or(|valid| valid.contains(default))
+        });
+    let supports_reasoning = supports_thinking_type
+        .as_deref()
+        .is_some_and(|kind| kind != "no");
+    (
+        supports_reasoning,
+        supports_thinking_type,
+        support_efforts,
+        default_effort,
+    )
 }
 
-/// `toModelInfo` + `capabilitiesForModel` + `toManagedModelAlias`.
+/// `toModelInfo` + `capabilitiesForModel` + `toManagedModelAlias` (unified
+/// /models schema: `limit.context` / `modalities.input` / `reasoning` /
+/// `tools.dynamic_load`; v2 #4209).
 fn parse_model(item: &Value) -> Result<Option<DiscoveredModel>, String> {
     let Some(id) = item
         .get("id")
@@ -75,39 +103,38 @@ fn parse_model(item: &Value) -> Result<Option<DiscoveredModel>, String> {
     else {
         return Ok(None);
     };
-    let context_length = item.get("context_length").and_then(Value::as_u64);
+    let context_length = item
+        .get("limit")
+        .and_then(Value::as_object)
+        .and_then(|limit| limit.get("context"))
+        .and_then(Value::as_u64);
     let Some(context_length) = context_length.filter(|length| *length > 0) else {
         return Err(format!(
-            "Kimi Code model \"{id}\" must include a positive context_length."
+            "Kimi Code model \"{id}\" must include a positive limit.context."
         ));
     };
-    let raw_capabilities = string_array(item.get("capabilities"));
-    let supports_reasoning = item.get("supports_reasoning").and_then(Value::as_bool) == Some(true)
-        || raw_capabilities.as_ref().is_some_and(|caps| {
-            caps.iter()
-                .any(|cap| cap == "thinking" || cap == "always_thinking")
-        });
-    let supports_image_in = item.get("supports_image_in").and_then(Value::as_bool) == Some(true)
-        || raw_capabilities
-            .as_ref()
-            .is_some_and(|caps| caps.iter().any(|cap| cap == "image_in"));
-    let supports_video_in = item.get("supports_video_in").and_then(Value::as_bool) == Some(true)
-        || raw_capabilities
-            .as_ref()
-            .is_some_and(|caps| caps.iter().any(|cap| cap == "video_in"));
     let supports_tool_use = item
         .get("supports_tool_use")
         .and_then(Value::as_bool)
-        .unwrap_or_else(|| {
-            raw_capabilities
-                .as_ref()
-                .map(|caps| caps.iter().any(|cap| cap == "tool_use"))
-                .unwrap_or(true)
-        });
-    let supports_thinking_type = item
-        .get("supports_thinking_type")
-        .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "only" | "both" | "no"));
+        .unwrap_or(true);
+    let input_modalities = item
+        .get("modalities")
+        .and_then(Value::as_object)
+        .and_then(|modalities| string_array(modalities.get("input")));
+    let supports_image_in = input_modalities
+        .as_ref()
+        .is_some_and(|input| input.iter().any(|m| m == "image"));
+    let supports_video_in = input_modalities
+        .as_ref()
+        .is_some_and(|input| input.iter().any(|m| m == "video"));
+    let (supports_reasoning, supports_thinking_type, support_efforts, default_effort) =
+        parse_model_reasoning(item.get("reasoning"));
+    let supports_dynamic_tools = item
+        .get("tools")
+        .and_then(Value::as_object)
+        .and_then(|tools| tools.get("dynamic_load"))
+        .and_then(Value::as_bool)
+        == Some(true);
     let protocol = item
         .get("protocol")
         .and_then(Value::as_str)
@@ -118,7 +145,7 @@ fn parse_model(item: &Value) -> Result<Option<DiscoveredModel>, String> {
         });
 
     let mut capabilities: Vec<String> = Vec::new();
-    match supports_thinking_type {
+    match supports_thinking_type.as_deref() {
         Some("only") => {
             capabilities.push("thinking".into());
             capabilities.push("always_thinking".into());
@@ -140,14 +167,13 @@ fn parse_model(item: &Value) -> Result<Option<DiscoveredModel>, String> {
     if supports_tool_use {
         capabilities.push("tool_use".into());
     }
-    // v2 `capabilitiesForModel` adds this from `supports_dynamic_tools`; it is
+    // v2 `capabilitiesForModel` adds this from `tools.dynamic_load`; it is
     // the model-side half of the on-demand tool-loading gate (the other half
     // is the `tool_select` experimental flag).
-    if item.get("supports_dynamic_tools").and_then(Value::as_bool) == Some(true) {
+    if supports_dynamic_tools {
         capabilities.push("dynamically_loaded_tools".into());
     }
 
-    let (support_efforts, default_effort) = parse_think_efforts(item.get("think_efforts"));
     Ok(Some(DiscoveredModel {
         id: id.to_string(),
         display_name: item
@@ -784,13 +810,11 @@ mod tests {
     fn parses_a_model_payload_like_v2() {
         let item = json!({
             "id": "k3",
-            "context_length": 200000,
+            "limit": { "context": 200000 },
             "display_name": "K3",
-            "capabilities": ["tool_use"],
-            "supports_thinking_type": "both",
-            "supports_image_in": true,
-            "protocol": "anthropic",
-            "think_efforts": { "support": true, "valid_efforts": ["low", "high"], "default_effort": "high" }
+            "modalities": { "input": ["text", "image"], "output": ["text"] },
+            "reasoning": { "type": "both", "effort": { "valid": ["low", "high"], "default": "high" } },
+            "protocol": "anthropic"
         });
         let model = parse_model(&item).unwrap().unwrap();
         assert_eq!(model.id, "k3");
@@ -822,26 +846,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_context_length_and_skips_entries_without_ids() {
+    fn rejects_a_missing_limit_context_and_skips_entries_without_ids() {
         assert!(parse_model(&json!({ "id": "no-context" })).is_err());
-        assert!(parse_model(&json!({ "id": "zero", "context_length": 0 })).is_err());
+        assert!(parse_model(&json!({ "id": "zero", "limit": { "context": 0 } })).is_err());
         assert!(
-            parse_model(&json!({ "context_length": 100 }))
+            parse_model(&json!({ "limit": { "context": 100 } }))
                 .unwrap()
                 .is_none()
         );
     }
 
     #[test]
-    fn think_efforts_require_support_true() {
+    fn reasoning_effort_drops_a_default_outside_the_valid_list() {
+        let (supports_reasoning, thinking_type, efforts, default) =
+            parse_model_reasoning(Some(&json!({
+                "type": "only",
+                "effort": { "valid": ["low", "high"], "default": "max" }
+            })));
+        assert!(supports_reasoning);
+        assert_eq!(thinking_type.as_deref(), Some("only"));
         assert_eq!(
-            parse_think_efforts(Some(&json!({ "valid_efforts": ["low"] }))),
-            (None, None)
+            efforts.as_deref(),
+            Some(&["low".to_string(), "high".to_string()][..])
         );
-        assert_eq!(
-            parse_think_efforts(Some(&json!({ "support": false, "valid_efforts": ["low"] }))),
-            (None, None)
-        );
+        assert_eq!(default, None);
+
+        // A missing reasoning object means the model cannot think ('no'), so a
+        // stale thinking default gets cleared.
+        let (supports_reasoning, thinking_type, _, _) = parse_model_reasoning(None);
+        assert!(!supports_reasoning);
+        assert_eq!(thinking_type.as_deref(), Some("no"));
     }
 
     #[test]

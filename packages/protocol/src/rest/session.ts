@@ -12,6 +12,7 @@
  *   GET     /v1/sessions/{id}/history     query: HistoryQuery   data: HistoryResponse
  *   POST    /v1/sessions/{id}:compact     body: CompactSession  data: {}
  *   POST    /v1/sessions/{id}:undo        body: UndoSession     data: UndoSession
+ *   POST    /v1/sessions/{id}:takeover    -                     data: { taken_over: true }
  *   POST    /v1/sessions/{id}:archive     -                     data: { archived: true }
  *   POST    /v1/sessions/{id}:restore     -                     data: Session
  */

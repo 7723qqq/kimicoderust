@@ -430,9 +430,14 @@ impl KimiEngine {
                     hook_guard: if self.hooks.is_empty() {
                         None
                     } else {
-                        Some(Arc::new(crate::tools::external_hooks::HookGuard::new(
-                            self.hooks.clone(),
-                        )))
+                        // v2 #4242: hooks run in the session's working
+                        // directory, not the engine process's cwd.
+                        Some(Arc::new(
+                            crate::tools::external_hooks::HookGuard::new(self.hooks.clone())
+                                .with_session_cwd(Some(
+                                    self.workspace_root.to_string_lossy().into_owned(),
+                                )),
+                        ))
                     },
                     agent_tool_veto: None,
                     tools_veto: None,
@@ -475,6 +480,7 @@ impl KimiEngine {
             hook_guard: None,
             media: None,
             media_dropped: None,
+            media_recovery: None,
             toolset: None,
             previous_turn_aborted: false,
         };

@@ -12,7 +12,7 @@ description:
       
 revision: 932e017600564470d7e43d7b25bb49896c06cca1
 updated_at: "2026-11-01T08:11:47.979Z"
-fingerprint: ec6eec5fc426ab3c51a70f5c71c6fb4521846f069cdd8acb0fd446d231938e41
+fingerprint: 07215820d878b9f4bdfeeaf17f1272703ddc22220512cbb48e9d8eb0982b142d
 source:
   - path: "packages/kimi-agent/src/llm/http.rs"
   - path: "packages/kimi-agent/src/llm/proxy.rs"

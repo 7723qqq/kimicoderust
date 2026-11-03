@@ -55,31 +55,58 @@ pub fn plan_denial(
     let plan_path = plan.get("path").and_then(|p| p.as_str());
     match tool_name.to_ascii_lowercase().as_str() {
         "write" | "edit" => {
-            let path = args.get("path").and_then(|p| p.as_str())?;
-            // Resolved the way the writer will resolve it: the model may
-            // spell the plan file in the shell's dialect (`/c/Users/...`),
-            // which is not absolute on Windows and would otherwise be
-            // relocated onto the workspace's drive and denied.
-            let resolved = match workspace_root {
-                Some(root) => super::NativeToolset::candidate_path(root, bridge, path)
-                    .to_string_lossy()
-                    .into_owned(),
-                None => path.to_string(),
-            };
+            // v2 `writesOnlyPlanFile` (planService.ts:278-293): the call passes
+            // only when every declared write/readwrite file access targets the
+            // current plan file; a call declaring no file writes at all is
+            // denied too (the previous `args.path?`-or-allow arm let it
+            // through, failing v2's no-path case).
+            let write_paths: Vec<String> =
+                crate::turn_loop::tool_scheduler::infer_tool_accesses(tool_name, args)
+                    .iter()
+                    .filter_map(|access| match access {
+                        crate::turn_loop::types::ToolResourceAccess::File(file)
+                            if matches!(
+                                file.operation,
+                                crate::turn_loop::types::FileOperation::Write
+                                    | crate::turn_loop::types::FileOperation::ReadWrite
+                            ) =>
+                        {
+                            Some(file.path.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
             let Some(plan_path) = plan_path else {
                 return Some(format!(
                     "Plan mode is active. You may only write to the current plan file: {}. Call ExitPlanMode to exit plan mode before editing other files.",
                     "(no plan file selected yet)"
                 ));
             };
-            // Component-wise comparison: the host's plan path and the model's
-            // argument may mix separators (`/` vs `\` on Windows).
-            if std::path::Path::new(plan_path) == std::path::Path::new(&resolved) {
-                return None;
+            if write_paths.is_empty() {
+                return Some(format!(
+                    "Plan mode is active. You may only write to the current plan file: {plan_path}. Call ExitPlanMode to exit plan mode before editing other files."
+                ));
             }
-            Some(format!(
-                "Plan mode is active. You may only write to the current plan file: {plan_path}. Call ExitPlanMode to exit plan mode before editing other files."
-            ))
+            for path in &write_paths {
+                // Resolved the way the writer will resolve it: the model may
+                // spell the plan file in the shell's dialect (`/c/Users/...`),
+                // which is not absolute on Windows and would otherwise be
+                // relocated onto the workspace's drive and denied.
+                let resolved = match workspace_root {
+                    Some(root) => super::NativeToolset::candidate_path(root, bridge, path)
+                        .to_string_lossy()
+                        .into_owned(),
+                    None => path.clone(),
+                };
+                // Component-wise comparison: the host's plan path and the model's
+                // argument may mix separators (`/` vs `\` on Windows).
+                if std::path::Path::new(plan_path) != std::path::Path::new(&resolved) {
+                    return Some(format!(
+                        "Plan mode is active. You may only write to the current plan file: {plan_path}. Call ExitPlanMode to exit plan mode before editing other files."
+                    ));
+                }
+            }
+            None
         }
         "taskstop" | "task_stop" => Some(
             "TaskStop is not available in plan mode. Call ExitPlanMode to exit plan mode before stopping a background task."
@@ -567,6 +594,27 @@ mod tests {
             denial.unwrap(),
             "Plan mode is active. You may only write to the current plan file: (no plan file selected yet). Call ExitPlanMode to exit plan mode before editing other files."
         );
+    }
+
+    /// v2 `writesOnlyPlanFile`: a Write/Edit call that declares no file write
+    /// access (no `path` argument) is denied, not waved through — and a call
+    /// whose accesses mix the plan file with another target is denied too.
+    #[test]
+    fn test_plan_denial_denies_writes_without_a_path_argument() {
+        let plan = active_plan("/w/plans/plan-1.md");
+        let denial = plan_denial(&plan, "write", &serde_json::json!({}), None, &bridge());
+        assert_eq!(
+            denial.unwrap(),
+            "Plan mode is active. You may only write to the current plan file: /w/plans/plan-1.md. Call ExitPlanMode to exit plan mode before editing other files."
+        );
+        let denial = plan_denial(
+            &plan,
+            "edit",
+            &serde_json::json!({ "edits": [] }),
+            None,
+            &bridge(),
+        );
+        assert!(denial.is_some());
     }
 
     #[test]

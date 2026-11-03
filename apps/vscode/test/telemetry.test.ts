@@ -29,7 +29,12 @@ const host = vi.hoisted(() => {
     track: vi.fn(),
     shutdownTelemetry: vi.fn(async () => undefined),
     installCrashHandlers: vi.fn(),
-    resolveKimiRegion: vi.fn(() => 'global' as const),
+    currentRegion: vi.fn(() => ({ region: 'global' as const, source: 'login' as const })),
+    refreshRegion: vi.fn(() => ({ region: 'global' as const, source: 'login' as const })),
+    createKimiRegionResolver: vi.fn(() => ({
+      current: host.currentRegion,
+      refresh: host.refreshRegion,
+    })),
     loadRuntimeConfigSafe: vi.fn(() => ({
       config: {
         telemetry: host.state.configTelemetry,
@@ -49,6 +54,7 @@ const host = vi.hoisted(() => {
 
 vi.mock('vscode', () => ({
   env: {
+    remoteName: undefined,
     get isTelemetryEnabled() {
       return host.state.isTelemetryEnabled;
     },
@@ -75,7 +81,7 @@ vi.mock('@moonshot-ai/kimi-code-oauth', () => ({
     'mainland-cn': { telemetryEndpoint: 'https://telemetry-logs.example.com/v1/event' },
     global: { telemetryEndpoint: 'https://telemetry-logs.example.net/v1/event' },
   },
-  resolveKimiRegion: host.resolveKimiRegion,
+  createKimiRegionResolver: host.createKimiRegionResolver,
 }));
 
 vi.mock('@moonshot-ai/kimi-code-sdk', () => ({
@@ -88,6 +94,7 @@ vi.mock('@moonshot-ai/kimi-code-sdk', () => ({
 }));
 
 import { activateExtensionTelemetry, deactivateExtensionTelemetry } from '../src/telemetry';
+import { resetExtensionRegionCache } from '../src/utils/region';
 
 function activate() {
   return activateExtensionTelemetry({ version: '1.2.3', log: vi.fn() });
@@ -109,6 +116,7 @@ describe('extension telemetry composition root', () => {
     host.state.accessToken = 'token-1';
     host.state.staticallyEnabled = true;
     vi.clearAllMocks();
+    resetExtensionRegionCache();
   });
 
   it('initializes the shared stack with extension identity and the config gate', async () => {
@@ -124,8 +132,11 @@ describe('extension telemetry composition root', () => {
       version: '1.2.3',
       uiMode: 'vscode',
       model: 'kimi-k2',
+      region: 'global',
+      regionSource: 'login',
     });
     expect(options['endpoint']).toBeTypeOf('function');
+    expect(options['resolveRegion']).toBeTypeOf('function');
     expect(options['getAccessToken']).toBeTypeOf('function');
     await expect((options['getAccessToken'] as () => Promise<string | null>)()).resolves.toBe(
       'token-1',
@@ -145,15 +156,19 @@ describe('extension telemetry composition root', () => {
   it('resolves the endpoint through the region resolver per flush', () => {
     activate();
 
-    const endpoint = initializeOptions()['endpoint'] as () => string;
+    const options = initializeOptions();
+    (options['resolveRegion'] as () => unknown)();
+    expect(host.currentRegion).toHaveBeenCalled();
+    const endpoint = options['endpoint'] as () => string;
     expect(endpoint()).toBe('https://telemetry-logs.example.net/v1/event');
-    expect(host.resolveKimiRegion).toHaveBeenCalledWith(
+    expect(host.createKimiRegionResolver).toHaveBeenCalledWith(
       expect.objectContaining({
-        configuredOAuthHost: 'https://auth.kimi.ai',
-        configuredOAuthKey: 'oauth/kimi-code-global',
         homeDir: '/kimi-home',
+        allowLocalInference: true,
+        readAuth: expect.any(Function),
       }),
     );
+    expect(host.refreshRegion).not.toHaveBeenCalled();
   });
 
   it('passes the VS Code global switch as the initial intake state', () => {

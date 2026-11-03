@@ -94,8 +94,11 @@ export interface CompactionUserSelection {
  * tool table is pulled fresh per turn through `list_tools_cb` (native
  * transports only — host-proxy rebuilds tools inside `llm_chat`), and the
  * goal snapshot through `goal_cb` per turn (snake_case wire goal, or null).
+ * The AGENTS.md reminder's bash-operand directories are asked through
+ * `parse_bash_cb` (`{"command","cwd","home"}` → JSON array, or `'null'` to
+ * keep the cwd-only fallback).
  */
-export declare function createEngineSession(params: JsRunTurnParams, llmChatCb: (callbackId: number) => void, executeToolCb: (callbackId: number) => void, emitEventCb?: (callbackId: number) => void, checkPermissionCb?: (callbackId: number) => void, askQuestionCb?: (callbackId: number) => void, stateReadCb?: (callbackId: number) => void, stateWriteCb?: (callbackId: number) => void, checkpointCb?: (callbackId: number) => void, turnEventCb?: (callbackId: number) => void, telemetryCb?: (callbackId: number) => void, listToolsCb?: (callbackId: number) => void, goalCb?: (callbackId: number) => void, authTokenCb?: (callbackId: number) => void): object
+export declare function createEngineSession(params: JsRunTurnParams, llmChatCb: (callbackId: number) => void, executeToolCb: (callbackId: number) => void, emitEventCb?: (callbackId: number) => void, checkPermissionCb?: (callbackId: number) => void, askQuestionCb?: (callbackId: number) => void, stateReadCb?: (callbackId: number) => void, stateWriteCb?: (callbackId: number) => void, checkpointCb?: (callbackId: number) => void, turnEventCb?: (callbackId: number) => void, telemetryCb?: (callbackId: number) => void, listToolsCb?: (callbackId: number) => void, goalCb?: (callbackId: number) => void, authTokenCb?: (callbackId: number) => void, parseBashCb?: (callbackId: number) => void): object
 
 /** Result of an edit operation. */
 export interface EditResult {
@@ -226,6 +229,24 @@ export interface JsLlmProviderDef {
    * `host/llm_chat`, which only works on a host that serves it.
    */
   native?: JsNativeLlmConfig
+}
+
+/**
+ * Global `[mcp]` defaults handed to the engine (v2 `resolveDefaults`):
+ * per-server values always win, these fill the gap, and the built-in
+ * defaults sit behind them. Without this field the napi transport had no
+ * way to see the `[mcp]` section at all, so `startup_timeout_ms`,
+ * `tool_timeout_ms` and `defaultDeferred` were silently ignored for every
+ * SDK/TUI session.
+ */
+export interface JsMcpDefaults {
+  startupTimeoutMs?: number
+  toolTimeoutMs?: number
+  /**
+   * Keep every server's tools out of the top-level tool list unless the
+   * server declares `deferred` itself (v2 `defaultDeferred`).
+   */
+  defaultDeferred?: boolean
 }
 
 /** MCP server configuration for pure-Rust MCP manager (P73). */
@@ -532,6 +553,11 @@ export interface JsRunTurnParams {
    */
   mcpOauthDir?: string
   /**
+   * Host-resolved `[mcp]` defaults (v2 `resolveDefaults`). Per-server
+   * values win; `None` keeps the engine's built-in defaults.
+   */
+  mcpDefaults?: JsMcpDefaults
+  /**
    * Host-resolved `[services.moonshot_search]` / `KIMI_WEB_SEARCH_*`
    * backend (v2 `configSection.ts`). When set, the native WebSearch tool
    * calls this endpoint instead of scraping DuckDuckGo.
@@ -656,6 +682,11 @@ export interface JsSubagentProfile {
    * nested optionals in a flat object cleanly.
    */
   summaryPolicyJson?: string
+  /**
+   * The subagent types this profile may itself spawn (v2
+   * `AgentProfile.subagents`, from the agent file's frontmatter).
+   */
+  subAgents?: Array<string>
 }
 
 /**
@@ -1713,6 +1744,13 @@ export declare function sessionStartBtw(sessionId: string): object
 
 /** Live session shape: the active turn id and the queued turn ids. */
 export declare function sessionStatus(sessionId: string): JsSessionStatus
+
+/**
+ * Evict a foreign session-occupancy holder so this process's next turn can
+ * claim the session (v2 `takeOverSessionLock`, upstream #4246). A hold of
+ * this process's own is left alone.
+ */
+export declare function sessionTakeoverLock(sessionId: string): void
 
 /**
  * Try to acquire quiescence (M1c): an exclusive window in which enqueued

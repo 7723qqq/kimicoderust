@@ -44,10 +44,16 @@ impl HttpServer {
                         // v2 `sessionExternalHooksService.triggerSessionStart`:
                         // SessionStart hooks fire on creation (source
                         // `startup`; the fork route never triggers one
-                        // upstream). Observational only.
+                        // upstream). Observational only. Session-level hooks
+                        // run in the session's workspace (v2 #4242's session
+                        // cwd, which session hooks always had upstream).
+                        let session_cwd = workspace_id
+                            .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
+                            .map(|w| w.root);
                         let guard = crate::tools::external_hooks::HookGuard::new(
                             self.config().await.hooks.clone(),
-                        );
+                        )
+                        .with_session_cwd(session_cwd);
                         guard
                             .notify_session_lifecycle(
                                 "SessionStart",
@@ -505,7 +511,18 @@ impl HttpServer {
                         "nativeToolCalls": report.native_tool_calls,
                         "usage": report.usage,
                     })),
-                    Err(error) => HttpResponse::internal_error(error.to_string()),
+                    Err(error) => match error {
+                        crate::server::engine::EngineError::Occupied(message) => {
+                            HttpResponse::json(
+                                409,
+                                &json!({
+                                    "code": crate::server::envelope::error_codes::SESSION_OCCUPIED,
+                                    "msg": message,
+                                }),
+                            )
+                        }
+                        other => HttpResponse::internal_error(other.to_string()),
+                    },
                 }
             }
             _ => HttpResponse::not_found(),

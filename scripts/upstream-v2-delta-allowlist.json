@@ -31,7 +31,7 @@
       "date": "2026-10-30",
       "subject": "feat: support folder-scoped git status (#4527)",
       "verdict": "tracked",
-      "note": "按目录范围查询 git status（本仓仅 work_dir 全量）",
+      "note": "按目录范围查询 git status（本仓仅 work_dir 全量）。2026-11-03 核实：上游经 fsGitStatusRequestSchema（protocol 包）携带范围字段、kap-server 路由交 workspace-fs 服务；fork 的 handle_git_status（fs_routes.rs:224）不接 body 参数。移植需扩 protocol schema（fsGitStatusRequestSchema 加可选范围字段）——依赖协议面扩展，排除出低风险批，单独成批",
       "roadmap": "§6.46"
     },
     {
@@ -75,17 +75,16 @@
       "sha": "da4e2f57a3d37d93e0dec13513e9764beaab746e",
       "date": "2026-10-29",
       "subject": "fix(oauth): restore global telemetry endpoint (#4523)",
-      "verdict": "tracked",
-      "note": "global 区 telemetry endpoint 缺失（packages/oauth/src/region.ts:70）",
+      "verdict": "ported",
+      "note": "global profile 补 telemetryEndpoint='https://telemetry-logs.kimi.ai/v1/event'（region.ts:75，与上游同值）；消费点 vscode telemetry.ts:88 与 kimi-code cli/telemetry.ts 的 currentKimiProfile 通道原样生效。判定：packages/oauth/test/region.test.ts 的 kimiRegionProfile 用例改断 global 端点（上游 agent-core-v2 上传覆盖测试随退役包不移植）",
       "roadmap": "§6.46"
     },
     {
       "sha": "47a518ed4e1912c0682596f882b1b6c5431b7ccb",
       "date": "2026-10-29",
       "subject": "fix(agent-core-v2): remind the agent to update its todo list less often (#4524)",
-      "verdict": "tracked",
-      "note": "待办提醒改按步骤计数并放宽文案；本仓 todo_reminder.rs:28-34 仍按 10 条 assistant 消息",
-      "roadmap": "§6.46"
+      "verdict": "ported",
+      "note": "步骤阈值 10/10 与放宽文案（injection/todo_reminder.rs STEPS_* 与 render_todo_list_reminder）"
     },
     {
       "sha": "7d72ae396586ad82f48ca4335956235d3c38f0d8",
@@ -144,8 +143,8 @@
       "sha": "88c3becefc56d3093009892bae6d7b7eab0d237b",
       "date": "2026-10-28",
       "subject": "fix(agent-core-v2): preserve llm reasoning and usage compatibility (#4485)",
-      "verdict": "tracked",
-      "note": "OpenAI 历史思考键应按当前模型探测方言；Responses 普通事件回退顶层 usage（openai.rs:159 只读 config 声明键，openai_responses.rs:483 只在 completed/incomplete 读 usage）",
+      "verdict": "ported",
+      "note": "OpenAI 历史思考键按当前模型探测方言 + Responses 普通事件回退顶层 usage。落地（2026-11-02）：(1) 思考键——openai.rs:229 resolve_reasoning_key 三档顺序 declared>detected>history（:242 history 新→旧扫描且限 REASONING_WRITE_KEYS）；openai.rs:790-806 流内检测首个可写方言（声明键抑制、probe-only 拼写不记录）；http.rs:160-183 进程级 DETECTED_REASONING_KEYS（对齐上游 registry 生命周期，键 base#model 对齐 modelKey，first-seen-wins），读点 :509、写点 :721-725——实例级 Mutex 会随每回合 pipeline 重建丢失，故用进程级 store 才等价上游。(2) usage——openai_responses.rs:449-463 逐事件读取：普通事件 nested ?? 顶层回退，response.completed/incomplete 只读嵌套。判定测试：llm::openai::tests::resolve_reasoning_key_orders_declared_detected_history、the_first_writeable_reasoning_dialect_is_detected、a_declared_reasoning_key_suppresses_detection、llm::http::tests::a_detected_dialect_replays_unmarked_history_on_the_next_request（跨请求 e2e）、llm::openai_responses::tests::ordinary_events_fall_back_to_top_level_usage_terminal_events_do_not。",
       "roadmap": "§6.46"
     },
     {
@@ -174,8 +173,8 @@
       "sha": "e3efbb9d3b2241412edfe9b704fc33b09a4c2054",
       "date": "2026-10-28",
       "subject": "feat(agent-core-v2): limit subagents to the configured model pool (#4418)",
-      "verdict": "tracked",
-      "note": "子代理限定在配置的 model pool 内",
+      "verdict": "ported",
+      "note": "2026-11-02 移植：secondary.rs 删 force/隐式 primary（残留 force 键 config/mod.rs 与宿主 native-llm-resolver.ts 双层警告忽略），单条目池/裸 default_model 隐藏 model 参数，无池时任何显式 model 报 CONFIG_INVALID；fork_incompatibility 删 primary 豁免。判定：agent_primary_is_an_invalid_alias_now、agent_without_a_pool_rejects_{an_explicit_model,primary_too}、agent_single_entry_pool_binds_the_default_when_model_is_omitted、test_swarm_rejects_an_explicit_model_without_a_pool",
       "roadmap": "§6.46"
     },
     {
@@ -189,8 +188,8 @@
       "sha": "68a283894163204e93b072cef20db164015a5cad",
       "date": "2026-10-27",
       "subject": "fix(agent-core-v2): keep the prompt cache through auto compaction (#4456)",
-      "verdict": "tracked",
-      "note": "自动压缩保住 prompt cache：仅超 input limit 才预缩、413 锁定降级、压缩请求带 usedContextTokens",
+      "verdict": "ported",
+      "note": "自动压缩保住 prompt cache。落地（2026-11-02）：①预缩门禁改按真实 input limit（window − outputReserve = window − window/8），安全预算仅作压缩目标（src/compaction/mod.rs:884-921，pre_shrink_gates_on_the_input_limit_not_the_safety_budget）；②压缩请求带 used_context_tokens（估算 + 2% margin）与 max_context_tokens，http.rs:253 的 completion 封顶按两者同时存在生效（summary_request_reports_used_context_tokens）；③降级计数钉住：MediaRecoveryAction::Degraded(usize) 携带 413 时捕获的计数（degrade_leading_media），继承降级下再遭 413 且可见媒体 > KEEP_RECENT(=2) 才重降级（run_turn.rs:1286-1326 can_degrade 门禁）。未移植：prompt_cache_probe 遥测（fork 无该遥测面，归 fed19d24f0 的裁决）。",
       "roadmap": "§6.46"
     },
     {
@@ -198,7 +197,7 @@
       "date": "2026-10-27",
       "subject": "feat: support symlinked directories in file tree (#4457)",
       "verdict": "tracked",
-      "note": "文件树符号链接：缺 allow_external_symlinks、扩张预算与根前缀检测（metadata() 已跟随链接）",
+      "note": "文件树符号链接：缺 allow_external_symlinks、扩张预算与根前缀检测（metadata() 已跟随链接）。2026-11-03 核实：allow_external_symlinks 是 fs:list 请求字段（协议面扩展），与 B-22 allow_ignored_globs 同属 fs 列表协议面——待 gitignore 过滤地基后一并评估",
       "roadmap": "§6.46"
     },
     {
@@ -251,17 +250,16 @@
       "sha": "8dabf4a10eaec7302344ba3060b7b3c69a5a76dc",
       "date": "2026-10-26",
       "subject": "fix(agent-core-v2): keep media recovery across turns and compaction (#4413)",
-      "verdict": "tracked",
-      "note": "媒体降级/剥离状态应跨轮、跨压缩保留；本仓仅本轮局部变量（run_turn.rs:860-863）",
+      "verdict": "ported",
+      "note": "媒体降级/剥离状态跨轮保留。落地（2026-11-02）：MediaRecovery/MediaRecoveryState/SharedMediaRecovery 在 src/llm/media_budget.rs:294-397（按 model_name + context_revision 键控；Stripped 携带捕获键集，后加媒体保持可见）；run_turn 回合头应用恢复、降级/剥离命中时 mark（src/turn_loop/run_turn.rs:798-827 与 :1303-1363，重捕获时并回继承键集——v2 从投影前历史捕获全量）。接线：RunTurnInput.media_recovery（types.rs:951）；EngineSession 持有 cell、set_history/clear_history 前进 revision（session/mod.rs:974-996）；server 按会话持 map、record_context_truncation 前进 revision（server/engine.rs:1499-1519）；pipeline/napi（turn.rs:1032）、REPL（main.rs:342）、子代理运行时（subagent/manager.rs:461，实例级 model 覆盖拿独立 cell）。压缩请求一侧为 fork 的 transcript 形态、不携带媒体，v2 的『压缩再捕获剥离快照』问题不存在（见 a9dc3a9af4 复核注记）。判定测试：media_budget 4 项单测 + turn_loop::run_turn::tests::a_media_recovery_applies_to_later_turns_until_invalidated（跨轮应用/模型切换/undo 失效）。",
       "roadmap": "§6.46"
     },
     {
       "sha": "93137cad204eed4a6a66196e85cafbaf722a1d65",
       "date": "2026-10-26",
       "subject": "fix(agent-core-v2): return a stopped subagent's partial output to the parent agent (#4430)",
-      "verdict": "tracked",
-      "note": "TaskStop/前台 Agent 失败时回传子代理已产出的部分输出与 resume 提示",
-      "roadmap": "§6.46"
+      "verdict": "ported",
+      "note": "停止的子代理回传 [partial output] 节（subagent/manager.rs partial_output_section；agent_tool.rs 前台两臂与后台 TaskOutcome；swarm/service.rs completion_from_turn；测试 stopped_subagent_returns_partial_output / stopped_resume_returns_partial_output）"
     },
     {
       "sha": "2e539f2f68c872d79a747655cb1962d5f0b596bd",
@@ -302,8 +300,8 @@
       "sha": "a9dc3a9af466a769a6dc93776c61ed89a0e653df",
       "date": "2026-10-26",
       "subject": "fix(agent-core-v2): stop stripping dynamic tool context from compaction requests (#4410)",
-      "verdict": "tracked",
-      "note": "压缩请求不得剥离动态工具上下文；本仓 compaction/mod.rs:750-753 发空 tools",
+      "verdict": "not-applicable",
+      "note": "压缩请求剥离动态工具上下文。复核（2026-11-02）：上游缺陷机制在 fork 不存在。上游 bug 是 fullCompactionService 对发给共享 requester 的历史跑 stripDynamicToolContext（删 <tools_added> 公告与已加载 schema 消息的 tools 字段），与 loop 请求前缀分叉、丢 prompt cache。fork 侧：(1) 剥离点不存在——summarization_prompt（src/compaction/mod.rs:636）对 omitted 全量序列化、无 tools_added/origin 过滤（compaction/ 全目录 grep 无剥离点）；公告消息经 delivery 在 src/turn_loop/run_turn.rs:1989-1998 作为 user 消息进入 messages，压缩调用方 :1061 直接把 &messages 交给压缩。(2) fork 摘要请求是刻意的另一种形状（system+transcript 两条消息，§6.9.2 记录的设计约束），与 loop 请求从不共享前缀，没有可丢失的缓存复用。(3) 台账原 note 指『发空 tools』（:752）属实但张冠李戴——上游 :284 的 tools 属于 requestTokens 估算而非压缩请求本身，且上游 #4410 的修复未动 tools 字段；transcript 形态的摘要器本就不该拿到可调用工具。压缩缓存保护的剩余议题归 68a2838941（usedContextTokens 等），不在本条。",
       "roadmap": "§6.46"
     },
     {
@@ -325,16 +323,16 @@
       "sha": "7ccac2b45b8a3481c76f771bb99c043b562de2c5",
       "date": "2026-10-23",
       "subject": "fix(agent-core-v2): wait for MCP discovery before tool announcements (#4364)",
-      "verdict": "tracked",
-      "note": "工具公告前应等 MCP 首次发现完成；本仓注入先于 list_tools（run_turn.rs:1207/1221）",
+      "verdict": "ported",
+      "note": "工具公告前等 MCP 首次发现。落地（2026-11-02）：fork 的注入 provider 是同步签名（injection/mod.rs:159），无法像上游那样在 provider 内 await，等价落点改为注入通道前的门禁——run_turn.rs:1156-1160 在 step_num==0 的注入 pass 先 await toolset.wait_for_mcp_discovery_before_disclosure()（tools/toolset.rs:221-236，仅在 disclosure 开关+capability 成立且有 mcp_manager 时等待）。wait_for_initial_load 随全部 connect settle（各自有连接超时上界）而解封，不会永久卡住回合；v2 的 AbortSignal 提前取消在 fork 侧无对应（connect  settle 有界）。判定测试：tools::tests::disclosure_waits_for_the_initial_mcp_discovery。",
       "roadmap": "§6.46"
     },
     {
       "sha": "273ddb077ae3c5b16555cb083088fda972e965f5",
       "date": "2026-10-23",
       "subject": "feat(oauth): infer region for logged-out installs (#4311)",
-      "verdict": "tracked",
-      "note": "未登录安装区域推断；引擎/CLI 已有，缺 VS Code 登录区域",
+      "verdict": "ported",
+      "note": "已移植（2026-11-03）：oauth 侧 region.ts（resolveKimiRegionFromParts/Detailed + source 标记 + readKimiRegionMarker 导出）+ region-local.ts（时区/locale 投票）+ region-cache.ts（logged-out 推断落 region.json）+ region-resolver.ts（decideKimiRegion 纯函数 + stat-gated memoizing resolver）；telemetry 包加 resolveRegion/region/regionSource 通道（sink 构造与 accept 各刷新一次）；消费方 apps/kimi-code utils/region.ts 切 resolver、cli/telemetry.ts 接线、apps/vscode utils/region.ts 新建 + telemetry.ts 接线（allowLocalInference 仅 remoteName===undefined）。判定：oauth region.test.ts 的 local-signals 检测与 reconciles auth/cache/fallback 大用例、apps/vscode telemetry.test.ts 的 resolver mock 组、apps/kimi-code test/utils/region.test.ts",
       "roadmap": "§6.46"
     },
     {
@@ -364,8 +362,8 @@
       "sha": "759958afdfeb0f8c7d09cb03cbc2cf85b6255e9e",
       "date": "2026-10-22",
       "subject": "fix(agent-core-v2): update import-from-cc-codex for current Claude Code and Codex layouts (#4331)",
-      "verdict": "tracked",
-      "note": "import-from-cc-codex 内置技能未适配新布局",
+      "verdict": "ported",
+      "note": "已移植（2026-11-03）：内置技能 import-from-cc-codex.md 整换为上游版（+291/-88：新布局路径 $CLAUDE_CONFIG_DIR/$CODEX_HOME、.agents 面、排除清单扩充、项目指令可落根与 cwd 之间目录）；上游同名 .ts 仅是 md 的 SkillDefinition 注册样板，fork 的 Rust 内置技能加载器无对应需求。判定：skills::tests 17/17（内容无门禁断言）+ diff --no-index 与上游零差异",
       "roadmap": "§6.46"
     },
     {
@@ -379,22 +377,23 @@
       "sha": "e7f1a99fc52e68d8e8a2d99d59deba38e4272754",
       "date": "2026-10-22",
       "subject": "feat: let users take over a session lock left by an exited process (#4328)",
-      "verdict": "not-applicable",
-      "note": "接管已退出进程的会话锁；同上"
+      "verdict": "tracked",
+      "note": "2026-11-02 重适用：锁载体已随 3079e9515f 落地。引擎+SDK 链已完成（REST :takeover、napi session_takeover_lock、session-handle takeoverSessionLock、SDKRpcClientNative.takeOverSessionLock、Session.takeOverLock）；剩余为宿主 TUI 占用提示流（上游 apps/kimi-code/src/tui/controllers/session-occupancy.ts 的 Retry/Cancel→Take over 双档对话 + occupied_* 遥测），属 apps/kimi-code 批次",
+      "roadmap": "§6.46"
     },
     {
       "sha": "0a90e2e8a2672c5c1d7e266b721f2853fe86a5ff",
       "date": "2026-10-21",
       "subject": "fix(agent-core-v2): reclaim session locks from zombie processes (#4320)",
-      "verdict": "not-applicable",
-      "note": "回收僵尸进程会话锁；本仓无跨进程锁载体（补 3079 后重新适用）"
+      "verdict": "ported",
+      "note": "2026-11-02 随 3079e9515f 一并移植：lock.rs 的 pid_alive 在 unix 经 ps -o stat= 排除僵尸（与上游同法 shell out ps、失败按活处理），win32 与上游一致止于 OpenProcess 探针；reclaim 协议回收死 holder。判定：a_dead_holder_is_reclaimed、a_pre_boot_holder_is_reclaimed"
     },
     {
       "sha": "366fafbf921bb121d3906aa6b685f1045be4e54d",
       "date": "2026-10-21",
       "subject": "feat(kap-server): reclaim idle sessions (#4284)",
       "verdict": "tracked",
-      "note": "空闲会话回收（超时/环境变量可配）",
+      "note": "2026-11-03 已核实现状：fork 无会话级空闲回收——engine.rs 的会话状态族（active_turns/steer_queues/session_mcp/status_hashes/media_* 等 HashMap）只增不减；hub.rs 的 evict_idle_lane 只是事件 lane 的 LRU（非会话卸载）。上游 #4284 为 kap-server 超时回收（环境变量可配）。移植前需先定 fork 的会话驻留语义（回收时在途 turn/MCP 连接如何处置），属生命周期设计，建议单独成批",
       "roadmap": "§6.46"
     },
     {
@@ -402,7 +401,7 @@
       "date": "2026-10-21",
       "subject": "perf(agent-core-v2): speed up large session resume (#4313)",
       "verdict": "tracked",
-      "note": "大会话恢复性能对等未验证（本仓仅压缩锚点，无基准）",
+      "note": "2026-11-03 已核实现状：fork 仍无大会话恢复基准（tests/turn_bench.rs 是 turn 基准，非恢复基准）；按既定口径先建恢复基准（数千 wire 事件的冷投影耗时）再谈移植",
       "roadmap": "§6.46"
     },
     {
@@ -417,15 +416,15 @@
       "date": "2026-10-20",
       "subject": "fix(transcript): realign rebuilt turn ordinals to wire ids and mark wedged turns (#4280)",
       "verdict": "tracked",
-      "note": "冷重建 turn ordinal 对齐 wire id + wedged 标记 + 循环看门狗诊断",
+      "note": "2026-11-03 已核实现状：fork 已部分对齐——ensure_turn 按 key 自带编号解析 ordinal（project.rs:1244-1251，其注释已记录位置序号漂移问题）；缺：wedged 标记（上游 TranscriptTurn.wedged + closeWedgedCurrentTurn，coreEventMap.ts:575-623）与 wire id 回查对齐（上游 lookups.stepOrdinal 通道）。涉及两个千行级投影器逐段对照，建议单独成批",
       "roadmap": "§6.46"
     },
     {
       "sha": "3079e9515f05f097a3f34afdc8ebe2b9b377bf0d",
       "date": "2026-10-20",
       "subject": "feat(agent-core-v2): add cross-process session occupancy lock (#4246)",
-      "verdict": "tracked",
-      "note": "跨进程会话占用锁，防两个进程写同一会话",
+      "verdict": "ported",
+      "note": "2026-11-02 移植：session/lock.rs（锁文件 claim/reclaim/存活判定/KIMI_CODE_SESSION_LOCK 开关/降级继续 + hold/try_hold/release/lease/held/takeover）；turn 持锁在 server engine.execute、undo/compact 路由、napi/CLI pump 三缝；写守卫在 append_wire_event_json（check-only，注释记差异）；takeover 双落点 REST :takeover + napi session_takeover_lock。判定：a_turn_on_a_foreign_held_session_is_refused_as_occupied、the_wire_write_guard_refuses_a_foreign_held_session、lock.rs 十三测",
       "roadmap": "§6.46"
     },
     {
@@ -440,8 +439,8 @@
       "sha": "5710c5496a213742ca0687f69dd8eeb5bde52dbf",
       "date": "2026-10-19",
       "subject": "fix(kap-server): evict session event state on session close and archive (#4281)",
-      "verdict": "tracked",
-      "note": "会话 close/archive 时驱逐广播事件状态；本仓仅空闲+容量驱逐（hub.rs:541）",
+      "verdict": "ported",
+      "note": "已移植（2026-11-03）：EventHub.evict_lane(session_id)（hub.rs:352）在 archive 路由（route_sessions.rs:537）与两处 delete 路由（route_sessions.rs:583、route_session_ops.rs:528，均在 event.session.deleted 广播发出之后）接线——lane 删除即序号/epoch 作废，客户端持旧 cursor 见新 epoch 而非 resume 死会话。fork 无 close 生命周期事件（上游 close→detach 臂不适用）且无 transcript per-session 缓存（上游 transcriptService.dropSession 无对应物）；既有 idle+cap 驱逐（evict_idle_lane）保留。判定：hub::tests::evict_lane_drops_the_lane_and_restarts_its_numbering",
       "roadmap": "§6.46"
     },
     {
@@ -449,7 +448,7 @@
       "date": "2026-10-19",
       "subject": "feat(server): place the default workspace under the home folder (#4277)",
       "verdict": "tracked",
-      "note": "默认工作区置于 home 下",
+      "note": "2026-11-03 已核实：默认工作区解析为 ~/KimiCode/Default（本条把 #4224 的 Documents 方案改到 home，规避 macOS 隐私提示与 iCloud/OneDrive 同步）；fork 该特性整体缺失（server 无 default_workspace/is_default，grep 零命中），见 47002256a0",
       "roadmap": "§6.46"
     },
     {
@@ -457,7 +456,7 @@
       "date": "2026-10-18",
       "subject": "feat: add a default workspace for chats without a project (#4224)",
       "verdict": "tracked",
-      "note": "无项目会话的默认工作区",
+      "note": "2026-11-03 已核实：POST /api/v1/sessions 接受 default_workspace:true（与 workspace_id/metadata.cwd 互斥），解析 ~/KimiCode/Default，REST/WS payload 带 is_default；fork server 无此面（零命中）。属新增协议面（REST + protocol schema + WS payload），单独成批",
       "roadmap": "§6.46"
     },
     {
@@ -479,32 +478,30 @@
       "sha": "c1459a61845056832b85a0a220ee11a2bc5132f8",
       "date": "2026-10-15",
       "subject": "fix(server): run agent hooks in the session's working directory (#4242)",
-      "verdict": "tracked",
-      "note": "外部钩子应在会话工作目录运行；本仓用进程 cwd（external_hooks.rs:718）",
+      "verdict": "ported",
+      "note": "HookGuard.session_cwd 经 with_session_cwd 注入（external_hooks.rs with_session_cwd）；payload cwd 与 spawn cwd 双路落会话目录（spawn_hooks 的 hook.cwd ?? session_cwd，对齐 v2 runMatchedHooks），PreToolUse 阻塞臂与全部 notify_* fire-and-forget 臂同走；接线点 pipeline/mod.rs、lib.rs、repl/mod.rs、route_prompts.rs、route_sessions.rs、route_session_ops.rs。判定：hooks_run_in_the_session_cwd_when_they_declare_none、a_hooks_own_cwd_wins_over_the_session_cwd、fire_and_forget_hooks_also_run_in_the_session_cwd、the_payload_cwd_is_the_session_cwd_or_the_process_cwd",
       "roadmap": "§6.46"
     },
     {
       "sha": "85077a419001285e49ede3574924f001935aed62",
       "date": "2026-10-15",
       "subject": "fix: align subagent tool descriptions with availability (#4066)",
-      "verdict": "tracked",
-      "note": "子代理描述的 Tools 列表按运行时真实可用性过滤",
-      "roadmap": "§6.46"
+      "verdict": "ported",
+      "note": "子代理描述的 Tools 列表按运行时真实可用性过滤（tools/tool_policy.rs matches_profile_tool_pattern；callbacks.rs list_tools 重写 Agent 定义）"
     },
     {
       "sha": "da5918c0c861a1d670f4523a9f9dd968647fe4cb",
       "date": "2026-10-15",
       "subject": "fix(agent-core-v2): nudge the agent to keep its todo list current (#4239)",
-      "verdict": "tracked",
-      "note": "待办提醒整套重写（进度/最后一项/下一步提示）",
-      "roadmap": "§6.46"
+      "verdict": "ported",
+      "note": "提醒整套重写（open>0 门、进度/在办项文案，injection/todo_reminder.rs）+ 写入回显 next_step_hint（tools/todo_list.rs）+ 描述与系统提示段落；telemetry 三项属宿主管线未移植"
     },
     {
       "sha": "9f0693becb63a329cbf764325688448e76f40922",
       "date": "2026-10-15",
       "subject": "feat(oauth): parse unified /models schema for managed Kimi Code models (#4209)",
-      "verdict": "tracked",
-      "note": "统一 /models schema（limit.context、modalities.input、reasoning、tools.dynamic_load）；宿主 packages/oauth 仍读扁平字段",
+      "verdict": "ported",
+      "note": "managed /models 切统一 schema：limit.context / modalities.input / reasoning{type,effort}（缺失对象与 type:none 均映射内部 'no'，不可识别 type 留 undefined，default 不在 valid 丢弃）/ tools.dynamic_load（managed-kimi-code.ts toModelInfo + parseModelReasoning；Rust 双源 provider_refresh.rs parse_model/parse_model_reasoning 同步）；open-platform.ts 保持旧 schema（上游同）；parseThinkEfforts 保留给 open-platform。判定：oauth test 的 reasoning/reasoning.effort describe 块与 rejects limit.context 用例（上游镜像形状）、Rust parses_a_model_payload_like_v2/rejects_a_missing_limit_context_and_skips_entries_without_ids/reasoning_effort_drops_a_default_outside_the_valid_list",
       "roadmap": "§6.46"
     },
     {
@@ -539,16 +536,15 @@
       "sha": "f28c51c01f025bba9f0d0f58f6309e7517a8cd02",
       "date": "2026-10-14",
       "subject": "feat(agent-core-v2): add global default for deferred MCP tool disclosure (#4210)",
-      "verdict": "tracked",
-      "note": "引擎侧已实现（McpConfig.defaultDeferred + configure 的 逐 server > 全局 > false 解析，manager.rs:1005-1008；配置解析与优先级测试已加），但 napi/SDK 路径尚未把 [mcp] 段送进引擎（与全局超时同一缺口），TUI/SDK 会话仍只能靠 per-server deferred",
-      "roadmap": "§6.46"
+      "verdict": "ported",
+      "note": "引擎侧 McpConfig.defaultDeferred + configure 的 逐 server > 全局 > false 解析；napi 新增 mcpDefaults 通道（JsMcpDefaults）在 connect_all 前安装到 manager，SDK 从 [mcp] 段透传并转发显式 deferred=false；manager 缓存键纳入 [mcp] 与 per-server tri-state；config 解析/优先级/缓存身份测试已加"
     },
     {
       "sha": "0327e8e9a875949fd40141ef79f902d756dfd3db",
       "date": "2026-10-14",
       "subject": "feat: support model migration metadata (#4171)",
       "verdict": "tracked",
-      "note": "模型迁移元数据 + TUI 迁移向导；本仓宿主无任何 migration 字段",
+      "note": "2026-11-03 回源码核实修正口径：数据面已落地（parity 驱动的 §27.4 附带修复）——TS ModelAliasBaseSchema.upgrade（config-local/schema.ts:115-125：model/migrationMarkdown/retirementAt，override 不可改写）与 Rust ModelAliasConfig.upgrade/ModelUpgradeConfig（config/mod.rs:53-59,131-134，serde alias 双写；测试 test_model_upgrade_metadata_parses）双层在。原 note「宿主无任何 migration 字段」系按 migration 字面 grep 的误报（字段名是 upgrade/migrationMarkdown）。真实剩余缺口：TUI 迁移提示流全套（上游 tui/controllers/model-migration.ts + utils/model-migration-state.ts + 提示组件 + 编辑器 idle 延迟/cache 警告/effort 保持等边界修复，20+ 子提交的产品面）+ registry 退役默认模型切 declared replacement 的解析——属 TUI 产品面特性，建议单独立项而非混入低风险批",
       "roadmap": "§6.46"
     },
     {
@@ -564,15 +560,15 @@
       "date": "2026-10-13",
       "subject": "feat(agent-core-v2): register plugin skills under qualified names and relax plugin name validation (#4188)",
       "verdict": "tracked",
-      "note": "插件技能以 pluginId:skill 注册、放宽插件名校验、插件命令优先",
+      "note": "插件技能以 pluginId:skill 注册、放宽插件名校验、插件命令优先。2026-11-03 核实：fork 插件技能以原名注册（skills/mod.rs 测试 plugin_roots_rank_below_extra_dirs 明示「插件身份骑 prompt 前缀而非 descriptor 名」），上游 registerPluginSkill（catalog/registry.ts:123-137）以 `${plugin.id}:${bareName}` 限定名入 byName、裸名入 byPluginAndName。三块联动（命名 + 校验放宽 + 命令优先），属用户可见调用名变更，建议单独成批",
       "roadmap": "§6.46"
     },
     {
       "sha": "e4c99a3bad19b00bd1939b1cf254f427b50061f0",
       "date": "2026-10-13",
       "subject": "feat(agent-core-v2): distinguish session-unavailable tools and explain select_tools failures (#4190)",
-      "verdict": "tracked",
-      "note": "select_tools 区分会话失效/策略禁用/未知并解释连续失败",
+      "verdict": "ported",
+      "note": "select_tools 区分会话失效/策略禁用/未知并解释连续失败。落地（2026-11-02）：分类与五档桶文案在 src/tools/select_tools.rs（evaluate_load_tools 按 v2 顺序 policyDenied→loadable→staticCallable→staleLoaded→unknown；is_denied 只查 deny-list 保持 typo→unknown；建议池改为仅 loadable），失败记账 SelectionFailureTracker（STOP_RETRY_THRESHOLD=2、混合批次诚实计数、环境指纹重置）挂在 NativeToolset.selection_failures（session 级，src/tools/mod.rs），空 loadable 一次性公告在 src/tools/toolset.rs::take_disclosure_announcement（empty_disclosure_announced）。策略源只接全局 [tools] 层（fork 的 ToolPolicyLayers 未在生产接线），v2 的 profile/session/workspace 三层 deny 源尚无对应物。判定测试：test_policy_denied_buckets、test_stale_loaded_is_not_reported_as_available、test_failure_tracking_escalates_and_resets、test_render_loadable_tools_announcement（select_tools.rs）、select_tools_remembers_loaded_names_and_announces_them（tools/tests.rs）。",
       "roadmap": "§6.46"
     },
     {
@@ -609,8 +605,8 @@
       "sha": "c15638b0a1234e5aa97659fbc625d7dc4d60d93f",
       "date": "2026-10-12",
       "subject": "fix: cancel in-flight video uploads when media reads are interrupted (#4183)",
-      "verdict": "tracked",
-      "note": "媒体读取被中断时取消在途视频上传；本仓上传 await 不在 cancel select 内",
+      "verdict": "ported",
+      "note": "媒体读取被中断时取消在途视频上传。落地（2026-11-02）：fork 的 read_media 工具不上传视频（tools/read_media.rs:387-441 视频一律内联 VideoUrl），上传全部延迟到请求构建期的 budgeted_request（run_turn.rs:357-407）——等价落点在 resolver.resolve 外套 tokio::select 竞速 turn 取消令牌：取消即丢弃 resolve future（随其丢弃在途上传的 HTTP 请求），biased 保证已取消的回合根本不起上传（v2 throwIfAborted at entry）；调用点（run_turn.rs:1241-1264）Ok(None) 走干净 Aborted/BudgetLimited 而非失败。覆盖全部媒体族（v2 只装视频工具臂，fork 上传集中在这一处）。判定测试：turn_loop::run_turn::tests::an_interruption_cancels_an_in_flight_media_upload。",
       "roadmap": "§6.46"
     },
     {
@@ -625,8 +621,8 @@
       "sha": "c151d5a3d03ed6e9d05c27a0d3b302538ea6e7b9",
       "date": "2026-10-12",
       "subject": "feat(agent-core-v2): add KIMI_CODE_LLM_HEADERS_TIMEOUT_MS for llm headers timeout (#4092)",
-      "verdict": "tracked",
-      "note": "新增 KIMI_CODE_LLM_HEADERS_TIMEOUT_MS（响应头/代理超时）；本仓仅整体与连接超时",
+      "verdict": "ported",
+      "note": "KIMI_CODE_LLM_HEADERS_TIMEOUT_MS 响应头超时。落地（2026-11-02）：http.rs:38-56 resolve_llm_headers_timeout_ms（未设/空白=不限；非正整数或超 2^31-1 报 config.invalid 并复用上游文案）；http.rs:869-893 非 google 协议把 reqwest send future 包进 tokio::time::timeout——reqwest 的 send 在响应头到达时 resolve，恰是 undici headersTimeout 的等价点（与上游同范围：openai/openai-responses/anthropic 三臂，google 不装）；超时文案 llm transport error headers_timeout（可重试），config.invalid 经 is_retryable_error 新守卫（http.rs:1349-1354）判不可重试。与上游的结构差异：undici 需要按代理类型构造 dispatcher，reqwest 在 future 外包一层即可，代理/no_proxy 分支逻辑不需要。判定测试：llm::http::tests::headers_timeout_env_parses_like_v2、headers_timeout_env_caps_the_header_wait。附带门禁效应：starts_with(\"config.invalid:\") 使该前缀成为 wire token，hardcoded 台账中 api_key_env 两条 prose 记录因此按规则移除（属重分类非放开）。",
       "roadmap": "§6.46"
     },
     {
@@ -641,8 +637,8 @@
       "sha": "f0bc988bbc7db08d650f37ae0eaa69bcc6e90696",
       "date": "2026-10-10",
       "subject": "fix(agent-core-v2): keep fork subagent request prefix identical to parent (#4152)",
-      "verdict": "tracked",
-      "note": "子代理应继承父 agent 的 profile/工具集/模型以对齐请求前缀；本仓未指定类型时落 coder（agent_tool.rs:954-1159）",
+      "verdict": "ported",
+      "note": "2026-11-02 移植：agent_tool/swarm_tool 的 fork 臂 profile=requested??caller_profile、model 经 instance_llm_of 逐字继承调用方（跳过 pool 解析保请求前缀），绑定移到 forkIncompatibility 门与定义检查之后；manager.caller_profile_name/set_main_profile_name 落地。判定：fork_inherits_the_callers_profile、a_pool_bound_callers_fork_binds_the_same_pool_entry、fork_members_inherit_the_callers_model",
       "roadmap": "§6.46"
     },
     {
@@ -712,8 +708,8 @@
       "sha": "e3bf50c0831d91ceb3656acf1b7a3f480eaada56",
       "date": "2026-09-29",
       "subject": "fix(agent-core-v2): remove interruption reminder on undo of its turn (#4076)",
-      "verdict": "tracked",
-      "note": "Five lines in v2: `history.findLast(isUndoAnchor)?.id` becomes the reminder's `ownerPromptId`, so undoing the owning prompt takes the reminder with it. `isUndoAnchor` is `role === 'user'` plus an origin test — `inTurn !== true` and (no origin, or `kind === 'user'`, or (`skill_activation` / `plugin_command` with `trigger === 'user-slash'`)). The data the test needs is already carried: `LLMMessage` has both `origin: Option<Value>` (v2 `PromptOrigin`, set on the opening user message, `turn_loop/types.rs:189-196`) and `prompt_id: Option<String>` (`:188`). The gap is the consumer: the fork's undo is turn-based — `plan_undo_turns(session_id, count)` / `undo_turns` in `session/sqlite_store.rs:980,988` — and `grep prompt_id src/session/mod.rs` returns nothing, so nothing can ask which prompt a turn belongs to. Porting means adding prompt ownership to the undo path, which is a new concept rather than a missing case. `injection/interruption_reminder.rs` is unaware of undo today.",
+      "verdict": "not-applicable",
+      "note": "改判（2026-11-03 回源码核实）：上游 #4076 修的是游离形态——提醒在 TurnEnded(cancelled) 时立即追加进历史、不属于任何回合，需 ownerPromptId 挂 undo 锚点才能被带走（interruptionReminderService.ts:42-45 的 history.findLast(isUndoAnchor)?.id）。fork 无此形态：提醒是回合内注入（run_turn.rs:1188-1194 注入消息 push 进当回合 messages），随当回合折进历史（session/mod.rs:1354-1355），undo_turns 按 turn_id 不分角色 DELETE 全部消息（sqlite_store.rs:1341-1344），提醒随其所属回合一并移除；取消后未开新回合即 undo 时提醒从未注入。无游离、无悬挂，ownerPromptId 概念无落点",
       "roadmap": "§6.23.5"
     },
     {

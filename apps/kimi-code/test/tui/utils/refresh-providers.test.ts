@@ -103,8 +103,8 @@ describe('refreshAllProviderModels', () => {
           data: [
             {
               id: 'kimi-for-coding',
-              context_length: 262144,
-              supports_reasoning: true,
+              limit: { context: 262144 },
+              reasoning: { type: 'both' },
             },
           ],
         }),
@@ -176,8 +176,8 @@ describe('refreshAllProviderModels', () => {
           data: [
             {
               id: 'kimi-for-coding',
-              context_length: 262144,
-              supports_reasoning: true,
+              limit: { context: 262144 },
+              reasoning: { type: 'both' },
               display_name: 'Fresh Kimi',
             },
           ],
@@ -741,9 +741,8 @@ describe('refreshAllProviderModels', () => {
             data: [
               {
                 id: 'kimi-deep-coder',
-                context_length: 262144,
-                supports_reasoning: true,
-                supports_thinking_type: 'only',
+                limit: { context: 262144 },
+                reasoning: { type: 'only' },
               },
             ],
           }),
@@ -817,11 +816,11 @@ describe('refreshAllProviderModels', () => {
           data: [
             {
               id: 'kimi-for-coding',
-              context_length: 262144,
-              supports_reasoning: true,
+              limit: { context: 262144 },
+              reasoning: { type: 'both' },
               display_name: 'Fresh Kimi',
             },
-            { id: 'kimi-k2', context_length: 131072 },
+            { id: 'kimi-k2', limit: { context: 131072 } },
           ],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -887,7 +886,7 @@ describe('refreshAllProviderModels', () => {
       expect(new Headers(init?.headers).get('authorization')).toBe('Bearer sk-env-key');
       return new Response(
         JSON.stringify({
-          data: [{ id: 'kimi-for-coding', context_length: 262144, supports_reasoning: true }],
+          data: [{ id: 'kimi-for-coding', limit: { context: 262144 }, reasoning: { type: 'both' } }],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
@@ -923,7 +922,7 @@ describe('refreshAllProviderModels', () => {
     const fetchMock = vi.fn<FetchMock>(async (input) => {
       expect(fetchInputUrl(input)).toBe('https://api.managed.example.test/coding/v1/models');
       return new Response(
-        JSON.stringify({ data: [{ id: 'kimi-for-coding', context_length: 262144 }] }),
+        JSON.stringify({ data: [{ id: 'kimi-for-coding', limit: { context: 262144 } }] }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     });
@@ -1009,8 +1008,8 @@ describe('refreshAllProviderModels', () => {
           data: [
             {
               id: 'kimi-for-coding',
-              context_length: 262144,
-              supports_reasoning: true,
+              limit: { context: 262144 },
+              reasoning: { type: 'both' },
               display_name: 'Fresh Kimi',
             },
           ],
@@ -1169,8 +1168,8 @@ describe('refreshAllProviderModels', () => {
             data: [
               {
                 id: 'kimi-for-coding',
-                context_length: 262144,
-                supports_reasoning: true,
+                limit: { context: 262144 },
+                reasoning: { type: 'both' },
                 display_name: 'Fresh Kimi',
               },
             ],

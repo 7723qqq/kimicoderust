@@ -137,6 +137,13 @@ export interface SessionCallbacks {
   goal?: () => string | null | Promise<string | null>;
   /** OAuth bearer token for `auth_provider`-configured native transports. */
   authToken?: (request: string) => CallbackAnswer;
+  /**
+   * The AGENTS.md reminder's operand directories for a Bash command
+   * (`host/parse_bash`): the request is `{"command","cwd","home"}` JSON; the
+   * answer is a JSON array of directories, or `'null'` when the command does
+   * not parse (the engine keeps the declared cwd — v2's own fallback).
+   */
+  parseBash?: (request: string) => CallbackAnswer;
 }
 
 /** The session-scoped slice of the native addon. */
@@ -156,10 +163,13 @@ export interface SessionNativeModule {
     listToolsCb?: (callbackId: number) => void,
     goalCb?: (callbackId: number) => void,
     authTokenCb?: (callbackId: number) => void,
+    parseBashCb?: (callbackId: number) => void,
   ): Promise<string>;
   sessionEnqueueTurn(sessionId: string, prompt: string, admission: string): number;
   sessionTurnOutcome(sessionId: string, turnId: number): Promise<SessionTurnOutcome>;
   sessionCancelTurn(sessionId: string, turnId?: number): boolean;
+  /** Evict a foreign occupancy holder (v2 `takeOverSessionLock`, #4246). */
+  sessionTakeoverLock(sessionId: string): void;
   /** Switch the permission mode on the live engine; false when the session
    *  has no local permission engine (caller falls back to a rebuild). */
   sessionSetPermissionMode(sessionId: string, mode: string): boolean;
@@ -262,6 +272,15 @@ export function findKimiAgentAddon(): string | null {
   return null;
 }
 
+/**
+ * Evict a foreign session-occupancy holder without opening a session handle
+ * (v2 `takeOverSessionLock`, upstream #4246/#4328). The lock lives in the
+ * engine's process-wide service, so no session entry is needed.
+ */
+export function takeoverSessionLock(sessionId: string): void {
+  loadSessionNativeModule().sessionTakeoverLock(sessionId);
+}
+
 function loadSessionNativeModule(): SessionNativeModule {
   const modulePath = findKimiAgentAddon();
   if (!modulePath) {
@@ -347,6 +366,15 @@ export class EngineSessionHandle {
   /** Cancel a turn by id; without an id the active turn (if any). */
   cancelTurn(turnId?: number): Promise<boolean> {
     return this.transport.cancelTurn(this.id, turnId);
+  }
+
+  /**
+   * Evict a foreign session-occupancy holder so this process's next turn can
+   * claim the session (v2 `takeOverSessionLock`, upstream #4246). A hold of
+   * this process's own is left alone.
+   */
+  takeoverLock(): Promise<void> {
+    return this.transport.takeoverLock(this.id);
   }
 
   /** Switch the permission mode live so it reaches the turn already running. */
@@ -516,6 +544,8 @@ export interface SessionTransport {
   ): Promise<number>;
   turnOutcome(sessionId: string, turnId: number): Promise<SessionTurnOutcome>;
   cancelTurn(sessionId: string, turnId?: number): Promise<boolean>;
+  /** Evict a foreign occupancy holder (v2 `takeOverSessionLock`, #4246). */
+  takeoverLock(sessionId: string): Promise<void>;
   /** Optional: live permission-mode switch (napi today). When absent the
    *  host rebuilds the handle instead. */
   setPermissionMode?(sessionId: string, mode: string): Promise<boolean>;
@@ -589,6 +619,7 @@ class NapiSessionTransport implements SessionTransport {
     const listTools = callbacks.listTools;
     const goal = callbacks.goal;
     const authToken = callbacks.authToken;
+    const parseBash = callbacks.parseBash;
     return this.mod.createEngineSession(
       params,
       makeRequestCallback(this.mod, (p) => callbacks.llmChat(p)),
@@ -627,6 +658,9 @@ class NapiSessionTransport implements SessionTransport {
             const token = await authToken(JSON.stringify(req));
             return JSON.stringify(authTokenResponseSchema.parse({ token }));
           }),
+      parseBash === undefined
+        ? undefined
+        : makeRequestCallback(this.mod, async (p) => (await parseBash(p)) ?? 'null'),
     );
   }
 
@@ -644,6 +678,10 @@ class NapiSessionTransport implements SessionTransport {
 
   async cancelTurn(sessionId: string, turnId?: number): Promise<boolean> {
     return this.mod.sessionCancelTurn(sessionId, turnId);
+  }
+
+  async takeoverLock(sessionId: string): Promise<void> {
+    return this.mod.sessionTakeoverLock(sessionId);
   }
 
   async setPermissionMode(sessionId: string, mode: string): Promise<boolean> {

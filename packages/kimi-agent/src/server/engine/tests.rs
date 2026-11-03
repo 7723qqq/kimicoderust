@@ -545,6 +545,43 @@ async fn a_turn_without_any_configured_model_is_refused_up_front() {
 }
 
 #[tokio::test]
+async fn a_turn_on_a_foreign_held_session_is_refused_as_occupied() {
+    let engine = engine();
+    engine
+        .store()
+        .create_session("sess-occupied-engine", Some("occupied test"))
+        .unwrap();
+    // A second service on the same directory stands in for another process:
+    // its holder file carries this pid (alive on every platform) with a
+    // token this process never claimed, exactly what a foreign hold writes.
+    let foreign = crate::session::lock::SessionLockService::new(
+        crate::session::lock::SESSION_LOCKS.lock_dir().to_path_buf(),
+    );
+    foreign.hold("sess-occupied-engine").unwrap();
+
+    let error = engine
+        .run_turn_on(&ScriptedLlm, "sess-occupied-engine", 1, Vec::new(), "hello")
+        .await
+        .expect_err("a foreign-held session must refuse the turn");
+    match error {
+        EngineError::Occupied(message) => assert_eq!(
+            message,
+            "This session is in use by another Kimi Code process. Stop the session in that process or exit it, then try again."
+        ),
+        other => panic!("expected Occupied, got {other:?}"),
+    }
+    // The refused turn left no trace: no busy marker, no history.
+    assert!(!engine.is_busy("sess-occupied-engine"));
+
+    // Once the foreign holder lets go, the next turn claims the session.
+    foreign.release("sess-occupied-engine");
+    engine
+        .run_turn_on(&ScriptedLlm, "sess-occupied-engine", 1, Vec::new(), "hello")
+        .await
+        .expect("a freed session runs");
+}
+
+#[tokio::test]
 async fn a_turn_runs_persists_and_reports_its_transport() {
     let engine = engine();
     engine

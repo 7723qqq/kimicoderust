@@ -64,6 +64,7 @@
     "check:roadmap-refs": "bun scripts/check-roadmap-refs.mjs",
     "check:rust-module-deps": "bun scripts/check-rust-module-deps.mjs",
     "check:rust-module-deps:update": "bun scripts/check-rust-module-deps.mjs --update",
+    "check:all": "bun run check:nix-workspace && bun run check:no-legacy-engine && bun run check:architecture && bun run check:normify && bun run check:rust-module-deps && bun run check:roadmap-refs && bun run check:parity && bun run check:no-comments && bun run check:t-call-coverage && bun run check:engine-i18n && bun run scan:hardcoded && bun run scan:hardcoded:rust && bun run check:upstream-v2-delta && bun run check:locale-keys && bun run check:locale-orphans && bun run check:locale-placeholders",
     "gen:brief": "bun scripts/gen-brief.mjs",
     "changeset": "changeset",
     "version": "changeset version",

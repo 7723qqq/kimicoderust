@@ -1,12 +1,14 @@
 //! The `[secondary_model]` subagent model pool (v2
 //! `session/subagent/configSection.ts`).
 //!
-//! The host resolves the pool from `config.toml` (aliases, hints, force, the
+//! The host resolves the pool from `config.toml` (aliases, hints, the
 //! default alias) and — because only the host knows provider credentials —
 //! hands the engine one ready-built LLM per alias. The engine owns the
 //! user-visible semantics from there: which models the `Agent` / `AgentSwarm`
 //! tools advertise, how an explicit `model` argument resolves, and the error
-//! texts a bad choice produces.
+//! texts a bad choice produces. v2 #4418 removed `force` and the implicit
+//! `primary` choice: a lone entry pins every spawn, and the pool only ever
+//! offers its own entries.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,12 +21,12 @@ pub const PRIMARY_MODEL_CHOICE: &str = "primary";
 
 /// Where a subagent's bound model came from (v2 `SubagentModelSource`).
 /// Inheritance has no binding in the engine — an unbound instance already
-/// runs on the session LLM — so only the three bound sources appear here.
+/// runs on the session LLM — so only the bound sources appear here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentModelSource {
-    /// `force = true` pinned the model; the `model` parameter is rejected.
-    Forced,
-    /// The caller passed `primary` and inherits its own model and effort.
+    /// Tower only (v2 `resolveSubagentBindingWithPrimary`): the reviewer
+    /// passed `primary` and binds the caller's own model and effort. Agent
+    /// and AgentSwarm no longer offer the choice (v2 #4418).
     PrimaryOverride,
     /// The requested alias, or the pool's default model.
     SecondaryPool,
@@ -50,38 +52,31 @@ impl SecondaryModelRuntime {
         Self { config, llms }
     }
 
-    /// Whether the tool schema advertises the `model` parameter. `force`
-    /// removes the choice, so the parameter is hidden (v2
-    /// `exposesSubagentModelChoice`).
+    /// Whether the tool schema advertises the `model` parameter (v2
+    /// `exposesSubagentModelChoice`): only a pool with a real choice does —
+    /// a single entry (or a lone `default_model`) pins every spawn, so the
+    /// parameter is hidden.
     pub fn exposes_choice(&self) -> bool {
-        !self.config.force
+        self.config.models.len() > 1
     }
 
-    /// The pool listing appended to the `Agent` / `AgentSwarm` descriptions,
-    /// with `[default]` and `[main model]` markers plus the reserved
-    /// `primary` entry (v2 `buildSubagentModelDescriptions`).
+    /// The pool listing appended to the `Agent` / `AgentSwarm` descriptions
+    /// (v2 `buildSubagentModelDescriptions`): pool entries only, default
+    /// first — v2 #4418 removed the implicit `primary` line; the caller's
+    /// own model is offered by naming its alias in the pool.
     pub fn description(&self) -> String {
         let mut lines = vec!["Available models (pass via model):".to_string()];
         let default_model = self.config.default_model.as_str();
-        let caller = self.config.caller_model_alias.as_deref();
         let format_entry = |entry: &SecondaryModelEntry| {
-            let mut markers: Vec<&str> = Vec::new();
-            if entry.alias == default_model {
-                markers.push("[default]");
-            }
-            if caller == Some(entry.alias.as_str()) {
-                markers.push("[main model]");
-            }
-            let marker = if markers.is_empty() {
-                String::new()
+            let marker = if entry.alias == default_model {
+                " [default]"
             } else {
-                format!(" {}", markers.join(" "))
+                ""
             };
-            let label = format!("{}{marker}", entry.alias);
             if entry.hint.is_empty() {
-                format!("- {label}")
+                format!("- {}{marker}", entry.alias)
             } else {
-                format!("- {label}: {}", entry.hint)
+                format!("- {}{marker}: {}", entry.alias, entry.hint)
             }
         };
         // v2 lists the default alias first, then the rest in configured order.
@@ -101,46 +96,21 @@ impl SecondaryModelRuntime {
         {
             lines.push(format_entry(entry));
         }
-        let caller_suffix = match caller.filter(|alias| self.llms.contains_key(*alias)) {
-            Some(alias) => format!(" ({alias})"),
-            None => String::new(),
-        };
-        lines.push(format!(
-            "- {PRIMARY_MODEL_CHOICE}{caller_suffix}: the main model you are running on, bound with your current thinking level; use it for hard, quality-sensitive subagent tasks"
-        ));
         lines.join("\n")
     }
 
-    /// Resolve a spawn's model binding (v2 `resolveSubagentBinding`).
+    /// Resolve a spawn's model binding (v2 `resolveSubagentBinding`, post
+    /// #4418): the pool's own entries only — an explicit `model` must name
+    /// one, and `primary` is just an invalid alias here (the tower keeps its
+    /// own `resolveSubagentBindingWithPrimary`; the fork's tower has no pool
+    /// integration, so that variant has no call site).
     ///
     /// Errors mirror v2's `CONFIG_INVALID` texts so the model sees the same
     /// guidance: they name the offending value and list the available choices.
-    pub fn resolve(
-        &self,
-        session_llm: &Arc<dyn LLM>,
-        requested: Option<&str>,
-    ) -> Result<SubagentBinding, String> {
-        if self.config.force {
-            if let Some(requested) = requested {
-                return Err(format!(
-                    "Invalid model \"{requested}\": [secondary_model].force is set, so every subagent binds \"{}\" (omit the model parameter).",
-                    self.config.default_model
-                ));
-            }
-            return self.bind(
-                self.config.default_model.as_str(),
-                SubagentModelSource::Forced,
-            );
-        }
-        if requested == Some(PRIMARY_MODEL_CHOICE) {
-            return Ok(SubagentBinding {
-                llm: session_llm.clone(),
-                source: SubagentModelSource::PrimaryOverride,
-            });
-        }
+    pub fn resolve(&self, requested: Option<&str>) -> Result<SubagentBinding, String> {
         if self.llms.contains_key(PRIMARY_MODEL_CHOICE) {
             return Err(format!(
-                "[secondary_model.models] key \"{PRIMARY_MODEL_CHOICE}\" is reserved: it always binds the caller's own model. Rename the pool entry."
+                "[secondary_model.models] key \"{PRIMARY_MODEL_CHOICE}\" is reserved. Rename the pool entry."
             ));
         }
         let choice = requested.unwrap_or(self.config.default_model.as_str());
@@ -149,13 +119,12 @@ impl SecondaryModelRuntime {
 
     fn bind(&self, alias: &str, source: SubagentModelSource) -> Result<SubagentBinding, String> {
         let llm = self.llms.get(alias).ok_or_else(|| {
-            let mut available: Vec<&str> = self
+            let available: Vec<&str> = self
                 .config
                 .models
                 .iter()
                 .map(|entry| entry.alias.as_str())
                 .collect();
-            available.push(PRIMARY_MODEL_CHOICE);
             format!(
                 "Invalid model \"{alias}\". Available models: {}.",
                 available.join(", ")
@@ -174,15 +143,16 @@ impl SecondaryModelRuntime {
         self.llms.get(self.config.default_model.as_str()).cloned()
     }
 
-    /// Validate an explicit `model` argument when no pool is configured:
-    /// `primary` (and omitting the parameter) inherit the caller's model,
-    /// anything else is the v2 `CONFIG_INVALID` text. No binding is returned —
-    /// an unbound instance already runs on the session LLM.
+    /// Validate an explicit `model` argument when no pool is configured (v2
+    /// `bindSubagentModel`'s no-pool arm): omitting the parameter inherits
+    /// the caller's model, and ANY value — `primary` included — is the v2
+    /// `CONFIG_INVALID` text. No binding is returned: an unbound instance
+    /// already runs on the session LLM.
     pub fn resolve_without_pool(requested: Option<&str>) -> Result<(), String> {
         match requested {
-            None | Some(PRIMARY_MODEL_CHOICE) => Ok(()),
+            None => Ok(()),
             Some(requested) => Err(format!(
-                "Invalid model \"{requested}\": no [secondary_model.models] pool is configured, so subagents inherit the caller's model (pass \"{PRIMARY_MODEL_CHOICE}\" or omit the model parameter)."
+                "Invalid model \"{requested}\": no [secondary_model] pool is configured, so subagents inherit the caller's model (omit the model parameter)."
             )),
         }
     }
@@ -236,13 +206,12 @@ mod tests {
         }
     }
 
-    fn runtime(force: bool, models: Vec<SecondaryModelEntry>) -> SecondaryModelRuntime {
+    fn runtime(models: Vec<SecondaryModelEntry>) -> SecondaryModelRuntime {
         let llms = models
             .iter()
             .map(|entry| (entry.alias.clone(), llm_llm(&entry.alias)))
             .collect();
         let config = SecondaryModelPool {
-            force,
             default_model: models[0].alias.clone(),
             caller_model_alias: Some("main-model".into()),
             models,
@@ -250,24 +219,17 @@ mod tests {
         SecondaryModelRuntime::new(config, llms)
     }
 
-    fn session_llm() -> Arc<dyn LLM> {
-        llm_llm("primary-llm")
-    }
-
     fn pool_runtime() -> SecondaryModelRuntime {
-        runtime(
-            false,
-            vec![
-                entry("fast", "Cheap and quick."),
-                entry("strong", "Pick this for hard problems."),
-            ],
-        )
+        runtime(vec![
+            entry("fast", "Cheap and quick."),
+            entry("strong", "Pick this for hard problems."),
+        ])
     }
 
     #[test]
     fn default_binding_uses_the_default_alias() {
         let pool = pool_runtime();
-        let binding = pool.resolve(&session_llm(), None).unwrap();
+        let binding = pool.resolve(None).unwrap();
         assert_eq!(binding.source, SubagentModelSource::SecondaryPool);
         assert_eq!(binding.llm.model_name(), "fast");
     }
@@ -275,56 +237,44 @@ mod tests {
     #[test]
     fn explicit_alias_binds_that_alias() {
         let pool = pool_runtime();
-        let binding = pool.resolve(&session_llm(), Some("strong")).unwrap();
+        let binding = pool.resolve(Some("strong")).unwrap();
         assert_eq!(binding.llm.model_name(), "strong");
     }
 
+    /// v2 #4418: `primary` is no longer an implicit choice — with a pool it
+    /// is just an invalid alias, and the available list names pool entries
+    /// only.
     #[test]
-    fn primary_binds_the_session_llm() {
+    fn primary_is_an_invalid_alias_now() {
         let pool = pool_runtime();
-        let binding = pool
-            .resolve(&session_llm(), Some(PRIMARY_MODEL_CHOICE))
-            .unwrap();
-        assert_eq!(binding.source, SubagentModelSource::PrimaryOverride);
-        assert_eq!(binding.llm.model_name(), "primary-llm");
+        let Err(error) = pool.resolve(Some(PRIMARY_MODEL_CHOICE)) else {
+            panic!("primary must not bind on the Agent path");
+        };
+        assert!(error.contains("Invalid model \"primary\""), "{error}");
+        assert!(error.contains("fast, strong"), "{error}");
+        assert!(!error.contains(", primary"), "{error}");
     }
 
     #[test]
     fn invalid_alias_lists_the_available_choices() {
         let pool = pool_runtime();
-        let Err(error) = pool.resolve(&session_llm(), Some("nope")) else {
+        let Err(error) = pool.resolve(Some("nope")) else {
             panic!("an unknown alias must fail");
         };
         assert!(error.contains("Invalid model \"nope\""), "{error}");
-        assert!(error.contains("fast, strong, primary"), "{error}");
+        assert!(error.contains("fast, strong"), "{error}");
     }
 
+    /// v2 #4418: a single-entry pool pins every spawn, so the `model`
+    /// parameter is hidden; only a real choice advertises it.
     #[test]
-    fn force_rejects_an_explicit_model_and_binds_the_default() {
-        let pool = runtime(true, vec![entry("only", "")]);
-        let forced = pool.resolve(&session_llm(), None).unwrap();
-        assert_eq!(forced.source, SubagentModelSource::Forced);
-        assert_eq!(forced.llm.model_name(), "only");
-
-        let Err(error) = pool.resolve(&session_llm(), Some("other")) else {
-            panic!("force must reject an explicit model");
-        };
-        assert!(error.contains("[secondary_model].force"), "{error}");
-        let Err(primary) = pool.resolve(&session_llm(), Some(PRIMARY_MODEL_CHOICE)) else {
-            panic!("force must reject primary too");
-        };
-        assert!(primary.contains("force is set"), "{primary}");
-    }
-
-    #[test]
-    fn force_hides_the_model_parameter() {
-        let pool = runtime(true, vec![entry("only", "")]);
-        assert!(!pool.exposes_choice());
+    fn a_single_entry_pool_hides_the_model_parameter() {
+        assert!(!runtime(vec![entry("only", "")]).exposes_choice());
         assert!(pool_runtime().exposes_choice());
     }
 
     #[test]
-    fn description_marks_default_and_main_model() {
+    fn description_marks_default_and_lists_pool_entries_only() {
         let mut pool = pool_runtime();
         // The configured order puts the non-default entry first; v2 still
         // lists the default alias first.
@@ -332,32 +282,33 @@ mod tests {
             entry("strong", "Pick this for hard problems."),
             entry("fast", "Cheap and quick."),
         ];
-        pool.config.caller_model_alias = Some("strong".into());
         let description = pool.description();
         assert!(description.contains("- fast [default]"), "{description}");
         assert!(
-            description.contains("- strong [main model]"),
+            description.contains("- strong: Pick this for hard problems."),
             "{description}"
         );
-        assert!(description.contains("- primary (strong)"), "{description}");
+        assert!(!description.contains("primary"), "{description}");
         let default_line = description
             .find("- fast [default]")
             .expect("default line listed");
-        let main_line = description
-            .find("- strong [main model]")
-            .expect("main line listed");
-        assert!(default_line < main_line, "{description}");
+        let strong_line = description.find("- strong:").expect("strong line listed");
+        assert!(default_line < strong_line, "{description}");
     }
 
+    /// v2 #4418's no-pool arm: omitting `model` inherits the caller's model,
+    /// and any explicit value — `primary` included — is the CONFIG_INVALID
+    /// text.
     #[test]
-    fn without_a_pool_only_primary_is_accepted() {
+    fn without_a_pool_every_explicit_model_is_rejected() {
         assert!(SecondaryModelRuntime::resolve_without_pool(None).is_ok());
-        assert!(SecondaryModelRuntime::resolve_without_pool(Some(PRIMARY_MODEL_CHOICE)).is_ok());
-        let error = SecondaryModelRuntime::resolve_without_pool(Some("fast")).unwrap_err();
-        assert!(
-            error.contains("no [secondary_model.models] pool"),
-            "{error}"
-        );
-        assert!(error.contains("primary"), "{error}");
+        for requested in ["fast", PRIMARY_MODEL_CHOICE] {
+            let error = SecondaryModelRuntime::resolve_without_pool(Some(requested)).unwrap_err();
+            assert!(
+                error.contains("no [secondary_model] pool is configured"),
+                "{requested}: {error}"
+            );
+            assert!(error.contains("omit the model parameter"), "{error}");
+        }
     }
 }

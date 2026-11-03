@@ -12,7 +12,7 @@ description:
       
 revision: 932e017600564470d7e43d7b25bb49896c06cca1
 updated_at: "2026-11-01T08:11:48.001Z"
-fingerprint: 6945e3a3b85bff032405eab6da5febcd69578c40f47040e4d76b1104d8ef2d4d
+fingerprint: b8a8c86bfb80b9d254d3d3e30a0b0a417fb71567343d762566ba4c582aa3fb16
 source:
   - path: "packages/kimi-agent/src/tools/mod.rs"
   - path: "packages/kimi-agent/src/tools/skill.rs"

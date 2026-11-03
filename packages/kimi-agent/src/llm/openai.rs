@@ -61,6 +61,7 @@ pub fn build_request_full(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -69,6 +70,11 @@ pub fn build_request_full(
 /// OpenAI-compatible vendor but encodes thinking in a `thinking` object
 /// (`{type, effort?, keep?}`) instead of a top-level `reasoning_effort` (v2
 /// `kimiOpenAITrait.thinking`). `None` keeps the generic encoding.
+///
+/// `reasoning_key` is the model's declared reasoning field and
+/// `detected_reasoning_key` the dialect the current model was observed
+/// streaming in (v2 `detectedReasoningKeys`); both feed
+/// [`resolve_reasoning_key`] for the replay of unmarked history think parts.
 #[allow(clippy::too_many_arguments)]
 pub fn build_request_for_provider(
     model: &str,
@@ -81,11 +87,13 @@ pub fn build_request_for_provider(
     provider_type: Option<&str>,
     cache_key: Option<&str>,
     max_tokens: Option<u32>,
+    detected_reasoning_key: Option<&str>,
 ) -> Value {
     let is_kimi = provider_type.is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
+    let resolved_key = resolve_reasoning_key(messages, reasoning_key, detected_reasoning_key);
     let msgs: Vec<Value> = messages
         .iter()
-        .map(|message| project_message(message, reasoning_key))
+        .map(|message| project_message(message, resolved_key.as_deref()))
         .collect();
 
     let mut req = json!({
@@ -194,6 +202,58 @@ fn apply_kimi_thinking(
         thinking["keep"] = json!(keep);
     }
     req["thinking"] = thinking;
+}
+
+/// The reasoning-field probe list, in the order gateways are known to use
+/// them — wider than v2's `KNOWN_REASONING_KEYS`: `reasoning_text` and
+/// `thought` are read-only conveniences (the opencode free tier speaks
+/// `reasoning`), they never become a replay dialect.
+const REASONING_PROBE_KEYS: [&str; 4] = [
+    "reasoning_content",
+    "reasoning",
+    "reasoning_text",
+    "thought",
+];
+
+/// The keys v2 accepts as a replay dialect (`KNOWN_REASONING_KEYS` minus
+/// `reasoning_details`): the detected and history fallbacks only ever name
+/// one of these, so a probe-only spelling never reaches the wire.
+const REASONING_WRITE_KEYS: [&str; 2] = ["reasoning_content", "reasoning"];
+
+/// v2 #4485 `resolveOpenAIReasoningKey`: the key unmarked history think
+/// parts are replayed under — the declared key, then the dialect the
+/// current model was observed streaming in, then the most recent key the
+/// history itself used. The order is deliberate: a model switch keeps the
+/// old dialect on marked parts but moves unmarked parts to the current
+/// model's own field, instead of dragging the old model's key along.
+pub fn resolve_reasoning_key(
+    messages: &[WireMessage],
+    declared: Option<&str>,
+    detected: Option<&str>,
+) -> Option<String> {
+    declared
+        .map(str::to_string)
+        .or_else(|| detected.map(str::to_string))
+        .or_else(|| history_reasoning_key(messages))
+}
+
+/// v2 `historyReasoningKey`: the reasoning key of the newest marked think
+/// part in the history, restricted to the writeable dialects.
+fn history_reasoning_key(messages: &[WireMessage]) -> Option<String> {
+    for message in messages.iter().rev() {
+        for block in message.blocks.iter().rev() {
+            if let ContentBlock::Think {
+                reasoning_key: Some(key),
+                ..
+            } = block
+                && key != REASONING_DETAILS_KEY
+                && REASONING_WRITE_KEYS.contains(&key.as_str())
+            {
+                return Some(key.clone());
+            }
+        }
+    }
+    None
 }
 
 fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
@@ -591,6 +651,10 @@ pub struct StreamAccumulator {
     /// (`[models.<alias>].reasoning_key`); the built-in probe list is the
     /// fallback when the model declares none.
     reasoning_key: Option<String>,
+    /// The first writeable dialect this stream was observed using (v2
+    /// `detectedReasoningKeys`, restricted to [`REASONING_WRITE_KEYS`]):
+    /// recorded once, read by the transport for the next request's replay.
+    detected_reasoning_key: Option<&'static str>,
     /// Tool-call argument fragments the last [`Self::feed`] carried, drained by
     /// the caller through [`Self::take_tool_call_deltas`]. Kept out of `feed`'s
     /// return value so a text-only chunk allocates nothing.
@@ -623,12 +687,16 @@ impl StreamAccumulator {
         if let Some(key) = self.reasoning_key.as_deref() {
             return delta.get(key).and_then(|c| c.as_str());
         }
-        delta
-            .get("reasoning_content")
-            .and_then(|c| c.as_str())
-            .or_else(|| delta.get("reasoning").and_then(|c| c.as_str()))
-            .or_else(|| delta.get("reasoning_text").and_then(|c| c.as_str()))
-            .or_else(|| delta.get("thought").and_then(|c| c.as_str()))
+        REASONING_PROBE_KEYS
+            .iter()
+            .find_map(|key| delta.get(key).and_then(|c| c.as_str()))
+    }
+
+    /// The first writeable dialect this stream was observed using (v2
+    /// `detectedReasoningKeys`): `None` until a probe key carries non-empty
+    /// reasoning text.
+    pub fn detected_reasoning_key(&self) -> Option<&'static str> {
+        self.detected_reasoning_key
     }
 
     /// Whether this delta carried reasoning as **text** (v2's
@@ -719,6 +787,23 @@ impl StreamAccumulator {
         if let Some(think) = self.reasoning_delta(delta)
             && !think.is_empty()
         {
+            // v2 `onReasoningKey` (protocolAdapterRegistry): the first
+            // writeable dialect the model is observed using is remembered
+            // for the replay of unmarked history parts. Detection only runs
+            // without a declared key, the way v2 only hands the detected key
+            // to models that declare none.
+            if self.reasoning_key.is_none()
+                && self.detected_reasoning_key.is_none()
+                && let Some(key) = REASONING_PROBE_KEYS.iter().find(|key| {
+                    REASONING_WRITE_KEYS.contains(key)
+                        && delta
+                            .get(**key)
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|text| !text.is_empty())
+                })
+            {
+                self.detected_reasoning_key = Some(*key);
+            }
             self.thinking.push_str(think);
             think_delta = Some(StreamDelta::Think(think.to_string()));
         }
@@ -1085,6 +1170,99 @@ mod tests {
         let parts = req["messages"][0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert!(req["messages"][0].get("reasoning_content").is_none());
+    }
+
+    fn assistant_with_think_key(key: Option<&str>) -> WireMessage {
+        WireMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            blocks: vec![ContentBlock::Think {
+                think: "hm".into(),
+                encrypted: None,
+                details_index: None,
+                reasoning_key: key.map(str::to_string),
+                details_summary: None,
+            }],
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// v2 #4485 `resolveOpenAIReasoningKey`: declared, then the dialect the
+    /// current model was observed streaming in, then the newest key the
+    /// history itself used — the swap that keeps a model switch from
+    /// dragging the old model's field onto unmarked parts.
+    #[test]
+    fn resolve_reasoning_key_orders_declared_detected_history() {
+        let history = vec![assistant_with_think_key(Some("reasoning"))];
+        // A declared key outranks both fallbacks.
+        assert_eq!(
+            resolve_reasoning_key(&history, Some("reasoning_content"), Some("reasoning"))
+                .as_deref(),
+            Some("reasoning_content")
+        );
+        // The detected dialect outranks the history key (the #4485 swap).
+        assert_eq!(
+            resolve_reasoning_key(&history, None, Some("reasoning_content")).as_deref(),
+            Some("reasoning_content")
+        );
+        // History fills the gap when nothing was detected.
+        assert_eq!(
+            resolve_reasoning_key(&history, None, None).as_deref(),
+            Some("reasoning")
+        );
+        // Nothing anywhere: no reasoning field at all.
+        assert_eq!(resolve_reasoning_key(&[], None, None), None);
+    }
+
+    /// The history scan takes the NEWEST marked part and only ever names a
+    /// writeable dialect: a `reasoning_details` stamp and the probe-only
+    /// spellings are skipped.
+    #[test]
+    fn history_reasoning_key_takes_the_newest_writeable_mark() {
+        let history = vec![
+            assistant_with_think_key(Some("reasoning_content")),
+            assistant_with_think_key(Some("reasoning")),
+        ];
+        assert_eq!(
+            resolve_reasoning_key(&history, None, None).as_deref(),
+            Some("reasoning")
+        );
+
+        let history = vec![
+            assistant_with_think_key(Some("reasoning")),
+            assistant_with_think_key(Some("reasoning_details")),
+        ];
+        assert_eq!(
+            resolve_reasoning_key(&history, None, None).as_deref(),
+            Some("reasoning")
+        );
+
+        let history = vec![assistant_with_think_key(Some("reasoning_text"))];
+        assert_eq!(resolve_reasoning_key(&history, None, None), None);
+    }
+
+    /// The resolved key reaches the wire: an unmarked history think part is
+    /// replayed under the current model's detected dialect.
+    #[test]
+    fn unmarked_thinking_replays_under_the_detected_dialect() {
+        let messages = vec![assistant_with_think_key(None)];
+        let req = build_request_for_provider(
+            "m",
+            &messages,
+            &[],
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("reasoning"),
+        );
+        let first = &req["messages"][0];
+        assert_eq!(first["reasoning"], "hm");
+        assert!(first.get("reasoning_content").is_none());
     }
 
     /// v2 #3910's unported half: think parts stamped with a `detailsIndex`
@@ -1642,6 +1820,47 @@ mod tests {
         assert_eq!(delta, Some(StreamDelta::Think("probed".into())));
     }
 
+    /// v2 #4485 `onReasoningKey`: the first writeable dialect a stream is
+    /// observed using is recorded for the transport — the replay key of
+    /// unmarked history parts on the next request.
+    #[test]
+    fn the_first_writeable_reasoning_dialect_is_detected() {
+        let mut acc = StreamAccumulator::new();
+        // An empty sighting is not a dialect.
+        acc.feed(&json!({ "choices": [{ "delta": { "reasoning": "" } }] }));
+        assert_eq!(acc.detected_reasoning_key(), None);
+
+        let delta = acc.feed(&json!({ "choices": [{ "delta": { "reasoning": "step" } }] }));
+        assert_eq!(delta, Some(StreamDelta::Think("step".into())));
+        assert_eq!(acc.detected_reasoning_key(), Some("reasoning"));
+
+        // First-seen wins: a later chunk in another writeable dialect does
+        // not move the record.
+        acc.feed(&json!({ "choices": [{ "delta": { "reasoning_content": "more" } }] }));
+        assert_eq!(acc.detected_reasoning_key(), Some("reasoning"));
+    }
+
+    /// Probe-only spellings (`reasoning_text`, `thought`) are read as
+    /// thinking but never recorded as a replay dialect.
+    #[test]
+    fn probe_only_spellings_are_not_a_replay_dialect() {
+        let mut acc = StreamAccumulator::new();
+        let delta = acc.feed(&json!({ "choices": [{ "delta": { "reasoning_text": "step" } }] }));
+        assert_eq!(delta, Some(StreamDelta::Think("step".into())));
+        assert_eq!(acc.detected_reasoning_key(), None);
+    }
+
+    /// A declared reasoning key suppresses detection (v2 arms
+    /// `onReasoningKey` only for models that declare none).
+    #[test]
+    fn a_declared_reasoning_key_suppresses_detection() {
+        let mut acc = StreamAccumulator::new().with_reasoning_key(Some("thinking_text"));
+        acc.feed(
+            &json!({ "choices": [{ "delta": { "thinking_text": "step", "reasoning": "x" } }] }),
+        );
+        assert_eq!(acc.detected_reasoning_key(), None);
+    }
+
     #[test]
     fn parse_response_extracts_reasoning_content() {
         let v = json!({
@@ -1726,6 +1945,7 @@ mod tests {
                 Some("kimi"),
                 None,
                 None,
+                None,
             )
         };
 
@@ -1765,6 +1985,7 @@ mod tests {
             Some("openai"),
             None,
             None,
+            None,
         );
         assert_eq!(generic["reasoning_effort"], "high");
         assert!(generic.get("thinking").is_none());
@@ -1787,6 +2008,7 @@ mod tests {
             Some("openai"),
             Some("sess-1"),
             Some(50_000),
+            None,
         );
         assert_eq!(generic["prompt_cache_key"], "sess-1");
         assert_eq!(generic["max_tokens"], 50_000);
@@ -1805,6 +2027,7 @@ mod tests {
                 Some("openai"),
                 None,
                 Some(4096),
+                None,
             );
             assert_eq!(
                 req["max_completion_tokens"], 4096,
@@ -1826,6 +2049,7 @@ mod tests {
             Some("kimi"),
             Some("sess-2"),
             Some(500_000),
+            None,
         );
         assert_eq!(kimi["max_completion_tokens"], 128 * 1024);
         assert_eq!(kimi["prompt_cache_key"], "sess-2");

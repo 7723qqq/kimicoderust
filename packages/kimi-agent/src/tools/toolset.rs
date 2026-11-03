@@ -53,6 +53,8 @@ impl NativeToolset {
             turn_id: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             loaded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             announced_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            empty_disclosure_announced: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            selection_failures: Arc::new(std::sync::Mutex::new(Default::default())),
             tools_filter: None,
             secondary_model: None,
             image_read_byte_budget: None,
@@ -176,15 +178,36 @@ impl NativeToolset {
             .cloned()
             .collect();
         if added.is_empty() && removed.is_empty() {
-            return None;
+            // Upstream #4190: when nothing can be loaded at all, say so once
+            // (replacing the usage trailer), then stay silent until a real
+            // delta resets the state.
+            if !loadable.is_empty() {
+                return None;
+            }
+            if self
+                .empty_disclosure_announced
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return None;
+            }
+            return crate::tools::select_tools::render_loadable_tools_announcement(&[], &[], false);
         }
+        self.empty_disclosure_announced
+            .store(loadable.is_empty(), std::sync::atomic::Ordering::SeqCst);
         for name in &added {
             announced.insert(name.clone());
         }
         for name in &removed {
             announced.remove(name);
         }
-        crate::tools::select_tools::render_loadable_tools_announcement(&added, &removed)
+        // A delta that drained the last loadable tools carries the empty-state
+        // text instead of the usage trailer (upstream #4190's
+        // `hasLoadableTools = loadable.length > 0`).
+        crate::tools::select_tools::render_loadable_tools_announcement(
+            &added,
+            &removed,
+            !loadable.is_empty(),
+        )
     }
 
     /// The model-declared capability probe shared by the media and
@@ -193,6 +216,23 @@ impl NativeToolset {
         self.model_capabilities
             .as_deref()
             .is_some_and(|caps| caps.iter().any(|cap| cap == name))
+    }
+
+    /// v2 #4364: the first turn's `<tools_added>` announcement must not run
+    /// ahead of the MCP servers' first discovery — otherwise it announces a
+    /// partial (often empty) set and the model is told nothing is loadable
+    /// until the next turn's delta. Await the initial load before the
+    /// announcement is computed; `wait_for_initial_load` settles when every
+    /// connect does (success or failure, each bounded by its own connect
+    /// timeout), so this cannot park a turn forever. No-op when disclosure
+    /// is off or no MCP manager is wired.
+    pub async fn wait_for_mcp_discovery_before_disclosure(&self) {
+        if !self.tool_select_enabled || !self.declares_capability("dynamically_loaded_tools") {
+            return;
+        }
+        if let Some(mcp) = &self.mcp_manager {
+            mcp.wait_for_initial_load().await;
+        }
     }
 
     /// `[background].bash_auto_background_on_timeout`: whether a timed-out
@@ -580,5 +620,12 @@ impl NativeToolset {
         &self,
     ) -> Option<&std::sync::Arc<crate::subagent::secondary::SecondaryModelRuntime>> {
         self.secondary_model.as_ref()
+    }
+
+    /// The attached SubagentManager, when the pipeline wired one
+    /// (`with_subagents`) — the spawn gate's catalog source for the `Agent`
+    /// description's type listing.
+    pub fn subagent_manager(&self) -> Option<&std::sync::Arc<crate::subagent::SubagentManager>> {
+        self.subagent_manager.as_ref()
     }
 }

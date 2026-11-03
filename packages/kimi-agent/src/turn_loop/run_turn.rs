@@ -350,14 +350,18 @@ fn strip_rebuilt_system_message(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
 ///
 /// `Err` carries a rejected upload credential and nothing else: v2 throws it
 /// out of the resolver (`isMediaUploadAuthError`), so the turn fails with the
-/// upload's own error instead of sending a degraded request.
+/// upload's own error instead of sending a degraded request. `Ok(None)` is a
+/// cancellation: v2 #4183 aborts an in-flight upload on interruption, and the
+/// select below drops the resolve future — which drops the upload's HTTP
+/// request with it.
 async fn budgeted_request<'a>(
     budget: &mut MediaBudget,
     resolver: Option<&MediaResolver>,
     llm: &dyn LLM,
     messages: &'a [LLMMessage],
     callbacks: &dyn HostCallbacks,
-) -> Result<Cow<'a, [LLMMessage]>, UploadError> {
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<Option<Cow<'a, [LLMMessage]>>, UploadError> {
     let target = llm.media_target();
     let mut request = match resolver {
         Some(resolver) => {
@@ -373,9 +377,19 @@ async fn budgeted_request<'a>(
                 }
                 _ => None,
             };
-            resolver
-                .resolve(messages, target.as_ref(), credential.as_deref())
-                .await?
+            let resolve = resolver.resolve(messages, target.as_ref(), credential.as_deref());
+            match cancel {
+                // `biased` puts the token first, so an already-cancelled turn
+                // never starts an upload (v2's `throwIfAborted` at entry).
+                Some(token) => {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => return Ok(None),
+                        resolved = resolve => resolved?,
+                    }
+                }
+                None => resolve.await?,
+            }
         }
         None => ResolvedRequest {
             messages: Cow::Borrowed(messages),
@@ -389,7 +403,7 @@ async fn budgeted_request<'a>(
             "message": message,
         }));
     }
-    Ok(request.messages)
+    Ok(Some(request.messages))
 }
 
 /// Run a turn to completion, transparently consuming at most one Stop-hook
@@ -429,6 +443,7 @@ pub fn run_turn_continued<'a>(
         hook_guard,
         media,
         media_dropped,
+        media_recovery,
         toolset,
         previous_turn_aborted,
     } = input;
@@ -467,6 +482,7 @@ pub fn run_turn_continued<'a>(
                 hook_guard: hook_guard.take(),
                 media,
                 media_dropped: media_dropped.clone(),
+                media_recovery: media_recovery.clone(),
                 toolset: toolset.clone(),
                 // The continuation is the same turn, not a new one: the
                 // interruption reminder only fires at a fresh turn's head.
@@ -797,8 +813,32 @@ pub fn run_turn<'a>(
         let mut consecutive_overflow_compactions: u32 = 0;
         // v2's media projection fallbacks, spent at most once each per turn:
         // degrade the older media, then strip every media part.
-        let mut media_degraded = false;
-        let mut media_stripped = false;
+        //
+        // v2 #4413 (`llmRequester.mediaRecovery`): a recovery an earlier turn
+        // paid for is agent-level state keyed by model and history revision,
+        // not a per-turn local — the next turn starts from the recovered
+        // projection instead of re-sending the media the provider already
+        // rejected. Applied to the turn's working messages (the fork's
+        // in-place spelling of v2's per-request rewrite); history on disk
+        // keeps the original references.
+        let (mut media_degraded, mut media_stripped) = input
+            .media_recovery
+            .as_ref()
+            .and_then(|cell| {
+                let state = cell.lock().unwrap_or_else(|e| e.into_inner());
+                state.applicable(input.llm.model_name()).map(|recovery| {
+                    let entries = input
+                        .media
+                        .map(|resolver| resolver.media_entries(&messages))
+                        .unwrap_or_default();
+                    crate::llm::media_budget::apply_media_recovery(
+                        &mut messages,
+                        &entries,
+                        recovery,
+                    )
+                })
+            })
+            .unwrap_or((false, false));
         // v2's third projection fallback, also spent at most once per turn: a
         // provider that rejects the request's *shape* gets one resend with the
         // strict projection (`llmRequesterService.ts:594-601`).
@@ -836,19 +876,19 @@ pub fn run_turn<'a>(
             );
         }
         // The stale-todo reminder (v2 `TodoFeature` -> `todoService` ->
-        // `todoReminder`): main agent only, only while `TodoList` is active,
-        // and only after the todo feature has been used. v2's `used` flag lives
-        // in the todo actor; the engine has no such actor, so a `TodoList` call
-        // in the history stands in for it. The state read also doubles as the
-        // capability probe: a host without the state bridge cannot persist
-        // todo state, so reminding the model to maintain a list that cannot be
-        // saved would be worse than silence.
+        // `todoReminder`): main agent only, only while `TodoList` is active.
+        // v2 used to arm the reminder on the todo service's first use; the
+        // upstream rewrite (`da5918c0c8`) dropped that gate — the provider
+        // stays silent on its own while the list has no open items, so a
+        // session that never used `TodoList` is never reminded. The state
+        // read also doubles as the capability probe: a host without the
+        // state bridge cannot persist todo state, so reminding the model to
+        // maintain a list that cannot be saved would be worse than silence.
         if input.agent_id == crate::callbacks::MAIN_AGENT_ID
             && input.llm.transport() != "host-proxy"
             && tool_defs
                 .iter()
                 .any(|def| def.name == crate::injection::todo_reminder::TODO_LIST_TOOL_NAME)
-            && crate::injection::todo_reminder::todo_list_used(&messages)
             && let Ok(response) = callbacks
                 .state_read(crate::rpc::types::StateReadRequest {
                     domain: "todo".into(),
@@ -1122,6 +1162,16 @@ pub fn run_turn<'a>(
             // the host owns the transcript and injects itself, so the
             // pass is skipped there to avoid duplicate reminders.
             if input.llm.transport() != "host-proxy" {
+                // v2 #4364: a new turn's tool announcement must wait for the
+                // MCP servers' first discovery — announcing before it told the
+                // model a partial (often empty) loadable set. The provider
+                // itself is sync, so the await sits here at the injection pass
+                // the announcement is computed in.
+                if step_num == 0
+                    && let Some(toolset) = &input.toolset
+                {
+                    toolset.wait_for_mcp_discovery_before_disclosure().await;
+                }
                 // Refresh the goal/plan snapshot through the host callbacks so
                 // the injections render the state the tools just wrote — the
                 // same channel, so a mid-turn plan exit or goal pause shows up
@@ -1184,10 +1234,34 @@ pub fn run_turn<'a>(
                     input.llm,
                     &messages,
                     callbacks.as_ref(),
+                    Some(turn_cancel.token()),
                 )
                 .await
                 {
-                    Ok(messages) => messages,
+                    Ok(Some(messages)) => messages,
+                    // v2 #4183: interrupting the turn cancels an in-flight
+                    // media upload; the turn aborts cleanly (or reports the
+                    // goal deadline) instead of failing or waiting it out.
+                    Ok(None) => {
+                        let is_goal_deadline = goal.as_ref().is_some_and(|g| {
+                            g.wall_clock_budget_ms
+                                .is_some_and(|budget| elapsed_wall_clock_ms(turn_started) >= budget)
+                        });
+                        let stop_reason = if is_goal_deadline {
+                            LoopTurnStopReason::BudgetLimited
+                        } else {
+                            LoopTurnStopReason::Aborted
+                        };
+                        return Ok(turn_result(
+                            stop_reason,
+                            steps,
+                            total_usage,
+                            0,
+                            llm_retries,
+                            messages.clone(),
+                        )
+                        .with_last_request_usage(last_request_usage.clone()));
+                    }
                     // v2 `isMediaUploadAuthError` → throw: a rejected upload
                     // credential fails the turn with the upload's own error
                     // rather than degrading the media to a path tag.
@@ -1258,11 +1332,18 @@ pub fn run_turn<'a>(
                     let image_format =
                         !too_large && crate::llm::media_budget::is_image_format_error(&err_str);
                     if too_large || image_format {
-                        let projection = if too_large && !media_degraded {
+                        let entries = input
+                            .media
+                            .map(|resolver| resolver.media_entries(&messages));
+                        let visible_media = entries.as_deref().map_or(0, <[_]>::len);
+                        // v2 #4456 `canDegradeMedia`: under an inherited
+                        // degrade a fresh 413 re-runs the degrade only when
+                        // more than KEEP_RECENT media are still visible —
+                        // otherwise the ladder goes straight to the strip.
+                        let can_degrade = !media_degraded
+                            || visible_media > crate::llm::media_budget::MEDIA_DEGRADE_KEEP_RECENT;
+                        let projection = if too_large && can_degrade {
                             media_degraded = true;
-                            let entries = input
-                                .media
-                                .map(|resolver| resolver.media_entries(&messages));
                             let degraded = entries.as_deref().map_or(0, |entries| {
                                 crate::llm::media_budget::degrade_older_media(
                                     &mut messages,
@@ -1273,6 +1354,21 @@ pub fn run_turn<'a>(
                             if degraded == 0 {
                                 return Err(Box::new(std::io::Error::other(err_str))
                                     as Box<dyn std::error::Error + 'a>);
+                            }
+                            // v2 #4413 `markMediaRecovery`: the recovery the
+                            // provider just forced is agent-level state, so the
+                            // next turn starts from it instead of re-sending
+                            // the rejected media. v2 #4456 pins the degrade
+                            // count at capture time: recomputing it per request
+                            // would let a media added later push an older kept
+                            // one out and break the prompt-cache prefix.
+                            if let Some(cell) = &input.media_recovery {
+                                cell.lock().unwrap_or_else(|e| e.into_inner()).mark(
+                                    input.llm.model_name().to_string(),
+                                    crate::llm::media_budget::MediaRecoveryAction::Degraded(
+                                        degraded,
+                                    ),
+                                );
                             }
                             crate::llm::media_budget::MEDIA_DEGRADED_CODE
                         } else if !media_stripped {
@@ -1286,6 +1382,42 @@ pub fn run_turn<'a>(
                             if stripped == 0 {
                                 return Err(Box::new(std::io::Error::other(err_str))
                                     as Box<dyn std::error::Error + 'a>);
+                            }
+                            // v2 #4413: the strip snapshot is the captured key
+                            // set, so media added by a later turn stay visible
+                            // until a rejection of their own.
+                            if let Some(cell) = &input.media_recovery {
+                                let mut keys: Vec<String> = entries
+                                    .as_deref()
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .map(|entry| entry.key.clone())
+                                    .collect();
+                                // v2 re-captures from the pre-projection
+                                // history, where the media an inherited strip
+                                // already replaced still exist. The fork's
+                                // strip runs in place, so this turn's entries
+                                // name only the media that were still visible —
+                                // merge the inherited keys back or the next
+                                // turn would resend the older media.
+                                let mut state = cell.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Some(existing) = &state.recovery
+                                    && existing.model == input.llm.model_name()
+                                    && existing.context_revision == state.revision
+                                    && let crate::llm::media_budget::MediaRecoveryAction::Stripped(
+                                        old_keys,
+                                    ) = &existing.action
+                                {
+                                    for key in old_keys {
+                                        if !keys.contains(key) {
+                                            keys.push(key.clone());
+                                        }
+                                    }
+                                }
+                                state.mark(
+                                    input.llm.model_name().to_string(),
+                                    crate::llm::media_budget::MediaRecoveryAction::Stripped(keys),
+                                );
                             }
                             crate::llm::media_budget::MEDIA_STRIPPED_CODE
                         } else {
@@ -1843,13 +1975,53 @@ pub fn run_turn<'a>(
                     for call in &scheduled {
                         let name = call.tool_call.name.to_ascii_lowercase();
                         if name == "bash" {
-                            if let Some(cwd) = call
-                                .tool_call
-                                .arguments
-                                .get("cwd")
-                                .and_then(|value| value.as_str())
-                            {
+                            let arguments = &call.tool_call.arguments;
+                            let cwd_arg = arguments.get("cwd").and_then(|value| value.as_str());
+                            if let Some(cwd) = cwd_arg {
                                 step_access.declared_cwds.push(cwd.to_string());
+                            }
+                            // v2's other half (`extractBashTargetDirs`): the
+                            // directories a Bash call's listing operands
+                            // resolve to, asked of the host's bash parser
+                            // (`host/parse_bash`). A host without a parser —
+                            // the standalone server, the REPL, the legacy
+                            // one-shot entry — or a command that fails to
+                            // parse contributes nothing beyond the declared
+                            // cwd, which is v2's own fallback shape
+                            // (`!parsed.ok || parsed.hasError` → cwd only),
+                            // never an error into the turn.
+                            if let Some(command) =
+                                arguments.get("command").and_then(|value| value.as_str())
+                            {
+                                let process_cwd = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let effective_cwd = match cwd_arg {
+                                    Some(cwd) if !cwd.is_empty() => {
+                                        let candidate = std::path::Path::new(cwd);
+                                        if candidate.is_absolute() {
+                                            candidate.to_path_buf()
+                                        } else {
+                                            process_cwd.join(candidate)
+                                        }
+                                    }
+                                    _ => process_cwd,
+                                };
+                                let home = std::env::var_os("USERPROFILE")
+                                    .or_else(|| std::env::var_os("HOME"))
+                                    .map(std::path::PathBuf::from)
+                                    .unwrap_or_else(|| effective_cwd.clone());
+                                if let Ok(Some(dirs)) = callbacks
+                                    .parse_bash(crate::rpc::types::ParseBashRequest {
+                                        command: command.to_string(),
+                                        cwd: effective_cwd.to_string_lossy().into_owned(),
+                                        home: home.to_string_lossy().into_owned(),
+                                    })
+                                    .await
+                                {
+                                    step_access
+                                        .dirs
+                                        .extend(dirs.into_iter().map(std::path::PathBuf::from));
+                                }
                             }
                             continue;
                         }

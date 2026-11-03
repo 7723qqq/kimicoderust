@@ -12,7 +12,7 @@ description:
       
 revision: 932e017600564470d7e43d7b25bb49896c06cca1
 updated_at: "2026-11-01T08:11:47.971Z"
-fingerprint: 473b55bb3dab76415bbd5929d44e8cf5f5922fa783c061ea16dba1943be920f3
+fingerprint: 6bbca034d0bb77818897c28af2e9bdbf64593c31f563b2cf67bd6b73199f7f1c
 source:
   - path: "packages/kimi-agent/src/session/mod.rs"
   - path: "packages/kimi-agent/src/session/sqlite_store.rs"

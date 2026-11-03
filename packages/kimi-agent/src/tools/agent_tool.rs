@@ -131,7 +131,16 @@ Once a subagent is running, leave that scope to it: do not redo its searches or 
 /// allowlist is declared, `none` when the allowlist admits nothing, else the
 /// comma-separated names (MCP globs included verbatim — `mcp__*` reads as
 /// "every MCP tool").
-fn profile_tools_listing(profile: &crate::prompt::profiles::AgentProfile) -> String {
+///
+/// `is_available` is the runtime availability filter: when present, a
+/// declared pattern is listed only if it matches at least one tool in the
+/// session's live table. MCP globs stay globs in the output — the predicate
+/// answers "does any available tool match this pattern?", so `mcp__*`
+/// survives exactly when some MCP tool is actually connected.
+fn profile_tools_listing(
+    profile: &crate::prompt::profiles::AgentProfile,
+    is_available: Option<&dyn Fn(&str) -> bool>,
+) -> String {
     if profile.tools.is_empty() {
         return "all".to_string();
     }
@@ -140,6 +149,38 @@ fn profile_tools_listing(profile: &crate::prompt::profiles::AgentProfile) -> Str
         .iter()
         .filter(|name| {
             crate::subagent::manager::ToolPolicyFilter::from_allowlist(&profile.tools).allows(name)
+        })
+        .filter(|name| match is_available {
+            Some(is_available) => is_available(name),
+            None => true,
+        })
+        .map(|name| name.as_str())
+        .collect();
+    if active.is_empty() {
+        "none".to_string()
+    } else {
+        active.join(", ")
+    }
+}
+
+/// The `Tools:` line for a discovered definition (v2
+/// `resolveActiveToolNames` over a file-declared allowlist): `all` when the
+/// profile declares no list, `none` when nothing survives the session's
+/// live table.
+fn definition_tools_listing(
+    def: &crate::subagent::types::SubagentDefinition,
+    is_available: Option<&dyn Fn(&str) -> bool>,
+) -> String {
+    if def.tools.is_empty() {
+        return "all".to_string();
+    }
+    let active: Vec<&str> = def
+        .tools
+        .iter()
+        .filter(|name| !def.disallowed_tools.contains(name))
+        .filter(|name| match is_available {
+            Some(is_available) => is_available(name),
+            None => true,
         })
         .map(|name| name.as_str())
         .collect();
@@ -153,21 +194,86 @@ fn profile_tools_listing(profile: &crate::prompt::profiles::AgentProfile) -> Str
 pub fn agent_tool_def(
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> crate::turn_loop::types::ToolInfo {
-    let catalog = crate::prompt::profiles::ProfileCatalog::with_builtins();
+    agent_tool_def_impl(pool, None, None)
+}
+
+/// The runtime-filtered form of [`agent_tool_def`]: each profile's `Tools:`
+/// line drops the declared patterns that match nothing in the session's live
+/// tool table (a disconnected MCP server, a name the global `[tools]`
+/// switch disabled, GitHub tools with no token), so the model never picks a
+/// subagent for a capability it does not have right now.
+///
+/// `catalog` is the spawn gate's view (v2's allowlist-filtered profile
+/// listing): the listed types are exactly the ones the caller may spawn,
+/// including the discovered definitions. Absent, the static default
+/// profile's delegation set (`coder` / `explore` / `plan`) stands in — the
+/// builtin `agent` is not spawnable.
+pub fn agent_tool_def_filtered(
+    pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
+    is_available: &dyn Fn(&str) -> bool,
+    catalog: Option<&crate::subagent::manager::SpawnCatalog>,
+) -> crate::turn_loop::types::ToolInfo {
+    agent_tool_def_impl(pool, Some(is_available), catalog)
+}
+
+fn agent_tool_def_impl(
+    pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
+    is_available: Option<&dyn Fn(&str) -> bool>,
+    catalog: Option<&crate::subagent::manager::SpawnCatalog>,
+) -> crate::turn_loop::types::ToolInfo {
+    let builtin_catalog = crate::prompt::profiles::ProfileCatalog::with_builtins();
+    let allowlist: Option<Vec<String>> = match catalog {
+        Some(catalog) => catalog.allowlist.clone(),
+        None => Some(
+            crate::subagent::allowlist::DEFAULT_MAIN_SUBAGENTS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+        ),
+    };
+    let admitted = |name: &str| {
+        allowlist
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|allowed| allowed == name))
+    };
     let mut available = String::new();
-    for profile in catalog.list() {
+    for profile in builtin_catalog
+        .list()
+        .iter()
+        .filter(|profile| admitted(&profile.name))
+    {
         available.push_str(&format!("- {}: {}\n", profile.name, profile.description));
         // v2 `buildSubagentTypeDescriptions` / `resolveActiveToolNames`: the
         // listing advertises each type's tool scope so the model can pick a
         // subagent by what it is actually allowed to do.
-        available.push_str(&format!("  Tools: {}\n", profile_tools_listing(profile)));
+        available.push_str(&format!(
+            "  Tools: {}\n",
+            profile_tools_listing(profile, is_available)
+        ));
+    }
+    // The turn's discovered (host-pushed) types join the listing, filtered
+    // by the same allowlist and deduplicated against builtin overrides.
+    if let Some(catalog) = catalog {
+        for def in catalog
+            .discovered
+            .iter()
+            .filter(|def| admitted(&def.name))
+            .filter(|def| !builtin_catalog.list().iter().any(|p| p.name == def.name))
+        {
+            available.push_str(&format!("- {}: {}\n", def.name, def.description));
+            available.push_str(&format!(
+                "  Tools: {}\n",
+                definition_tools_listing(def, is_available)
+            ));
+        }
     }
     let mut description = format!(
         "{AGENT_TOOL_DESCRIPTION}\n\nAvailable agent types:\n{}",
         available.trim_end()
     );
-    // v2 `buildSubagentModelDescriptions`: a forced pool exposes no choice,
-    // so it appends neither the listing nor (below) the `model` parameter.
+    // v2 `buildSubagentModelDescriptions`: a pool with a single entry pins
+    // every spawn, so the listing and the `model` parameter appear only when
+    // a real choice exists (v2 `exposesSubagentModelChoice`).
     if let Some(pool) = pool
         && pool.exposes_choice()
     {
@@ -225,7 +331,7 @@ pub fn agent_tool_def(
             "model".into(),
             serde_json::json!({
                 "type": "string",
-                "description": "Which model to run the subagent on: one of the aliases listed under \"Available models\" in this tool description, or \"primary\" for the main model you are running on (for hard, quality-sensitive tasks). When omitted, the configured default model is used. Ignored when resuming — resumed subagents keep their own model."
+                "description": "Which model to run the subagent on: one of the aliases listed under \"Available models\" in this tool description. When omitted, the configured default model is used. Ignored when resuming — resumed subagents keep their own model."
             }),
         );
     }
@@ -254,6 +360,51 @@ fn format_failure(agent_id: &str, profile: &str, message: &str, timed_out: bool)
         text.push_str(&timeout_resume_hint(agent_id));
     }
     text
+}
+
+/// Report a finished foreground turn — the fresh-spawn and resume arms share
+/// this. An aborted turn is a stop, not a completion: the v2 stopped message
+/// leads (a user interrupt emits `subagent.cancelled`, anything else
+/// `subagent.failed` — silently dropping the event would strand the
+/// `subagent.started` the spawn already sent) and the turn's partial output
+/// rides below it. Anything else reports the summary as a completion.
+fn report_foreground_turn(
+    callbacks: &dyn crate::callbacks::HostCallbacks,
+    agent_id: &str,
+    profile_name: &str,
+    turn: &crate::turn_loop::types::TurnResult,
+    parent_cancel: Option<&crate::subagent::types::ParentCancel>,
+) -> (String, bool) {
+    if matches!(turn.stop_reason, LoopTurnStopReason::Aborted) {
+        let interrupted = parent_cancel.is_some_and(|signal| signal.triggered());
+        let message = if interrupted {
+            emit_cancelled(callbacks, agent_id, profile_name);
+            USER_INTERRUPTED_SUBAGENT_MESSAGE
+        } else {
+            emit_failed(callbacks, agent_id, profile_name, SUBAGENT_STOPPED_MESSAGE);
+            SUBAGENT_STOPPED_MESSAGE
+        };
+        let mut content = format_failure(agent_id, profile_name, message, false);
+        if let Some(section) = crate::subagent::manager::partial_output_section(turn) {
+            content.push_str(&section);
+        }
+        (content, true)
+    } else {
+        let summary = crate::subagent::manager::final_assistant_summary(&turn.messages);
+        emit_completed(callbacks, agent_id, profile_name, &summary, &turn.usage);
+        (format_success(agent_id, profile_name, &summary), false)
+    }
+}
+
+/// A background task's output for a stopped subagent: the v2 stopped message
+/// with the partial output appended — TaskOutput renders this verbatim, which
+/// is the "stopped task's partial output comes back marked as stopped"
+/// contract. The lifecycle event keeps the bare v2 message.
+fn stopped_task_output(message: &str, turn: &crate::turn_loop::types::TurnResult) -> String {
+    match crate::subagent::manager::partial_output_section(turn) {
+        Some(section) => format!("{message}{section}"),
+        None => message.to_string(),
+    }
 }
 
 /// Fire-and-forget subagent lifecycle event to the host (v2
@@ -626,17 +777,13 @@ async fn execute_resume(
     };
 
     let (content, is_error) = match run {
-        Ok(Some(Ok(ForegroundTurnOutcome::Completed(turn)))) => {
-            let summary = crate::subagent::manager::final_assistant_summary(&turn.messages);
-            emit_completed(
-                runtime.callbacks.as_ref(),
-                resume_id,
-                &profile_name,
-                &summary,
-                &turn.usage,
-            );
-            (format_success(resume_id, &profile_name, &summary), false)
-        }
+        Ok(Some(Ok(ForegroundTurnOutcome::Completed(turn)))) => report_foreground_turn(
+            runtime.callbacks.as_ref(),
+            resume_id,
+            &profile_name,
+            &turn,
+            parent_cancel,
+        ),
         Ok(Some(Ok(ForegroundTurnOutcome::ParentCancelled))) => {
             // Same terminal the fresh-spawn and background-resume arms emit
             // (`:1038`, `:611`): without it `subagent.started` from
@@ -757,7 +904,7 @@ async fn run_resume_in_background(
             Some(Ok(ForegroundTurnOutcome::Completed(turn))) => {
                 if matches!(turn.stop_reason, LoopTurnStopReason::Aborted) {
                     emit_failed(cb.as_ref(), &agent, &bg_profile, SUBAGENT_STOPPED_MESSAGE);
-                    TaskOutcome::Failed(SUBAGENT_STOPPED_MESSAGE.to_string())
+                    TaskOutcome::Failed(stopped_task_output(SUBAGENT_STOPPED_MESSAGE, &turn))
                 } else {
                     let summary = crate::subagent::manager::final_assistant_summary(&turn.messages);
                     emit_completed(cb.as_ref(), &agent, &bg_profile, &summary, &turn.usage);
@@ -893,9 +1040,9 @@ pub async fn execute_agent(
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> Option<ExecutableToolResult> {
     // Without a `[secondary_model]` pool the engine still absorbs the `model`
-    // parameter: `primary` (or omitting it) inherits the caller's model, any
-    // other value is the v2 no-pool error — the host no longer owns subagent
-    // model routing.
+    // parameter: omitting it inherits the caller's model, and any explicit
+    // value — `primary` included (v2 #4418) — is the no-pool error. The host
+    // no longer owns subagent model routing.
     let requested_model = string_arg(args, "model");
     // Native resume (P55): a `resume` for an agent whose conversation we
     // hold continues natively; unknown ids stay host-owned (v2 persistent
@@ -913,46 +1060,24 @@ pub async fn execute_agent(
         .await;
     }
 
-    // The pool binding applies to the spawn, not to resumes (a resumed agent
-    // keeps its own model, v2 `stripSubagentModelParameter` note).
-    let binding_llm = match pool {
-        Some(pool) => {
-            let runtime = manager.runtime().await?;
-            match pool.resolve(&runtime.llm, requested_model.as_deref()) {
-                Ok(binding) => Some(binding.llm),
-                Err(message) => {
-                    return Some(ExecutableToolResult {
-                        delivery: None,
-                        stop_turn: false,
-                        content: message,
-                        is_error: true,
-                        note: None,
-                        display: None,
-                    });
-                }
-            }
-        }
-        None => {
-            if let Err(message) =
-                crate::subagent::secondary::SecondaryModelRuntime::resolve_without_pool(
-                    requested_model.as_deref(),
-                )
-            {
-                return Some(ExecutableToolResult {
-                    delivery: None,
-                    stop_turn: false,
-                    content: message,
-                    is_error: true,
-                    note: None,
-                    display: None,
-                });
-            }
-            None
-        }
-    };
     let is_fork = args.get("fork").and_then(|v| v.as_bool()).unwrap_or(false);
-    let profile_name =
-        string_arg(args, "subagent_type").unwrap_or_else(|| DEFAULT_PROFILE_NAME.into());
+    // v2 #4152 (`planSpawn`): a fork inherits the caller's profile when
+    // `subagent_type` is omitted, so its system prompt — and with it the
+    // whole request prefix — stays byte-identical to the caller's and the
+    // provider's prompt cache survives the handoff. A plain spawn defaults
+    // to `coder`.
+    let caller_id = crate::tools::CALLER_AGENT_ID
+        .try_with(|id| id.clone())
+        .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
+    let caller_profile = manager
+        .caller_profile_name(&caller_id)
+        .await
+        .unwrap_or_else(|| DEFAULT_PROFILE_NAME.into());
+    let profile_name = if is_fork {
+        string_arg(args, "subagent_type").unwrap_or_else(|| caller_profile.clone())
+    } else {
+        string_arg(args, "subagent_type").unwrap_or_else(|| DEFAULT_PROFILE_NAME.into())
+    };
 
     if is_fork {
         // v2 refuses `fork` outright when the flag is off. The flag defaults
@@ -975,7 +1100,7 @@ pub async fn execute_agent(
             resume.as_deref(),
             subagent_type.as_deref(),
             model.as_deref(),
-            &profile_name,
+            &caller_profile,
             None,
         ) {
             return Some(ExecutableToolResult {
@@ -992,8 +1117,79 @@ pub async fn execute_agent(
     // Unknown profiles stay host-owned: plugin sources and external
     // backends never reach the pushed snapshot.
     manager.get_definition(&profile_name).await?;
+
+    // v2 `planSpawn`: the requested type must be inside the caller's
+    // allowlist — the caller profile's `subagents` declaration, else the
+    // default profile's delegation set (plus the main agent's discovered
+    // extras). Forks skip the gate: a fork inherits a type the caller was
+    // already admitted as. The gate runs after the unknown-profile check so
+    // types the engine never registered keep their host fallback (plugin
+    // sources never reach the snapshot).
+    if let Err(message) = manager
+        .check_spawn_allowed(&caller_id, &profile_name, is_fork)
+        .await
+    {
+        return Some(ExecutableToolResult {
+            delivery: None,
+            stop_turn: false,
+            content: message,
+            is_error: true,
+            note: None,
+            display: None,
+        });
+    }
+
     // No injected runtime (unwired transport) — the host tool still works.
     let runtime = manager.runtime().await?;
+
+    // The pool binding applies to non-fork spawns (resumes keep their own
+    // model either way, v2 `stripSubagentModelParameter`). A fork inherits
+    // the caller's model and thinking verbatim (v2 #4152 `planSpawn`) — a
+    // pool binding would move the fork onto the pool default and break the
+    // request prefix it shares with the caller. A pool-bound caller's fork
+    // binds that same pool entry (`instance_llm_of`); everyone else inherits
+    // the session model.
+    let binding_llm = if is_fork {
+        Some(
+            manager
+                .instance_llm_of(&caller_id)
+                .await
+                .unwrap_or_else(|| runtime.llm.clone()),
+        )
+    } else {
+        match pool {
+            Some(pool) => match pool.resolve(requested_model.as_deref()) {
+                Ok(binding) => Some(binding.llm),
+                Err(message) => {
+                    return Some(ExecutableToolResult {
+                        delivery: None,
+                        stop_turn: false,
+                        content: message,
+                        is_error: true,
+                        note: None,
+                        display: None,
+                    });
+                }
+            },
+            None => {
+                if let Err(message) =
+                    crate::subagent::secondary::SecondaryModelRuntime::resolve_without_pool(
+                        requested_model.as_deref(),
+                    )
+                {
+                    return Some(ExecutableToolResult {
+                        delivery: None,
+                        stop_turn: false,
+                        content: message,
+                        is_error: true,
+                        note: None,
+                        display: None,
+                    });
+                }
+                None
+            }
+        }
+    };
 
     let prompt = match required_string_arg(args, "prompt") {
         Ok(prompt) => prompt,
@@ -1055,7 +1251,7 @@ pub async fn execute_agent(
                 Ok(ForegroundTurnOutcome::Completed(turn)) => {
                     if matches!(turn.stop_reason, LoopTurnStopReason::Aborted) {
                         emit_failed(cb.as_ref(), &agent, &profile, SUBAGENT_STOPPED_MESSAGE);
-                        TaskOutcome::Failed(SUBAGENT_STOPPED_MESSAGE.to_string())
+                        TaskOutcome::Failed(stopped_task_output(SUBAGENT_STOPPED_MESSAGE, &turn))
                     } else {
                         let summary =
                             crate::subagent::manager::final_assistant_summary(&turn.messages);
@@ -1195,40 +1391,13 @@ pub async fn execute_agent(
     .await;
 
     let (content, is_error) = match run {
-        Ok(Ok(ForegroundTurnOutcome::Completed(turn))) => {
-            if matches!(turn.stop_reason, LoopTurnStopReason::Aborted) {
-                let interrupted = parent_cancel.is_some_and(|signal| signal.triggered());
-                let message = if interrupted {
-                    emit_cancelled(runtime.callbacks.as_ref(), &agent_id, &profile_name);
-                    USER_INTERRUPTED_SUBAGENT_MESSAGE
-                } else {
-                    // The instance stopped itself. The background path reports
-                    // exactly this shape as failed (`:876-881`), so leaving the
-                    // foreground one silent strands `subagent.started`.
-                    emit_failed(
-                        runtime.callbacks.as_ref(),
-                        &agent_id,
-                        &profile_name,
-                        SUBAGENT_STOPPED_MESSAGE,
-                    );
-                    SUBAGENT_STOPPED_MESSAGE
-                };
-                (
-                    format_failure(&agent_id, &profile_name, message, false),
-                    true,
-                )
-            } else {
-                let summary = crate::subagent::manager::final_assistant_summary(&turn.messages);
-                emit_completed(
-                    runtime.callbacks.as_ref(),
-                    &agent_id,
-                    &profile_name,
-                    &summary,
-                    &turn.usage,
-                );
-                (format_success(&agent_id, &profile_name, &summary), false)
-            }
-        }
+        Ok(Ok(ForegroundTurnOutcome::Completed(turn))) => report_foreground_turn(
+            runtime.callbacks.as_ref(),
+            &agent_id,
+            &profile_name,
+            &turn,
+            parent_cancel,
+        ),
         Ok(Ok(ForegroundTurnOutcome::ParentCancelled)) => {
             // The user interrupted the subagent: v2 emitted a distinct
             // `subagent.cancelled` here instead of a failure, so the TUI can
@@ -1428,7 +1597,7 @@ mod tests {
     /// tool survives the profile filter.
     async fn register_looper(manager: &SubagentManager) {
         manager
-            .register_definition(crate::subagent::types::SubagentDefinition {
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
                 name: "looper".into(),
                 description: "loops".into(),
                 system_prompt: "You loop.".into(),
@@ -1437,6 +1606,7 @@ mod tests {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
     }
@@ -1461,7 +1631,7 @@ mod tests {
         let llm = Arc::new(RecordingPromptLlm::new(vec!["theirs".into()]));
         let manager = manager_with(llm).await;
         manager
-            .register_definition(crate::subagent::types::SubagentDefinition {
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
                 name: "research".into(),
                 description: "d".into(),
                 system_prompt: "You research.".into(),
@@ -1470,6 +1640,7 @@ mod tests {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
         // A subagent belonging to somebody else.
@@ -1514,7 +1685,7 @@ mod tests {
         let llm = Arc::new(RecordingPromptLlm::new(vec!["busy".into()]));
         let manager = manager_with(llm).await;
         manager
-            .register_definition(crate::subagent::types::SubagentDefinition {
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
                 name: "research".into(),
                 description: "d".into(),
                 system_prompt: "You research.".into(),
@@ -1523,6 +1694,7 @@ mod tests {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
         let id = as_main_agent(manager.spawn("research", "Busy"))
@@ -1564,7 +1736,7 @@ mod tests {
             ]));
             let manager = manager_with_callbacks(llm.clone(), recorder.clone()).await;
             manager
-                .register_definition(crate::subagent::types::SubagentDefinition {
+                .register_discovered_definition(crate::subagent::types::SubagentDefinition {
                     name: "research".into(),
                     description: "d".into(),
                     system_prompt: "You research.".into(),
@@ -1573,6 +1745,7 @@ mod tests {
                     prompt_prefix: None,
                     summary_policy: None,
                     model: None,
+                    subagents: None,
                 })
                 .await;
             let first = execute_agent(
@@ -1933,8 +2106,8 @@ mod tests {
         ]));
         let manager = manager_with_callbacks(llm.clone(), recorder.clone()).await;
         manager
-            .register_definition(crate::subagent::types::SubagentDefinition {
-                name: "tower-worker".into(),
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
+                name: "reviewer".into(),
                 description: "d".into(),
                 system_prompt: "You are a tower worker.".into(),
                 tools: vec![],
@@ -1942,12 +2115,13 @@ mod tests {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
         let first = execute_agent(
             &manager,
             None,
-            &serde_json::json!({ "subagent_type": "tower-worker", "prompt": "go" }),
+            &serde_json::json!({ "subagent_type": "reviewer", "prompt": "go" }),
             None,
             None,
             None,
@@ -2042,8 +2216,8 @@ mod tests {
         let runner = Arc::new(crate::storage::TaskRunner::new(None));
         manager.set_task_runner(runner.clone()).await;
         manager
-            .register_definition(crate::subagent::types::SubagentDefinition {
-                name: "tower-worker".into(),
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
+                name: "reviewer".into(),
                 description: "d".into(),
                 system_prompt: "You are a tower worker.".into(),
                 tools: vec![],
@@ -2051,12 +2225,13 @@ mod tests {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
         let first = execute_agent(
             &manager,
             None,
-            &serde_json::json!({ "subagent_type": "tower-worker", "prompt": "go" }),
+            &serde_json::json!({ "subagent_type": "reviewer", "prompt": "go" }),
             None,
             None,
             None,
@@ -2205,7 +2380,7 @@ mod tests {
     async fn max_tokens_truncation_fails_the_subagent_run() {
         let manager = manager_with(Arc::new(MaxTokensLlm)).await;
         manager
-            .register_definition(crate::subagent::types::SubagentDefinition {
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
                 name: "research".into(),
                 description: "d".into(),
                 system_prompt: "You research.".into(),
@@ -2214,6 +2389,7 @@ mod tests {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
         let result = execute_agent(
@@ -2248,7 +2424,7 @@ mod tests {
             ]));
             let manager = manager_with_callbacks(llm.clone(), recorder.clone()).await;
             manager
-                .register_definition(crate::subagent::types::SubagentDefinition {
+                .register_discovered_definition(crate::subagent::types::SubagentDefinition {
                     name: "research".into(),
                     description: "d".into(),
                     system_prompt: "You research.".into(),
@@ -2261,6 +2437,7 @@ mod tests {
                         retries: 1,
                     }),
                     model: None,
+                    subagents: None,
                 })
                 .await;
             let first = execute_agent(
@@ -2317,6 +2494,21 @@ mod tests {
     #[tokio::test]
     async fn foreground_success_formats_v2_shape() {
         let manager = manager_with(Arc::new(SummaryLlm)).await;
+        // `research` is not in the default allowlist; register it as a
+        // discovered profile so the spawn gate admits it (v2 extras).
+        manager
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
+                name: "research".into(),
+                description: "d".into(),
+                system_prompt: "You research.".into(),
+                tools: vec![],
+                disallowed_tools: vec![],
+                prompt_prefix: None,
+                summary_policy: None,
+                model: None,
+                subagents: None,
+            })
+            .await;
         let result = execute_agent(
             &manager,
             None,
@@ -2354,6 +2546,7 @@ mod tests {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
         let result = execute_agent(
@@ -2469,6 +2662,19 @@ mod tests {
         // an explicit `0` disables it (it must neither expire immediately
         // nor fold into the 2h default's timeout error path).
         let manager = manager_with(Arc::new(SleepyLlm)).await;
+        manager
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
+                name: "research".into(),
+                description: "d".into(),
+                system_prompt: "You research.".into(),
+                tools: vec![],
+                disallowed_tools: vec![],
+                prompt_prefix: None,
+                summary_policy: None,
+                model: None,
+                subagents: None,
+            })
+            .await;
         let result = execute_agent(
             &manager,
             None,
@@ -2518,6 +2724,201 @@ mod tests {
         );
     }
 
+    /// LLM whose first *working* answer carries partial text plus a tool call
+    /// and whose later answers wait on `release` — a kill landing mid-turn
+    /// leaves an aborted turn whose messages hold the partial output.
+    /// `seed_first` prepends one plain answer, so the resume test can complete
+    /// an initial run before the stop-driven one.
+    struct PartialThenBlockLlm {
+        calls: std::sync::atomic::AtomicU32,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        seed_first: bool,
+    }
+
+    impl PartialThenBlockLlm {
+        fn new(
+            seed_first: bool,
+        ) -> (
+            Arc<Self>,
+            Arc<tokio::sync::Notify>,
+            Arc<tokio::sync::Notify>,
+        ) {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let llm = Arc::new(Self {
+                calls: std::sync::atomic::AtomicU32::new(0),
+                entered: entered.clone(),
+                release: release.clone(),
+                seed_first,
+            });
+            (llm, entered, release)
+        }
+    }
+
+    impl LLM for PartialThenBlockLlm {
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+        fn model_name(&self) -> &str {
+            "partial-then-block-llm"
+        }
+        fn is_retryable_error(&self, _: &str) -> bool {
+            false
+        }
+        fn chat(
+            &self,
+            _params: LLMChatParams,
+        ) -> BoxFuture<'_, Result<TurnChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let entered = self.entered.clone();
+            let release = self.release.clone();
+            let seed_first = self.seed_first;
+            Box::pin(async move {
+                let echo_call = |id: &str| ToolCall {
+                    id: id.into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({}),
+                    extras: None,
+                };
+                // Seeding mode: the first call answers plainly and ends the
+                // turn, so the initial run completes with a resumable history.
+                if seed_first && call == 0 {
+                    return Ok(TurnChatResponse {
+                        content: "seed answer".into(),
+                        thinking: vec![],
+                        tool_calls: vec![],
+                        finish_reason: Some("stop".into()),
+                        usage: TokenUsage::default(),
+                        timing: None,
+                    });
+                }
+                let first_working = (!seed_first && call == 0) || (seed_first && call == 1);
+                if first_working {
+                    return Ok(TurnChatResponse {
+                        content: "partial findings so far".into(),
+                        thinking: vec![],
+                        tool_calls: vec![echo_call("tc-partial")],
+                        finish_reason: Some("tool_calls".into()),
+                        usage: TokenUsage::default(),
+                        timing: None,
+                    });
+                }
+                entered.notify_one();
+                release.notified().await;
+                Ok(TurnChatResponse {
+                    content: String::new(),
+                    thinking: vec![],
+                    tool_calls: vec![echo_call(&format!("tc-{}", fastrand::u64(..)))],
+                    finish_reason: Some("tool_calls".into()),
+                    usage: TokenUsage::default(),
+                    timing: None,
+                })
+            })
+        }
+    }
+
+    /// Kill the one running instance once the LLM is mid-turn, then let the
+    /// in-flight call finish so the loop reaches its cancellation checkpoint.
+    async fn kill_the_running_instance(
+        manager: &Arc<SubagentManager>,
+        entered: &tokio::sync::Notify,
+        release: &tokio::sync::Notify,
+    ) {
+        entered.notified().await;
+        let list = manager.list().await;
+        assert_eq!(list.len(), 1, "exactly one subagent is running");
+        assert!(manager.kill(&list[0].id).await.unwrap());
+        release.notify_one();
+    }
+
+    fn assert_stopped_with_partial_output(content: &str) {
+        assert!(content.contains("status: failed"), "got: {content}");
+        assert!(
+            content.contains(SUBAGENT_STOPPED_MESSAGE),
+            "the v2 stopped message leads: {content}"
+        );
+        assert!(
+            content.contains("[partial output]"),
+            "the partial output is marked: {content}"
+        );
+        assert!(
+            content.contains("partial findings so far"),
+            "the partial output rides below: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_subagent_returns_partial_output() {
+        let (llm, entered, release) = PartialThenBlockLlm::new(false);
+        let manager = manager_with(llm).await;
+        register_looper(&manager).await;
+        let mgr = manager.clone();
+        let run = tokio::spawn(async move {
+            execute_agent(
+                &mgr,
+                None,
+                &serde_json::json!({ "subagent_type": "looper", "prompt": "dig" }),
+                Some(60_000),
+                None,
+                None,
+                None,
+            )
+            .await
+        });
+        kill_the_running_instance(&manager, &entered, &release).await;
+        let result = run
+            .await
+            .unwrap()
+            .expect("a stop is a native outcome, not a fallback");
+        assert!(result.is_error);
+        assert_stopped_with_partial_output(&result.content);
+    }
+
+    #[tokio::test]
+    async fn stopped_resume_returns_partial_output() {
+        let (llm, entered, release) = PartialThenBlockLlm::new(true);
+        let manager = manager_with(llm).await;
+        register_looper(&manager).await;
+        // Owned by main: v2's resume guard refuses another parent's agent.
+        let agent_id = as_main_agent(manager.spawn("looper", "resumable"))
+            .await
+            .unwrap();
+        // Seed the conversation the resume continues (the first LLM call's
+        // partial text becomes the history's last assistant message).
+        let seeded = manager
+            .run_foreground_turn(&agent_id, "start", None)
+            .await
+            .unwrap();
+        assert!(matches!(seeded, ForegroundTurnOutcome::Completed(_)));
+        let mgr = manager.clone();
+        let resume_id = agent_id.clone();
+        let run = tokio::spawn(async move {
+            as_main_agent(execute_agent(
+                &mgr,
+                None,
+                &serde_json::json!({ "resume": resume_id, "prompt": "continue" }),
+                Some(60_000),
+                None,
+                None,
+                None,
+            ))
+            .await
+        });
+        kill_the_running_instance(&manager, &entered, &release).await;
+        let result = run
+            .await
+            .unwrap()
+            .expect("a stopped resume is a native outcome, not a fallback");
+        assert!(
+            result.is_error,
+            "a stopped resume must not report completed: {}",
+            result.content
+        );
+        assert_stopped_with_partial_output(&result.content);
+    }
+
     #[test]
     fn tool_policy_filter_allowlist_and_disallowed() {
         use crate::subagent::manager::ToolPolicyFilter;
@@ -2531,6 +2932,7 @@ mod tests {
             prompt_prefix: None,
             summary_policy: None,
             model: None,
+            subagents: None,
         });
         assert!(allow.allows("Read"));
         assert!(allow.allows("grep"));
@@ -2545,6 +2947,7 @@ mod tests {
             prompt_prefix: None,
             summary_policy: None,
             model: None,
+            subagents: None,
         });
         assert!(deny.allows("read"));
         assert!(!deny.allows("bash"));
@@ -2713,6 +3116,7 @@ mod tests {
                 prompt_prefix: Some("<git-context>".into()),
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
         let result = execute_agent(
@@ -2756,6 +3160,7 @@ mod tests {
                     retries: 2,
                 }),
                 model: None,
+                subagents: None,
             })
             .await;
         let result = execute_agent(
@@ -2801,6 +3206,7 @@ mod tests {
                     retries: 1,
                 }),
                 model: None,
+                subagents: None,
             })
             .await;
         let result = execute_agent(
@@ -2825,7 +3231,7 @@ mod tests {
         let recorder = Arc::new(EventRecorder::new());
         let manager = manager_with_callbacks(llm, recorder.clone()).await;
         manager
-            .register_definition(crate::subagent::types::SubagentDefinition {
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
                 name: "research".into(),
                 description: "d".into(),
                 system_prompt: "You research.".into(),
@@ -2834,6 +3240,7 @@ mod tests {
                 prompt_prefix: None,
                 summary_policy: None,
                 model: None,
+                subagents: None,
             })
             .await;
         let result = execute_agent(
@@ -3138,9 +3545,8 @@ mod tests {
     use crate::subagent::secondary::{PRIMARY_MODEL_CHOICE, SecondaryModelRuntime};
 
     /// Build a pool runtime whose `strong` alias binds `alias_llm`.
-    fn pool_runtime(alias_llm: Arc<RecordingPromptLlm>, force: bool) -> SecondaryModelRuntime {
+    fn pool_runtime(alias_llm: Arc<RecordingPromptLlm>) -> SecondaryModelRuntime {
         let config = SecondaryModelPool {
-            force,
             default_model: "strong".into(),
             caller_model_alias: Some("main-model".into()),
             models: vec![SecondaryModelEntry {
@@ -3166,7 +3572,7 @@ mod tests {
         let session_llm = Arc::new(RecordingPromptLlm::new(vec!["session answer".into()]));
         let alias_llm = Arc::new(RecordingPromptLlm::new(vec!["pool answer".into()]));
         let manager = manager_with_callbacks(session_llm.clone(), recorder.clone()).await;
-        let pool = pool_runtime(alias_llm.clone(), false);
+        let pool = pool_runtime(alias_llm.clone());
 
         let result = execute_agent(
             &manager,
@@ -3189,13 +3595,16 @@ mod tests {
         assert_eq!(session_llm.call_count(), 0, "the session model stayed idle");
     }
 
+    /// v2 #4418: `primary` is no longer an implicit choice — on the Agent
+    /// path it is an invalid alias and the available list names pool entries
+    /// only.
     #[tokio::test]
-    async fn agent_primary_binds_the_session_model() {
+    async fn agent_primary_is_an_invalid_alias_now() {
         let recorder = Arc::new(EventRecorder::new());
         let session_llm = Arc::new(RecordingPromptLlm::new(vec!["session answer".into()]));
         let alias_llm = Arc::new(RecordingPromptLlm::new(vec!["pool answer".into()]));
         let manager = manager_with_callbacks(session_llm.clone(), recorder.clone()).await;
-        let pool = pool_runtime(alias_llm.clone(), false);
+        let pool = pool_runtime(alias_llm.clone());
 
         let result = execute_agent(
             &manager,
@@ -3211,15 +3620,20 @@ mod tests {
             Some(&pool),
         )
         .await
-        .expect("primary runs natively");
+        .expect("primary resolves to an error result, not a host fallback");
 
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(
-            session_llm.call_count(),
-            1,
-            "primary bound the session model"
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Invalid model \"primary\""),
+            "{}",
+            result.content
         );
-        assert_eq!(alias_llm.call_count(), 0);
+        assert!(
+            result.content.contains("Available models: strong."),
+            "{}",
+            result.content
+        );
+        assert_eq!(session_llm.call_count(), 0, "no turn ran");
     }
 
     #[tokio::test]
@@ -3227,7 +3641,7 @@ mod tests {
         let recorder = Arc::new(EventRecorder::new());
         let session_llm = Arc::new(RecordingPromptLlm::new(vec!["session answer".into()]));
         let manager = manager_with_callbacks(session_llm.clone(), recorder.clone()).await;
-        let pool = pool_runtime(Arc::new(RecordingPromptLlm::new(vec![])), false);
+        let pool = pool_runtime(Arc::new(RecordingPromptLlm::new(vec![])));
 
         let result = execute_agent(
             &manager,
@@ -3251,20 +3665,26 @@ mod tests {
             "{}",
             result.content
         );
+        // v2 #4418: the available list names pool entries only — no implicit
+        // `primary` choice.
         assert!(
-            result.content.contains("strong, primary"),
+            result.content.contains("Available models: strong."),
             "{}",
             result.content
         );
         assert_eq!(session_llm.call_count(), 0, "no turn ran");
     }
 
+    /// v2 #4418: a single-entry pool pins every spawn — an omitted `model`
+    /// binds the default alias (the tool schema hides the parameter, but the
+    /// engine still resolves an explicit one).
     #[tokio::test]
-    async fn agent_force_rejects_an_explicit_model() {
+    async fn agent_single_entry_pool_binds_the_default_when_model_is_omitted() {
         let recorder = Arc::new(EventRecorder::new());
         let session_llm = Arc::new(RecordingPromptLlm::new(vec!["session answer".into()]));
+        let alias_llm = Arc::new(RecordingPromptLlm::new(vec!["pool answer".into()]));
         let manager = manager_with_callbacks(session_llm.clone(), recorder.clone()).await;
-        let pool = pool_runtime(Arc::new(RecordingPromptLlm::new(vec![])), true);
+        let pool = pool_runtime(alias_llm.clone());
 
         let result = execute_agent(
             &manager,
@@ -3272,7 +3692,6 @@ mod tests {
             &serde_json::json!({
                 "subagent_type": "coder",
                 "prompt": "task",
-                "model": "strong",
             }),
             None,
             None,
@@ -3280,14 +3699,15 @@ mod tests {
             Some(&pool),
         )
         .await
-        .expect("force rejections are error results");
+        .expect("a pinned pool binds natively");
 
-        assert!(result.is_error);
-        assert!(
-            result.content.contains("[secondary_model].force"),
-            "{}",
-            result.content
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            alias_llm.call_count(),
+            1,
+            "the pool default served the turn"
         );
+        assert_eq!(session_llm.call_count(), 0, "the session model stayed idle");
     }
 
     #[tokio::test]
@@ -3314,15 +3734,19 @@ mod tests {
 
         assert!(result.is_error);
         assert!(
-            result.content.contains("no [secondary_model.models] pool"),
+            result
+                .content
+                .contains("no [secondary_model] pool is configured"),
             "{}",
             result.content
         );
         assert_eq!(session_llm.call_count(), 0, "no turn ran");
     }
 
+    /// v2 #4418's no-pool arm: `primary` is rejected like any other value —
+    /// omitting `model` is the only way to inherit.
     #[tokio::test]
-    async fn agent_without_a_pool_accepts_primary() {
+    async fn agent_without_a_pool_rejects_primary_too() {
         let recorder = Arc::new(EventRecorder::new());
         let session_llm = Arc::new(RecordingPromptLlm::new(vec!["session answer".into()]));
         let manager = manager_with_callbacks(session_llm.clone(), recorder.clone()).await;
@@ -3341,13 +3765,290 @@ mod tests {
             None,
         )
         .await
-        .expect("primary without a pool inherits the caller's model");
+        .expect("primary without a pool is an error result");
 
-        assert!(!result.is_error, "{}", result.content);
+        assert!(result.is_error);
+        assert!(
+            result
+                .content
+                .contains("no [secondary_model] pool is configured"),
+            "{}",
+            result.content
+        );
+        assert_eq!(session_llm.call_count(), 0, "no turn ran");
+    }
+
+    /// v2 `planSpawn`: a profile outside the caller's allowlist is refused
+    /// with the guidance text; a discovered profile joins the extras and
+    /// spawns; the caller profile's own declaration narrows the set.
+    #[tokio::test]
+    async fn the_spawn_gate_enforces_the_callers_allowlist() {
+        let recorder = Arc::new(EventRecorder::new());
+        let llm = Arc::new(RecordingPromptLlm::new(vec!["gate ok".into()]));
+        let manager = manager_with_callbacks(llm.clone(), recorder.clone()).await;
+
+        // The engine-builtin `research` is not in the default delegation set.
+        let refused = execute_agent(
+            &manager,
+            None,
+            &serde_json::json!({ "subagent_type": "research", "prompt": "go" }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("a denied type is a native error result");
+        assert!(refused.is_error);
+        assert_eq!(
+            refused.content,
+            "Subagent type \"research\" is not allowed for this agent. Allowed subagent types: coder, explore, plan."
+        );
+
+        // Recursive delegation is refused by the same list.
+        let refused = execute_agent(
+            &manager,
+            None,
+            &serde_json::json!({ "subagent_type": "agent", "prompt": "go" }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            refused.is_error,
+            "agent must not spawn agent: {}",
+            refused.content
+        );
+
+        // A discovered profile joins the extras and spawns.
+        manager
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
+                name: "reviewer".into(),
+                description: "Reviewer subagent".into(),
+                system_prompt: "You review.".into(),
+                tools: vec![],
+                disallowed_tools: vec![],
+                prompt_prefix: None,
+                summary_policy: None,
+                model: None,
+                subagents: None,
+            })
+            .await;
+        let spawned = execute_agent(
+            &manager,
+            None,
+            &serde_json::json!({ "subagent_type": "reviewer", "prompt": "go" }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("a discovered profile spawns natively");
+        assert!(!spawned.is_error, "{}", spawned.content);
+
+        // The caller profile's own declaration narrows the set: a main
+        // profile declaring only `coder` loses `explore` (discovered extras
+        // still merge, the way v2's rootDelegationExtras works).
+        manager
+            .register_profile_snapshot(&[crate::rpc::types::SubagentProfileWire {
+                name: "agent".into(),
+                description: "custom main".into(),
+                system_prompt: String::new(),
+                tools: vec![],
+                disallowed_tools: vec![],
+                prompt_prefix: None,
+                summary_policy: None,
+                subagents: Some(vec!["coder".into()]),
+            }])
+            .await;
+        let refused = execute_agent(
+            &manager,
+            None,
+            &serde_json::json!({ "subagent_type": "explore", "prompt": "go" }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(refused.is_error);
+        assert!(
+            refused
+                .content
+                .contains("Subagent type \"explore\" is not allowed"),
+            "{}",
+            refused.content
+        );
+    }
+
+    /// v2's listing is allowlist-filtered: without a catalog the default
+    /// delegation set stands in, and the builtin `agent` is never spawnable.
+    #[test]
+    fn agent_def_lists_only_spawnable_types() {
+        let def = agent_tool_def(None);
+        let listing = def
+            .description
+            .split("Available agent types:")
+            .nth(1)
+            .expect("the description advertises types");
+        for name in ["coder", "explore", "plan"] {
+            assert!(listing.contains(&format!("- {name}:")), "missing {name}");
+        }
+        assert!(
+            !listing.contains("- agent:"),
+            "the builtin agent is not spawnable: {listing}"
+        );
+    }
+
+    /// The catalog-fed listing advertises a discovered type exactly when the
+    /// gate admits it (v2's filtered profile listing).
+    #[tokio::test]
+    async fn agent_def_lists_discovered_types_the_gate_admits() {
+        let recorder = Arc::new(EventRecorder::new());
+        let llm = Arc::new(RecordingPromptLlm::new(vec![]));
+        let manager = manager_with_callbacks(llm, recorder).await;
+        manager
+            .register_discovered_definition(crate::subagent::types::SubagentDefinition {
+                name: "reviewer".into(),
+                description: "Reviewer subagent".into(),
+                system_prompt: "You review.".into(),
+                tools: vec![],
+                disallowed_tools: vec![],
+                prompt_prefix: None,
+                summary_policy: None,
+                model: None,
+                subagents: None,
+            })
+            .await;
+        let catalog = manager
+            .spawn_catalog(crate::callbacks::MAIN_AGENT_ID)
+            .await
+            .expect("a catalog for the main agent");
+        let def = agent_tool_def_filtered(None, &|_| true, Some(&catalog));
+        assert!(
+            def.description.contains("- reviewer: Reviewer subagent"),
+            "{}",
+            def.description
+        );
+        assert!(!def.description.contains("- agent:"), "{}", def.description);
+    }
+
+    /// v2 #4152: a fork inherits the caller's profile when `subagent_type`
+    /// is omitted, and an explicit different type is refused against the
+    /// caller's REAL profile — the main agent's `agent`, not the spawn
+    /// default the stand-in once compared against.
+    #[tokio::test]
+    async fn fork_inherits_the_callers_profile() {
+        let recorder = Arc::new(EventRecorder::new());
+        let session_llm = Arc::new(RecordingPromptLlm::new(vec!["fork answer".into()]));
+        let manager = manager_with_callbacks(session_llm.clone(), recorder.clone()).await;
+
+        let refused = execute_agent(
+            &manager,
+            None,
+            &serde_json::json!({ "subagent_type": "coder", "prompt": "task", "fork": true }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("typed forks resolve natively");
+        assert!(refused.is_error);
+        assert!(
+            refused
+                .content
+                .contains("Cannot set a different subagent_type"),
+            "{}",
+            refused.content
+        );
+
+        let spawned = execute_agent(
+            &manager,
+            None,
+            &serde_json::json!({ "prompt": "task", "fork": true }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("an untyped fork runs natively");
+        assert!(!spawned.is_error, "{}", spawned.content);
+        assert!(
+            spawned.content.contains("actual_subagent_type: agent"),
+            "the fork must inherit the main agent's profile: {}",
+            spawned.content
+        );
+    }
+
+    /// v2 #4152: a pool-bound caller's fork binds the SAME pool entry — the
+    /// session model is not the caller's model and never serves the fork.
+    #[tokio::test]
+    async fn a_pool_bound_callers_fork_binds_the_same_pool_entry() {
+        let recorder = Arc::new(EventRecorder::new());
+        let session_llm = Arc::new(RecordingPromptLlm::new(vec!["session answer".into()]));
+        let strong_llm = Arc::new(RecordingPromptLlm::new(vec!["pool answer".into()]));
+        let manager = manager_with_callbacks(session_llm.clone(), recorder.clone()).await;
+        let pool = pool_runtime(strong_llm.clone());
+
+        let parent = execute_agent(
+            &manager,
+            None,
+            &serde_json::json!({ "subagent_type": "coder", "prompt": "parent task", "model": "strong" }),
+            None,
+            None,
+            None,
+            Some(&pool),
+        )
+        .await
+        .expect("the pool-bound caller runs natively");
+        assert!(!parent.is_error, "{}", parent.content);
+        let parent_id = parent
+            .content
+            .lines()
+            .next()
+            .expect("the success text carries the id")
+            .trim_start_matches("agent_id: ")
+            .to_string();
+        assert_eq!(strong_llm.call_count(), 1);
+
+        let nested_manager = manager.clone();
+        let fork = crate::tools::CALLER_AGENT_ID
+            .scope(parent_id, async move {
+                execute_agent(
+                    &nested_manager,
+                    None,
+                    &serde_json::json!({ "prompt": "fork task", "fork": true }),
+                    None,
+                    None,
+                    None,
+                    Some(&pool),
+                )
+                .await
+                .expect("the nested fork runs natively")
+            })
+            .await;
+        assert!(!fork.is_error, "{}", fork.content);
+        assert!(
+            fork.content.contains("actual_subagent_type: coder"),
+            "the fork inherits the subagent caller's own type: {}",
+            fork.content
+        );
+        assert_eq!(
+            strong_llm.call_count(),
+            2,
+            "the fork reused the caller's pool entry"
+        );
         assert_eq!(
             session_llm.call_count(),
-            1,
-            "the session model served the turn"
+            0,
+            "the session model never served"
         );
     }
 
@@ -3379,7 +4080,7 @@ mod tests {
                 .iter()
                 .find(|p| p.name == name)
                 .unwrap_or_else(|| panic!("advertised type {name} has no profile"));
-            let expected = format!("  Tools: {}", profile_tools_listing(profile));
+            let expected = format!("  Tools: {}", profile_tools_listing(profile, None));
             assert!(
                 def.description.contains(&format!("- {name}")),
                 "type {name} must be advertised"
@@ -3407,15 +4108,74 @@ mod tests {
             description: "d".into(),
             role_additional: String::new(),
             tools: vec!["Read".into(), "mcp__*".into()],
+            subagents: None,
         };
-        assert_eq!(profile_tools_listing(&profile), "Read, mcp__*");
+        assert_eq!(profile_tools_listing(&profile, None), "Read, mcp__*");
         let unrestricted = crate::prompt::profiles::AgentProfile {
             name: "t".into(),
             description: "d".into(),
             role_additional: String::new(),
             tools: vec![],
+            subagents: None,
         };
-        assert_eq!(profile_tools_listing(&unrestricted), "all");
+        assert_eq!(profile_tools_listing(&unrestricted, None), "all");
+    }
+
+    #[test]
+    fn profile_tools_listing_drops_names_the_session_cannot_call() {
+        let profile = crate::prompt::profiles::AgentProfile {
+            name: "t".into(),
+            description: "d".into(),
+            role_additional: String::new(),
+            tools: vec!["Read".into(), "Bash".into(), "mcp__github__*".into()],
+            subagents: None,
+        };
+        // The live table holds Read and an MCP tool from another server:
+        // Bash is globally disabled and no connected server matches
+        // `mcp__github__*`, so both leave the listing.
+        let available = ["Read".to_string(), "mcp__linear__get_issue".to_string()];
+        let is_available = |pattern: &str| {
+            available
+                .iter()
+                .any(|name| crate::tools::tool_policy::matches_profile_tool_pattern(pattern, name))
+        };
+        assert_eq!(profile_tools_listing(&profile, Some(&is_available)), "Read");
+        // Nothing available renders as `none`, the empty-allowlist wording.
+        let nothing = |_: &str| false;
+        assert_eq!(profile_tools_listing(&profile, Some(&nothing)), "none");
+    }
+
+    #[test]
+    fn agent_tool_def_filtered_renders_the_live_table() {
+        // With only Read on the table, no MCP glob survives in any built-in
+        // profile's listing — a glob is advertised only when some connected
+        // tool matches it.
+        let available = ["Read".to_string()];
+        let def = agent_tool_def_filtered(
+            None,
+            &|pattern: &str| {
+                available.iter().any(|name| {
+                    crate::tools::tool_policy::matches_profile_tool_pattern(pattern, name)
+                })
+            },
+            None,
+        );
+        let listing = def
+            .description
+            .split("Available agent types:")
+            .nth(1)
+            .expect("the description advertises the available types");
+        for line in listing.lines() {
+            if line.starts_with("  Tools: ") {
+                assert!(
+                    !line.contains("mcp__"),
+                    "no MCP pattern without a connected MCP tool: {line}"
+                );
+            }
+        }
+        // The unfiltered form keeps the static allowlist verbatim.
+        let static_def = agent_tool_def(None);
+        assert!(static_def.description.contains("mcp__"));
     }
 
     /// v2 #3878: the Agent tool once advertised tool names that no registry
@@ -3451,10 +4211,40 @@ mod tests {
         }
     }
 
+    /// v2 #4418 `exposesSubagentModelChoice`: only a pool with a real choice
+    /// advertises the listing and the `model` parameter — a single entry
+    /// pins every spawn and hides both.
     #[test]
     fn agent_def_advertises_the_pool_only_when_a_choice_is_offered() {
-        let llm = Arc::new(RecordingPromptLlm::new(vec![]));
-        let offered = agent_tool_def(Some(&pool_runtime(llm.clone(), false)));
+        fn entry(alias: &str, hint: &str) -> SecondaryModelEntry {
+            SecondaryModelEntry {
+                alias: alias.into(),
+                hint: hint.into(),
+                llm: Default::default(),
+            }
+        }
+        fn pool(aliases: &[&str]) -> SecondaryModelRuntime {
+            let llms = aliases
+                .iter()
+                .map(|alias| {
+                    (
+                        alias.to_string(),
+                        Arc::new(RecordingPromptLlm::new(vec![]))
+                            as Arc<dyn crate::turn_loop::types::LLM>,
+                    )
+                })
+                .collect();
+            SecondaryModelRuntime::new(
+                SecondaryModelPool {
+                    default_model: aliases[0].into(),
+                    caller_model_alias: None,
+                    models: aliases.iter().map(|alias| entry(alias, "hint")).collect(),
+                },
+                llms,
+            )
+        }
+
+        let offered = agent_tool_def(Some(&pool(&["strong", "fast"])));
         assert!(
             offered
                 .description
@@ -3468,14 +4258,14 @@ mod tests {
                 .is_some()
         );
 
-        let forced = agent_tool_def(Some(&pool_runtime(llm, true)));
+        let pinned = agent_tool_def(Some(&pool(&["strong"])));
         assert!(
-            !forced.description.contains("Available models"),
+            !pinned.description.contains("Available models"),
             "{}",
-            forced.description
+            pinned.description
         );
         assert!(
-            forced
+            pinned
                 .input_schema
                 .get("properties")
                 .and_then(|properties| properties.get("model"))

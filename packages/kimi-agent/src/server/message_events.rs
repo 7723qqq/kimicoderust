@@ -328,6 +328,13 @@ impl HostCallbacks for MessageCallbacks {
         self.inner.goal()
     }
 
+    fn parse_bash(
+        &self,
+        request: crate::rpc::types::ParseBashRequest,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<Option<Vec<String>>, String>> {
+        self.inner.parse_bash(request)
+    }
+
     fn auth_token(
         &self,
         provider: String,
