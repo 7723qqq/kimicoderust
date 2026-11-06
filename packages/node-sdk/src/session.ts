@@ -38,6 +38,7 @@ import type {
   SkillSummary,
   PluginCommandDef,
   ThinkingEffort,
+  UndoAvailability,
   Unsubscribe,
 } from '#/types';
 
@@ -407,6 +408,15 @@ export class Session {
   async undoHistory(count: number = 1): Promise<void> {
     this.ensureOpen();
     await this.rpc.undoHistory({ sessionId: this.id, count });
+  }
+
+  /**
+   * How many turns an undo can actually restore here (v2 `availability`): the
+   * transcript's anchors capped by the engine's state checkpoint depth.
+   */
+  async getUndoAvailability(): Promise<UndoAvailability> {
+    this.ensureOpen();
+    return this.rpc.getUndoAvailability({ sessionId: this.id });
   }
 
   async getTodos(): Promise<readonly SessionTodoItem[]> {

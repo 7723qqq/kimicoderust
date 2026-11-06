@@ -519,3 +519,48 @@ promisor 远端走 HTTPS 不通，见 §11.4。
 - 本节新暴露的接缝值得记住：`#[napi]` 新导出有**三条**必经之路（Rust 属性、`index.native.cjs` 手写转发、
   手写 `index.native.d.ts`），`check:parity` 只覆盖第一条与生成契约之间的差集，第二条靠
   `surface-contract.test.ts` 兜，而那个套件当前是红的。
+
+## 13. 2026-11-06 补 Rust 之八：undo 的可用量接到 SDK 与 TUI（exit 0）
+
+**来源**：§12 收口后留下的开口——v2 的 `availability()` 取 `min(computeUndoCut, checkpointDepth)`，
+本仓的 TUI 只按转录锚点算（`resolveUndoAvailability` 取 transcript 与 context 的较小值），于是 fork /
+导入会话会先给出可选条数、执行时才被 §12 的门禁拒掉。菜单与服务端的说法必须一致。
+
+### 13.1 改动
+
+1. `packages/node-sdk/src/types.ts`：新增 `UndoAvailability`（`{ maxTurns, stoppedAtCompaction }`，对齐 v2 字段名）。
+2. `packages/node-sdk/src/rpc.ts`：基类 `getUndoAvailability` 抛 `NOT_IMPLEMENTED`（与其余 native-only 方法同形）。
+3. `packages/node-sdk/src/native/sdk-rpc-client-native.ts`：`min(computeUndoCut(history, MAX_SAFE_INTEGER).removedCount,
+   nativeEngineStateCheckpointDepth(...))`——与 `undoHistory` 实际执行的门禁同一对数。
+4. `packages/node-sdk/src/session.ts`：`Session.getUndoAvailability()` 门面。
+5. `apps/kimi-code/src/tui/commands/undo.ts`：`resolveUndoAvailability` 并入引擎上限；SDK 未实现时按鸭子类型跳过，
+   保持原来两路取小的行为。
+
+### 13.2 一处刻意的取舍（与 v2 的差异，已登记而非隐藏）
+
+v2 的 `availability()` 是 `stoppedAtCompaction: cut.stoppedAtCompaction || maxTurns < cut.removedCount`——把
+"栈比转录短"也折进这个布尔。本仓该字段驱动的是提示文案（"…after compaction"），照抄会让一个从未发生压缩的
+会话被说成"受压缩阻断"。因此本仓只在**真撞压缩边界**时为真，栈不够只体现为 `maxTurns` 变小；拒绝时的 reason
+仍按 v2 的词表区分（`checkpoint_lost` / `compaction_boundary`），用户仍能读到准确原因。
+
+### 13.3 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `bun --bun run vitest run packages/node-sdk/test/session-undo.test.ts` | 0 | 3 passed（2 回合 → `maxTurns: 2`；fork → `maxTurns: 0`） |
+| `bun --bun run vitest run apps/kimi-code/test/tui/commands/undo.test.ts` | 0 | 8 passed（引擎报 1 时 `/undo 2` 只出提示、不调 `undoHistory`；`/undo 1` 照常执行） |
+| **变异验证（SDK）** | — | `maxTurns` 改回只看 `cut.removedCount` → fork 用例红（`{maxTurns:1}` vs 0）；还原即绿 |
+| **变异验证（TUI）** | — | `maxCount` 不再与引擎取小 → 新用例红；还原即绿 |
+| `bun --bun run vitest run apps/kimi-code/test/tui/commands` | 0 | 253 passed / 21 files |
+| `bun --bun run vitest run packages/node-sdk/test/native-unimplemented.test.ts` | 0 | 4 passed（基类抛 `NOT_IMPLEMENTED` 的既有契约不破） |
+| `bun run typecheck` | 0 | 全部包 exit 0 |
+| `cargo fmt --check` / `cargo clippy --all-targets --features cli -- -D warnings` | 0 / 0 | clean（本批无 Rust 改动，仍照跑） |
+| `cargo test --lib` | 0 | 3659 passed / 0 failed |
+| `bun run check:all` | 0 | 20 道全绿；`node-sdk` 指纹与 `sdk.node` / `sdk.node.native-client` 两个 normify 模块经官方通道刷新 |
+
+### 13.4 仍未收口
+
+- `packages/kimi-agent/test/surface-contract.test.ts` 仍红（`sessionTowerStatus` / `sessionTakeoverLock`
+  未转发也未登记豁免，见 §12.4），与本批无关。
+- `packages/kimi-agent` 的 undo 语义剩下 plan 一侧：undo 不回退 `planMode` 与计划文件（host-first 设计决定，
+  §11.1 表格），需裁决后才能动。

@@ -145,6 +145,13 @@ max_context_size = 200000
     await session.prompt('two');
     await expect(ended).resolves.toMatchObject({ reason: 'completed' });
 
+    // v2 `availability`: two anchors, and the engine holds the two
+    // checkpoints those turns pushed.
+    await expect(session.getUndoAvailability()).resolves.toEqual({
+      maxTurns: 2,
+      stoppedAtCompaction: false,
+    });
+
     const before = await session.getContext();
     const userTurns = before.history.filter(
       (message) => message.role === 'user' && originKind(message) !== 'injection',
@@ -254,6 +261,12 @@ max_context_size = 200000
       before.history.filter((message) => message.role === 'user' && originKind(message) !== 'injection'),
     ).toHaveLength(1);
 
+    // The menu reads the same number the command enforces, so it never offers
+    // a turn this session cannot roll back.
+    await expect(forked.getUndoAvailability()).resolves.toEqual({
+      maxTurns: 0,
+      stoppedAtCompaction: false,
+    });
     await expect(forked.undoHistory(1)).rejects.toMatchObject({
       code: 'session.undo_unavailable',
       details: { reason: 'checkpoint_lost', requestedCount: 1, undoableCount: 0 },

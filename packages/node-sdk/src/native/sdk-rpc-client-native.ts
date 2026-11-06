@@ -164,6 +164,7 @@ import type {
   WorkspaceTrustInfoOptions,
   WorkspaceTrustInstructionSources,
   WorkspaceTrustMcpServerInfo,
+  UndoAvailability,
 } from '#/types';
 
 import {
@@ -1746,6 +1747,31 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     meta.updatedAt = Date.now();
     this.persistMeta(meta);
     await this.persistHistory(meta);
+  }
+
+  /**
+   * How far back an undo may go (v2 `AgentConversationUndoService.availability`).
+   *
+   * `maxTurns` is the smaller of the transcript's anchors and the engine's
+   * state checkpoint depth — the same pair `undoHistory` enforces — so the UI
+   * can offer exactly what will succeed instead of a menu the command then
+   * refuses.
+   */
+  override async getUndoAvailability(input: SessionIdRpcInput): Promise<UndoAvailability> {
+    const meta = this.requireSession(input.sessionId);
+    if (!meta.handle) return { maxTurns: 0, stoppedAtCompaction: false };
+    const history = await meta.handle.getHistory();
+    const cut = computeUndoCut(history, Number.MAX_SAFE_INTEGER);
+    const { nativeEngineStateCheckpointDepth } = await import('@moonshot-ai/kimi-agent/native');
+    const depth = nativeEngineStateCheckpointDepth(meta.workDir, meta.id);
+    return {
+      maxTurns: Math.min(cut.removedCount, depth),
+      // v2 folds "the stack is shorter than the transcript" into this flag;
+      // this host keeps the field literal (a real compaction boundary) because
+      // the TUI renders it as the reason ("after compaction"), and claiming a
+      // compaction that never happened is worse than saying nothing.
+      stoppedAtCompaction: cut.stoppedAtCompaction,
+    };
   }
 
   override async forkSession(input: ForkSessionInput): Promise<SessionSummary> {

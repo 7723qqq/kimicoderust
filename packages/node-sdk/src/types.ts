@@ -1082,6 +1082,17 @@ export interface SessionTodoItem {
   readonly status: SessionTodoStatus;
 }
 
+/**
+ * How far back an undo may go (v2 `UndoAvailability`). `maxTurns` is the
+ * smaller of the transcript's undo anchors and the engine's state checkpoint
+ * depth: the transcript cut and the state rollback are one operation, so the
+ * state stack is what caps a cut the panels could not follow.
+ */
+export interface UndoAvailability {
+  readonly maxTurns: number;
+  readonly stoppedAtCompaction: boolean;
+}
+
 export interface TokenUsage {
   readonly inputOther: number;
   readonly output: number;

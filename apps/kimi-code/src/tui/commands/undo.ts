@@ -38,6 +38,13 @@ type UndoSessionContext = Awaited<
   ReturnType<NonNullable<SlashCommandHost['session']>['getContext']>
 >;
 
+interface UndoAvailabilitySource {
+  readonly getUndoAvailability?: () => Promise<{
+    readonly maxTurns?: number;
+    readonly stoppedAtCompaction?: boolean;
+  }>;
+}
+
 const UNDO_LIMIT_STATUS_TURN_ID = 'undo-limit-status';
 
 export async function handleUndoCommand(host: SlashCommandHost, args: string = ''): Promise<void> {
@@ -220,13 +227,40 @@ async function resolveUndoAvailability(host: SlashCommandHost): Promise<UndoAvai
     host.state.transcriptContainer.children,
   );
   const context = await getSessionContext(host.session);
-  if (context === undefined) return local;
-
-  const activeContext = undoAvailabilityFromContext(context.history);
+  const engine = await getSessionUndoAvailability(host.session);
+  let availability = local;
+  if (context !== undefined) {
+    const activeContext = undoAvailabilityFromContext(context.history);
+    availability = {
+      maxCount: Math.min(availability.maxCount, activeContext.maxCount),
+      stoppedAtCompaction: availability.stoppedAtCompaction || activeContext.stoppedAtCompaction,
+    };
+  }
+  if (engine === undefined) return availability;
+  // The engine caps by its state checkpoint stack as well (v2 `availability`):
+  // the transcript cut and the state rollback are one operation, so offering
+  // more than it can roll back is a menu the command then refuses — a fork
+  // copies the transcript but not the stack.
   return {
-    maxCount: Math.min(local.maxCount, activeContext.maxCount),
-    stoppedAtCompaction: local.stoppedAtCompaction || activeContext.stoppedAtCompaction,
+    maxCount: Math.min(availability.maxCount, engine.maxCount),
+    stoppedAtCompaction: availability.stoppedAtCompaction || engine.stoppedAtCompaction,
   };
+}
+
+/** v2 `availability()`: the engine's own cap, when the client exposes it. */
+async function getSessionUndoAvailability(
+  session: SlashCommandHost['session'],
+): Promise<UndoAvailability | undefined> {
+  const source = session as UndoAvailabilitySource | undefined;
+  const read = source?.getUndoAvailability;
+  if (source === undefined || read === undefined) return undefined;
+  try {
+    const value = await read.call(source);
+    if (typeof value?.maxTurns !== 'number') return undefined;
+    return { maxCount: value.maxTurns, stoppedAtCompaction: value.stoppedAtCompaction === true };
+  } catch {
+    return undefined;
+  }
 }
 
 async function getSessionContext(

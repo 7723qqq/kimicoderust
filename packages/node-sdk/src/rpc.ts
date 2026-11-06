@@ -60,6 +60,7 @@ import type {
   SessionPlan,
   SessionStatus,
   SessionTodoItem,
+  UndoAvailability,
   SessionUsage,
   PromptInput,
   PromptPart,
@@ -838,6 +839,14 @@ export abstract class SDKRpcClientBase {
       agentId: this.interactiveAgentId,
       count: input.count,
     });
+  }
+
+  async getUndoAvailability(input: SessionIdRpcInput): Promise<UndoAvailability> {
+    void input;
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'getUndoAvailability is only available on the native engine client.',
+    );
   }
 
   async getContext(input: SessionIdRpcInput): Promise<AgentContextData> {

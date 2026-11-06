@@ -101,6 +101,58 @@ describe('/undo with bundled prompts', () => {
   });
 });
 
+describe('/undo availability', () => {
+  function hostWithAvailability(
+    entries: TranscriptEntry[],
+    session: Record<string, unknown>,
+  ): { host: SlashCommandHost; appendTranscriptEntry: ReturnType<typeof vi.fn> } {
+    const host = hostWith(entries);
+    const appendTranscriptEntry = vi.fn();
+    (host as { appendTranscriptEntry?: unknown }).appendTranscriptEntry = appendTranscriptEntry;
+    (host as { session?: unknown }).session = session;
+    return { host, appendTranscriptEntry };
+  }
+
+  const anchors: TranscriptEntry[] = [
+    entry({ kind: 'user', content: 'prompt one' }),
+    entry({ kind: 'assistant', content: 'answer one' }),
+    entry({ kind: 'user', content: 'prompt two' }),
+    entry({ kind: 'assistant', content: 'answer two' }),
+    entry({ kind: 'user', content: 'prompt three' }),
+    entry({ kind: 'assistant', content: 'answer three' }),
+  ];
+
+  it('caps the offered count by the engine checkpoint depth', async () => {
+    const undoHistory = vi.fn(async () => {});
+    // A fork copies the transcript but not the state stack: the engine can roll
+    // back one turn, so the menu must not offer two.
+    const { host, appendTranscriptEntry } = hostWithAvailability(anchors, {
+      undoHistory,
+      getUndoAvailability: vi.fn(async () => ({ maxTurns: 1, stoppedAtCompaction: false })),
+    });
+
+    await handleUndoCommand(host, '2');
+
+    expect(undoHistory).not.toHaveBeenCalled();
+    expect(anchors).toHaveLength(6);
+    expect(appendTranscriptEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'status' }),
+    );
+  });
+
+  it('still runs what the engine can cover', async () => {
+    const undoHistory = vi.fn(async () => {});
+    const { host } = hostWithAvailability(anchors, {
+      undoHistory,
+      getUndoAvailability: vi.fn(async () => ({ maxTurns: 1, stoppedAtCompaction: false })),
+    });
+
+    await handleUndoCommand(host, '1');
+
+    expect(undoHistory).toHaveBeenCalledWith(1);
+  });
+});
+
 describe('/undo todo panel refresh', () => {
   function hostWithTodos(
     entries: TranscriptEntry[],
