@@ -194,18 +194,7 @@
       "source": "packages/kimi-ui-core/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "26be7d25256faf65"
-    },
-    {
-      "id": "kimi-ui-terminal",
-      "name": "Kimi UI Terminal (ANSI render backend)",
-      "source": "packages/kimi-ui-terminal/src",
-      "layer": "app",
-      "deps": [
-        "kimi-ui-core"
-      ],
-      "_depsNote": "Only edge is kimi-ui-core: the terminal backend builds on its component tree, RenderBackend contract and Style vocabulary (design reports/design/RUST-UI-DECOUPLING.md §1.3/§3). No terminal crate dependency — ANSI bytes are written to any std::io::Write, so raw mode and key decoding stay with the application crate that owns the terminal handle.",
-      "fingerprint": "9623de9f4318f87d"
+      "fingerprint": "1471c25bd94c6002"
     },
     {
       "id": "kimi-tui-app",
@@ -213,11 +202,10 @@
       "source": "packages/kimi-tui-app/src",
       "layer": "app",
       "deps": [
-        "kimi-ui-core",
-        "kimi-ui-terminal"
+        "kimi-ui-core"
       ],
-      "_depsNote": "Edges are the two UI crates only: kimi-ui-core for the EntryOp/EntryStore contract and the entry renderer, kimi-ui-terminal for painting. The session link is the UiTransport trait, not a crate dependency — the host that owns an engine handle implements it, which is what keeps this crate out of the engine's layer (design §3: the app talks to the engine over the contract). crossterm is a third-party dependency for event decoding, not a workspace module.",
-      "fingerprint": "e82e99418dca0954"
+      "_depsNote": "Edges are kimi-ui-core only: the EntryOp/EntryStore contract and the entry row policy (gutter, wrap, per-kind dimming). The widget tree, layout engine and terminal come from textual-rs, a third-party dependency rather than a workspace module, so it is not an edge here. The session link is the UiTransport trait, not a crate dependency: the host that owns an engine handle implements it, which is what keeps this crate out of the engine layer.",
+      "fingerprint": "1d9dbe469eed2135"
     },
     {
       "id": "vis-server",

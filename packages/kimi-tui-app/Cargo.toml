@@ -2,9 +2,13 @@
 name = "kimi-tui-app"
 version = "0.1.0"
 edition = "2024"
-description = "Terminal UI application layer: drives kimi-ui-terminal from a decoded input stream and an EntryOp stream."
+description = "Terminal UI application layer: a textual-rs app driving the engine's EntryOp stream."
 
 [dependencies]
+anyhow = "1"
 crossterm = "0.29"
 kimi-ui-core = { path = "../kimi-ui-core" }
-kimi-ui-terminal = { path = "../kimi-ui-terminal" }
+# The drawing surface textual-rs hands a widget. Pinned to the same minor so
+# `Buffer` and `Rect` are one type, not two copies of it.
+ratatui = "0.30"
+textual-rs = "0.3"

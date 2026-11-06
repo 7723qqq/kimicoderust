@@ -902,3 +902,77 @@ v2 的 `readTool` 在"读的路径本身就是 spill 文件"时给结果打 `spi
 后端，自带 headless `TestApp`），本仓只保留 `EntryOp`/`EntryId` 契约与投影；`kimi-ui-core` 的组件树、
 `kimi-ui-terminal` 的 ANSI 后端、`kimi-tui-app` 的 crossterm 循环随之退役。本机取包需
 `CARGO_HTTP_CHECK_REVOKE=false`（schannel 吊销检查离线失败），registry 已是 rsproxy。
+## 20. 2026-11-06 Rust TUI 基座换成 textual-rs（用户裁决，exit 0）
+
+**裁决**：用户 2026-11-06 选择"整体换成 textual-rs"——组件树、布局、事件循环与渲染都交给它，本仓只保留
+`EntryOp`/`EntryId` 契约与投影。这是 §3.1 待裁决项的落地：app 侧不再定义任何渲染实现。
+
+### 20.1 事实（本机实测，不是照抄 README）
+
+| 事实 | 依据 |
+|---|---|
+| `textual-rs` 0.3.16，MIT，仓库 `github.com/jabberwock/textual-rs` | crates.io 元数据（本机 registry 里的 `textual-rs-0.3.16/Cargo.toml`） |
+| 直接依赖 19 个：ratatui 0.30（`crossterm_0_29` feature）、crossterm 0.29、taffy 0.9（flexbox）、reactive_graph 0.2、cssparser、arboard、tokio… | 同上 `[dependencies.*]` |
+| 传递依赖解析出 247 个包 | 探测工程 `cargo fetch` 的 Cargo.lock |
+| 本机取包需 `CARGO_HTTP_CHECK_REVOKE=false` | 默认 TLS 因 schannel 吊销检查离线失败：`CRYPT_E_REVOCATION_OFFLINE (0x80092013)` |
+| `Widget`：`render(&self, ctx, area: Rect, buf: &mut Buffer)` + `compose() -> Vec<Box<dyn Widget>>`，状态经 `Cell`/`Reactive` | textual-rs 0.3.16 的 `widget/mod.rs` 第 79–160 行 |
+| 按键：先查焦点 widget 的 key bindings，未命中则把 `crossterm::event::KeyEvent` 派给焦点 widget 并向上冒泡；无焦点则派给 screen root | textual-rs 0.3.16 的 `app.rs` 第 962–1045 行 |
+| 版本与既有解码层一致（crossterm 0.29），故 `input.rs` 原样保留 | 两个 manifest 对照 |
+| `TestApp::new_styled(cols, rows, css, factory)` 给 ratatui `Buffer`；`process_event(RenderRequest)` 重绘 | textual-rs 0.3.16 的 `testing/mod.rs` 第 40–140 行 |
+| `App::run()` 自带渲染 tick，引擎侧 `apply(op)` 不需要任何重绘管道 | textual-rs 0.3.16 的 `app.rs` 第 400–410 行 |
+
+### 20.2 改动
+
+1. **新增 `kimi-ui-core/src/input.rs`**：把键鼠契约从 `render_backend.rs` 抽出（`Key`、`KeyEvent`、
+   `Modifiers`、`MouseKind`、`MouseEvent`、`InputEvent`），并补两条自身测试（Ctrl-C 是唯一的取消和弦；
+   导航键与编辑键可区分）。它本来就不是后端的一部分，只是恰好住在那张文件里。
+2. **删除 `kimi-ui-core/src/render_backend.rs`（1384 行）与 `headless.rs`（243 行）**：`RenderBackend` trait、
+   arena、scrollback/alt-screen/headless 三个后端。组件树与后端由 textual-rs 接管，留着就是第二套实现。
+   core 测试 **76 → 50**。
+3. **删除 `packages/kimi-ui-terminal`（780 行 + 22 测试）**：ANSI 后端被 ratatui 的后端取代；该 crate 唯一的
+   存在理由（把行写成 SGR 字节）现在是 ratatui 的职责。
+4. **`kimi-tui-app` 重写**（645 → 约 430 行 + 新测试 210 行）：`app.rs`（`UiState` + `UiCommand`/`UiTransport` +
+   `RecordingTransport` + `run_terminal`）、`transcript.rs`（把 `entry_lines` 画进 buffer 的尾部）、
+   `prompt.rs`（`on_event` 收 crossterm `KeyEvent`，经既有 `to_input_event`）、`screen.rs`（纵向布局，
+   无焦点时兜底收键）。`input.rs` 的 7 条测试原样保留。
+5. **`kimi-agent/tests/ui_slice_integration.rs` 拆层**：只断投影（6 条）；渲染断言移到
+   `kimi-tui-app/tests/render_slice.rs`（6 条，TestApp 缓冲逐格断言）。原测试在引擎 crate 里驱动渲染后端，
+   迁移后引擎侧不再看见渲染器。
+
+### 20.3 为什么行策略留在 core、组件树不留
+
+`render::entry_lines` 决定"一个条目长什么样"：gutter 一个字符加 `"| "`、折行宽度扣掉 gutter、thinking 与
+status 变暗。这条策略与渲染器无关，而且 textual-rs 的 buffer 与它一一对应（`Vec<(String, Style)>` 逐行
+`set_stringn`）。组件树则相反：textual-rs 自带 flexbox 布局、焦点、鼠标、CSS、屏幕栈，自建的那套既不完备
+也不会再用。因此 core 保留"契约 + 行策略"，渲染实现在 app crate 之上、由 textual-rs 提供。
+
+### 20.4 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test`（`kimi-ui-core`） | 0 | 50 passed（原 76，差值为被删后端的 26 条） |
+| `cargo test`（`kimi-tui-app`） | 0 | 7（input）+ 6（render_slice）passed；原 21 条里 14 条随 crossterm 循环退役 |
+| `cargo test --features cli --test ui_slice_integration`（`kimi-agent`） | 0 | 6 passed |
+| `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check`（三 crate） | 0 / 0 | clean |
+| `bun run check:architecture` | 0 | **20 modules**（`kimi-ui-terminal` 条目移除；`kimi-tui-app` / `kimi-ui-core` 指纹经 `--update` 刷新） |
+| `bun run check:rust-module-deps` | 0 | 271 条边不变（该门禁只扫 `kimi-agent`） |
+| `bun run check:all` | 0 | 20 道全绿 |
+| `bun run typecheck` | 0 | 全部包 exit 0 |
+
+`render_slice` 的 6 条断言的都是真实终端会显示的单元格：用户条目 `>| explain the build`、助手条目
+` | the build is two steps.`、prompt 独占最后一行；超宽文本在 transcript 内折行且续行对齐；`40` 与 `80` 两种
+宽度下同一段文字都不丢词且无行超宽；打字→回车产出 `UiCommand::Prompt("ship it")` 并清空输入行；
+Esc 与 Ctrl-C 产出 `Cancel` 且不插入字符；Alt-b 不插入字符。
+
+### 20.5 未验证与未收口
+
+- **`App::run()` 面对真实 TTY 的路径没有在本机跑过**。这是交互式终端，本环境无法驱动；被验证的是同一套
+  widget 在 textual-rs 自带 TestApp 终端里的渲染与按键行为。真机冒烟需要一个二进制入口，本批未加。
+- `kimi-tui-app` 仍是库 crate，没有 `main`；`UiTransport` 的真实实现（把命令送给引擎会话、把 `EntryOp`
+  喂回 `UiState`）是 §3.2 里"宿主侧 `UiTransport` 实现"那一项，仍未做。
+- textual-rs 的 247 包依赖树进入 Rust TUI 的构建面（`kimi-tui-app/Cargo.lock` 随本批提交）。若要收紧，可退回
+  ratatui 自建薄壳，但当前裁决是"用它的完整栈"，不自建。
+- 退役的 1627 行后端代码连同 48 条测试一并消失：**这不是"测试变少"**，是那段实现不再存在。新增的两侧测试
+  （6 + 6）覆盖的是替代实现的同一批行为（gutter、折行、宽窄不丢内容、提交与取消）。
+
+**下一步**：TUI 二进制入口 + `UiTransport` 的引擎实现，把切片接到真实会话上。
