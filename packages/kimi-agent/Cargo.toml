@@ -44,6 +44,11 @@ eventsource-stream = "0.2"
 httparse = "1.10"
 base64 = "0.22"
 regex = "1"
+# The bash operand half of the AGENTS.md reminder: the grammar the host's
+# parser mirrors (tree-sitter-bash 0.25), used directly so the engine does not
+# depend on a host parser for text it puts in its own prompt.
+tree-sitter = "0.27"
+tree-sitter-bash = "=0.25.0"
 sha2 = "0.10"
 # Server bearer tokens are minted from the OS CSPRNG (src/server/auth.rs).
 getrandom = "0.4"

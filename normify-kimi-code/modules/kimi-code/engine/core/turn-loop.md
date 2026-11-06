@@ -10,9 +10,9 @@ description:
   en: >
       The turn state machine: run_turn, step scheduler, retry, tool-call id ledger and wall-time budget.
       
-revision: 28f4b101d79bba811d53e53662341c0bb0fe93c0
-updated_at: "2026-11-06T05:19:43.864Z"
-fingerprint: c4c8cc547b610ddab52b7c39f79a0603f06935b3ddaa19f6a9b38c233660a822
+revision: 21f332f9541ce58bba5591a6b55b2dd77cb110e6
+updated_at: "2026-11-06T08:30:58.113Z"
+fingerprint: ce3f1037174835428f7272d53ccbf507e223e28cec175cd89fc244c4349b5547
 source:
   - path: "packages/kimi-agent/src/turn_loop/run_turn.rs"
   - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/mod.rs"

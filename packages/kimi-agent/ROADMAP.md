@@ -204,4 +204,74 @@
 `bashTargetDirs` + `packages/tree-sitter-bash`（7 文件 / 5,000 行）解析 shell 命令给
 AGENTS.md 操作数提醒用。这是 14 个宿主缝里唯一"Rust 侧为零"的一个。
 
+## 7. 2026-11-06 补 Rust 之二：bash 操作数目录解析（exit 0）
+
+**落点**：`packages/kimi-agent/src/tools/bash_target_dirs.rs`（新，784 行含测试）、
+`packages/kimi-agent/tests/bash_target_dirs_corpus.rs`（新）、
+`tests/fixtures/bash-target-dirs.json`（796 条金标语料）、`src/callbacks.rs`（新增
+`supports_parse_bash`）、`src/napi_bindings/callbacks.rs`、`src/turn_loop/run_turn.rs`、
+`packages/node-sdk/src/native/sdk-client/build-handle.ts`（注释纠错）。
+
+### 7.1 TS 行为清单（对齐基准，含边界与失败路径）
+
+入口 `bashTargetDirs(command, cwd, home) → string[] | null`：
+
+| 环节 | 语义 |
+|---|---|
+| 解析 | 仓库自研解析器，预算 500ms / 10,000 节点；`ok=false` 或 `hasError` → `null` |
+| 失败形态 | **不进回合错误**；`null` 与 `[]` 对消费者不可区分（`run_turn.rs` 只对 `Some(dirs)` 扩展） |
+| 命令收集 | 仅沿 `program`/`list`/`pipeline`/`redirected_statement` 下钻；`pipeline` 标记传给子命令 |
+| 命令名 | `command_name` 的第一个 named 子节点；含 `/` 或不可字面化 → 忽略整条命令 |
+| 参数 | 名字之后**每个**子节点 `literalText`；任一不可字面化 → `dropped`（dot 兜底不再加） |
+| 字面文本 | `word`（含 `$` `` ` `` `*` `?` `[` `]` `~` 判废，解 `\x` 转义后再判）、`number`、`raw_string`（去引号）、`string`（拼 `string_content`，出现其它 named 子节点即废）；其余类型废 |
+| `cd` | pipeline 内跳过；dropped → 基准未知；恰一个非 `-` 参数 → 绝对 normalize / 相对 join；无参数 → `home`；其余 → 基准未知 |
+| 列表命令 | `ls tree find dir exa eza lsd`；`find` 取前导路径（跳过 `-H/-L/-P/--`，遇 `-`/`(`/`)`/`!` 停），其余丢选项（两套取值选项；`--opt=value` 不吞） |
+| 无操作数 | dropped → 不加；否则加 `.` |
+| 路径 | `pathe`：反斜杠转 `/`、盘符大写、尾分隔符保留、相对路径保留前导 `..`、UNC 处理 |
+| 去重 | 规范化后按首次出现顺序 |
+
+### 7.2 实现选择与等价口径（已与用户确认：方案 B）
+
+引擎侧用**真实 tree-sitter 语法**（`tree-sitter 0.27` + `tree-sitter-bash =0.25.0`，
+钉住宿主解析器对照的那个版本），算法 1:1 复刻；`pathe` 的 `normalize`/`join`/`isAbsolute`
+逐行移植（`std::path` 在这些输入上会给出不同字符串）。792 条语料中 779 条与宿主逐字相同，
+**17 条登记偏差**全部是 `null` ↔ `[]` 互换（`case` 续行、空 `$()`、空反引号、`${!# }`、
+heredoc 尾语句、`<>` 重定向、`$'` body 等），对提醒输出无差别；语料测试把 17 条按名登记，
+新增偏差或偏差消失都会失败。
+
+### 7.3 接线：宿主回调降为覆盖项
+
+`HostCallbacks` 新增 `supports_parse_bash()`（默认 `false`）。`run_turn` 现在：
+宿主声明支持 → 问宿主；否则用引擎自己的解析。`build-handle.ts` 的 `parseBash` 与
+`napi_bindings` 分别声明支持，因此 napi 宿主仍走它的解析器，而 standalone server /
+REPL / 任何没有该回调的宿主第一次真正拿到操作数目录（此前是"没有解析器就什么都不加"）。
+
+### 7.4 其它宿主缝的对齐判定（本轮一并核过）
+
+| 缝 | 判定 | 依据 |
+|---|---|---|
+| `parseBash` | **Rust 消费者级完全等价**（本轮补上） | 796 条语料 + 17 条登记偏差 |
+| `llmChat` | **Rust 完全等价** | 配 provider 时引擎自己发 HTTP（`llm/`），宿主回调是旧代理；TS 实现是 fail-loud 桩 |
+| `executeTool` | **Rust 完全等价** | `NATIVE_TOOL_NAMES`（98）+ 动态族 `mcp__*`（引擎 MCP manager）、GitHub 族都在 Rust 执行；只剩"宿主注册工具"走回调，而 native harness 没有这类工具。原注释称 MCP/select_tools 为 host-owned 属**文档错误，已改** |
+| `stateRead`/`stateWrite` | **Rust 完全等价** | `StateStoreCallbacks` 以本地 `StateStore` 为准，宿主桥只是回退 |
+| `checkpoint` | **Rust 完全等价** | 本地快照是权威 undo 锚，宿主锚是次要且 fail-open（`CHECKPOINT_UNSUPPORTED` 被识别） |
+
+### 7.5 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib tools::bash_target_dirs` | 0 | 16 passed（含 pathe 三组、cd/pipeline/find/flag/去重/失败臂） |
+| `cargo test --test bash_target_dirs_corpus` | 0 | **4 passed**：796 条全部与语法一致、17 条登记偏差恰为全集、宿主 14 条契约用例、预算臂（>10,000 节点 → `None`） |
+| `cargo test --lib turn_loop::run_turn::tests::bash_operands` | 0 | 6 passed（无宿主解析器时原生生效、不可解析时保持 cwd-only、宿主覆盖仍被调用） |
+| 变异验证 | — | 把 `run_turn` 的原生分支改成 `None` → `bash_operands_resolve_without_a_host_parser` 失败；还原即通过 |
+| `cargo test --lib`（全量） | 0 | 3654 passed / 0 failed |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun run typecheck` | 0 | clean |
+| `bun run check:all` | 0 | 19 道全绿（architecture 2 指纹、normify 5 模块：core / core.turn-loop / napi / napi.bindings / tools；module-deps 271 边不变） |
+
+**构建影响**：`kimi-agent` 新增 C 依赖（tree-sitter）。`--no-default-features --features cli`
+的"纯 Rust 无 C 依赖"性质因此改变（`workflow-js` 早已引入 rquickjs），napi / Nix 打包面需在
+下一次原生构建时复核。
+
+
 

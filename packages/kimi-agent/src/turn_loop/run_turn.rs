@@ -2145,12 +2145,12 @@ pub fn run_turn<'a>(
                             }
                             // v2's other half (`extractBashTargetDirs`): the
                             // directories a Bash call's listing operands
-                            // resolve to, asked of the host's bash parser
-                            // (`host/parse_bash`). A host without a parser —
-                            // the standalone server, the REPL, the legacy
-                            // one-shot entry — or a command that fails to
-                            // parse contributes nothing beyond the declared
-                            // cwd, which is v2's own fallback shape
+                            // resolve to. The engine parses bash itself
+                            // (`tools::bash_target_dirs`); a host that supplies
+                            // its own parser overrides it through
+                            // `host/parse_bash`. Either way a command that
+                            // fails to parse contributes nothing beyond the
+                            // declared cwd — v2's own fallback shape
                             // (`!parsed.ok || parsed.hasError` → cwd only),
                             // never an error into the turn.
                             if let Some(command) =
@@ -2173,14 +2173,24 @@ pub fn run_turn<'a>(
                                     .or_else(|| std::env::var_os("HOME"))
                                     .map(std::path::PathBuf::from)
                                     .unwrap_or_else(|| effective_cwd.clone());
-                                if let Ok(Some(dirs)) = callbacks
-                                    .parse_bash(crate::rpc::types::ParseBashRequest {
-                                        command: command.to_string(),
-                                        cwd: effective_cwd.to_string_lossy().into_owned(),
-                                        home: home.to_string_lossy().into_owned(),
-                                    })
-                                    .await
-                                {
+                                let operands = if callbacks.supports_parse_bash() {
+                                    callbacks
+                                        .parse_bash(crate::rpc::types::ParseBashRequest {
+                                            command: command.to_string(),
+                                            cwd: effective_cwd.to_string_lossy().into_owned(),
+                                            home: home.to_string_lossy().into_owned(),
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                } else {
+                                    crate::tools::bash_target_dirs::bash_target_dirs(
+                                        command,
+                                        &effective_cwd.to_string_lossy(),
+                                        &home.to_string_lossy(),
+                                    )
+                                };
+                                if let Some(dirs) = operands {
                                     step_access
                                         .dirs
                                         .extend(dirs.into_iter().map(std::path::PathBuf::from));

@@ -227,6 +227,7 @@ const BASH_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 pub mod agent_tool;
 pub mod ask_user_question;
 mod bash_exec;
+pub mod bash_target_dirs;
 pub mod core_tool_defs;
 pub mod create_goal;
 pub mod cron_tools;

@@ -1,0 +1,7848 @@
+{
+  "note": "Generated from the TypeScript implementation (packages/node-sdk/src/native/sdk-client/bash-target-dirs.ts) against the fork parser, together with the reference tree-sitter-bash 0.25.0 verdict for the same input. `expected` is what the host path returns today; `reference` is what the engine-side Rust port is expected to return, using the real grammar. `diverges` marks the documented cases where the two disagree — the Rust test asserts those against `reference` and requires them to be registered.",
+  "generatedFor": "packages/kimi-agent/tests/bash_targets_corpus.rs",
+  "cases": [
+    {
+      "name": "differential/arithmetic.txt:1",
+      "command": "for ((i=0;i<3;i++)); do echo $i; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:2",
+      "command": "for (( i = 0; i < 10; i += 2 )); do x; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:3",
+      "command": "echo $((1 + 2 * 3))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:4",
+      "command": "echo $((a > b ? a : b))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:5",
+      "command": "echo $(( (1+2) ** 3 ))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:6",
+      "command": "echo $((i++ + --j))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:7",
+      "command": "echo $((-x + ~y))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:8",
+      "command": "echo $((arr[0] + 1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:9",
+      "command": "echo $((x += 5))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:10",
+      "command": "echo $((1, 2, 3))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:11",
+      "command": "((x = y + 1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:12",
+      "command": "echo $((n % 2 == 0))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:13",
+      "command": "echo $((2 ** 3 ** 2))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:14",
+      "command": "echo $((x = y = 1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:15",
+      "command": "echo $((\n1 +\n2\n))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:16",
+      "command": "(( ls ))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:17",
+      "command": "((x=1)); echo $x",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:18",
+      "command": "for ((;;)); do x; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:19",
+      "command": "for ((i=0,j=1; i<3; i++,j--)); do x; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:20",
+      "command": "for ((i=0;i<3;i++)) { echo $i; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:21",
+      "command": "echo $[1+2]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:22",
+      "command": "echo $((x[1]+y[z]))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:23",
+      "command": "((a++))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:24",
+      "command": "((a--))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:25",
+      "command": "((a++ + b))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:26",
+      "command": "((b + a++))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:27",
+      "command": "echo $((0x1F))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:28",
+      "command": "echo ((a++))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:29",
+      "command": "((a[i]++))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:30",
+      "command": "! ((a++))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:31",
+      "command": "((ab-cd++))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:32",
+      "command": "echo $((1+2)) more",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:33",
+      "command": "$(((${1:-${SECONDS}} % 12) + 144))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:34",
+      "command": "echo $((-1, 1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:35",
+      "command": "echo $((! -a || ~ +b || ++c || --d))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:36",
+      "command": "((\"${MULTIBUILD_VARIANTS}\" > 1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:37",
+      "command": "$((\"$(stat --printf '%05a' \"${save_file}\")\" & 07177))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:38",
+      "command": "soft_errors_count=$[soft_errors_count + 1]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:39",
+      "command": "for (( i = j = k = 1; i % 9 || (j *= -1, $( ((i%9)) || printf \" \" >&2; echo 0), k++ <= 10); i += j ))\ndo\nprintf \"$i\"\ndone",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:40",
+      "command": "((x = -1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:41",
+      "command": "((x += -1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:42",
+      "command": "echo $((-1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:43",
+      "command": "echo $((x * -1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/arithmetic.txt:44",
+      "command": "echo $((x=-1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:1",
+      "command": "case $x in\n  a) echo A ;;\n  b|c) echo BC ;&\n  *) echo other ;;\nesac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:2",
+      "command": "case $x in (a) x ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:3",
+      "command": "case $x in a|b) x ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:4",
+      "command": "case $x in foo*|bar) x ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:5",
+      "command": "case $x in [a-z]) x ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:6",
+      "command": "case $x in \"a\") x ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:7",
+      "command": "case $x in $v|${w}) x ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:8",
+      "command": "case $x in a) x ;;& esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:9",
+      "command": "case $x in a) x esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:10",
+      "command": "case $x in esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:11",
+      "command": "case x in a) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:12",
+      "command": "case $x in\na) y ;;\nesac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:13",
+      "command": "case $x in a) echo esac ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:14",
+      "command": "case $x in a) x\nesac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:15",
+      "command": "x=$(case y in a) 1;; esac)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:16",
+      "command": "x=$(case y in (b) 2;; esac)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:17",
+      "command": "diff <(case y in a) 1;; esac) other",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:18",
+      "command": "case $x in [1]) x ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:19",
+      "command": "if a; then case x in b) 1;; esac elif c; then d; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:20",
+      "command": "case $dest in\n  *.[1357])\n    exit $?\n    ;;\nesac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:21",
+      "command": "case \"$arg\" in\n  *([0-9])([0-9])) echo \"$arg\"\nesac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:22",
+      "command": "case ${lang} in\nCMakeLists.txt | \\\n\tcmake_modules | \\\n\t${PN}.pot) ;;\n*) rm -r ${lang} || die ;;\nesac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:23",
+      "command": "case ${out} in\n*\"not supported\"*|\\\n*\"operation not supported\"*)\n\t;;\nesac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:24",
+      "command": "case $1 in\n-o)\n\towner=$2\n\tshift\n\t;;\n-g) ;;\nesac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:25",
+      "command": "case x in *.txt) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:26",
+      "command": "case x in [abc]) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:27",
+      "command": "case x in a|b) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:28",
+      "command": "case x in -o|--output) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:29",
+      "command": "case x in x) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:30",
+      "command": "case x in foo.txt) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:31",
+      "command": "case x in *foo) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:32",
+      "command": "case x in foo*) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:33",
+      "command": "case x in *) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:34",
+      "command": "case x in ?) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:35",
+      "command": "case x in *.*) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:36",
+      "command": "case x in foo|bar) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:37",
+      "command": "case x in foo.txt|*.log) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:38",
+      "command": "case x in [a-z]*) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:39",
+      "command": "case x in *.[1357]) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:40",
+      "command": "case x in -o) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:41",
+      "command": "case x in --output) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:42",
+      "command": "case x in +(a|b)) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:43",
+      "command": "case x in *(a|b)) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:44",
+      "command": "case x in @(a|b)) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:45",
+      "command": "case x in x@(y)) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:46",
+      "command": "case x in *([0-9])([0-9])) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:47",
+      "command": "case x in *\"s\"*) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:48",
+      "command": "case x in *${x}*) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:49",
+      "command": "case x in ${x}) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:50",
+      "command": "case x in ?(a)) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:51",
+      "command": "case x in !(a)) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:52",
+      "command": "case x in a\\ b) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:53",
+      "command": "case $x in foo_bar) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:54",
+      "command": "case $x in word1) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:55",
+      "command": "case $x in abc1d) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:56",
+      "command": "case $x in v2.0) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:57",
+      "command": "case $x in a1) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:58",
+      "command": "case $x in a_) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:59",
+      "command": "case $x in A1) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:60",
+      "command": "case $x in a-b) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:61",
+      "command": "case $x in a-bc) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:62",
+      "command": "case $x in ab-c) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:63",
+      "command": "case $x in a-b-c) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:64",
+      "command": "case $x in cmake_modules) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:65",
+      "command": "case $x in a-b|y) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:66",
+      "command": "case $x in abc|y) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:67",
+      "command": "case $x in abc | y) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:68",
+      "command": "case $x in -x-) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:69",
+      "command": "case $x in -x-y) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:70",
+      "command": "case $x in *.(a|b)) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:71",
+      "command": "case $x in x.(y)) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/case.txt:72",
+      "command": "case $x in cont\\\nued) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/case.txt:73",
+      "command": "case $x in a\\\n1) ;; esac",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:1",
+      "command": "for f in a b c; do echo \"$f\"; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:2",
+      "command": "for f; do echo \"$f\"; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:3",
+      "command": "select opt in a b; do echo $opt; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:4",
+      "command": "a[i+1]=$y",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:5",
+      "command": "echo ${arr[1]} ${arr[@]}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:6",
+      "command": "echo $'a\\nb\\t'",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:7",
+      "command": "echo $\"hello $USER\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:8",
+      "command": "echo ${x##*/} ${x%%.*}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:9",
+      "command": "echo ${x/y/z} ${x//a/b}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:10",
+      "command": "echo ${x^} ${x^^} ${x,} ${x,,}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:11",
+      "command": "echo ${x@Q}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:12",
+      "command": "echo ${v:1:2} ${v:-default}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:13",
+      "command": "f() { arr=(1 2); echo ${arr[0]}; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:14",
+      "command": "for i in $(seq 3); do echo $i; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:15",
+      "command": "echo ${a[$i]} ${a[i+1]}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:16",
+      "command": "echo ${!prefix*} ${!name@}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:17",
+      "command": "echo ${x##a b}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:18",
+      "command": "echo ${x#\"pat\"}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:19",
+      "command": "echo ${x/a b/c}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:20",
+      "command": "echo ${x/a/$v}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:21",
+      "command": "echo ${x/pat/rep/extra}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:22",
+      "command": "echo ${x:?msg} ${x:+alt} ${x:-d e f}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:23",
+      "command": "echo ${v:-1} ${v:=2x} ${v:-\"d e\"}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:24",
+      "command": "echo ${arr[@]:1:2}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:25",
+      "command": "echo ${s//\"/x}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:26",
+      "command": "x=$\"v\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:27",
+      "command": "for f in $\"a\"; do x; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:28",
+      "command": "echo a$\"b\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:29",
+      "command": "echo $\"a\"\"b\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:30",
+      "command": "echo x=$\"v\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:31",
+      "command": "echo $0 ${0} $1 ${10}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:32",
+      "command": "echo ${x: -5}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:33",
+      "command": "echo ${x: -5:2}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:34",
+      "command": "${x@}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:35",
+      "command": "echo ${x[1]}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:36",
+      "command": "echo \"hello $NAME\" 'raw'",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:37",
+      "command": "echo `hostname` $(date)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:38",
+      "command": "echo ${v:-d} ${x} $1 $@",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:39",
+      "command": "echo $HOME",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:40",
+      "command": "echo a\"b\"c'd'$e${f}g",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:41",
+      "command": "echo $v",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:42",
+      "command": "echo \"${a} middle ${b}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:43",
+      "command": "echo \"$@\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:44",
+      "command": "echo $(a $(b c))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:45",
+      "command": "echo ${#v}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:46",
+      "command": "echo ${v:=word}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:47",
+      "command": "echo $( )",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/expansions.txt:48",
+      "command": "echo ``",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/expansions.txt:49",
+      "command": "echo $",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:50",
+      "command": "echo \"a\\$b\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:51",
+      "command": "echo \"line1\nline2\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:52",
+      "command": "echo ${v:-$(cmd)}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:53",
+      "command": "echo ${a[0]}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:54",
+      "command": "echo ${}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:55",
+      "command": "echo ${#}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:56",
+      "command": "echo ${var1#*#}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:57",
+      "command": "echo ${!abc}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:58",
+      "command": "echo ${abc:- }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:59",
+      "command": "echo ${abc:\n}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:60",
+      "command": "echo ${abc,?}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:61",
+      "command": "echo ${abc^^b}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:62",
+      "command": "echo ${abc@U}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:63",
+      "command": "echo ${abc:- -quiet}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:64",
+      "command": "A=\"${B[0]# }\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:65",
+      "command": "C=\"${D/#* -E /}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:66",
+      "command": "F=\"${G%% *}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:67",
+      "command": "H=\"${I#*;}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:68",
+      "command": "R=\"${S%()}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:69",
+      "command": "F=\"${#!}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:70",
+      "command": "G=${H,,[I]}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:71",
+      "command": "L=\"${M/'N'*/O}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:72",
+      "command": "A=${B//:;;/$'\\n'}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:73",
+      "command": "C=${D/;\\ *;|}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:74",
+      "command": "MOFILES=${LINGUAS// /.po }.po",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:75",
+      "command": "MY_P=\"${PN/aspell/aspell\"${ASPELL_VERSION}\"}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:76",
+      "command": "pyc=${pyc//*\\/}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:77",
+      "command": "${pv/\\.}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:78",
+      "command": "${new_test_cp//\"${old_ver_cp}\"/}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:79",
+      "command": "${allarchives// /\\\\|}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:80",
+      "command": "${!#}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:81",
+      "command": "${!# }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": [],
+      "diverges": true
+    },
+    {
+      "name": "differential/expansions.txt:82",
+      "command": "${!##}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:83",
+      "command": "${!## }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": [],
+      "diverges": true
+    },
+    {
+      "name": "differential/expansions.txt:84",
+      "command": "${!##/}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:85",
+      "command": "echo \"${kw}? ( ${cond:+${cond}? (} ${baseuri}-${ver}-${kw}.${suff} ${cond:+) })\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:86",
+      "command": "${completions[*]}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:87",
+      "command": "${=1}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:88",
+      "command": "${2?}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:89",
+      "command": "${p_key#*=}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:90",
+      "command": "${B[0]# }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:91",
+      "command": "${to_enables[0]##*/}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:92",
+      "command": "exec \"${0#-}\" --rcfile \"${BASH_IT_BASHRC:-${HOME?}/.bashrc}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:93",
+      "command": "recho \"TDEFAULTS = ${selvecs:+-DSELECT_VECS=\\\"$selvecs\\\"}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:94",
+      "command": "local msg=\"${2:-command '$1' does not exist}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:95",
+      "command": "${cdir:+#}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:96",
+      "command": "${dict_langs:+;}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:97",
+      "command": "${UTIL_LINUX_LIBC[@]/%/? ( sys-apps/util-linux )}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:98",
+      "command": "${id}${2+ ${2}}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:99",
+      "command": "${BRANDING_GCC_PKGVERSION/(/(Gentoo ${PVR}${extvers}, }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:100",
+      "command": "BASH_IT_GIT_URL=\"${BASH_IT_GIT_URL/git@/https://}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:101",
+      "command": "10#${command_start##*.}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:102",
+      "command": "echo ${LIB_DEPEND//\\[static-libs(+)]}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:103",
+      "command": "${ALL_LLVM_TARGETS[@]/%/(-)?}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:104",
+      "command": "filterdiff -p1 ${paths[@]/#/-i }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:105",
+      "command": "${cflags//-O? /$(get-flag O) }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:106",
+      "command": "curf=\"${f%'-roff2html'*}.html\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:107",
+      "command": "reff=\"${f/'-roff2html'*/'-ref'}.html\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:108",
+      "command": "echo \"s/$/'/\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:109",
+      "command": "echo \"s$\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:110",
+      "command": "echo $'Here\\'s Johnny!\\r\\n'",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:111",
+      "command": "printf \"  %-9s\" \"${seq0:-(default)}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:112",
+      "command": "main() {\n    local foo=\"asd\"`\n        `\"fgh\"\n}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:113",
+      "command": "$(eval echo $`echo ${foo}`)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:114",
+      "command": "echo `echo otherword`word",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:115",
+      "command": "echo word`echo otherword`",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:116",
+      "command": "assert()\n  if ! $1; then\n    return 1\n  fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:117",
+      "command": "echo \" ${x}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:118",
+      "command": "echo \"a ${x} b\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:119",
+      "command": "echo \"$x \"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:120",
+      "command": "echo \"${x} \"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:121",
+      "command": "echo ${#@}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:122",
+      "command": "echo ${#*}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:123",
+      "command": "echo ${#-}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:124",
+      "command": "echo ${#x[@]}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:125",
+      "command": "echo ${x/'abc'/y}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:126",
+      "command": "echo ${x/\"abc\"/y}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:127",
+      "command": "echo ${x/'a'*'b'/y}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:128",
+      "command": "echo ${x##'a'}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:129",
+      "command": "echo ${x%%a b}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:130",
+      "command": "echo \"${x} $(y)\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:131",
+      "command": "echo \" $(y)\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:132",
+      "command": "echo \" $x\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/expansions.txt:133",
+      "command": "echo \"${x} $y\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:1",
+      "command": "echo $((x << 2 | 1))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:2",
+      "command": "foo() { cat <<EOF\nbody $x\nEOF\n}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:3",
+      "command": "if cat <<EOF; then x; fi\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:4",
+      "command": "cmd <<< \"$str\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:5",
+      "command": "cat <<EOF\nhello $USER\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:6",
+      "command": "cat <<-EOF\n\tindented\n\tEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:7",
+      "command": "cat <<'EOF'\nraw $notexpanded\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:8",
+      "command": "cat <<A <<B\nbody a\nA\nbody b\nB",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:9",
+      "command": "echo $((1<<2))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:10",
+      "command": "cat <<EOF\nno end marker",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:11",
+      "command": "cat <<EOF\nhello $USER and `date` ${x}\ndone\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:12",
+      "command": "cat <<EOF\nplain only\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:13",
+      "command": "cat <<-\"EOF\"\n\tx\n\tEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:14",
+      "command": "cat <<-EOF\n\t\ta\n\tb\n\t\tEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:15",
+      "command": "cat <<EOF\n$(cmd) `other` $v ${w}\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:16",
+      "command": "cat <<EOF arg1 arg2\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:17",
+      "command": "cat <<EOF > out\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:18",
+      "command": "cat <<EOF | grep x\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:19",
+      "command": "cat <<EOF && echo done\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:20",
+      "command": "cmd <<< x > out",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:21",
+      "command": "cat <<A <<B\nba\nA\nbb\nB",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:22",
+      "command": "cat <<EOF; echo x\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/heredoc.txt:23",
+      "command": "cat <<EOF &\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/heredoc.txt:24",
+      "command": "wc <<EOF | cat | sort\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:25",
+      "command": "cat <<EOF\n# check out this regex '^EOF$'\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:26",
+      "command": "a=$((6 % 7 ** 8 << 9 >> 10 & 11 | 12 ^ 13))",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:27",
+      "command": "cat <<EOF\n# comment\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:28",
+      "command": "cat <<EOF\nhas 'quote'\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:29",
+      "command": "cat <<EOF\nhas $dollar\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:30",
+      "command": "cat <<EOF\nregex '^EOF$'\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:31",
+      "command": "cat <<EOF\n$'x'\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/heredoc.txt:32",
+      "command": "<<EOF cat\nbody\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/heredoc.txt:33",
+      "command": "gh --body \"$(cat <<'EOF'\nit's\nEOF\n)\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:34",
+      "command": "echo $(cat <<'EOF'\nit's\nEOF\n)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:35",
+      "command": "echo $(cat <<'EOF'\n) paren\nEOF\n)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:36",
+      "command": "cat <(cat <<'EOF'\nit's\nEOF\n)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:37",
+      "command": "echo \"$(cat <<'EOF'\n$(broken\nEOF\n)\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:38",
+      "command": "echo \"$(cat <<-'EOF'\n\tit's\n\tEOF\n)\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/heredoc.txt:39",
+      "command": "echo $(echo $((x << 2)))\necho $(echo $[x << 2]\n)\necho $(printf x # <<EOF\n)\necho $( [[ x == @(<<EOF) ]]\n)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/recovery.txt:1",
+      "command": "foo () ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/recovery.txt:2",
+      "command": "if a; then b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/recovery.txt:3",
+      "command": "if a; then b;",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/recovery.txt:4",
+      "command": "if a",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/recovery.txt:5",
+      "command": "if a; then b fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/recovery.txt:6",
+      "command": "{ ls }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/recovery.txt:7",
+      "command": "while x do y done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/recovery.txt:8",
+      "command": "echo \"unterminated",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:1",
+      "command": "while read -r line; do echo \"$line\"; done < file",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:2",
+      "command": "foo() { x; } > out",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:3",
+      "command": "if a; then b; fi > out",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:4",
+      "command": "cat > $\"out\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:5",
+      "command": "diff <(cmd) >(other)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:6",
+      "command": "cmd > out 2>&1",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:7",
+      "command": "cmd &>> log",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:8",
+      "command": "exec 3<>file",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/redirects.txt:9",
+      "command": "> out",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:10",
+      "command": "cmd 2>/dev/null",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:11",
+      "command": "cmd >&-",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:12",
+      "command": "cmd >| file",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:13",
+      "command": "cmd <>file",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/redirects.txt:14",
+      "command": "cmd < in",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:15",
+      "command": "cmd <&0-",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:16",
+      "command": "cmd > out",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:17",
+      "command": "cmd 2>&1 >/dev/null",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:18",
+      "command": "> a cmd x",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:19",
+      "command": "(ls) > out",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:20",
+      "command": "! ls > out",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:21",
+      "command": "cmd > out arg",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:22",
+      "command": "2>&1 whoami",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:23",
+      "command": "echo \"foobar\" >&2",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:24",
+      "command": "exec {VIRTWL[0]} {VIRTWL[1]} <&- >&-",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:25",
+      "command": "exec {VIRTWL[0]}<&- {VIRTWL[1]}>&-",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:26",
+      "command": "x <x a b c",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:27",
+      "command": "Z=\"${A#*<B>}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:28",
+      "command": "C=\"${D%</E>*}\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:29",
+      "command": "some-command ${foo:+--arg <(printf '%s\\n' \"$foo\")}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:30",
+      "command": "echo $(< some-file)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:31",
+      "command": "exec {fd}<&-",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:32",
+      "command": "exec {a[0]}<&- {b[1]}>&-",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/redirects.txt:33",
+      "command": "exec {a[0]}<&-",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:1",
+      "command": "if true; then echo yes; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:2",
+      "command": "if a; then b; elif c; then d; else e; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:3",
+      "command": "if a\nthen\n  b\nfi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:4",
+      "command": "until x; do y; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:5",
+      "command": "foo() { echo hi; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:6",
+      "command": "function bar { echo hi; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:7",
+      "command": "function baz() { echo hi; return 0; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:8",
+      "command": "foo() ( echo sub )",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:9",
+      "command": "{ echo a; echo b; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:10",
+      "command": "coproc myjob { echo hi; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:11",
+      "command": "echo if for while",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:12",
+      "command": "arr=(a b \"c d\")",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:13",
+      "command": "arr[0]=x",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:14",
+      "command": "export FOO=bar BAZ",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:15",
+      "command": "declare -r x=1",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:16",
+      "command": "local y",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:17",
+      "command": "readonly z=2",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:18",
+      "command": "unset a b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:19",
+      "command": "echo {1..10}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:20",
+      "command": "echo {1..10..2}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:21",
+      "command": "echo {a..z}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:22",
+      "command": "echo a{b,c}d",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:23",
+      "command": "time ls -la",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:24",
+      "command": "ls\necho b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:25",
+      "command": "echo [ x ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:26",
+      "command": "if [ -f f ]; then x; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:27",
+      "command": "foo() if a; then b; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:28",
+      "command": "if a; then b; fi | grep x",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:29",
+      "command": "if ! grep -q x f; then echo missing; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:30",
+      "command": "x[1]+=2",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:31",
+      "command": "until grep -q done log; do sleep 1; done &",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:32",
+      "command": "( (ls) )",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:33",
+      "command": "{ls;}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:34",
+      "command": "fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:35",
+      "command": "done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:36",
+      "command": "}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:37",
+      "command": "echo a{1..3}b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:38",
+      "command": "x={1..5}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:39",
+      "command": "while x; do done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:40",
+      "command": "echo {a..z..2}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:41",
+      "command": "echo {10..1}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:42",
+      "command": "echo {-5..5}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:43",
+      "command": "select x in; do y; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:44",
+      "command": "function f() if x; then y; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:45",
+      "command": "f () { x; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:46",
+      "command": "if a && b; then c; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:47",
+      "command": "foo (ls)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:48",
+      "command": "for f in a b\ndo x\ndone",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:49",
+      "command": "while a; b; do x; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:50",
+      "command": "if a; then b; fi && c",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:51",
+      "command": "if if a; then b; fi; then c; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:52",
+      "command": "x=1 if a; then b; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:53",
+      "command": "echo hi | if a; then b; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:54",
+      "command": "! while x; do y; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:55",
+      "command": "! [ -f x ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:56",
+      "command": "x+=(c d)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:57",
+      "command": "declare -A m",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:58",
+      "command": "{1..3}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:59",
+      "command": "echo {1..3}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:60",
+      "command": "if echo then; then x; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:61",
+      "command": "while echo do; do x; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:62",
+      "command": "for f in a; do echo done; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:63",
+      "command": "{ echo }; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:64",
+      "command": "[1]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:65",
+      "command": "echo [1] a[2]b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:66",
+      "command": "echo a[-5]b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:67",
+      "command": "if a; then b; elif c; then d\nelse e\nfi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:68",
+      "command": "ls -la",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:69",
+      "command": "FOO=bar env | grep FOO && echo ok || echo fail",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:70",
+      "command": "! grep -q x file",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:71",
+      "command": "# a comment\necho hi # trailing",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:72",
+      "command": "(ls)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:73",
+      "command": "FOO=bar ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:74",
+      "command": "ls &&",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:75",
+      "command": "a & b &",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:76",
+      "command": "echo 123 45.6",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:77",
+      "command": "VAR=value",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:78",
+      "command": "ls; echo a\necho b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:79",
+      "command": "FOO=1 BAR=2 cmd arg",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:80",
+      "command": "! a | b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:81",
+      "command": "echo \"\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:82",
+      "command": "VAR=",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:83",
+      "command": "a|b|c",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:84",
+      "command": "ls ;",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:85",
+      "command": "echo hi;# c\nls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:86",
+      "command": "A=1 B=2",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:87",
+      "command": "a && b && c",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:88",
+      "command": "echo x\\\ny",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:89",
+      "command": "echo {a,b}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:90",
+      "command": "ls |",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:91",
+      "command": "time ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:92",
+      "command": "FOO=\"a b\" cmd",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:93",
+      "command": "FOO=a\"b\"c",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:94",
+      "command": "echo 1 \\ 2 \\ 3",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:95",
+      "command": "for c in ${=1}; do\n\techo c\ndone",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:96",
+      "command": "foo::bar() {\n  echo what\n}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:97",
+      "command": "echo \"a \"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:98",
+      "command": "echo 你好 && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:99",
+      "command": "echo \"🎉 done\" | grep 🎉 && echo ✓",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:100",
+      "command": "变量=值 echo $变量",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/statements.txt:101",
+      "command": "echo a\\\tb",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/statements.txt:102",
+      "command": "echo \\\tx",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:1",
+      "command": "[[ -f file.txt ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:2",
+      "command": "[[ $x == \"foo\" ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:3",
+      "command": "[[ $x =~ ^ab+c$ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:4",
+      "command": "[[ -n $s && -d /tmp ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:5",
+      "command": "[[ a < b || ! -e f ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:6",
+      "command": "[ -f file ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:7",
+      "command": "[ \"$a\" = \"b\" ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:8",
+      "command": "! [[ -f x ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:9",
+      "command": "[ -f file",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:10",
+      "command": "[ x ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:11",
+      "command": "while [[ -n $s ]]; do s=; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:12",
+      "command": "foo() [[ -f x ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:13",
+      "command": "[[ -z $s ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:14",
+      "command": "[[ $a -eq 3 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:15",
+      "command": "[[ $a -nt $b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:16",
+      "command": "[[ \"x\" ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:17",
+      "command": "[[ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:18",
+      "command": "[[ a = b*c ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:19",
+      "command": "[[ a = bc ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:20",
+      "command": "[[ $x == b*c ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:21",
+      "command": "[[ $x == a\"b\" ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:22",
+      "command": "[[ $x =~ ^a.*b$ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:23",
+      "command": "[[ a != b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:24",
+      "command": "[[ (a == b) && c ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:25",
+      "command": "[[ -v var ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:26",
+      "command": "[[ -o opt ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:27",
+      "command": "[[ $x -eq 1 && $y -ne 2 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:28",
+      "command": "[[ $x == b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:29",
+      "command": "[[ $x =~ ^a b$ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:30",
+      "command": "[[ $x =~ a|b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:31",
+      "command": "[[ $x == b && $y == c ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:32",
+      "command": "[[ $x == 123 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:33",
+      "command": "[[ -t 1 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:34",
+      "command": "[[ $x =~ $re ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:35",
+      "command": "[[ $x =~ \"a b\" ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:36",
+      "command": "[[ a=b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:37",
+      "command": "[[ $a==b* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:38",
+      "command": "[[ ( $a == x* ) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:39",
+      "command": "[[ ( $a = x* ) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:40",
+      "command": "[[ $x == b=c ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:41",
+      "command": "[[ a == =b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:42",
+      "command": "[[ a = b=c ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:43",
+      "command": "[[ -f file",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:44",
+      "command": "[[ $a",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:45",
+      "command": "[ 1 ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:46",
+      "command": "[[ 1 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:47",
+      "command": "[[ $f == foo*(.txt|.log) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:48",
+      "command": "[[ $f == *foo*(a) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:49",
+      "command": "[[ $f == [a-z]*(x) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:50",
+      "command": "[[ $f == x@(y|z)w ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:51",
+      "command": "[[ $n == -0.5 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:52",
+      "command": "[[ -x$f && -d /tmp ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:53",
+      "command": "[[ $a == foo\\|bar ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:54",
+      "command": "[[ -f",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:55",
+      "command": "[[ a",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:56",
+      "command": "[[ a == b",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:57",
+      "command": "[[ a &&",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:58",
+      "command": "[[ -f file ",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:59",
+      "command": "[[ a = =b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:60",
+      "command": "[[ $a =~^x ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:61",
+      "command": "[[ !x = y ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:62",
+      "command": "[[ a =b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:63",
+      "command": "[[ a!=b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:64",
+      "command": "[[ a ==b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:65",
+      "command": "[[ $a == foo ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:66",
+      "command": "[[ $a == x.y ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:67",
+      "command": "[[ ( $a == x ) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:68",
+      "command": "[[ $a == x1 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:69",
+      "command": "[[ $a == foo- ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:70",
+      "command": "[[ $a == x_ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:71",
+      "command": "[[ a == b*c=d ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:72",
+      "command": "[[ a == bc=d ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:73",
+      "command": "[[ a == b?=e ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:74",
+      "command": "[[ a == .x ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:75",
+      "command": "[[ $a == a-b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:76",
+      "command": "[[ ((a)) == x ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:77",
+      "command": "[[ $a == -foo ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:78",
+      "command": "[[ $a == -f ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:79",
+      "command": "[[ -foo == x ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:80",
+      "command": "[[ $a == -1 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:81",
+      "command": "[[ $a -eq -1 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:82",
+      "command": "[[ $a == +(!a) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:83",
+      "command": "[[ $a == ?(a|b) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:84",
+      "command": "[[ $a == !(x) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:85",
+      "command": "[[ $a == b\\*c ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:86",
+      "command": "[[ $ver == [0-9]* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:87",
+      "command": "[[ $a == [abc] ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:88",
+      "command": "[[ ( $a == [xyz] ) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:89",
+      "command": "[[ $a = [abc] ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:90",
+      "command": "[[ $a == [!a]* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:91",
+      "command": "[[ $a == foo\\ bar ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:92",
+      "command": "[[ ((a) == x) && y ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "differential/test-command.txt:93",
+      "command": "[ ! command -v go &>/dev/null ] && return",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:94",
+      "command": "[[ ${f} != */@(default).vim ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:95",
+      "command": "[[ $(LC_ALL=C $(tc-getCC) ${LDFLAGS} -Wl,--version 2>/dev/null) != @(LLD|GNU\\ ld)* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:96",
+      "command": "[[ ${test} == @($(IFS='|'; echo \"${skip[*]}\")) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:97",
+      "command": "[[ ${SRC_URI} == */${a}* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:98",
+      "command": "[[ a == *_@(LIB|SYMLINK) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:99",
+      "command": "[[ \"35d8b\" =~ ^[0-9a-fA-F] ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:100",
+      "command": "[[ $CMD =~ (^|;)update_terminal_cwd($|;) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:101",
+      "command": "[[ ! \" ${completions[*]} \" =~ \" $alias_cmd \" ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:102",
+      "command": "! [[ \"$a\" =~ ^a|b\\ *c|d$ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:103",
+      "command": "[[ \"$1\" =~ ^${var}${var}*=..* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:104",
+      "command": "[[ \"$1\" =~ ^\\-${var}+ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:105",
+      "command": "[[ ${var1} == *${var2}* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:106",
+      "command": "[[ \"$server\" =~ [0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3} ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:107",
+      "command": "[[ -f ${x} && $(od -t x1 -N 4 \"${x}\") == *\"7f 45 4c 46\"* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:108",
+      "command": "[[ \" ${REPLACING_VERSIONS} \" != *\\ ${PVR}\\ * ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:109",
+      "command": "[[ ${file} == @(*${GENTOO_PATCH_NAME}.tar.xz|*.asc|*.sig) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:110",
+      "command": "[[ $RUBY_TARGETS != *$( eselect ruby show | awk 'NR==2' | tr  -d ' '  )* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:111",
+      "command": "[[ \" ${m[0]##*/}\" =~ ^(\\ ${skip_files[*]/%/.*|\\\\} ) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:112",
+      "command": "[[ ' boop xyz' =~ ' boop '(.*)$ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:113",
+      "command": "[[ $b = foo* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:114",
+      "command": "[[ a == \\\"+(?)\\\" ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:115",
+      "command": "[[ ${PV} != $(sed -n -e 's/^Version: //p' \"${ED}/usr/$(get_libdir)/pkgconfig/tss2-tcti-tabrmd.pc\" || die) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:116",
+      "command": "[[ \"${MY_LOCALES}\" != *en_US* || a != 2 ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:117",
+      "command": "[[ -f \"${EROOT}/usr/share/php/.packagexml/${MY_P}.xml\" && \\\n\t-x \"${EROOT}/usr/bin/peardev\" ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:118",
+      "command": "[[ ${1} =~ \\.(lisp|lsp|cl)$ ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:119",
+      "command": "[[ a == - ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:120",
+      "command": "run_test_command() [[ -e foo ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:121",
+      "command": "[[ $a == *.@(txt|log) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:122",
+      "command": "[[ $a == x@(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:123",
+      "command": "[[ $a == ?(a) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:124",
+      "command": "[[ $a == *${x}*${y} ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:125",
+      "command": "[[ $a == ${x}* ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:126",
+      "command": "[[ $a == *\"s\"*\"t\" ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:127",
+      "command": "[ -f x ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:128",
+      "command": "[ ! -f x ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:129",
+      "command": "[ a = b ] 2>/dev/null",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:130",
+      "command": "[[ $a == @(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:131",
+      "command": "[[ $a == *@(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:132",
+      "command": "[[ $a == */@(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:133",
+      "command": "[[ $a == .@(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:134",
+      "command": "[[ $a == _@(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:135",
+      "command": "[[ $a == ?*(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:136",
+      "command": "[[ $a == a*(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:137",
+      "command": "[[ $a == *?(y) ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:138",
+      "command": "[[ $a =~ 'a'b ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:139",
+      "command": "[[ $a =~ a'b'c ]]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:140",
+      "command": "[ ! command -v go ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "differential/test-command.txt:141",
+      "command": "[ command -v go &>/dev/null ]",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/0@0",
+      "command": "ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/0@1",
+      "command": "ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/0@2",
+      "command": "ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/1@1",
+      "command": "ls -la",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/1@2",
+      "command": "ls -la",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/2@0",
+      "command": "ls src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/2@1",
+      "command": "ls src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/2@2",
+      "command": "ls src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/3@0",
+      "command": "ls -w 40 src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/3@1",
+      "command": "ls -w 40 src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/3@2",
+      "command": "ls -w 40 src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/4@0",
+      "command": "ls --sort=size src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/4@1",
+      "command": "ls --sort=size src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/4@2",
+      "command": "ls --sort=size src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/5@0",
+      "command": "ls -I node_modules src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/5@1",
+      "command": "ls -I node_modules src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/5@2",
+      "command": "ls -I node_modules src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/6@0",
+      "command": "ls src tests",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src",
+        "/work/project/tests"
+      ],
+      "reference": [
+        "/work/project/src",
+        "/work/project/tests"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/6@1",
+      "command": "ls src tests",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src",
+        "C:/work/project/tests"
+      ],
+      "reference": [
+        "C:/work/project/src",
+        "C:/work/project/tests"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/6@2",
+      "command": "ls src tests",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src",
+        "/work/project/tests"
+      ],
+      "reference": [
+        "/work/project/src",
+        "/work/project/tests"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/7@0",
+      "command": "tree",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/7@1",
+      "command": "tree",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/7@2",
+      "command": "tree",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/8@0",
+      "command": "tree -L 2 src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/8@1",
+      "command": "tree -L 2 src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/8@2",
+      "command": "tree -L 2 src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/9@0",
+      "command": "tree --ignore node_modules .",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/9@1",
+      "command": "tree --ignore node_modules .",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/9@2",
+      "command": "tree --ignore node_modules .",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/10@0",
+      "command": "find . -name \"*.ts\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/10@1",
+      "command": "find . -name \"*.ts\"",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/10@2",
+      "command": "find . -name \"*.ts\"",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/11@0",
+      "command": "find -H src -type f",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/11@1",
+      "command": "find -H src -type f",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/11@2",
+      "command": "find -H src -type f",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/12@0",
+      "command": "find src -maxdepth 2",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/12@1",
+      "command": "find src -maxdepth 2",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/12@2",
+      "command": "find src -maxdepth 2",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/13@0",
+      "command": "dir",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/13@1",
+      "command": "dir",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/13@2",
+      "command": "dir",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/14@0",
+      "command": "exa -la src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/14@1",
+      "command": "exa -la src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/14@2",
+      "command": "exa -la src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/15@0",
+      "command": "eza src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/15@1",
+      "command": "eza src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/15@2",
+      "command": "eza src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/16@0",
+      "command": "lsd src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/16@1",
+      "command": "lsd src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/16@2",
+      "command": "lsd src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/17@0",
+      "command": "cd src && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/17@1",
+      "command": "cd src && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/17@2",
+      "command": "cd src && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/18@0",
+      "command": "cd src; ls docs",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src/docs"
+      ],
+      "reference": [
+        "/work/project/src/docs"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/18@1",
+      "command": "cd src; ls docs",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src/docs"
+      ],
+      "reference": [
+        "C:/work/project/src/docs"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/18@2",
+      "command": "cd src; ls docs",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src/docs"
+      ],
+      "reference": [
+        "/work/project/src/docs"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/19@0",
+      "command": "cd && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/home/user"
+      ],
+      "reference": [
+        "/home/user"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/19@1",
+      "command": "cd && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/Users/dev"
+      ],
+      "reference": [
+        "C:/Users/dev"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/19@2",
+      "command": "cd && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/home/user"
+      ],
+      "reference": [
+        "/home/user"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/20@0",
+      "command": "cd - && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/20@1",
+      "command": "cd - && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/20@2",
+      "command": "cd - && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/21@0",
+      "command": "cd /tmp && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/tmp"
+      ],
+      "reference": [
+        "/tmp"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/21@1",
+      "command": "cd /tmp && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "/tmp"
+      ],
+      "reference": [
+        "/tmp"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/21@2",
+      "command": "cd /tmp && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/tmp"
+      ],
+      "reference": [
+        "/tmp"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/22@0",
+      "command": "ls | grep x",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/22@1",
+      "command": "ls | grep x",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/22@2",
+      "command": "ls | grep x",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/23@0",
+      "command": "cd src | ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/23@1",
+      "command": "cd src | ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/23@2",
+      "command": "cd src | ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/24@0",
+      "command": "echo hi | ls src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/24@1",
+      "command": "echo hi | ls src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/24@2",
+      "command": "echo hi | ls src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/25@0",
+      "command": "ls > out.txt",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/25@1",
+      "command": "ls > out.txt",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/25@2",
+      "command": "ls > out.txt",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/26@0",
+      "command": "ls 2>/dev/null",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/26@1",
+      "command": "ls 2>/dev/null",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/26@2",
+      "command": "ls 2>/dev/null",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/27@0",
+      "command": "ls \"$HOME/docs\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/27@1",
+      "command": "ls \"$HOME/docs\"",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/27@2",
+      "command": "ls \"$HOME/docs\"",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/28@0",
+      "command": "ls 'src'",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/28@1",
+      "command": "ls 'src'",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/28@2",
+      "command": "ls 'src'",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/29@0",
+      "command": "ls src/*.ts",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/29@1",
+      "command": "ls src/*.ts",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/29@2",
+      "command": "ls src/*.ts",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/30@0",
+      "command": "ls ~/docs",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/30@1",
+      "command": "ls ~/docs",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/30@2",
+      "command": "ls ~/docs",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/31@0",
+      "command": "ls $(pwd)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/31@1",
+      "command": "ls $(pwd)",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/31@2",
+      "command": "ls $(pwd)",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/32@0",
+      "command": "ls -1 src && cd . && tree",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src",
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project/src",
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/32@1",
+      "command": "ls -1 src && cd . && tree",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src",
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project/src",
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/32@2",
+      "command": "ls -1 src && cd . && tree",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src",
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project/src",
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/33@0",
+      "command": "if true; then ls src; fi",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/33@1",
+      "command": "if true; then ls src; fi",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/33@2",
+      "command": "if true; then ls src; fi",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/34@0",
+      "command": "for f in a b; do ls \"$f\"; done",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/34@1",
+      "command": "for f in a b; do ls \"$f\"; done",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/34@2",
+      "command": "for f in a b; do ls \"$f\"; done",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/35@0",
+      "command": "f() { ls src; }",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/35@1",
+      "command": "f() { ls src; }",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/35@2",
+      "command": "f() { ls src; }",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/36@0",
+      "command": "ls src # comment",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/36@1",
+      "command": "ls src # comment",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/36@2",
+      "command": "ls src # comment",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/37@0",
+      "command": "  ls   src  ",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/37@1",
+      "command": "  ls   src  ",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/37@2",
+      "command": "  ls   src  ",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/38@0",
+      "command": "ls; tree",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/38@1",
+      "command": "ls; tree",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/38@2",
+      "command": "ls; tree",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/39@0",
+      "command": "ls && tree || find .",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/39@1",
+      "command": "ls && tree || find .",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/39@2",
+      "command": "ls && tree || find .",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/40@0",
+      "command": "ls <<EOF\nhi\nEOF",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/40@1",
+      "command": "ls <<EOF\nhi\nEOF",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/40@2",
+      "command": "ls <<EOF\nhi\nEOF",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/41@1",
+      "command": "exec 3<>file",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "listing/41@2",
+      "command": "exec 3<>file",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "listing/42@0",
+      "command": "<<EOF cat",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/42@1",
+      "command": "<<EOF cat",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/42@2",
+      "command": "<<EOF cat",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/43@1",
+      "command": "cat <<EOF; echo x\nbody\nEOF",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "listing/43@2",
+      "command": "cat <<EOF; echo x\nbody\nEOF",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": null,
+      "diverges": true
+    },
+    {
+      "name": "listing/44@0",
+      "command": "ls `pwd`",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/44@1",
+      "command": "ls `pwd`",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/44@2",
+      "command": "ls `pwd`",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/45@0",
+      "command": "$(ls src)",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/45@1",
+      "command": "$(ls src)",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/45@2",
+      "command": "$(ls src)",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/46@0",
+      "command": "ls ${HOME}",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/46@1",
+      "command": "ls ${HOME}",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/46@2",
+      "command": "ls ${HOME}",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/47@0",
+      "command": "time ls src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/47@1",
+      "command": "time ls src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/47@2",
+      "command": "time ls src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/48@0",
+      "command": "env ls src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/48@1",
+      "command": "env ls src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/48@2",
+      "command": "env ls src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/49@0",
+      "command": "sudo ls /root",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/49@1",
+      "command": "sudo ls /root",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/49@2",
+      "command": "sudo ls /root",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/50@0",
+      "command": "ls ./src/../docs",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/docs"
+      ],
+      "reference": [
+        "/work/project/docs"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/50@1",
+      "command": "ls ./src/../docs",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/docs"
+      ],
+      "reference": [
+        "C:/work/project/docs"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/50@2",
+      "command": "ls ./src/../docs",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/docs"
+      ],
+      "reference": [
+        "/work/project/docs"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/51@0",
+      "command": "ls /abs/path",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/abs/path"
+      ],
+      "reference": [
+        "/abs/path"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/51@1",
+      "command": "ls /abs/path",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "/abs/path"
+      ],
+      "reference": [
+        "/abs/path"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/51@2",
+      "command": "ls /abs/path",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/abs/path"
+      ],
+      "reference": [
+        "/abs/path"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/52@0",
+      "command": "cd ~/work && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/52@1",
+      "command": "cd ~/work && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/52@2",
+      "command": "cd ~/work && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/53@0",
+      "command": "cd .. && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work"
+      ],
+      "reference": [
+        "/work"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/53@1",
+      "command": "cd .. && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work"
+      ],
+      "reference": [
+        "C:/work"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/53@2",
+      "command": "cd .. && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work"
+      ],
+      "reference": [
+        "/work"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/54@0",
+      "command": "ls \"a b\"",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/a b"
+      ],
+      "reference": [
+        "/work/project/a b"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/54@1",
+      "command": "ls \"a b\"",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/a b"
+      ],
+      "reference": [
+        "C:/work/project/a b"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/54@2",
+      "command": "ls \"a b\"",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/a b"
+      ],
+      "reference": [
+        "/work/project/a b"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/55@0",
+      "command": "ls \"unterminated",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/55@1",
+      "command": "ls \"unterminated",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/55@2",
+      "command": "ls \"unterminated",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/56@0",
+      "command": "ls (",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/56@1",
+      "command": "ls (",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/56@2",
+      "command": "ls (",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/57@1",
+      "command": "ls |",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/57@2",
+      "command": "ls |",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/58@1",
+      "command": "ls &&",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/58@2",
+      "command": "ls &&",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": null,
+      "reference": null,
+      "diverges": false
+    },
+    {
+      "name": "listing/59@0",
+      "command": "ls -d src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/59@1",
+      "command": "ls -d src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/59@2",
+      "command": "ls -d src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/60@0",
+      "command": "ls -a -l src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/60@1",
+      "command": "ls -a -l src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/60@2",
+      "command": "ls -a -l src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/61@0",
+      "command": "ls --color=always src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/61@1",
+      "command": "ls --color=always src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/61@2",
+      "command": "ls --color=always src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/62@0",
+      "command": "ls --width 40 src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/62@1",
+      "command": "ls --width 40 src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/62@2",
+      "command": "ls --width 40 src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/63@0",
+      "command": "ls -w40 src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/63@1",
+      "command": "ls -w40 src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/63@2",
+      "command": "ls -w40 src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/64@0",
+      "command": "ls -Iw src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/64@1",
+      "command": "ls -Iw src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/64@2",
+      "command": "ls -Iw src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/65@0",
+      "command": "find src -name x -o -name y",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/65@1",
+      "command": "find src -name x -o -name y",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/65@2",
+      "command": "find src -name x -o -name y",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/66@0",
+      "command": "find ( src )",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/66@1",
+      "command": "find ( src )",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/66@2",
+      "command": "find ( src )",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [],
+      "reference": [],
+      "diverges": false
+    },
+    {
+      "name": "listing/67@0",
+      "command": "find src ! -name x",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/67@1",
+      "command": "find src ! -name x",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/67@2",
+      "command": "find src ! -name x",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/68@0",
+      "command": "tree -a -L1 src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/68@1",
+      "command": "tree -a -L1 src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/68@2",
+      "command": "tree -a -L1 src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/69@0",
+      "command": "tree --filelimit 10 src",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/69@1",
+      "command": "tree --filelimit 10 src",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/69@2",
+      "command": "tree --filelimit 10 src",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/70@0",
+      "command": "cd src && cd .. && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/70@1",
+      "command": "cd src && cd .. && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project"
+      ],
+      "reference": [
+        "C:/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/70@2",
+      "command": "cd src && cd .. && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project"
+      ],
+      "reference": [
+        "/work/project"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/71@0",
+      "command": "cd /a/b/../c && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/a/c"
+      ],
+      "reference": [
+        "/a/c"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/71@1",
+      "command": "cd /a/b/../c && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "/a/c"
+      ],
+      "reference": [
+        "/a/c"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/71@2",
+      "command": "cd /a/b/../c && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/a/c"
+      ],
+      "reference": [
+        "/a/c"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/72@0",
+      "command": "cd . && ls ./x",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/x"
+      ],
+      "reference": [
+        "/work/project/x"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/72@1",
+      "command": "cd . && ls ./x",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/x"
+      ],
+      "reference": [
+        "C:/work/project/x"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/72@2",
+      "command": "cd . && ls ./x",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/x"
+      ],
+      "reference": [
+        "/work/project/x"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/73@0",
+      "command": "ls /work/project/src/",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/src/"
+      ],
+      "reference": [
+        "/work/project/src/"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/73@1",
+      "command": "ls /work/project/src/",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "/work/project/src/"
+      ],
+      "reference": [
+        "/work/project/src/"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/73@2",
+      "command": "ls /work/project/src/",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/src/"
+      ],
+      "reference": [
+        "/work/project/src/"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/74@0",
+      "command": "ls //double//slash",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "//double/slash"
+      ],
+      "reference": [
+        "//double/slash"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/74@1",
+      "command": "ls //double//slash",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "//double/slash"
+      ],
+      "reference": [
+        "//double/slash"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/74@2",
+      "command": "ls //double//slash",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "//double/slash"
+      ],
+      "reference": [
+        "//double/slash"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/75@0",
+      "command": "true && cd docs && ls && cd ../src && ls",
+      "cwd": "/work/project",
+      "home": "/home/user",
+      "expected": [
+        "/work/project/docs",
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/docs",
+        "/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/75@1",
+      "command": "true && cd docs && ls && cd ../src && ls",
+      "cwd": "C:/work/project",
+      "home": "C:/Users/dev",
+      "expected": [
+        "C:/work/project/docs",
+        "C:/work/project/src"
+      ],
+      "reference": [
+        "C:/work/project/docs",
+        "C:/work/project/src"
+      ],
+      "diverges": false
+    },
+    {
+      "name": "listing/75@2",
+      "command": "true && cd docs && ls && cd ../src && ls",
+      "cwd": "/work/project/",
+      "home": "/home/user/",
+      "expected": [
+        "/work/project/docs",
+        "/work/project/src"
+      ],
+      "reference": [
+        "/work/project/docs",
+        "/work/project/src"
+      ],
+      "diverges": false
+    }
+  ]
+}

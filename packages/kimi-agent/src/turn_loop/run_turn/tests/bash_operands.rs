@@ -93,6 +93,10 @@ impl HostCallbacks for ParseBashStub {
     {
         self.inner.check_permission(request)
     }
+    fn supports_parse_bash(&self) -> bool {
+        true
+    }
+
     fn parse_bash(
         &self,
         request: crate::rpc::types::ParseBashRequest,
@@ -211,11 +215,10 @@ async fn bash_operand_dirs_reach_the_agents_md_reminder_through_the_host_parser(
     assert!(reminder.content.contains("sub"), "{reminder:?}");
 }
 
-/// Degradation arm one: no parser wired (the server's shape — the trait
-/// default) means the operands contribute nothing, while the turn runs on
-/// undisturbed.
+/// The engine parses the command itself: a host that carries no parser still
+/// gets operand directories for the reminder.
 #[tokio::test]
-async fn bash_operands_contribute_nothing_when_the_host_has_no_parser() {
+async fn bash_operands_resolve_without_a_host_parser() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir(root.join("sub")).unwrap();
@@ -233,9 +236,34 @@ async fn bash_operands_contribute_nothing_when_the_host_has_no_parser() {
     let turn = run_turn(bash_turn_input(&llm), &callbacks).await.unwrap();
     assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
     let captured = captured.lock().unwrap();
+    let reminder =
+        reminder_in(&captured[1]).expect("the engine's own parser must find the operand dir: {:?}");
+    assert!(reminder.content.contains("sub"), "{reminder:?}");
+}
+
+/// The failure arm the reminder rides on: a command the parser rejects
+/// contributes nothing beyond the declared cwd, and the turn still runs.
+#[tokio::test]
+async fn a_command_that_does_not_parse_keeps_the_cwd_only_reminder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub").join("AGENTS.md"), "sub rules").unwrap();
+    let _cwd = crate::test_support::CwdScope::enter(root).await;
+
+    let callbacks = rpc_callbacks(stub_tool_server());
+    let captured: Arc<Mutex<Vec<Vec<LLMMessage>>>> = Arc::new(Mutex::new(Vec::new()));
+    let llm = BashThenStopLlm {
+        bash_args: serde_json::json!({ "command": "ls \"unterminated sub" }),
+        requests: captured.clone(),
+    };
+
+    let turn = run_turn(bash_turn_input(&llm), &callbacks).await.unwrap();
+    assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
+    let captured = captured.lock().unwrap();
     assert!(
         reminder_in(&captured[1]).is_none(),
-        "no parser, no operand dirs: {:?}",
+        "an unparseable command must not invent an operand dir: {:?}",
         captured[1]
     );
 }

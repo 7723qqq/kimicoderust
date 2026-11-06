@@ -154,19 +154,26 @@ pub trait HostCallbacks: Send + Sync {
     }
 
     /// Parse a Bash command for the AGENTS.md reminder's operand directories
-    /// (v2 `extractBashTargetDirs`, `host/parse_bash`). The host owns the
-    /// bash syntax tree; the engine has none. The default answers `Ok(None)`
-    /// — a host without a parser (the standalone server has no JS side, the
-    /// REPL wires none) keeps the reminder at its cwd-only shape, which is
-    /// exactly v2's own fallback when a command fails to parse
-    /// (`agentsMdReminderService.ts`: `!parsed.ok || parsed.hasError` keeps
-    /// the declared cwd and nothing more).
+    /// (v2 `extractBashTargetDirs`, `host/parse_bash`).
+    ///
+    /// The engine parses bash itself (`tools::bash_target_dirs`), so this
+    /// channel is an **override**: a host that supplies it is asked, and one
+    /// that does not falls back to the engine's own parse — never to "no
+    /// operands". The `Ok(None)` default below therefore means "this host has
+    /// nothing to say", which is what [`HostCallbacks::supports_parse_bash`]
+    /// distinguishes from "the command did not parse".
     fn parse_bash(
         &self,
         request: ParseBashRequest,
     ) -> BoxFuture<'static, Result<Option<Vec<String>>, String>> {
         let _ = request;
         Box::pin(async { Ok(None) })
+    }
+
+    /// Whether [`HostCallbacks::parse_bash`] is a real parser rather than the
+    /// trait default. False keeps the engine's own parse in charge.
+    fn supports_parse_bash(&self) -> bool {
+        false
     }
 
     /// Fetch a bearer token for an OAuth-managed provider (`host/auth_token`).
@@ -1383,6 +1390,10 @@ impl HostCallbacks for NativeToolCallbacks {
         self.inner.parse_bash(request)
     }
 
+    fn supports_parse_bash(&self) -> bool {
+        self.inner.supports_parse_bash()
+    }
+
     fn auth_token(
         &self,
         provider: String,
@@ -1546,6 +1557,10 @@ impl HostCallbacks for CountingCallbacks {
         request: ParseBashRequest,
     ) -> BoxFuture<'static, Result<Option<Vec<String>>, String>> {
         self.inner.parse_bash(request)
+    }
+
+    fn supports_parse_bash(&self) -> bool {
+        self.inner.supports_parse_bash()
     }
 
     fn auth_token(
@@ -1869,6 +1884,10 @@ impl HostCallbacks for StateStoreCallbacks {
         request: ParseBashRequest,
     ) -> BoxFuture<'static, Result<Option<Vec<String>>, String>> {
         self.inner.parse_bash(request)
+    }
+
+    fn supports_parse_bash(&self) -> bool {
+        self.inner.supports_parse_bash()
     }
 
     fn auth_token(

@@ -10,9 +10,9 @@ description:
   en: >
       Engine core: the run_turn state machine, session lifecycle, compaction, subagent orchestration and the event bus.
       
-revision: 8002a6bd8f99fbbdcdecba9fe678ce0bb053c59c
-updated_at: "2026-11-06T07:46:01.640Z"
-fingerprint: 07391273f37aa95e19e9dd50703ca3d6201da61cfbab707a35075d76649aa85f
+revision: 21f332f9541ce58bba5591a6b55b2dd77cb110e6
+updated_at: "2026-11-06T08:30:58.110Z"
+fingerprint: dbb557c15871a6347a3af98e505990231b5dd263fded1f649663279bd6f50d19
 source:
   - path: "packages/kimi-agent/src/turn_loop/run_turn.rs"
   - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/mod.rs"

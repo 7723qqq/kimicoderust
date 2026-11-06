@@ -521,6 +521,10 @@ impl HostCallbacks for NapiHostCallbacks {
         })
     }
 
+    fn supports_parse_bash(&self) -> bool {
+        self.parse_bash_fn.is_some()
+    }
+
     fn parse_bash(
         &self,
         request: crate::rpc::types::ParseBashRequest,

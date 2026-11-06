@@ -151,12 +151,15 @@ export async function buildSessionHandle(
       );
     },
     executeTool: async (req: string) => {
-      // The Rust engine routes only host-owned tools here (MCP tools,
-      // select_tools — everything not in NATIVE_TOOL_NAMES). The native
-      // harness has no host tool registry yet, so fail loud *naming the tool*.
-      // The previous path delegated to the base `toolCall`, which returned a
-      // generic "SDK custom tool calls are not supported: <id>" that dropped
-      // the tool name and read to the model like a transient failure to retry.
+      // Only a tool the engine does not own reaches this proxy. The engine
+      // executes every contracted native tool itself — `NATIVE_TOOL_NAMES`
+      // (98 names) plus the dynamic families: `mcp__*` (its own MCP manager)
+      // and the GitHub tools. What is left is a tool a host registered, and the
+      // native harness has no host tool registry, so fail loud *naming the
+      // tool*. The previous path delegated to the base `toolCall`, which
+      // returned a generic "SDK custom tool calls are not supported: <id>" that
+      // dropped the tool name and read to the model like a transient failure to
+      // retry.
       //
       // Wire shape: the return value is a serde-deserialized
       // `ToolExecuteResponse` (`kimi-agent/src/rpc/types.rs`), whose required
@@ -862,11 +865,13 @@ export async function buildSessionHandle(
     },
     parseBash: async (request: string) => {
       // `host/parse_bash`: the AGENTS.md reminder's operand directories for a
-      // Bash call (v2 `extractBashTargetDirs`). The host owns the bash syntax
-      // tree; the engine has none. `'null'` when the request or the command
-      // does not parse — the engine keeps the declared cwd and nothing more,
-      // v2's own fallback shape, so a parse failure never costs the reminder
-      // nor the turn.
+      // Bash call (v2 `extractBashTargetDirs`). The engine parses bash itself
+      // (`kimi-agent/src/tools/bash_target_dirs.rs`) and asks this channel only
+      // because this host supplies one — the override exists so the host can
+      // keep its own parser without the engine losing the capability.
+      // `'null'` when the request or the command does not parse — the engine
+      // keeps the declared cwd and nothing more, v2's own fallback shape, so a
+      // parse failure never costs the reminder nor the turn.
       try {
         const { command, cwd, home } = JSON.parse(request) as {
           command: string;
