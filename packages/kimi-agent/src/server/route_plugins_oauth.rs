@@ -61,10 +61,14 @@ impl HttpServer {
             ("GET", "/api/v1/skills") => {
                 let config = self.config().await;
                 let merge = config.resolve_merge_all_available_skills();
-                let mut extra = config.extra_skill_dirs_paths();
-                extra.extend(self.plugin_manager.plugin_skill_dir_paths());
-                let skills =
-                    crate::skills::scan_all_skills_with_extra_and_merge(None, &extra, merge);
+                let extra = config.extra_skill_dirs_paths();
+                let plugin_dirs = self.plugin_manager.plugin_skill_dirs();
+                let skills = crate::skills::scan_all_skills_with_extra_merge_and_plugins(
+                    None,
+                    &extra,
+                    &plugin_dirs,
+                    merge,
+                );
                 HttpResponse::ok(&json!({ "skills": skills }))
             }
             ("POST", "/api/v1/acp") => {
@@ -218,8 +222,14 @@ impl HttpServer {
                     .get("provider")
                     .and_then(|v| v.as_str())
                     .unwrap_or("kimi");
-                let logged_out = self.oauth_manager.logout(provider);
-                HttpResponse::ok(&json!({ "loggedOut": logged_out }))
+                // Wire shape is the protocol's `oauthLogoutResponseSchema`
+                // (`{ logged_out: true, provider }`, v2 `authService.ts:258`):
+                // always the literal — the nothing-to-drop case is a no-op
+                // success upstream. The manager's internal "was anything
+                // dropped" bool stays off the wire; the shipped Web bundle
+                // reads `logged_out` (snake_case).
+                let _ = self.oauth_manager.logout(provider);
+                HttpResponse::ok(&json!({ "logged_out": true, "provider": provider }))
             }
             ("GET", "/api/v1/oauth/usage") => {
                 let provider = req.query_param("provider").unwrap_or_else(|| "kimi".into());

@@ -35,6 +35,10 @@ pub struct TurnHeader {
     pub duration_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Upstream #4280 `turnHeaderSchema.wedged` (additive optional, same
+    /// contract reasoning as the field on `TranscriptTurn`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wedged: Option<bool>,
 }
 
 /// The `kind` tag a turn header carries (v2 `kind: z.literal('turn')`).

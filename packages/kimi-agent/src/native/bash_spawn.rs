@@ -381,10 +381,12 @@ mod tests {
     fn platform_sleep_command(seconds: u32) -> Vec<String> {
         if cfg!(windows) {
             // `timeout` refuses redirected stdin; ping is the reliable sleeper.
+            // Pin ping through `%SystemRoot%`: cmd's PATH lookup silently fails
+            // when the inherited PATH is too long.
             vec![
                 "cmd".to_string(),
                 "/c".to_string(),
-                "ping".to_string(),
+                r"%SystemRoot%\System32\ping.exe".to_string(),
                 "-n".to_string(),
                 (seconds + 1).to_string(),
                 "127.0.0.1".to_string(),

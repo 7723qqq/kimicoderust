@@ -8,7 +8,7 @@ pub mod callbacks;
 pub mod compaction;
 pub mod config;
 pub mod cron;
-pub mod engine;
+pub mod default_workspace;
 pub mod env;
 pub mod events;
 pub mod frontmatter;
@@ -35,12 +35,16 @@ pub mod storage;
 pub mod subagent;
 pub mod swarm;
 pub mod team;
+#[cfg(test)]
+mod test_support;
 pub mod tool_input_display;
 pub mod tool_result_truncation;
 pub mod tools;
 pub mod turn_events;
 pub mod turn_loop;
 pub mod workflow;
+pub mod workspace_trust;
+pub mod workspace_trust_disclosure;
 
 use crate::native::event_store::{EventStore, RawWireEvent};
 use crate::permission::{PermissionEngine, VerdictDecision};
@@ -217,7 +221,6 @@ impl crate::callbacks::HostCallbacks for NativeHostCallbacks {
     }
 }
 
-use crate::engine::EngineConfig;
 use crate::i18n::LocalizedText;
 
 /// Legacy in-crate engine facade.
@@ -232,7 +235,6 @@ use crate::i18n::LocalizedText;
 pub struct KimiEngine {
     store: Arc<dyn EventStore>,
     permission: Arc<PermissionEngine>,
-    engine_config: EngineConfig,
     /// Local state store: backs the state bridge (todo / plan / goal) and the
     /// `host/goal` seam so those tools work without a host.
     state: Option<Arc<crate::storage::StateStore>>,
@@ -257,7 +259,6 @@ impl KimiEngine {
         Self {
             store,
             permission,
-            engine_config: EngineConfig::default(),
             state: None,
             mcp: None,
             subagents: Arc::new(crate::subagent::SubagentManager::new()),
@@ -279,12 +280,6 @@ impl KimiEngine {
     #[must_use]
     pub fn with_hooks(mut self, hooks: Vec<crate::permission::HookDef>) -> Self {
         self.hooks = hooks;
-        self
-    }
-
-    /// 设置引擎执行配置（如 Token 预算上限）
-    pub fn with_engine_config(mut self, config: EngineConfig) -> Self {
-        self.engine_config = config;
         self
     }
 
@@ -410,6 +405,7 @@ impl KimiEngine {
                 let shell_bridge = toolset.shell_bridge();
                 let toolset = Arc::new(toolset);
                 Arc::new(crate::callbacks::NativeToolCallbacks {
+                    notify_user_enabled: true,
                     inner: base_callbacks.clone(),
                     toolset,
                     native_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -470,7 +466,12 @@ impl KimiEngine {
             tools: &[],
             tool_defs,
             max_steps,
-            max_context_tokens: Some(self.engine_config.max_tokens_limit as u32),
+            // No host-resolved window here: the compaction config falls back
+            // to its own DEFAULT_MAX_CONTEXT_TOKENS, which is the engine's
+            // real default — the former `EngineConfig::max_tokens_limit`
+            // (102_400) was reachable only through this test facade and
+            // disagreed with it.
+            max_context_tokens: None,
             compaction_max_attempts: None,
             // This path carries no `PolicySnapshot` (see the guard note above),
             // so the permission-mode reminders stay off.
@@ -643,6 +644,7 @@ mod engine_tests {
                 .with_subagents(engine.subagents.clone()),
         );
         let callbacks = crate::callbacks::NativeToolCallbacks {
+            notify_user_enabled: true,
             inner: Arc::new(NativeHostCallbacks {
                 permission,
                 state: None,
@@ -880,32 +882,5 @@ mod engine_tests {
             crate::native::event_store::MessageRole::Tool
         );
         assert_eq!(history[2].tool_call_id.as_deref(), Some("call_read_1"));
-    }
-
-    #[tokio::test]
-    async fn test_kimi_engine_with_custom_engine_config() {
-        let store = Arc::new(SqliteEventStore::new_in_memory().unwrap());
-        let root = std::env::current_dir().unwrap();
-        let permission = Arc::new(PermissionEngine::with_workspace(
-            crate::permission::PolicySnapshot::default(),
-            Some(root.to_string_lossy().to_string()),
-            Vec::new(),
-        ));
-
-        let custom_config = EngineConfig {
-            max_tokens_limit: 50_000,
-        };
-
-        let engine = KimiEngine::new(store.clone(), permission)
-            .with_workspace_root(root.clone())
-            .with_engine_config(custom_config);
-        let mock_llm = MockLLM;
-
-        let result = engine
-            .run_turn_with_llm("sess_cfg_test", "Hello with config", &mock_llm, 2)
-            .await
-            .unwrap();
-        assert_eq!(result.steps, 1);
-        assert_eq!(engine.engine_config.max_tokens_limit, 50_000);
     }
 }

@@ -50,6 +50,7 @@ pub async fn start_btw(
             system_prompt: SIDE_QUESTION_SYSTEM_REMINDER.into(),
             tools: Vec::new(),
             disallowed_tools: vec!["*".into()],
+            when_to_use: None,
             prompt_prefix: None,
             summary_policy: None,
             model: None,

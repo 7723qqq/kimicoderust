@@ -297,6 +297,21 @@ describe('project MCP config (trust gated)', () => {
       await harness.close();
     }
   }, 15_000);
+
+  it('loads project config without a trust record when require_trust is false', async () => {
+    const { homeDir, workDir } = await setupProject();
+    await writeFile(join(homeDir, 'config.toml'), '[workspace]\nrequire_trust = false\n', 'utf-8');
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const session = await harness.createSession({ id: 'ses_project_mcp_config_trusted', workDir });
+      await expect(waitForMcpSettled(session)).resolves.toMatchObject([
+        { name: 'project', transport: 'stdio', status: 'connected' },
+      ]);
+    } finally {
+      await harness.close();
+    }
+  }, 15_000);
 });
 
 describe('standalone MCP check (connection result)', () => {

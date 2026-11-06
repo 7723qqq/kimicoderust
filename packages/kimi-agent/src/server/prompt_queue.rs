@@ -3,7 +3,7 @@
 //! prompts into the running turn. Mirrors the kap-server prompt-queue state
 //! machine (`running` / `queued` / `blocked`) that the REST contract exposes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -13,6 +13,7 @@ use crate::rpc::types::ContentBlock;
 use crate::server::engine::{ServerEngine, TurnReport};
 use crate::server::hub::EventHub;
 use crate::session::sqlite_store::SqliteSessionStore;
+use crate::session::wake::{WakePayload, WakeReplayHandler, WakeReplayStatus};
 
 /// The model input handed back to the turn loop when a prompt is admitted or
 /// promoted.
@@ -29,10 +30,22 @@ pub struct RunInput {
     pub prompt_events: bool,
 }
 
+enum PromptAdvance {
+    Run(RunInput),
+    Replay(WakePayload, WakeReplayHandler),
+    Idle,
+}
+
 #[derive(Default)]
 struct State {
     active: HashMap<String, Entry>,
     queued: HashMap<String, Vec<Entry>>,
+    /// Rich wakes interrupted by user input, replayed after the prompt FIFO
+    /// drains. Ordinary task notifications keep their existing semantics.
+    deferred_wakes: HashMap<String, Vec<WakePayload>>,
+    wake_replay_handlers: HashMap<(String, String), WakeReplayHandler>,
+    wake_replay_inflight: HashSet<(String, String)>,
+    wake_replay_errors: HashMap<(String, String), String>,
 }
 
 /// One active prompt plus a FIFO of queued prompts, keyed by session.
@@ -65,6 +78,9 @@ struct Entry {
     /// `prompt.aborted` the route already published — v2's `cancelWaiter`
     /// settles the item exactly once (loopService.ts:735-750).
     cancelled: bool,
+    /// Present only for caller-rendered rich wakes. The payload survives an
+    /// automatic user-prompt interruption so it can be replayed verbatim.
+    wake: Option<WakePayload>,
 }
 
 impl PromptQueue {
@@ -84,6 +100,7 @@ impl PromptQueue {
         origin: Option<Value>,
     ) -> (Value, Option<RunInput>) {
         let mut state = self.lock();
+        Self::defer_rich_wakes_locked(&mut state, session_id);
         let mut item = item;
         if state.active.contains_key(session_id) {
             item["status"] = json!("queued");
@@ -99,6 +116,7 @@ impl PromptQueue {
                     prompt_events: true,
                     turn_number: None,
                     cancelled: false,
+                    wake: None,
                 });
             (item, None)
         } else {
@@ -120,6 +138,7 @@ impl PromptQueue {
                     prompt_events: true,
                     turn_number: None,
                     cancelled: false,
+                    wake: None,
                 },
             );
             (item, Some(run))
@@ -135,41 +154,181 @@ impl PromptQueue {
     /// `None` means it queued behind an active prompt and the running driver
     /// promotes it through [`PromptQueue::advance`].
     pub fn admit_wake(&self, session_id: &str, text: String, origin: Value) -> Option<RunInput> {
+        self.admit_wake_entry(session_id, text, Vec::new(), Some(origin), None)
+            .1
+    }
+
+    /// Admit a caller-rendered rich wake. Unlike an ordinary task notification,
+    /// this entry participates in user-prompt interruption and replay.
+    pub fn admit_rich_wake(&self, session_id: &str, payload: WakePayload) -> Option<RunInput> {
+        self.admit_rich_wake_with_id(session_id, payload).1
+    }
+
+    /// Variant that also returns the wake id for explicit cancellation through
+    /// [`PromptQueue::cancel`]. Explicit cancellation discards; only automatic
+    /// user-prompt interruption requeues the payload.
+    pub fn admit_rich_wake_with_id(
+        &self,
+        session_id: &str,
+        payload: WakePayload,
+    ) -> (String, Option<RunInput>) {
+        let origin = payload.origin();
+        self.admit_wake_entry(
+            session_id,
+            payload.message.content.clone(),
+            payload.message.blocks.clone(),
+            Some(origin),
+            Some(payload),
+        )
+    }
+
+    fn admit_wake_entry(
+        &self,
+        session_id: &str,
+        prompt: String,
+        blocks: Vec<ContentBlock>,
+        origin: Option<Value>,
+        wake: Option<WakePayload>,
+    ) -> (String, Option<RunInput>) {
         let mut state = self.lock();
-        let item = json!({
-            "prompt_id": format!("wake-{}", fastrand::u64(..)),
-            "status": "queued",
-            "kind": "notification",
-            "created_at": chrono::Utc::now().to_rfc3339(),
-        });
-        let entry = Entry {
-            item: item.clone(),
-            prompt: text.clone(),
-            blocks: Vec::new(),
-            origin: Some(origin),
-            prompt_events: false,
-            turn_number: None,
-            cancelled: false,
-        };
+        let entry = Self::new_wake_entry(prompt, blocks, origin, wake);
+        let wake_id = item_id(&entry.item);
         if state.active.contains_key(session_id) {
             state
                 .queued
                 .entry(session_id.to_string())
                 .or_default()
                 .push(entry);
-            return None;
+            return (wake_id, None);
         }
-        let run = RunInput {
-            prompt_id: item_id(&item),
-            prompt: text,
-            blocks: Vec::new(),
-            origin: entry.origin.clone(),
-            prompt_events: false,
-        };
+        let run = Self::run_input(&entry);
         let mut entry = entry;
         entry.item["status"] = json!("running");
         state.active.insert(session_id.to_string(), entry);
-        Some(run)
+        (wake_id, Some(run))
+    }
+
+    fn new_wake_entry(
+        prompt: String,
+        blocks: Vec<ContentBlock>,
+        origin: Option<Value>,
+        wake: Option<WakePayload>,
+    ) -> Entry {
+        Entry {
+            item: json!({
+                "prompt_id": format!("wake-{}", fastrand::u64(..)),
+                "status": "queued",
+                "kind": "notification",
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            }),
+            prompt,
+            blocks,
+            origin,
+            prompt_events: false,
+            turn_number: None,
+            cancelled: false,
+            wake,
+        }
+    }
+
+    fn run_input(entry: &Entry) -> RunInput {
+        RunInput {
+            prompt_id: item_id(&entry.item),
+            prompt: entry.prompt.clone(),
+            blocks: entry.blocks.clone(),
+            origin: entry.origin.clone(),
+            prompt_events: entry.prompt_events,
+        }
+    }
+
+    fn defer_rich_wakes_locked(state: &mut State, session_id: &str) {
+        let deferred = state
+            .deferred_wakes
+            .entry(session_id.to_string())
+            .or_default();
+        if let Some(active) = state.active.get_mut(session_id)
+            && active.wake.is_some()
+            && !active.cancelled
+        {
+            active.cancelled = true;
+            active.item["status"] = json!("aborted");
+            deferred.push(active.wake.clone().expect("checked above"));
+        }
+        if let Some(queue) = state.queued.get_mut(session_id) {
+            let mut ordinary = Vec::with_capacity(queue.len());
+            for entry in queue.drain(..) {
+                if let Some(payload) = entry.wake {
+                    deferred.push(payload);
+                } else {
+                    ordinary.push(entry);
+                }
+            }
+            *queue = ordinary;
+        }
+    }
+
+    /// The expected server turn number of an active wake interrupted by a user
+    /// prompt. The caller passes it to `ServerEngine::cancel_turn_at`, which
+    /// refuses to cancel a newer turn if the wake ended in the meantime.
+    pub fn interrupted_wake_turn(&self, session_id: &str) -> Option<u32> {
+        let state = self.lock();
+        let active = state.active.get(session_id)?;
+        (active.wake.is_some() && active.cancelled)
+            .then_some(active.turn_number)
+            .flatten()
+    }
+
+    /// Whether the active rich wake was interrupted before its driver started
+    /// the turn. The run loop skips execution and immediately promotes the
+    /// queued user prompt in this case.
+    pub fn active_is_interrupted_wake(&self, session_id: &str) -> bool {
+        self.lock()
+            .active
+            .get(session_id)
+            .is_some_and(|entry| entry.wake.is_some() && entry.cancelled)
+    }
+
+    /// Discard a producer's whole wake channel, including deferred replays.
+    /// Returns whether anything was found and the active turn that now needs
+    /// cancellation, if it had already started.
+    pub fn drop_rich_wakes(&self, session_id: &str, variant: &str) -> (bool, Option<u32>) {
+        let mut state = self.lock();
+        let mut found = false;
+        let mut active_turn = None;
+        if let Some(active) = state.active.get_mut(session_id)
+            && active
+                .wake
+                .as_ref()
+                .is_some_and(|payload| payload.variant == variant)
+        {
+            found = true;
+            if !active.cancelled {
+                active.cancelled = true;
+                active.item["status"] = json!("aborted");
+                active_turn = active.turn_number;
+            }
+        }
+        if let Some(queue) = state.queued.get_mut(session_id) {
+            let before = queue.len();
+            queue.retain(|entry| {
+                entry
+                    .wake
+                    .as_ref()
+                    .is_none_or(|payload| payload.variant != variant)
+            });
+            found |= queue.len() != before;
+        }
+        if let Some(deferred) = state.deferred_wakes.get_mut(session_id) {
+            let before = deferred.len();
+            deferred.retain(|payload| payload.variant != variant);
+            found |= deferred.len() != before;
+        }
+        if found {
+            state
+                .wake_replay_errors
+                .remove(&(session_id.to_string(), variant.to_string()));
+        }
+        (found, active_turn)
     }
 
     /// `(active, queued)` wire items for the list route.
@@ -192,26 +351,114 @@ impl PromptQueue {
             .map(|entry| entry.item.clone())
     }
 
-    /// Promote the next queued prompt to active and return its run input, or
-    /// `None` when the queue is drained (the active slot is cleared by the
-    /// caller via [`PromptQueue::clear_active`]).
-    pub fn advance(&self, session_id: &str) -> Option<RunInput> {
+    /// Replace the replay owner for one session + variant. Deferred payloads
+    /// use the handler on their next advance; unregistered variants retain the
+    /// original direct replay.
+    pub fn set_wake_replay_handler(
+        &self,
+        session_id: &str,
+        variant: &str,
+        handler: WakeReplayHandler,
+    ) {
+        self.lock()
+            .wake_replay_handlers
+            .insert((session_id.to_string(), variant.to_string()), handler);
+    }
+
+    /// Inspect one channel's deferred/in-flight replay and last handler error.
+    pub fn wake_replay_status(&self, session_id: &str, variant: &str) -> Option<WakeReplayStatus> {
+        let state = self.lock();
+        let key = (session_id.to_string(), variant.to_string());
+        let pending = state.wake_replay_inflight.contains(&key)
+            || state
+                .deferred_wakes
+                .get(session_id)
+                .is_some_and(|deferred| deferred.iter().any(|payload| payload.variant == variant));
+        let error = state.wake_replay_errors.get(&key).cloned();
+        (pending || error.is_some()).then(|| WakeReplayStatus {
+            variant: variant.to_string(),
+            pending,
+            error,
+        })
+    }
+
+    /// Select the next runnable turn, or a delegated replay when its variant
+    /// has a handler. The queue lock is released before `advance_after_turn`
+    /// invokes that handler.
+    fn advance(&self, session_id: &str) -> PromptAdvance {
         let mut state = self.lock();
-        let next = match state.queued.get_mut(session_id) {
-            Some(queue) if !queue.is_empty() => queue.remove(0),
-            _ => return None,
+        let queued = match state.queued.get_mut(session_id) {
+            Some(queue) if !queue.is_empty() => Some(queue.remove(0)),
+            _ => None,
         };
-        let run = RunInput {
-            prompt_id: item_id(&next.item),
-            prompt: next.prompt.clone(),
-            blocks: next.blocks.clone(),
-            origin: next.origin.clone(),
-            prompt_events: next.prompt_events,
+        let next = match queued {
+            Some(entry) => entry,
+            None => {
+                let Some(payload) = state
+                    .deferred_wakes
+                    .get_mut(session_id)
+                    .filter(|deferred| !deferred.is_empty())
+                    .map(|deferred| deferred.remove(0))
+                else {
+                    return PromptAdvance::Idle;
+                };
+                let key = (session_id.to_string(), payload.variant.clone());
+                if let Some(handler) = state.wake_replay_handlers.get(&key).cloned() {
+                    state.wake_replay_inflight.insert(key);
+                    return PromptAdvance::Replay(payload, handler);
+                }
+                let origin = payload.origin();
+                Self::new_wake_entry(
+                    payload.message.content.clone(),
+                    payload.message.blocks.clone(),
+                    Some(origin),
+                    Some(payload),
+                )
+            }
         };
+        let run = Self::run_input(&next);
         let mut next = next;
         next.item["status"] = json!("running");
         state.active.insert(session_id.to_string(), next);
-        Some(run)
+        PromptAdvance::Run(run)
+    }
+
+    /// Advance after a completed turn, awaiting any delegated replay. Handler
+    /// success transfers ownership of re-enqueue to the handler. On failure the
+    /// original payload is restored and the error remains queryable; returning
+    /// `None` stops the current driver instead of spinning on the failure.
+    async fn advance_after_turn(&self, session_id: &str) -> Option<RunInput> {
+        loop {
+            let (payload, handler) = match self.advance(session_id) {
+                PromptAdvance::Run(run) => return Some(run),
+                PromptAdvance::Idle => return None,
+                PromptAdvance::Replay(payload, handler) => (payload, handler),
+            };
+            let variant = payload.variant.clone();
+            let result = handler(payload.clone()).await;
+            let mut state = self.lock();
+            state
+                .wake_replay_inflight
+                .remove(&(session_id.to_string(), variant.clone()));
+            match result {
+                Ok(()) => {
+                    state
+                        .wake_replay_errors
+                        .remove(&(session_id.to_string(), variant));
+                }
+                Err(error) => {
+                    state
+                        .deferred_wakes
+                        .entry(session_id.to_string())
+                        .or_default()
+                        .insert(0, payload);
+                    state
+                        .wake_replay_errors
+                        .insert((session_id.to_string(), variant), error);
+                    return None;
+                }
+            }
+        }
     }
 
     /// Settle a prompt by id (v2 `cancelWaiter`, loopService.ts:735-750): a
@@ -397,6 +644,21 @@ pub async fn run_prompt_loop(
     };
     let mut run = run;
     loop {
+        // A user prompt can interrupt an admitted wake before this driver gets
+        // its first poll. Such a wake never starts an engine turn; its payload
+        // is already deferred and replayed after the user queue drains.
+        if queue.active_is_interrupted_wake(&session_id) {
+            match queue.advance_after_turn(&session_id).await {
+                Some(next) => {
+                    run = next;
+                    continue;
+                }
+                None => {
+                    queue.clear_active(&session_id);
+                    break;
+                }
+            }
+        }
         let history = store.load_session_history(&session_id).unwrap_or_default();
         let turn_number = store.next_turn_number(&session_id).unwrap_or(1);
         // The live `event.message.created` id names this turn (`msg-u{turn}`);
@@ -473,7 +735,7 @@ pub async fn run_prompt_loop(
                 )
                 .await;
         }
-        match queue.advance(&session_id) {
+        match queue.advance_after_turn(&session_id).await {
             Some(next) => run = next,
             None => {
                 queue.clear_active(&session_id);
@@ -537,6 +799,14 @@ mod tests {
         })
     }
 
+    fn advance(queue: &PromptQueue, session_id: &str) -> Option<RunInput> {
+        match queue.advance(session_id) {
+            PromptAdvance::Run(run) => Some(run),
+            PromptAdvance::Idle => None,
+            PromptAdvance::Replay(_, _) => panic!(),
+        }
+    }
+
     #[test]
     fn first_prompt_runs_second_queues() {
         let queue = PromptQueue::new();
@@ -578,7 +848,7 @@ mod tests {
         );
         assert_eq!(queue.snapshot("s1").1.len(), 1);
 
-        let next = queue.advance("s1").expect("the queued wake is promoted");
+        let next = advance(&queue, "s1").expect("the queued wake is promoted");
         assert_eq!(next.prompt, "task done");
         assert!(!next.prompt_events, "a wake settles no client prompt");
         assert_eq!(next.origin.unwrap()["kind"], "task");
@@ -678,7 +948,7 @@ mod tests {
             queue.admit("s1", queued_base, "p2".into(), Vec::new(), Some(origin2));
         assert!(none.is_none());
 
-        let next = queue.advance("s1").expect("p2 promoted");
+        let next = advance(&queue, "s1").expect("p2 promoted");
         let origin = next.origin.unwrap();
         assert_eq!(origin["clientMetadata"][0]["surface"], "web");
     }
@@ -689,11 +959,11 @@ mod tests {
         queue.admit("s1", item("p1"), "p1".into(), Vec::new(), None);
         queue.admit("s1", item("p2"), "p2".into(), Vec::new(), None);
 
-        let next = queue.advance("s1").expect("p2 promoted");
+        let next = advance(&queue, "s1").expect("p2 promoted");
         assert_eq!(next.prompt, "p2");
         assert!(queue.active_is("s1", "p2"));
         assert_eq!(queue.snapshot("s1").0.unwrap()["status"], "running");
-        assert!(queue.advance("s1").is_none());
+        assert!(advance(&queue, "s1").is_none());
 
         queue.clear_active("s1");
         assert!(queue.snapshot("s1").0.is_none());
@@ -740,7 +1010,7 @@ mod tests {
         assert!(queue.active_is("s1", "p1"));
         assert!(!queue.active_is_cancelled("s1"));
         // Promotion skips the removed entry entirely.
-        assert!(queue.advance("s1").is_none());
+        assert!(advance(&queue, "s1").is_none());
     }
 
     /// The active prompt is flagged, not removed: its turn is still running
@@ -767,5 +1037,242 @@ mod tests {
         queue.admit("s1", item("p1"), "p1".into(), Vec::new(), None);
         assert!(queue.cancel("s1", "nope").is_none());
         assert!(queue.cancel("nope", "p1").is_none());
+    }
+
+    #[test]
+    fn user_prompt_interrupts_active_rich_wake_and_requeues_it_afterward() {
+        let queue = PromptQueue::new();
+        let payload = crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            crate::turn_loop::types::LLMMessage {
+                role: "user".into(),
+                content: "caller-rendered wake".into(),
+                ..Default::default()
+            },
+        );
+        let wake = queue
+            .admit_rich_wake("s1", payload)
+            .expect("an idle session starts the wake");
+        assert!(!wake.prompt_events);
+        let origin = wake.origin.expect("the wake carries its injection origin");
+        assert_eq!(origin["kind"], "injection");
+        assert_eq!(origin["variant"], "tower_inbox");
+        queue.stamp_active_turn("s1", 7);
+
+        let (_, user) = queue.admit("s1", item("p1"), "user".into(), Vec::new(), None);
+        assert!(
+            user.is_none(),
+            "the user queues behind the interrupted wake"
+        );
+        assert_eq!(queue.interrupted_wake_turn("s1"), Some(7));
+        assert!(queue.active_is_cancelled("s1"));
+
+        let user = advance(&queue, "s1").expect("the user turn follows the wake");
+        assert_eq!(user.prompt_id, "p1");
+        let replay = advance(&queue, "s1").expect("the wake is requeued after the user turn");
+        assert_eq!(replay.prompt, "caller-rendered wake");
+        assert_eq!(replay.origin.unwrap()["variant"], "tower_inbox");
+        assert!(!replay.prompt_events);
+    }
+
+    #[test]
+    fn user_prompt_removes_queued_rich_wake_and_replays_it_after_user_turns() {
+        let queue = PromptQueue::new();
+        queue.admit("s1", item("p1"), "first".into(), Vec::new(), None);
+        let payload = crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            crate::turn_loop::types::LLMMessage {
+                role: "user".into(),
+                content: "queued wake".into(),
+                ..Default::default()
+            },
+        );
+        assert!(queue.admit_rich_wake("s1", payload).is_none());
+        queue.admit("s1", item("p2"), "second".into(), Vec::new(), None);
+
+        let second = advance(&queue, "s1").expect("the second user turn is next");
+        assert_eq!(second.prompt_id, "p2");
+        let replay = advance(&queue, "s1").expect("the queued wake replays after both user turns");
+        assert_eq!(replay.prompt, "queued wake");
+        assert!(!replay.prompt_events);
+    }
+
+    #[test]
+    fn drop_rich_wakes_discards_deferred_replay_by_variant() {
+        let queue = PromptQueue::new();
+        queue.admit("s1", item("p1"), "first".into(), Vec::new(), None);
+        let payload = crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            crate::turn_loop::types::LLMMessage {
+                role: "user".into(),
+                content: "discarded wake".into(),
+                ..Default::default()
+            },
+        );
+        assert!(queue.admit_rich_wake("s1", payload).is_none());
+        queue.admit("s1", item("p2"), "second".into(), Vec::new(), None);
+        assert_eq!(advance(&queue, "s1").unwrap().prompt_id, "p2");
+
+        assert_eq!(queue.drop_rich_wakes("s1", "tower_inbox"), (true, None));
+        assert_eq!(queue.drop_rich_wakes("s1", "tower_inbox"), (false, None));
+        assert!(advance(&queue, "s1").is_none());
+    }
+
+    #[tokio::test]
+    async fn replay_handler_receives_original_payload_without_direct_requeue() {
+        let queue = PromptQueue::new();
+        let payload = crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            crate::turn_loop::types::LLMMessage {
+                role: "user".into(),
+                content: "original server wake".into(),
+                ..Default::default()
+            },
+        );
+        let expected = payload.clone();
+        queue.admit_rich_wake("s1", payload).unwrap();
+        queue.stamp_active_turn("s1", 7);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let handler_seen = seen.clone();
+        queue.set_wake_replay_handler(
+            "s1",
+            "tower_inbox",
+            Arc::new(move |payload| {
+                let handler_seen = handler_seen.clone();
+                Box::pin(async move {
+                    handler_seen.lock().unwrap().push(payload);
+                    Ok(())
+                })
+            }),
+        );
+        queue.admit("s1", item("p1"), "user".into(), Vec::new(), None);
+
+        let user = queue
+            .advance_after_turn("s1")
+            .await
+            .expect("the user turn follows the interrupted wake");
+        assert_eq!(user.prompt_id, "p1");
+        assert!(
+            queue.advance_after_turn("s1").await.is_none(),
+            "the handler, not the queue, owns the replay"
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].message.content, expected.message.content);
+        assert_eq!(seen[0].items, expected.items);
+        assert_eq!(seen[0].gate_digests, expected.gate_digests);
+    }
+
+    #[tokio::test]
+    async fn replay_handler_error_retains_server_payload_and_exposes_status() {
+        let queue = PromptQueue::new();
+        let payload = crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            crate::turn_loop::types::LLMMessage {
+                role: "user".into(),
+                content: "server wake retained after failure".into(),
+                ..Default::default()
+            },
+        );
+        queue.admit_rich_wake("s1", payload).unwrap();
+        queue.stamp_active_turn("s1", 7);
+        queue.set_wake_replay_handler(
+            "s1",
+            "tower_inbox",
+            Arc::new(|_payload| Box::pin(async { Err("server replay failed".to_string()) })),
+        );
+        queue.admit("s1", item("p1"), "user".into(), Vec::new(), None);
+        assert_eq!(
+            queue.advance_after_turn("s1").await.unwrap().prompt_id,
+            "p1"
+        );
+        assert!(queue.advance_after_turn("s1").await.is_none());
+
+        let status = queue
+            .wake_replay_status("s1", "tower_inbox")
+            .expect("the failed server replay remains observable");
+        assert!(status.pending);
+        assert_eq!(status.error.as_deref(), Some("server replay failed"));
+    }
+
+    #[tokio::test]
+    async fn http_wake_driver_preserves_enqueue_error_kind() {
+        use crate::session::wake::TowerWakeDriver as _;
+
+        let server = Arc::new(crate::server::HttpServer::in_memory().unwrap());
+        server.store().create_session("s1", None).unwrap();
+        let driver = crate::server::HttpServerWakeDriver::new(server.clone());
+        let error = driver
+            .enqueue(
+                "s1",
+                crate::session::wake::WakePayload::new(
+                    "tower_inbox",
+                    crate::turn_loop::types::LLMMessage::default(),
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            format!("{:?}", crate::server::WakeEnqueueError::EngineUnavailable)
+        );
+        let error = driver
+            .enqueue(
+                "missing",
+                crate::session::wake::WakePayload::new(
+                    "tower_inbox",
+                    crate::turn_loop::types::LLMMessage::default(),
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            format!("{:?}", crate::server::WakeEnqueueError::SessionNotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn http_driver_forwards_replay_handler_and_status() {
+        use crate::session::wake::TowerWakeDriver as _;
+
+        let server = Arc::new(crate::server::HttpServer::in_memory().unwrap());
+        let driver = crate::server::HttpServerWakeDriver::new(server.clone());
+        driver.set_replay_handler(
+            "s1",
+            "tower_inbox",
+            Arc::new(|_payload| Box::pin(async { Err("http driver replay failed".to_string()) })),
+        );
+        let payload = crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            crate::turn_loop::types::LLMMessage {
+                role: "user".into(),
+                content: "http driver retained wake".into(),
+                ..Default::default()
+            },
+        );
+        server.prompt_queue.admit_rich_wake("s1", payload).unwrap();
+        server.prompt_queue.stamp_active_turn("s1", 7);
+        server
+            .prompt_queue
+            .admit("s1", item("p1"), "user".into(), Vec::new(), None);
+        assert_eq!(
+            server
+                .prompt_queue
+                .advance_after_turn("s1")
+                .await
+                .unwrap()
+                .prompt_id,
+            "p1"
+        );
+        assert!(server.prompt_queue.advance_after_turn("s1").await.is_none());
+
+        let status = driver
+            .wake_replay_status("s1", "tower_inbox")
+            .expect("the HTTP driver forwards replay status");
+        assert!(status.pending);
+        assert_eq!(status.error.as_deref(), Some("http driver replay failed"));
+        assert_eq!(
+            status,
+            server.wake_replay_status("s1", "tower_inbox").unwrap()
+        );
     }
 }

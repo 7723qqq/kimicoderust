@@ -582,6 +582,9 @@ const NOTIFY_USER_DESCRIPTION: &str = r#"Show the end user a short progress upda
 - Do not use an update to ask questions, request decisions, or deliver the final answer. Subagents must leave questions for the parent agent in their handoff.
 "#;
 
+/// The tool name the nudge streak scans for (`NOTIFY_USER_TOOL_NAME` upstream).
+pub const NOTIFY_USER_TOOL_NAME: &str = "NotifyUser";
+
 /// Tool definition for the native NotifyUser tool.
 pub fn notify_user_tool_def() -> ToolInfo {
     ToolInfo {

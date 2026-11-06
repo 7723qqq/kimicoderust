@@ -39,6 +39,107 @@ use crate::turn_loop::types::LLMMessage;
 /// its next cooperative point before returning (v2 `SIGTERM_GRACE_MS`).
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
+const PARTIAL_OUTPUT_MAX_CHARS: usize = 32 * 1024;
+const PARTIAL_OUTPUT_NOTICE: &str = "[partial output] The subagent did not finish this run. Below is the text it wrote before it ended; it is incomplete and unverified.";
+const PARTIAL_OUTPUT_TRUNCATED_MARKER: &str = "[earlier text truncated]";
+
+/// Public assistant text streamed by one subagent run. Retried attempts are
+/// discarded and only the most recent 32K Unicode code points are retained.
+#[derive(Default)]
+struct RunOutput {
+    turn_id: Option<String>,
+    steps: Vec<String>,
+    length: usize,
+    truncated: bool,
+}
+
+impl RunOutput {
+    fn accepts_turn(&self, turn_id: &str) -> bool {
+        self.turn_id
+            .as_deref()
+            .is_none_or(|current| current == turn_id)
+    }
+
+    fn bind_turn(&mut self, turn_id: &str) {
+        if self.turn_id.is_none() {
+            self.turn_id = Some(turn_id.to_string());
+        }
+    }
+
+    fn start_step(&mut self, turn_id: &str) {
+        if !self.accepts_turn(turn_id) {
+            return;
+        }
+        self.bind_turn(turn_id);
+        self.steps.push(String::new());
+    }
+
+    fn append(&mut self, turn_id: &str, delta: &str) {
+        if !self.accepts_turn(turn_id) {
+            return;
+        }
+        self.bind_turn(turn_id);
+        if self.steps.is_empty() {
+            self.steps.push(String::new());
+        }
+        self.steps.last_mut().unwrap().push_str(delta);
+        self.length += delta.chars().count();
+        if self.length > PARTIAL_OUTPUT_MAX_CHARS * 2 {
+            self.drop_head(self.length - PARTIAL_OUTPUT_MAX_CHARS);
+        }
+    }
+
+    fn discard_step(&mut self, turn_id: &str) {
+        if !self.accepts_turn(turn_id) {
+            return;
+        }
+        if let Some(last) = self.steps.last_mut() {
+            self.length = self.length.saturating_sub(last.chars().count());
+            last.clear();
+        }
+    }
+
+    fn drop_head(&mut self, excess: usize) {
+        self.truncated = true;
+        let mut remaining = excess;
+        while self.steps.len() > 1 {
+            let first_len = self.steps[0].chars().count();
+            if first_len > remaining {
+                break;
+            }
+            self.steps.remove(0);
+            self.length = self.length.saturating_sub(first_len);
+            remaining -= first_len;
+        }
+        if remaining == 0 || self.steps.is_empty() {
+            return;
+        }
+        let first_len = self.steps[0].chars().count();
+        let dropped = remaining.min(first_len);
+        let kept = self.steps[0].chars().skip(dropped).collect();
+        self.steps[0] = kept;
+        self.length = self.length.saturating_sub(dropped);
+    }
+
+    fn render(&self) -> String {
+        let text = self
+            .steps
+            .iter()
+            .map(|step| step.trim())
+            .filter(|step| !step.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let length = text.chars().count();
+        let dropped = length.saturating_sub(PARTIAL_OUTPUT_MAX_CHARS);
+        let kept = text.chars().skip(dropped).collect::<String>();
+        if kept.is_empty() || (!self.truncated && dropped == 0) {
+            kept
+        } else {
+            format!("{PARTIAL_OUTPUT_TRUNCATED_MARKER}\n{kept}")
+        }
+    }
+}
+
 /// The runner's view of a task's status; the wire strings match the v2
 /// task domain (`running` / `completed` / `killed` / `lost`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +254,9 @@ struct TaskEntry {
     ended_at: Option<u64>,
     stop_reason: Option<String>,
     output: Option<String>,
+    /// Live public text for a running subagent; rendered only if the run ends
+    /// without a normal completion.
+    partial_output: RunOutput,
     /// Which session spawned the task (`event.task.*` lane routing).
     session_id: Option<String>,
     /// `subagent` | `bash` | `tool`.
@@ -409,8 +513,9 @@ impl TaskRunner {
 
     /// Register a background task and spawn it on the current tokio
     /// runtime. The task's output is snapshotted when it completes; a
-    /// `stop()` that lands before completion settles the task as
-    /// `killed` with no output. The runner must be shared (`Arc`) so the
+    /// `stop()` that lands before completion settles the task as `killed`,
+    /// preserving any public partial output captured for a subagent. The
+    /// runner must be shared (`Arc`) so the
     /// spawned wrapper can settle the entry.
     ///
     /// Takes a plain `String` because this shape has no failure notion: the
@@ -484,6 +589,7 @@ impl TaskRunner {
             ended_at: None,
             stop_reason: None,
             output: None,
+            partial_output: RunOutput::default(),
             session_id: meta.session_id.map(str::to_string),
             kind: meta.kind.to_string(),
             subagent_type: meta.subagent_type.map(str::to_string),
@@ -702,13 +808,27 @@ impl TaskRunner {
         let mut queued = false;
         for notification in notifications {
             if !self.session_alive(notification.session_id.as_deref()) {
+                // v2 `notifyAgentTask`'s `lifecycleActive` guard, surfaced
+                // (upstream #4280).
+                tracing::warn!(
+                    task_id = %notification.task_id,
+                    status = %notification.status.as_str(),
+                    "task notification skipped: agent lifecycle inactive"
+                );
                 continue;
             }
             let mut queue = self.pending_notifications.lock().unwrap();
             let duplicate = queue.iter().any(|queued| {
                 queued.task_id == notification.task_id && queued.status == notification.status
             });
-            if !duplicate {
+            if duplicate {
+                // v2 `scheduledNotificationKeys` redelivery suppression,
+                // surfaced at debug (upstream #4280).
+                tracing::debug!(
+                    task_id = %notification.task_id,
+                    "task notification already scheduled; in-process redelivery suppressed"
+                );
+            } else {
                 queue.push(notification);
                 queued = true;
             }
@@ -727,9 +847,83 @@ impl TaskRunner {
         ))
     }
 
+    /// Capture public stream events for the running subagent task that owns
+    /// `agent_id`. Main-agent events and already-settled tasks are ignored.
+    pub(crate) fn observe_subagent_event(&self, event: &Value) {
+        let Some(agent_id) = event
+            .get("agent_id")
+            .or_else(|| event.get("agentId"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let event_type = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let turn_id = event
+            .get("turn_id")
+            .or_else(|| event.get("turnId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if turn_id.is_empty() {
+            return;
+        }
+        let mut tasks = self.tasks.lock().unwrap();
+        for entry in tasks.values_mut().filter(|entry| {
+            entry.status == TaskStatus::Running
+                && entry.kind == "subagent"
+                && entry.agent_id.as_deref() == Some(agent_id)
+        }) {
+            match event_type {
+                "llm.step.begin" => entry.partial_output.start_step(turn_id),
+                "llm.delta" => {
+                    let part = event.get("part");
+                    if part
+                        .and_then(|part| part.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("text")
+                        && let Some(text) = part
+                            .and_then(|part| part.get("text"))
+                            .and_then(Value::as_str)
+                    {
+                        entry.partial_output.append(turn_id, text);
+                    }
+                }
+                "assistant.delta" => {
+                    if let Some(text) = event.get("delta").and_then(Value::as_str) {
+                        entry.partial_output.append(turn_id, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A retry invalidates only the current step attempt of the matching run.
+    pub(crate) fn observe_subagent_telemetry(&self, event: &Value) {
+        if event.get("event").and_then(Value::as_str) != Some("TurnStepRetrying") {
+            return;
+        }
+        let Some(turn_id) = event
+            .get("turn_id")
+            .or_else(|| event.get("turnId"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let mut tasks = self.tasks.lock().unwrap();
+        for entry in tasks
+            .values_mut()
+            .filter(|entry| entry.status == TaskStatus::Running && entry.kind == "subagent")
+        {
+            entry.partial_output.discard_step(turn_id);
+        }
+    }
+
     /// The output snapshot of a settled task; `None` while the task is
-    /// still running (or unknown), and for tasks that were stopped
-    /// before completing.
+    /// still running (or unknown), or when a stopped subagent produced no
+    /// public assistant text.
     pub fn get_output(&self, id: &str) -> Option<String> {
         let tasks = self.tasks.lock().unwrap();
         let entry = tasks.get(id)?;
@@ -756,7 +950,16 @@ impl TaskRunner {
                 return Err(format!("Task not found: {id}"));
             };
             if entry.status != TaskStatus::Running {
-                return Ok(self.entry_wire(entry));
+                let mut wire = self.entry_wire(entry);
+                if entry.kind == "subagent"
+                    && let Some(object) = wire.as_object_mut()
+                {
+                    // A repeated subagent TaskStop does not deliver the same
+                    // output again; TaskOutput remains the persisted read path.
+                    object.remove("output");
+                    object.remove("outputPath");
+                }
+                return Ok(wire);
             }
             if entry.stop_reason.is_none() {
                 let reason = reason
@@ -975,7 +1178,20 @@ impl TaskRunner {
             };
             entry.status = status;
             entry.ended_at = Some(now_ms());
-            entry.output = output;
+            let partial = if entry.kind == "subagent" && status != TaskStatus::Completed {
+                entry.partial_output.render()
+            } else {
+                String::new()
+            };
+            let partial =
+                (!partial.is_empty()).then(|| format!("{PARTIAL_OUTPUT_NOTICE}\n\n{partial}"));
+            entry.output = match (output, partial) {
+                (Some(output), _) if output.contains("[partial output]") => Some(output),
+                (Some(output), Some(partial)) => Some(format!("{output}\n\n{partial}")),
+                (Some(output), None) => Some(output),
+                (None, partial) => partial,
+            };
+            entry.partial_output = RunOutput::default();
             if let Some(reason) = stop_reason {
                 entry.stop_reason = Some(reason);
             }
@@ -1031,10 +1247,9 @@ impl TaskRunner {
                         .await;
                 });
             }
-            self.pending_notifications
-                .lock()
-                .unwrap()
-                .push(TaskNotification {
+            let pending = {
+                let mut queue = self.pending_notifications.lock().unwrap();
+                queue.push(TaskNotification {
                     task_id: id.to_string(),
                     description,
                     status,
@@ -1043,7 +1258,25 @@ impl TaskRunner {
                     ended_at,
                     session_id: session_id.clone(),
                 });
+                queue.len()
+            };
+            // v2 `loop.notify`'s buffered-arm debug (upstream #4280): the
+            // notification sits in the queue until the owning session's pump
+            // drains it into a turn.
+            tracing::debug!(
+                task_id = %id,
+                pending,
+                "loop notify buffered before reaching the machine"
+            );
             self.ring_notification_bell();
+        } else {
+            // v2 `notifyAgentTask`'s `lifecycleActive` guard, surfaced
+            // (upstream #4280): the drop itself must be visible.
+            tracing::warn!(
+                task_id = %id,
+                status = %status.as_str(),
+                "task notification skipped: agent lifecycle inactive"
+            );
         }
         // Terminal facts, both vocabularies (mappers + projector). Same
         // liveness gate as v2's `recordTaskTerminated`: a session teardown
@@ -1069,6 +1302,13 @@ impl TaskRunner {
                     "status": status.as_str(),
                     "kind": kind,
                 }),
+            );
+        } else {
+            // v2 `recordTaskTerminated`'s guard, surfaced (upstream #4280).
+            tracing::warn!(
+                task_id = %id,
+                status = %status.as_str(),
+                "task terminal event dropped: agent lifecycle inactive"
             );
         }
     }
@@ -1100,6 +1340,14 @@ impl TaskRunner {
             }
         }
         *queue = kept;
+        if !taken.is_empty() {
+            // v2 `consumeNudges`'s drained-arm debug (upstream #4280).
+            tracing::debug!(
+                live = taken.len(),
+                remaining = queue.len(),
+                "loop consumed drained notifications"
+            );
+        }
         taken
     }
 
@@ -1163,6 +1411,12 @@ impl TaskRunner {
     /// TaskList/TaskOutput.
     pub fn enqueue_wake(&self, session_id: &str, task_id: &str, description: String) {
         if !self.session_alive(Some(session_id)) {
+            // Same lifecycle guard as `settle_task`'s notification arm,
+            // surfaced (upstream #4280).
+            tracing::warn!(
+                task_id = %task_id,
+                "task notification skipped: agent lifecycle inactive"
+            );
             return;
         }
         let mut queue = self.pending_notifications.lock().unwrap();
@@ -1252,6 +1506,14 @@ impl TaskRunner {
         }
         if let Some(output) = &entry.output {
             obj.insert("output".into(), json!(output));
+            if entry.kind == "subagent"
+                && let Some(store) = &self.store
+            {
+                obj.insert(
+                    "outputPath".into(),
+                    json!(store.task_output_path(&entry.id).to_string_lossy()),
+                );
+            }
         }
         // The spawning session: the task domain is workspace-scoped, so
         // per-session history pages filter on this field.

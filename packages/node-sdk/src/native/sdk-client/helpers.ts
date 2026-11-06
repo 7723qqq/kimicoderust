@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import type { EngineSessionHandle, SessionPrompt } from '@moonshot-ai/kimi-agent/session-handle';
@@ -36,6 +36,53 @@ import { resolveModelContextWindow, type JsNativeLlmConfig } from '../native-llm
  * Map the engine's snake_case usage payload onto the protocol's camelCase
  * {@link TokenUsage}. Returns `undefined` when the engine reported none.
  */
+/**
+ * Per-turn cache-hit aggregation (upstream `prompt_cache_probe` /
+ * `cacheProbe.ts`, the host-aggregation half of #4179). The engine reports
+ * `input_cache_read` / `input_cache_creation` / `input_tokens` on every
+ * addressed `llm.step.end`; folding them here and reporting one record per
+ * turn keeps the probe out of the engine and gives the hit rate the same
+ * denominator upstream uses (total input, not cacheable input).
+ */
+export interface CacheUsageAggregate {
+  inputTokens: number;
+  cacheRead: number;
+  cacheCreation: number;
+  output: number;
+}
+
+export class CacheUsageAggregator {
+  private agg: CacheUsageAggregate | undefined;
+
+  /** A new turn: drop whatever the previous turn accumulated. */
+  reset(): void {
+    this.agg = undefined;
+  }
+
+  /** Fold one step's usage. A step without usage contributes nothing. */
+  add(usage: TokenUsage | undefined): void {
+    if (usage === undefined) return;
+    this.agg ??= { inputTokens: 0, cacheRead: 0, cacheCreation: 0, output: 0 };
+    this.agg.inputTokens += usage.inputOther + usage.inputCacheRead + usage.inputCacheCreation;
+    this.agg.cacheRead += usage.inputCacheRead;
+    this.agg.cacheCreation += usage.inputCacheCreation;
+    this.agg.output += usage.output;
+  }
+
+  /**
+   * The turn's probe record, or `undefined` when nothing was measured (no
+   * step carried usage). `cache_hit_rate` uses total input as the
+   * denominator — a denominator of zero (a provider that reports only cache
+   * fields) reports 0 rather than a lie.
+   */
+  settle(): (CacheUsageAggregate & { cacheHitRate: number }) | undefined {
+    const agg = this.agg;
+    if (agg === undefined || agg.inputTokens <= 0) return undefined;
+    this.agg = undefined;
+    return { ...agg, cacheHitRate: agg.cacheRead / agg.inputTokens };
+  }
+}
+
 export function toTokenUsage(raw: unknown): TokenUsage | undefined {
   if (raw === null || typeof raw !== 'object') return undefined;
   const usage = raw as Record<string, unknown>;
@@ -508,35 +555,6 @@ export function normalizeRequiredWorkDir(operation: string, workDir: unknown): s
     throw new KimiError(ErrorCodes.REQUEST_WORK_DIR_REQUIRED, `${operation} requires workDir`);
   }
   return posixPath(resolve(workDir));
-}
-
-/**
- * v2 keys a workspace trust record by the canonical root
- * (`trustRecord.trustKey`), so one directory matches however the caller spelled
- * it. Comparing the raw strings instead made a trusted workspace read as
- * untrusted — silently dropping the roots its `local.toml` asks for — whenever
- * the two spellings differed in separators or drive case.
- *
- * The key is the *real* path, not a normalized string: a symlink or junction
- * spelled one way today and another tomorrow names the same directory, and a
- * junction retargeted later would otherwise keep the trust its old target had.
- * `realpathSync.native` also collapses Windows' 8.3 short names, which are a
- * different string for the same directory.
- *
- * A path that cannot be resolved falls back to its absolute normalized form:
- * a workspace deleted after being trusted still has to match its stored entry
- * (and a missing path is never a *different* directory we would trust instead).
- */
-export function workspaceTrustKey(root: string): string {
-  const absolute = resolve(root);
-  let real: string;
-  try {
-    real = realpathSync.native(absolute);
-  } catch {
-    real = absolute;
-  }
-  const canonical = posixPath(real).replace(/\/+$/, '');
-  return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
 }
 
 /**

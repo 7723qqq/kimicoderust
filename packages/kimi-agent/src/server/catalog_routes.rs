@@ -334,10 +334,14 @@ impl HttpServer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn format_wire_session(
     session: &crate::session::sqlite_store::SessionSummary,
     store: &SqliteSessionStore,
     engine: Option<&Arc<ServerEngine>>,
+    // The resolved default-workspace root, when the host knows it. `None`
+    // (an embedder that never resolves one) answers `is_default: false`.
+    default_root: Option<&Path>,
 ) -> Value {
     let session_id = &session.session_id;
     let busy = engine.map(|e| e.is_busy(session_id)).unwrap_or(false);
@@ -429,10 +433,25 @@ pub(super) fn format_wire_session(
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
 
+    // Upstream #4224: `is_default` rides every workspace payload (REST and
+    // WS events) so a client can badge "the default workspace" without
+    // knowing where it resolves to. The root comes from the caller: this
+    // function is sync and config-free on purpose (nine call sites, all in
+    // async methods that already hold or can cheaply clone the config).
+    let is_default = default_root
+        .map(|root| {
+            crate::default_workspace::is_default_root_resolved(
+                &ws_id_root(&ws_id, store).unwrap_or_else(|| cwd.clone()),
+                root,
+            )
+        })
+        .unwrap_or(false);
+
     json!({
         "id": session_id,
         "session_id": session_id,
         "workspace_id": ws_id,
+        "is_default": is_default,
         "title": session.title.as_deref().unwrap_or(""),
         "created_at": created_iso,
         "updated_at": updated_iso,
@@ -463,4 +482,9 @@ pub(super) fn format_wire_session(
         // optional and its own doc says it is "when the session is live".
         "last_turn_reason": store.last_turn_reason(session_id)
     })
+}
+
+/// The root a workspace id refers to, for the `is_default` comparison.
+fn ws_id_root(ws_id: &str, store: &SqliteSessionStore) -> Option<String> {
+    store.get_workspace(ws_id).ok().flatten().map(|w| w.root)
 }

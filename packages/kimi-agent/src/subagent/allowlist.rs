@@ -134,6 +134,7 @@ mod tests {
                     system_prompt: String::new(),
                     tools: tools.iter().map(|t| t.to_string()).collect(),
                     disallowed_tools: vec![],
+                    when_to_use: None,
                     prompt_prefix: None,
                     summary_policy: None,
                     model: None,

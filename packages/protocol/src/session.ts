@@ -111,6 +111,10 @@ export const sessionSchema = z.object({
    *  reason is cancelled/failed). */
   last_turn_reason: z.enum(['completed', 'cancelled', 'failed']).optional(),
   archived: z.boolean().optional(),
+  /** True when the session's workspace *is* the default workspace
+   *  (`~/KimiCode/Default` or `[default_workspace] path`). Absent for older
+   *  servers (upstream #4224). */
+  is_default: z.boolean().optional(),
   /** When the session was archived (ISO 8601); absent for sessions archived
    *  before the field existed — clients fall back to `updated_at`. */
   archived_at: isoDateTimeSchema.optional(),
@@ -132,6 +136,10 @@ export const sessionCreateSchema = z.object({
   metadata: sessionMetadataSchema.optional(),
   agent_config: sessionAgentConfigPartialSchema.optional(),
   workspace_id: workspaceIdSchema.optional(),
+  /** Place the session in the default workspace (`~/KimiCode/Default` or
+   *  `[default_workspace] path`). Exclusive with `workspace_id` and
+   *  `metadata` (upstream #4224). */
+  default_workspace: z.boolean().optional(),
 });
 
 export type SessionCreate = z.infer<typeof sessionCreateSchema>;

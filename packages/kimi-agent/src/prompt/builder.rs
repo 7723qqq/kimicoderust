@@ -45,6 +45,10 @@ pub struct SystemPromptBuilder {
     /// Extra skill scan roots (`extra_skill_dirs`): the listed skills must
     /// match what the `Skill` tool can load.
     skill_dirs: Vec<PathBuf>,
+    /// Plugin-contributed skill roots with their identity: scanned under
+    /// qualified `<plugin_id>:<skill>` names (v2 `registerPluginSkill`), so
+    /// the section advertises exactly what the `Skill` tool resolves.
+    plugin_skill_dirs: Vec<crate::skills::PluginSkillDir>,
     /// `merge_all_available_skills` (schema): whether a scope group scans
     /// every directory it declares or only its first existing one. Defaults
     /// to the documented `true`.
@@ -69,6 +73,7 @@ impl SystemPromptBuilder {
             plugin_sections: None,
             additional_dirs: Vec::new(),
             skill_dirs: Vec::new(),
+            plugin_skill_dirs: Vec::new(),
             merge_all_available_skills: true,
             notify_user_active: false,
             todo_list_active: false,
@@ -106,6 +111,15 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn with_skill_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.skill_dirs = dirs;
+        self
+    }
+
+    /// Plugin-contributed skill roots (v2 `manager.pluginSkillRoots`): scanned
+    /// under qualified `<plugin_id>:<skill>` names, matching the `Skill`
+    /// tool's scan (`NativeToolset::with_skill_scan`).
+    #[must_use]
+    pub fn with_plugin_skill_dirs(mut self, dirs: Vec<crate::skills::PluginSkillDir>) -> Self {
+        self.plugin_skill_dirs = dirs;
         self
     }
 
@@ -239,6 +253,7 @@ impl SystemPromptBuilder {
             generate_skills_section_with_options(
                 Some(&self.workspace_root),
                 &self.skill_dirs,
+                &self.plugin_skill_dirs,
                 self.merge_all_available_skills,
             )
         };

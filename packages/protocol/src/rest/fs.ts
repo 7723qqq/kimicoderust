@@ -37,13 +37,25 @@
  *                                      elapsed_ms }
  *     Errors: 40401, 41303, 41304, 41305 (>30s grep timeout)
  *   POST /v1/sessions/{sid}/fs:git_status
- *     Body: FsGitStatusRequest  { paths? }
+ *     Body: FsGitStatusRequest  { root?, paths?, include_pull_request? }
  *     Response data: FsGitStatusResponse  { branch, ahead, behind, entries,
  *                                           additions, deletions }
  *     Errors: 40401, 40908 (not a git repo), 41304
  *
+ *   POST /v1/sessions/{sid}/fs:git_status:batch
+ *     Body: FsGitStatusBatchRequest  { roots (1..32), include_pull_request? }
+ *     Response data: FsGitStatusBatchResponse  { results, errors }
+ *
+ *   POST /v1/sessions/{sid}/fs:pull_request
+ *     Body: FsPullRequestRequest  { root? }
+ *     Response data: FsPullRequest | null
+ *
+ *   POST /v1/sessions/{sid}/fs:pull_request:batch
+ *     Body: FsPullRequestBatchRequest  { roots (1..32) }
+ *     Response data: FsPullRequestBatchResponse  { results, errors }
+ *
  *   POST /v1/sessions/{sid}/fs:diff
- *     Body: FsDiffRequest  { path }
+ *     Body: FsDiffRequest  { path, root? }
  *     Response data: FsDiffResponse  { path, diff, truncated }
  *     Errors: 40401, 40409, 40908 (not a git repo), 41304
  *
@@ -91,6 +103,13 @@ export const fsListRequestSchema = z.object({
   show_hidden: z.boolean().default(false),
   follow_gitignore: z.boolean().default(true),
   exclude_globs: z.array(z.string()).optional(),
+  // Globs to show even when gitignored (e.g. `.tmp`). Ignored ancestor
+  // directories of a match stay reachable; allowing dot-paths additionally
+  // requires `show_hidden: true` (v2 #4058).
+  allow_ignored_globs: z.array(z.string()).optional(),
+  // Follow symlinked directories whose targets are outside the workspace
+  // (v2 #4457). Default `false`.
+  allow_external_symlinks: z.boolean().optional(),
   sort: fsListSortSchema.default('type_first'),
   include_git_status: z.boolean().default(false),
 });
@@ -112,6 +131,9 @@ export const fsReadRequestSchema = z.object({
   offset: z.number().int().nonnegative().default(0),
   length: z.number().int().min(1).max(10_485_760).default(1_048_576),
   encoding: fsReadEncodingRequestSchema.default('auto'),
+  // Allow reading through symlinks whose targets are outside the workspace
+  // (v2 #4457). Default `false`.
+  allow_external_symlinks: z.boolean().optional(),
 });
 export type FsReadRequest = z.infer<typeof fsReadRequestSchema>;
 
@@ -286,7 +308,13 @@ export const fsGrepResponseSchema = z.object({
 export type FsGrepResponse = z.infer<typeof fsGrepResponseSchema>;
 
 export const fsGitStatusRequestSchema = z.object({
+  // Folder scope: run the query at this workspace-relative directory instead
+  // of the session root; entries come back relative to it (v2 #4527).
+  root: z.string().min(1).optional(),
   paths: z.array(z.string().min(1)).optional(),
+  // Whether the response should look up the branch's pull request. Default
+  // `true`; the fork's server never performs the lookup either way.
+  include_pull_request: z.boolean().optional(),
 });
 export type FsGitStatusRequest = z.infer<typeof fsGitStatusRequestSchema>;
 
@@ -316,6 +344,8 @@ export type FsGitStatusResponse = z.infer<typeof fsGitStatusResponseSchema>;
 
 export const fsDiffRequestSchema = z.object({
   path: z.string().min(1),
+  // Folder scope for the diff (v2 #4527), resolved like git_status's `root`.
+  root: z.string().min(1).optional(),
 });
 export type FsDiffRequest = z.infer<typeof fsDiffRequestSchema>;
 
@@ -325,6 +355,41 @@ export const fsDiffResponseSchema = z.object({
   truncated: z.boolean(),
 });
 export type FsDiffResponse = z.infer<typeof fsDiffResponseSchema>;
+
+export const fsBatchErrorSchema = z.object({
+  code: z.number().int(),
+  msg: z.string(),
+});
+export type FsBatchError = z.infer<typeof fsBatchErrorSchema>;
+
+// v2 #4527 batched folder git queries.
+export const fsGitStatusBatchRequestSchema = z.object({
+  roots: z.array(z.string().min(1)).min(1).max(32),
+  include_pull_request: z.boolean().optional(),
+});
+export type FsGitStatusBatchRequest = z.infer<typeof fsGitStatusBatchRequestSchema>;
+
+export const fsGitStatusBatchResponseSchema = z.object({
+  results: z.record(z.string(), fsGitStatusResponseSchema),
+  errors: z.record(z.string(), fsBatchErrorSchema),
+});
+export type FsGitStatusBatchResponse = z.infer<typeof fsGitStatusBatchResponseSchema>;
+
+export const fsPullRequestRequestSchema = z.object({
+  root: z.string().min(1).optional(),
+});
+export type FsPullRequestRequest = z.infer<typeof fsPullRequestRequestSchema>;
+
+export const fsPullRequestBatchRequestSchema = z.object({
+  roots: z.array(z.string().min(1)).min(1).max(32),
+});
+export type FsPullRequestBatchRequest = z.infer<typeof fsPullRequestBatchRequestSchema>;
+
+export const fsPullRequestBatchResponseSchema = z.object({
+  results: z.record(z.string(), fsPullRequestSchema.nullable()),
+  errors: z.record(z.string(), fsBatchErrorSchema),
+});
+export type FsPullRequestBatchResponse = z.infer<typeof fsPullRequestBatchResponseSchema>;
 
 export const fsDownloadParamsSchema = z.object({
   path: z.string().min(1),

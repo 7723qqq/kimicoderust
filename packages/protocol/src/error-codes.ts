@@ -17,6 +17,12 @@ export const ErrorCode = {
   VALIDATION_FAILED: 40001,
   /** JSON 解析失败、字段类型错 */
   REQUEST_MALFORMED: 40002,
+  /** 目标是 OAuth 托管 provider，拒绝静态 key 写操作 */
+  PROVIDER_OAUTH_MANAGED: 40003,
+  /** models.dev 目录条目无法导入 */
+  CATALOG_IMPORT_INVALID: 40004,
+  /** 自定义 registry 拉取/解析失败或没有可导入 provider */
+  REGISTRY_IMPORT_INVALID: 40005,
 
   /** daemon 没有任何 provider 配置 */
   AUTH_PROVISIONING_REQUIRED: 40110,
@@ -59,11 +65,17 @@ export const ErrorCode = {
   SKILL_NOT_FOUND: 40415,
   /** tool_call_id 不存在，或该调用没有对应的 plan（非 ExitPlanMode） */
   TOOL_CALL_NOT_FOUND: 40416,
+  /** models.dev 目录中没有该 catalog id 的条目 */
+  CATALOG_ENTRY_NOT_FOUND: 40417,
+  /** plugin id 不存在 */
+  PLUGIN_NOT_FOUND: 40419,
 
   /** session 有正在进行的 prompt，拒绝新请求 */
   SESSION_BUSY: 40901,
   /** approval 已被其他 client 应答 */
   APPROVAL_ALREADY_RESOLVED: 40902,
+  /** 一个活跃的外部进程持有该 session 的占用锁（v2 `session.occupied`） */
+  SESSION_OCCUPIED: 40903,
   /** task 已完结，无法取消 */
   TASK_ALREADY_FINISHED: 40904,
   /** mcp restart 时若已在 connecting/connected */
@@ -99,8 +111,12 @@ export const ErrorCode = {
   FS_ALREADY_EXISTS: 40919,
   /** goal 只允许主 agent 使用 */
   GOAL_UNSUPPORTED_AGENT: 40920,
+  /** provider id 已被占用（创建冲突） */
+  PROVIDER_ALREADY_EXISTS: 40921,
   /** prompt_id 已在该 agent 的历史中使用 */
   PROMPT_ID_CONFLICT: 40927,
+  /** remote control 已在运行，拒绝重复启动 */
+  REMOTE_CONTROL_ALREADY_RUNNING: 40928,
 
   /** approval 60s 超时 */
   APPROVAL_EXPIRED: 41001,
@@ -122,6 +138,8 @@ export const ErrorCode = {
 
   /** WS 单连接 watch_paths > 100 */
   FS_WATCH_LIMIT_EXCEEDED: 42902,
+  /** WS 出站队列溢出（客户端消费过慢，连接被关闭） */
+  WS_SLOW_CONSUMER: 42903,
 
   /** 兜底 */
   INTERNAL_ERROR: 50001,
@@ -153,6 +171,9 @@ export const ErrorCodeReason: Readonly<Record<ErrorCode, string>> = {
 
   [ErrorCode.VALIDATION_FAILED]: 'validation.failed',
   [ErrorCode.REQUEST_MALFORMED]: 'request.malformed',
+  [ErrorCode.PROVIDER_OAUTH_MANAGED]: 'provider.oauth_managed',
+  [ErrorCode.CATALOG_IMPORT_INVALID]: 'catalog.import_invalid',
+  [ErrorCode.REGISTRY_IMPORT_INVALID]: 'registry.import_invalid',
 
   [ErrorCode.AUTH_PROVISIONING_REQUIRED]: 'auth.provisioning_required',
   [ErrorCode.AUTH_TOKEN_MISSING]: 'auth.token_missing',
@@ -175,9 +196,12 @@ export const ErrorCodeReason: Readonly<Record<ErrorCode, string>> = {
   [ErrorCode.TERMINAL_NOT_FOUND]: 'terminal.not_found',
   [ErrorCode.SKILL_NOT_FOUND]: 'skill.not_found',
   [ErrorCode.TOOL_CALL_NOT_FOUND]: 'tool_call.not_found',
+  [ErrorCode.CATALOG_ENTRY_NOT_FOUND]: 'catalog.entry_not_found',
+  [ErrorCode.PLUGIN_NOT_FOUND]: 'plugin.not_found',
 
   [ErrorCode.SESSION_BUSY]: 'session.busy',
   [ErrorCode.APPROVAL_ALREADY_RESOLVED]: 'approval.already_resolved',
+  [ErrorCode.SESSION_OCCUPIED]: 'session.occupied',
   [ErrorCode.TASK_ALREADY_FINISHED]: 'task.already_finished',
   [ErrorCode.MCP_ALREADY_CONNECTED]: 'mcp.already_connected',
   [ErrorCode.FS_IS_DIRECTORY]: 'fs.is_directory',
@@ -196,7 +220,9 @@ export const ErrorCodeReason: Readonly<Record<ErrorCode, string>> = {
   [ErrorCode.GOAL_OBJECTIVE_TOO_LONG]: 'goal.objective_too_long',
   [ErrorCode.FS_ALREADY_EXISTS]: 'fs.already_exists',
   [ErrorCode.GOAL_UNSUPPORTED_AGENT]: 'goal.unsupported_agent',
+  [ErrorCode.PROVIDER_ALREADY_EXISTS]: 'provider.already_exists',
   [ErrorCode.PROMPT_ID_CONFLICT]: 'prompt.id_conflict',
+  [ErrorCode.REMOTE_CONTROL_ALREADY_RUNNING]: 'remote_control.already_running',
 
   [ErrorCode.APPROVAL_EXPIRED]: 'approval.expired',
   [ErrorCode.QUESTION_EXPIRED]: 'question.expired',
@@ -209,6 +235,7 @@ export const ErrorCodeReason: Readonly<Record<ErrorCode, string>> = {
   [ErrorCode.FS_GREP_TIMEOUT]: 'fs.grep_timeout',
 
   [ErrorCode.FS_WATCH_LIMIT_EXCEEDED]: 'fs.watch_limit_exceeded',
+  [ErrorCode.WS_SLOW_CONSUMER]: 'ws.slow_consumer',
 
   [ErrorCode.INTERNAL_ERROR]: 'internal.error',
   [ErrorCode.PERSISTENCE_FAILURE]: 'persistence.failure',

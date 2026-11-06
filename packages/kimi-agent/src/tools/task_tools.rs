@@ -27,6 +27,157 @@ use crate::turn_loop::wall_time;
 /// (600) and decoupled it in `20a2cea72f`; the cap is now its own constant.
 const WAIT_FOR_MAX_TIMEOUT_S: u64 = 90;
 
+/// v2 `TurnWaitTally` (`20a2cea72f` #4061): the per-turn WaitFor call tally
+/// behind the `[wait_warning]` repeat block. Stored session-scoped on the
+/// toolset (like `selection_failures`) and reset whenever the turn changes
+/// (v2 `countCall`).
+#[derive(Default)]
+pub struct WaitTally {
+    turn_id: Option<usize>,
+    calls: u32,
+    waited_ms: u64,
+}
+
+impl WaitTally {
+    /// v2 `countCall`: a turn change starts a fresh tally.
+    fn count_call(&mut self, turn_id: usize) {
+        if self.turn_id != Some(turn_id) {
+            *self = Self {
+                turn_id: Some(turn_id),
+                calls: 0,
+                waited_ms: 0,
+            };
+        }
+        self.calls += 1;
+    }
+}
+
+/// The WaitFor execution context the dispatch layer hands down: everything
+/// the repeat warning and the subagent wording need that the bare tool
+/// arguments do not carry.
+pub struct WaitContext<'a> {
+    /// The session-scoped tally (v2 `WaitForTool.tally`).
+    pub tally: &'a std::sync::Arc<std::sync::Mutex<WaitTally>>,
+    /// The current turn number (v2 `ctx.turnId`).
+    pub turn_id: usize,
+    /// v2 `scopeContext.agentId`: anything but `main` selects the subagent
+    /// wording (timeout report and repeat advice).
+    pub caller_agent_id: &'a str,
+    /// The invoked display name (`WaitFor` / the REPL-only `TaskWait` alias):
+    /// warning and timeout prose name the tool the model actually called.
+    pub display_name: &'a str,
+}
+
+impl WaitContext<'_> {
+    fn lock_tally(&self) -> std::sync::MutexGuard<'_, WaitTally> {
+        self.tally.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn is_subagent(&self) -> bool {
+        self.caller_agent_id != "main"
+    }
+
+    /// v2 `withRepeatWarning`: from the second call in a turn, append the
+    /// `[wait_warning]` block — call count, accumulated wait, and one advice
+    /// variant (subagent / active goal / default).
+    async fn with_repeat_warning(
+        &self,
+        mut result: ExecutableToolResult,
+        calls: u32,
+        callbacks: &dyn HostCallbacks,
+        args: &Value,
+    ) -> ExecutableToolResult {
+        if calls < 2 {
+            return result;
+        }
+        let waited_ms = self.lock_tally().waited_ms;
+        let advice = if self.is_subagent() {
+            subagent_repeat_advice(self.display_name)
+        } else if goal_is_active(callbacks, args).await {
+            goal_repeat_advice(self.display_name)
+        } else {
+            default_repeat_advice(self.display_name)
+        };
+        let waited = format_wait_seconds(waited_ms);
+        result.content = format!(
+            "{}\n\n[wait_warning]\nThis is {} call {} in this turn, and you have already spent {} waiting. {}",
+            result.content, self.display_name, calls, waited, advice
+        );
+        result
+    }
+}
+
+/// v2 `formatWaitSeconds` (verbatim): `45s` / `1m` / `1m 30s` / `1h` / `1h 01m`.
+fn format_wait_seconds(waited_ms: u64) -> String {
+    // v2 `Math.round(waitedMs / 1000)`.
+    let total_seconds = (waited_ms + 500) / 1000;
+    if total_seconds < 60 {
+        return format!("{total_seconds}s");
+    }
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    if minutes < 60 {
+        return if seconds == 0 {
+            format!("{minutes}m")
+        } else {
+            format!("{minutes}m {seconds:02}s")
+        };
+    }
+    let hours = minutes / 60;
+    let remaining_minutes = minutes % 60;
+    if remaining_minutes == 0 {
+        format!("{hours}h")
+    } else {
+        format!("{hours}h {remaining_minutes:02}m")
+    }
+}
+
+/// v2 `repeatWaitAdvice` subagent arm (verbatim apart from the tool name).
+fn subagent_repeat_advice(name: &str) -> String {
+    format!(
+        "Stop waiting by reflex: repeated waits burn time your caller is waiting on. Before calling {name} again, do every part of your task that does not depend on the running background task. Wait again only for a result you truly cannot finish without — ending your turn is your final hand-off, so do not hand off without it, but never wait for tasks you do not need."
+    )
+}
+
+/// v2 `repeatWaitAdvice` active-goal arm (verbatim apart from the tool name).
+fn goal_repeat_advice(name: &str) -> String {
+    format!(
+        "Stop waiting by reflex: repeated waits stall the goal. Before calling {name} again, do every piece of remaining goal work that does not depend on the running background task — there is almost always some. Wait again only if nothing else can proceed until it finishes; even then, {name} beats polling with Bash sleep or ending the turn only to be continued again."
+    )
+}
+
+/// v2 `repeatWaitAdvice` default arm (verbatim apart from the tool name).
+fn default_repeat_advice(name: &str) -> String {
+    format!(
+        "Stop calling {name}. Repeated waiting wastes the user's time and is almost never the right move. Do not call it again in this turn unless the user explicitly asked you to wait. Do something useful now — another part of the task, or verifying earlier work — or end your turn with a progress update. Finished background tasks notify you automatically, so you will not miss the result."
+    )
+}
+
+/// The goal arm of v2 `repeatWaitAdvice` (`goals.getGoal().goal?.status ===
+/// 'active'`). The host is the goal authority (see `goal_tools`), so the check
+/// is a state-bridge read; any bridge failure falls through to the default
+/// advice, matching v2's `?.` short-circuit.
+async fn goal_is_active(callbacks: &dyn HostCallbacks, args: &Value) -> bool {
+    let request = StateReadRequest {
+        domain: "goal".into(),
+        key: "goal".into(),
+        turn_id: args
+            .get("turn_id")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string(),
+        tool_call_id: args
+            .get("tool_call_id")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    match callbacks.state_read(request).await {
+        Ok(response) => response.value["goal"]["status"].as_str() == Some("active"),
+        Err(_) => false,
+    }
+}
+
 /// Failure message when the connected host does not implement the state
 /// bridge. The model must not retry the tool — the host cannot manage
 /// background tasks for this session.
@@ -283,11 +434,13 @@ pub async fn execute_task_stop(
     }
 }
 
-/// Render the host's stop response as the v2 `TaskStop` output: exactly
-/// `task_id` / `status` / `reason` lines, preceded by the `Wall time` line
-/// upstream #3966 added to both stop branches (the response carries the
-/// entry's `startedAt` / `endedAt`). The id falls back to the requested
-/// task id, the reason to the submitted one.
+const NO_PARTIAL_OUTPUT: &str =
+    "[partial output] none — the subagent wrote no text in this run before it ended.";
+
+/// Render the host's stop response as the v2 `TaskStop` output: task metadata
+/// preceded by the optional `Wall time` line, plus a stopped subagent's output
+/// and resume coordinates. The id falls back to the requested task id, the
+/// reason to the submitted one.
 fn render_task_stop(value: &Value, task_id: &str, reason: &str) -> ExecutableToolResult {
     let Some(obj) = value.as_object() else {
         return err_result("Invalid task state from host: expected the stopped task.".into());
@@ -307,6 +460,35 @@ fn render_task_stop(value: &Value, task_id: &str, reason: &str) -> ExecutableToo
         .and_then(|v| v.as_str())
         .unwrap_or(reason);
     lines.push(format!("reason: {stop_reason}"));
+    let is_subagent = matches!(
+        obj.get("kind").and_then(|value| value.as_str()),
+        Some("subagent" | "agent")
+    );
+    if is_subagent {
+        let agent_id = obj.get("agentId").and_then(|value| value.as_str());
+        if let Some(agent_id) = agent_id {
+            lines.push(format!("agent_id: {agent_id}"));
+        }
+        if let Some(path) = obj
+            .get("outputPath")
+            .or_else(|| obj.get("output_path"))
+            .and_then(|value| value.as_str())
+        {
+            lines.push(format!("output_path: {path}"));
+        }
+        let output = obj.get("output").and_then(|value| value.as_str());
+        let status = obj.get("status").and_then(|value| value.as_str());
+        if output.is_some() || matches!(status, Some("killed" | "failed" | "timed_out")) {
+            lines.push(String::new());
+            lines.push(output.unwrap_or(NO_PARTIAL_OUTPUT).to_string());
+            if let Some(agent_id) = agent_id {
+                lines.push(String::new());
+                lines.push(format!(
+                    "resume_hint: To continue this subagent from where it stopped, call Agent(resume=\"{agent_id}\", prompt=\"...\"). Use agent_id (\"{agent_id}\"), not task_id (\"{id}\")."
+                ));
+            }
+        }
+    }
     let body = lines.join("\n");
     // v2's stop result is typed with `startedAt`; a host response without
     // timing renders the bare lines rather than a bogus header.
@@ -350,6 +532,7 @@ pub async fn execute_task_wait(
     callbacks: &dyn HostCallbacks,
     runner: Option<&crate::storage::TaskRunner>,
     steer: Option<&crate::subagent::types::ParentCancel>,
+    wait: &WaitContext<'_>,
     args: &Value,
 ) -> ExecutableToolResult {
     let task_id = match parse_optional_task_id(args) {
@@ -361,6 +544,15 @@ pub async fn execute_task_wait(
         Err(message) => return err_result(message),
     };
     let timeout_ms = timeout_s * 1000;
+    // v2 `countCall`: the tally advances before any outcome render, so even
+    // cheap calls (nothing running / unknown id) count toward the repeat
+    // warning. Argument-shape errors above return uncounted and unwrapped,
+    // like v2's schema rejection.
+    let calls = {
+        let mut tally = wait.lock_tally();
+        tally.count_call(wait.turn_id);
+        tally.calls
+    };
     let started = Instant::now();
     if let Some(runner) = runner {
         // Only a task this runner actually knows can be waited on natively.
@@ -373,7 +565,15 @@ pub async fn execute_task_wait(
             None => true,
         };
         if known {
-            return wait_with_runner(runner, steer, task_id.as_deref(), timeout_ms, started).await;
+            let (result, waited) =
+                wait_with_runner(runner, steer, task_id.as_deref(), timeout_ms, started, wait)
+                    .await;
+            if waited {
+                wait.lock_tally().waited_ms += waited_ms(started);
+            }
+            return wait
+                .with_repeat_warning(result, calls, callbacks, args)
+                .await;
         }
     }
     let Some(task_id) = task_id else {
@@ -401,38 +601,51 @@ pub async fn execute_task_wait(
             .to_string(),
     };
     match callbacks.state_write(request).await {
-        Ok(response) => render_task_wait(
-            &response.value,
-            Some(&task_id),
-            timeout_ms,
-            waited_ms(started),
-            &[],
-        ),
-        Err(error) => map_wait_error(error, &task_id, timeout_ms, waited_ms(started)),
+        Ok(response) => {
+            let waited = waited_ms(started);
+            wait.lock_tally().waited_ms += waited;
+            let result = render_task_wait(
+                &response.value,
+                Some(&task_id),
+                timeout_ms,
+                waited,
+                &[],
+                wait,
+            );
+            wait.with_repeat_warning(result, calls, callbacks, args)
+                .await
+        }
+        // A host-side failure aborted the wait; like v2's rethrown abort it
+        // carries no repeat warning and does not accumulate wait time.
+        Err(error) => map_wait_error(error, &task_id, timeout_ms, waited_ms(started), wait),
     }
 }
 
 /// Perform the wait against the engine's own task runner. The wait targets the
 /// requested task, or — with no `task_id` — every task running at call time
-/// (v2 `waitAny`), ending as soon as the first one settles.
+/// (v2 `waitAny`), ending as soon as the first one settles. The boolean half
+/// of the return tells the caller whether an actual wait happened (the repeat
+/// tally accumulates wait time only then; the no-tasks and unknown-id arms
+/// return before waiting, like v2).
 async fn wait_with_runner(
     runner: &crate::storage::TaskRunner,
     steer: Option<&crate::subagent::types::ParentCancel>,
     task_id: Option<&str>,
     timeout_ms: u64,
     started: Instant,
-) -> ExecutableToolResult {
+    wait: &WaitContext<'_>,
+) -> (ExecutableToolResult, bool) {
     let targets: Vec<String> = match task_id {
         Some(id) => {
             if runner.entry(id).is_none() {
-                return err_result(format!("Task not found: {id}"));
+                return (err_result(format!("Task not found: {id}")), false);
             }
             vec![id.to_string()]
         }
         None => {
             let running = running_wires(runner);
             if running.is_empty() {
-                return ok_result(render_wait_no_tasks(timeout_ms));
+                return (ok_result(render_wait_no_tasks(timeout_ms)), false);
             }
             running
                 .iter()
@@ -451,7 +664,7 @@ async fn wait_with_runner(
     };
     let waited = waited_ms(started);
     let still_running = running_wires(runner);
-    match result {
+    let rendered = match result {
         TaskWaitResult::Interrupted => {
             render_wait_interrupted(task_id, timeout_ms, waited, &still_running)
         }
@@ -461,9 +674,10 @@ async fn wait_with_runner(
         // `Completed` always carries a terminal entry and `TimedOut` a
         // still-running one, so the shared renderer picks the right report.
         TaskWaitResult::Completed(entry) | TaskWaitResult::TimedOut(entry) => {
-            render_task_wait(&entry, task_id, timeout_ms, waited, &still_running)
+            render_task_wait(&entry, task_id, timeout_ms, waited, &still_running, wait)
         }
-    }
+    };
+    (rendered, true)
 }
 
 /// The wire entries of the tasks still running, oldest first.
@@ -489,6 +703,7 @@ fn render_task_wait(
     timeout_ms: u64,
     waited_ms: u64,
     still_running: &[Value],
+    wait: &WaitContext<'_>,
 ) -> ExecutableToolResult {
     let Some(obj) = value.as_object() else {
         return err_result("Invalid task state from host: expected a task output snapshot.".into());
@@ -505,7 +720,13 @@ fn render_task_wait(
     if is_terminal_status(status) {
         render_wait_completed(value, task_id, timeout_ms, waited_ms, still_running)
     } else {
-        render_wait_timeout(requested_task_id, timeout_ms, waited_ms, still_running)
+        render_wait_timeout(
+            requested_task_id,
+            timeout_ms,
+            waited_ms,
+            still_running,
+            wait,
+        )
     }
 }
 
@@ -538,17 +759,29 @@ fn render_wait_completed(
 }
 
 /// v2 `WaitFor.formatTimeout`: the timeout report. A timeout is not an
-/// error — the tool returns it as a success result.
+/// error — the tool returns it as a success result. v2 splits the body by
+/// caller: a subagent is told to wait again (its turn end is the hand-off,
+/// and a completion after it reaches no one), the main agent to prefer
+/// other work (`20a2cea72f` #4061).
 fn render_wait_timeout(
     task_id: Option<&str>,
     timeout_ms: u64,
     waited_ms: u64,
     still_running: &[Value],
+    wait: &WaitContext<'_>,
 ) -> ExecutableToolResult {
+    let body = if wait.is_subagent() {
+        format!(
+            "The wait ended before the task finished — a timeout is not an error. If you need its result, call {} again: ending your turn is your hand-off, and a completion notification after it reaches no one.",
+            wait.display_name
+        )
+    } else {
+        "The wait ended before the task finished — a timeout is not an error. Prefer continuing with other work over waiting again; completion arrives via automatic notification.".to_string()
+    };
     let mut lines = vec![
         wait_metadata("timed_out", None, task_id, timeout_ms, waited_ms),
         String::new(),
-        "The wait ended before the task finished — a timeout is not an error. Call TaskWait again to keep waiting, or continue with other work; completion also arrives via automatic notification.".into(),
+        body,
     ];
     push_still_running(&mut lines, still_running);
     ok_result(lines.join("\n"))
@@ -682,6 +915,7 @@ fn map_wait_error(
     task_id: &str,
     timeout_ms: u64,
     waited_ms: u64,
+    wait: &WaitContext<'_>,
 ) -> ExecutableToolResult {
     if error.contains("does not support state bridge") {
         err_result(STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE.into())
@@ -690,7 +924,7 @@ fn map_wait_error(
     } else {
         let lower = error.to_lowercase();
         if lower.contains("timed out") || lower.contains("timeout") {
-            render_wait_timeout(Some(task_id), timeout_ms, waited_ms, &[])
+            render_wait_timeout(Some(task_id), timeout_ms, waited_ms, &[], wait)
         } else {
             err_result(error)
         }
@@ -1017,6 +1251,22 @@ mod tests {
             "fullOutputAvailable": true,
             "preview": "All tests passed."
         })
+    }
+
+    /// A fresh per-turn WaitFor tally for tests.
+    fn test_tally() -> Arc<std::sync::Mutex<WaitTally>> {
+        Arc::new(std::sync::Mutex::new(WaitTally::default()))
+    }
+
+    /// A main-agent `WaitFor` context for turn 1 (no subagent wording, no
+    /// `[wait_warning]` on the first call).
+    fn main_wait_ctx(tally: &Arc<std::sync::Mutex<WaitTally>>) -> WaitContext<'_> {
+        WaitContext {
+            tally,
+            turn_id: 1,
+            caller_agent_id: "main",
+            display_name: "WaitFor",
+        }
     }
 
     // ── TaskList ──────────────────────────────────────────────────────
@@ -1383,6 +1633,37 @@ mod tests {
     }
 
     #[test]
+    fn bg_partial_output_task_stop_render_includes_output_and_resume_hint() {
+        let rendered = render_task_stop(
+            &serde_json::json!({
+                "taskId": "task-1",
+                "kind": "subagent",
+                "agentId": "agent-child",
+                "status": "killed",
+                "stopReason": "Stopped by TaskStop",
+                "output": "[partial output] The subagent did not finish this run.\n\nunverified finding",
+                "outputPath": "C:/state/tasks/task-1/output.log"
+            }),
+            "task-1",
+            "Stopped by TaskStop",
+        );
+        assert!(!rendered.is_error);
+        assert!(rendered.content.contains("agent_id: agent-child"));
+        assert!(
+            rendered
+                .content
+                .contains("output_path: C:/state/tasks/task-1/output.log")
+        );
+        assert!(rendered.content.contains("[partial output]"));
+        assert!(rendered.content.contains("unverified finding"));
+        assert!(
+            rendered
+                .content
+                .contains("Agent(resume=\"agent-child\", prompt=\"...\")")
+        );
+    }
+
+    #[test]
     fn test_stop_render_prepends_wall_time_when_the_response_is_timed() {
         // Upstream #3966: both TaskStop branches carry the wall-time line.
         let rendered = render_task_stop(
@@ -1468,10 +1749,13 @@ mod tests {
     async fn test_wait_sends_action_and_renders_completed() {
         let (callbacks, read_received, write_received) =
             scripted(read_ok(Value::Null), write_ok(sample_snapshot()));
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             None,
             None,
+            &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
         .await;
@@ -1497,7 +1781,15 @@ mod tests {
 
     #[test]
     fn test_wait_completed_render_golden() {
-        let rendered = render_task_wait(&sample_snapshot(), Some("task-1"), 30000, 1234, &[]);
+        let tally = test_tally();
+        let rendered = render_task_wait(
+            &sample_snapshot(),
+            Some("task-1"),
+            30000,
+            1234,
+            &[],
+            &main_wait_ctx(&tally),
+        );
         assert!(!rendered.is_error);
         assert_eq!(
             rendered.content,
@@ -1533,7 +1825,15 @@ mod tests {
             "startedAt": 1700000000000u64,
             "endedAt": 1700000001000u64
         });
-        let rendered = render_task_wait(&entry, Some("task-1"), 30000, 1234, &[]);
+        let tally = test_tally();
+        let rendered = render_task_wait(
+            &entry,
+            Some("task-1"),
+            30000,
+            1234,
+            &[],
+            &main_wait_ctx(&tally),
+        );
         assert!(!rendered.is_error);
         assert_eq!(
             rendered.content,
@@ -1555,7 +1855,15 @@ mod tests {
     fn test_wait_non_terminal_status_renders_timeout() {
         let mut snapshot = sample_snapshot();
         snapshot["status"] = serde_json::json!("running");
-        let rendered = render_task_wait(&snapshot, Some("task-1"), 30000, 30000, &[]);
+        let tally = test_tally();
+        let rendered = render_task_wait(
+            &snapshot,
+            Some("task-1"),
+            30000,
+            30000,
+            &[],
+            &main_wait_ctx(&tally),
+        );
         assert!(!rendered.is_error);
         assert_eq!(
             rendered.content,
@@ -1564,7 +1872,7 @@ mod tests {
              waited_ms: 30000\n\
              timeout_ms: 30000\n\
              \n\
-             The wait ended before the task finished — a timeout is not an error. Call TaskWait again to keep waiting, or continue with other work; completion also arrives via automatic notification."
+             The wait ended before the task finished — a timeout is not an error. Prefer continuing with other work over waiting again; completion arrives via automatic notification."
         );
     }
 
@@ -1574,10 +1882,13 @@ mod tests {
             read_ok(Value::Null),
             Err("State write error: [-32003] wait timed out after 30000ms".into()),
         );
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             None,
             None,
+            &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
         .await;
@@ -1592,10 +1903,13 @@ mod tests {
             read_ok(Value::Null),
             Err("State write error: [-32002] task not found: task-9".into()),
         );
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             None,
             None,
+            &wait,
             &serde_json::json!({ "task_id": "task-9", "timeout": 30 }),
         )
         .await;
@@ -1607,6 +1921,8 @@ mod tests {
     async fn test_wait_invalid_args_return_error_without_calling_host() {
         let (callbacks, read_received, write_received) =
             scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         for bad in [
             serde_json::json!({ "timeout": 30 }),
             serde_json::json!({ "task_id": "task-1" }),
@@ -1614,7 +1930,7 @@ mod tests {
             serde_json::json!({ "task_id": "task-1", "timeout": 601 }),
             serde_json::json!({ "task_id": "task-1", "timeout": "30" }),
         ] {
-            let result = execute_task_wait(&callbacks, None, None, &bad).await;
+            let result = execute_task_wait(&callbacks, None, None, &wait, &bad).await;
             assert!(result.is_error, "args: {bad}");
             assert!(result.content.contains("Invalid TaskWait arguments"));
         }
@@ -1628,10 +1944,13 @@ mod tests {
             read_ok(Value::Null),
             Err("State write error: [-32603] host does not support state bridge".into()),
         );
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             None,
             None,
+            &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
         .await;
@@ -1645,10 +1964,13 @@ mod tests {
             read_ok(Value::Null),
             Err("State write error: [-32603] something else broke".into()),
         );
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             None,
             None,
+            &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
         .await;
@@ -1685,11 +2007,14 @@ mod tests {
         let (_dir, runner, release) = held_runner();
         let (callbacks, read_received, write_received) =
             scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let started = std::time::Instant::now();
         let result = execute_task_wait(
             &callbacks,
             Some(&runner),
             None,
+            &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 1 }),
         )
         .await;
@@ -1718,10 +2043,13 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = release.send(());
         });
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             Some(&runner),
             None,
+            &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
         .await;
@@ -1745,11 +2073,14 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             trigger.trigger();
         });
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let started = std::time::Instant::now();
         let result = execute_task_wait(
             &callbacks,
             Some(&runner),
             Some(&steer),
+            &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
         .await;
@@ -1774,10 +2105,13 @@ mod tests {
     async fn test_wait_without_a_task_id_waits_for_any() {
         let (_dir, runner, release) = held_runner();
         let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             Some(&runner),
             None,
+            &wait,
             &serde_json::json!({ "timeout": 5 }),
         )
         .await;
@@ -1795,10 +2129,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(crate::storage::TaskRunner::for_workspace(dir.path()).unwrap());
         let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             Some(&runner),
             None,
+            &wait,
             &serde_json::json!({ "timeout": 5 }),
         )
         .await;
@@ -1818,10 +2155,13 @@ mod tests {
             read_ok(Value::Null),
             Err("State write error: [-32002] task not found: nope".into()),
         );
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             Some(&runner),
             None,
+            &wait,
             &serde_json::json!({ "task_id": "nope", "timeout": 5 }),
         )
         .await;
@@ -1843,10 +2183,13 @@ mod tests {
         let runner = Arc::new(crate::storage::TaskRunner::for_workspace(dir.path()).unwrap());
         let (callbacks, _, write_received) =
             scripted(read_ok(Value::Null), write_ok(sample_snapshot()));
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
         let result = execute_task_wait(
             &callbacks,
             Some(&runner),
             None,
+            &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
         .await;
@@ -1864,11 +2207,208 @@ mod tests {
     #[tokio::test]
     async fn test_wait_any_without_a_runner_requires_a_task_id() {
         let (callbacks, _, write_received) = scripted(read_ok(Value::Null), write_ok(Value::Null));
-        let result =
-            execute_task_wait(&callbacks, None, None, &serde_json::json!({ "timeout": 5 })).await;
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
+        let result = execute_task_wait(
+            &callbacks,
+            None,
+            None,
+            &wait,
+            &serde_json::json!({ "timeout": 5 }),
+        )
+        .await;
         assert!(result.is_error);
         assert!(result.content.contains("`task_id` is required"));
         assert!(write_received.lock().unwrap().is_none());
+    }
+
+    // ── WaitFor repeat warning (`20a2cea72f` #4061) ────────────────────
+
+    /// An empty runner: wait-any returns immediately, so repeat-warning tests
+    /// run without real waiting.
+    fn empty_runner() -> (tempfile::TempDir, Arc<crate::storage::TaskRunner>) {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(crate::storage::TaskRunner::for_workspace(dir.path()).unwrap());
+        (dir, runner)
+    }
+
+    #[tokio::test]
+    async fn the_second_wait_in_a_turn_appends_the_repeat_warning() {
+        let (_dir, runner) = empty_runner();
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
+        let args = serde_json::json!({ "timeout": 5 });
+        let first = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        assert!(
+            !first.content.contains("[wait_warning]"),
+            "first call: {first:?}"
+        );
+        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        assert!(
+            second.content.contains("[wait_warning]"),
+            "second call: {second:?}"
+        );
+        assert!(second.content.contains(
+            "This is WaitFor call 2 in this turn, and you have already spent 0s waiting."
+        ));
+        // No running task and no active goal: the default advice applies.
+        assert!(
+            second
+                .content
+                .contains("Stop calling WaitFor. Repeated waiting wastes the user's time")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_repeat_warning_uses_the_subagent_advice_for_a_subagent_caller() {
+        let (_dir, runner) = empty_runner();
+        let (callbacks, read_received, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let wait = WaitContext {
+            tally: &tally,
+            turn_id: 1,
+            caller_agent_id: "subagent-7",
+            display_name: "WaitFor",
+        };
+        let args = serde_json::json!({ "timeout": 5 });
+        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        assert!(
+            second
+                .content
+                .contains("repeated waits burn time your caller is waiting on"),
+            "subagent advice: {second:?}"
+        );
+        // The subagent arm short-circuits before the goal read (v2 order).
+        assert!(read_received.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_repeat_warning_uses_the_goal_advice_when_a_goal_is_active() {
+        let (_dir, runner) = empty_runner();
+        let (callbacks, read_received, _) = scripted(
+            read_ok(serde_json::json!({ "goal": { "status": "active" } })),
+            write_ok(Value::Null),
+        );
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
+        let args = serde_json::json!({ "timeout": 5 });
+        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        assert!(
+            second.content.contains("repeated waits stall the goal"),
+            "goal advice: {second:?}"
+        );
+        assert!(
+            second
+                .content
+                .contains("WaitFor beats polling with Bash sleep"),
+            "goal advice tail: {second:?}"
+        );
+        // The goal check is a state-bridge read (the host is the goal authority).
+        assert_eq!(
+            read_received.lock().unwrap().as_ref().unwrap().domain,
+            "goal"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_tally_resets_when_the_turn_changes() {
+        let (_dir, runner) = empty_runner();
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let args = serde_json::json!({ "timeout": 5 });
+        let turn_one = WaitContext {
+            tally: &tally,
+            turn_id: 1,
+            caller_agent_id: "main",
+            display_name: "WaitFor",
+        };
+        let _ = execute_task_wait(&callbacks, Some(&runner), None, &turn_one, &args).await;
+        // A new turn starts a fresh tally: its first call carries no warning.
+        let turn_two = WaitContext {
+            tally: &tally,
+            turn_id: 2,
+            caller_agent_id: "main",
+            display_name: "WaitFor",
+        };
+        let fresh = execute_task_wait(&callbacks, Some(&runner), None, &turn_two, &args).await;
+        assert!(
+            !fresh.content.contains("[wait_warning]"),
+            "a turn change must reset the tally: {fresh:?}"
+        );
+        let repeated = execute_task_wait(&callbacks, Some(&runner), None, &turn_two, &args).await;
+        assert!(
+            repeated
+                .content
+                .contains("This is WaitFor call 2 in this turn"),
+            "the new turn counts from one: {repeated:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_repeat_warning_names_the_repl_alias() {
+        let (_dir, runner) = empty_runner();
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let wait = WaitContext {
+            tally: &tally,
+            turn_id: 1,
+            caller_agent_id: "main",
+            display_name: "TaskWait",
+        };
+        let args = serde_json::json!({ "timeout": 5 });
+        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        assert!(
+            second
+                .content
+                .contains("This is TaskWait call 2 in this turn"),
+            "the REPL alias is named, not the product name: {second:?}"
+        );
+        assert!(second.content.contains("Stop calling TaskWait."));
+    }
+
+    #[tokio::test]
+    async fn a_subagent_timeout_report_uses_the_handoff_wording() {
+        let (_dir, runner, release) = held_runner();
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let wait = WaitContext {
+            tally: &tally,
+            turn_id: 1,
+            caller_agent_id: "subagent-7",
+            display_name: "WaitFor",
+        };
+        let result = execute_task_wait(
+            &callbacks,
+            Some(&runner),
+            None,
+            &wait,
+            &serde_json::json!({ "task_id": "task-1", "timeout": 1 }),
+        )
+        .await;
+        assert!(result.content.starts_with("wait_status: timed_out"));
+        assert!(
+            result.content.contains(
+                "If you need its result, call WaitFor again: ending your turn is your hand-off, and a completion notification after it reaches no one."
+            ),
+            "subagent timeout body: {result:?}"
+        );
+        let _ = release.send(());
+    }
+
+    #[test]
+    fn test_format_wait_seconds_matches_v2() {
+        assert_eq!(format_wait_seconds(45_000), "45s");
+        assert_eq!(format_wait_seconds(1_499), "1s");
+        assert_eq!(format_wait_seconds(1_500), "2s");
+        assert_eq!(format_wait_seconds(60_000), "1m");
+        assert_eq!(format_wait_seconds(90_000), "1m 30s");
+        assert_eq!(format_wait_seconds(3_600_000), "1h");
+        assert_eq!(format_wait_seconds(3_660_000), "1h 01m");
+        assert_eq!(format_wait_seconds(0), "0s");
     }
 
     // ── Tool defs ─────────────────────────────────────────────────────

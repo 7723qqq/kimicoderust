@@ -511,7 +511,15 @@ impl MediaKind {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Plain text.
-    Text { text: String },
+    Text {
+        text: String,
+        /// v2 `TextPart.meta` (#4081): provenance tags such as
+        /// `{ "source": "user prompt submit hook" }` /
+        /// `{ "source": "skill activation" }`. Absent from the wire when
+        /// unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Map<String, serde_json::Value>>,
+    },
     /// Base64-encoded image data with a MIME media type (e.g. `image/png`).
     Image {
         media_type: String,
@@ -905,6 +913,11 @@ pub struct RunTurnParams {
     /// `[experimental].tower`). `None` leaves the decision to the engine.
     #[serde(default)]
     pub tower_enabled: Option<bool>,
+    /// NotifyUser availability resolved by the host (`KIMI_CODE_EXPERIMENTAL_NOTIFY_USER`
+    /// flag AND a host update panel — upstream #4054's two-input gate). `None`
+    /// leaves the decision to the engine.
+    #[serde(default)]
+    pub notify_user_enabled: Option<bool>,
     /// Host-resolved `[sandbox] mode`. Typed rather than a bare `String` so an
     /// unknown spelling fails **deserialization** here — the wire boundary,
     /// which is where v2 rejects the same values (`z.enum` in
@@ -966,6 +979,9 @@ pub struct SubagentProfileWire {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// Optional usage guidance rendered in the Agent tool's type listing.
+    #[serde(default)]
+    pub when_to_use: Option<String>,
     #[serde(default)]
     pub system_prompt: String,
     /// Explicit tool allowlist; empty means every tool minus

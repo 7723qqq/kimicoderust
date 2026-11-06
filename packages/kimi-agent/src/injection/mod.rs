@@ -39,6 +39,7 @@ pub mod swarm_mode;
 
 /// The stale-todo reminder (v2 `todoListReminder`, the `todo_list_reminder`
 /// variant).
+pub mod notify_user_nudge;
 pub mod todo_reminder;
 
 /// What the injection providers read their domain values from.

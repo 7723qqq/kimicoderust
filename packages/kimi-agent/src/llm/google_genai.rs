@@ -252,7 +252,7 @@ pub fn build_request_for_model(
                 }
                 for b in &m.blocks {
                     match b {
-                        ContentBlock::Text { text } => parts.push(json!({ "text": text })),
+                        ContentBlock::Text { text, .. } => parts.push(json!({ "text": text })),
                         ContentBlock::Image {
                             media_type, data, ..
                         } => {

@@ -229,6 +229,10 @@ pub struct WsOptions<'a> {
     pub store: Option<Arc<crate::session::sqlite_store::SqliteSessionStore>>,
     pub engine: Option<Arc<crate::server::engine::ServerEngine>>,
     pub terminal_manager: Option<Arc<crate::server::terminal::TerminalManager>>,
+    /// The live wire turn number per session (`active_turn_number`), threaded
+    /// to the cold transcript baseline's wedged finalization (upstream #4280):
+    /// the replay's tail turn is only wedged when it is not the live one.
+    pub prompt_queue: Option<Arc<crate::server::prompt_queue::PromptQueue>>,
 }
 
 /// Serve the upgraded connection as an event stream until the peer closes it or
@@ -256,6 +260,7 @@ pub async fn serve_ws(
         store,
         engine,
         terminal_manager,
+        prompt_queue,
     } = options;
     let key = request
         .headers
@@ -366,6 +371,7 @@ pub async fn serve_ws(
                                 store.as_deref(),
                                 engine.as_ref(),
                                 terminal_manager.as_ref(),
+                                prompt_queue.as_ref(),
                                 &mut writer,
                                 &mut subscriptions,
                                 &mut transcripts,
@@ -405,6 +411,7 @@ pub async fn serve_ws(
                                 store.as_deref(),
                                 engine.as_ref(),
                                 terminal_manager.as_ref(),
+                                prompt_queue.as_ref(),
                                 &mut writer,
                                 &mut subscriptions,
                                 &mut transcripts,
@@ -510,6 +517,7 @@ async fn handle_inbound(
     store: Option<&crate::session::sqlite_store::SqliteSessionStore>,
     engine: Option<&Arc<crate::server::engine::ServerEngine>>,
     terminal_manager: Option<&Arc<crate::server::terminal::TerminalManager>>,
+    prompt_queue: Option<&Arc<crate::server::prompt_queue::PromptQueue>>,
     writer: &mut WriteHalf<TcpStream>,
     subscriptions: &mut Option<HashSet<String>>,
     transcripts: &mut HashMap<String, TranscriptSubscription>,
@@ -745,15 +753,19 @@ async fn handle_inbound(
             // Baseline `transcript.reset` per attached agent, reconstructed
             // from the persisted conversation.
             if let Some(st) = &store {
+                let active_wire_turn_id = prompt_queue
+                    .as_ref()
+                    .and_then(|queue| queue.active_turn_number(&session_id))
+                    .map(i64::from);
                 let history = st.load_session_history(&session_id).unwrap_or_default();
-                let items = crate::server::transcript::build_items(&history);
+                let items = crate::server::transcript::cold_items(st, &session_id, &history);
                 let snapshot = json!({
                     "items": items,
-                    "tasks": crate::server::transcript::cold_tasks(st, &session_id),
+                    "tasks": crate::server::transcript::cold_tasks(st, &session_id, active_wire_turn_id),
                     "interactions": [],
                     "attachments": [],
                     "todos": [],
-                    "prompts": crate::server::transcript::cold_prompts(st, &session_id),
+                    "prompts": crate::server::transcript::cold_prompts(st, &session_id, active_wire_turn_id),
                     "meta": {},
                 });
                 for agent in &agents {

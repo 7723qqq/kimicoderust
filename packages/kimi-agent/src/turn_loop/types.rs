@@ -146,6 +146,14 @@ pub trait LLM: Send + Sync {
     /// emitting agent's id and the host can keep a subagent's stream out of
     /// the main transcript. The default is a no-op for stubs.
     fn set_stream_agent_id(&self, _agent_id: &str) {}
+    /// Install the running turn's watchdog state (v2 `armTurnWatch`, upstream
+    /// #4280): a streaming transport ticks
+    /// [`crate::turn_loop::watch::TurnWatchState::note_partial`] per streamed
+    /// fragment, so a turn that keeps receiving model output is never
+    /// reported as stalled. The default is a no-op — a non-streaming stub has
+    /// no deltas to report, and the host-proxy transport's stream flows
+    /// host-side, where the engine cannot observe it.
+    fn set_turn_watch(&self, _watch: Option<Arc<crate::turn_loop::watch::TurnWatchState>>) {}
     /// Send a chat request and get a response.
     fn chat(
         &self,

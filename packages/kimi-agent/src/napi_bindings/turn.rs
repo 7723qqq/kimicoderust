@@ -471,6 +471,7 @@ pub(crate) async fn build_engine_pipeline(
             .map(|p| SubagentProfileWire {
                 name: p.name.clone(),
                 description: p.description.clone().unwrap_or_default(),
+                when_to_use: p.when_to_use.clone(),
                 system_prompt: p.system_prompt.clone().unwrap_or_default(),
                 tools: p.tools.clone().unwrap_or_default(),
                 disallowed_tools: p.disallowed_tools.clone().unwrap_or_default(),
@@ -759,6 +760,7 @@ pub(crate) async fn build_engine_pipeline(
         // The host resolves the experiment itself (env + config) and passes the
         // resulting flag down; falling back to the env switch keeps a direct
         // napi caller working without plumbing a new param.
+        notify_user_enabled: params.notify_user_enabled.unwrap_or(true),
         tower_enabled: params.tower_enabled.unwrap_or_else(|| {
             crate::tools::tower::paths::tower_enabled(
                 crate::tools::tower::paths::tower_env_switch(),

@@ -43,3 +43,5 @@ export * from './rest/terminal';
 export * from './rest/connection';
 export * from './rest/guiStore';
 export * from './rest/remoteControl';
+export * from './rest/plugin';
+export * from './rest/sessionV2';

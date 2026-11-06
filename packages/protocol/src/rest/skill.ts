@@ -1,4 +1,9 @@
 /**
+ *   GET  /v1/skills
+ *     Response data: `{ skills: SkillDescriptor[] }` — the global scan
+ *     (project-agnostic; no workspace root is in scope), served by the same
+ *     descriptor shape as the session route below.
+ *
  *   GET  /v1/sessions/{session_id}/skills
  *     Response data: `{ skills: SkillDescriptor[] }`
  *     Errors: 40401 session.not_found
@@ -19,6 +24,11 @@ export const listSkillsResponseSchema = z.object({
   skills: z.array(skillDescriptorSchema),
 });
 export type ListSkillsResponse = z.infer<typeof listSkillsResponseSchema>;
+
+/** `GET /v1/skills` — the global (project-agnostic) scan; same descriptor
+ *  list as the session-scoped route. */
+export const listGlobalSkillsResponseSchema = listSkillsResponseSchema;
+export type ListGlobalSkillsResponse = ListSkillsResponse;
 
 /**
  * Attachment parts accepted on skill activation — the media/file subset of

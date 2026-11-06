@@ -79,6 +79,15 @@ struct StoredToken {
     expires_in: i64,
 }
 
+/// The managed credential relay device management exchanges for a cloud session.
+#[derive(Debug, Clone)]
+pub(crate) struct ManagedToken {
+    pub storage_name: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+}
+
 struct FlowState {
     snapshot: OAuthFlowSnapshot,
     device_code: String,
@@ -96,6 +105,15 @@ struct OAuthManagerInner {
     generation: AtomicU64,
 }
 
+/// Cleanup the server runs around a managed Kimi logout, wrapping the
+/// credential wipe. Upstream serialises the logout and clears the relay
+/// session cache on both sides of it; the fork hook does the same without
+/// moving the route handler out of its own module.
+pub trait RemoteControlLogoutHook: Send + Sync {
+    /// Run `logout` between the remote-control session-cache clears.
+    fn around_logout(&self, logout: &mut dyn FnMut());
+}
+
 /// Drives real device-code logins against the Kimi OAuth host.
 pub struct OAuthManager {
     inner: OAuthManagerInner,
@@ -103,6 +121,7 @@ pub struct OAuthManager {
     oauth_host: String,
     managed_base_url: String,
     credentials_dir: Option<PathBuf>,
+    remote_control_logout: std::sync::OnceLock<Arc<dyn RemoteControlLogoutHook>>,
 }
 
 impl Default for OAuthManager {
@@ -124,7 +143,13 @@ impl OAuthManager {
             managed_base_url: std::env::var("KIMI_CODE_MANAGED_BASE_URL")
                 .unwrap_or_else(|_| DEFAULT_MANAGED_BASE_URL.to_string()),
             credentials_dir: credentials_dir(),
+            remote_control_logout: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Install the server's remote-control cleanup for managed Kimi logouts.
+    pub fn set_remote_control_logout_hook(&self, hook: Arc<dyn RemoteControlLogoutHook>) {
+        let _ = self.remote_control_logout.set(hook);
     }
 
     /// Test seam: point the flow at a local mock authorization server and a
@@ -286,6 +311,42 @@ impl OAuthManager {
         Self::MANAGED_TOKEN_NAMES
             .iter()
             .any(|name| self.has_cached_token(name))
+    }
+
+    /// Load the managed credential used by the relay device-management client.
+    /// Unlike API reads, the relay exchange consumes the stored access/refresh
+    /// pair directly and performs its own 401 session renewal. Read the file on
+    /// every call: upstream's FileTokenStorage observes account changes made by
+    /// another process, and the cookie cache key must change with the token.
+    pub(crate) fn managed_remote_control_token(
+        &self,
+        preferred_storage_name: &str,
+        allow_managed_aliases: bool,
+    ) -> Result<ManagedToken, String> {
+        let mut candidates = vec![preferred_storage_name];
+        if allow_managed_aliases {
+            candidates.extend(Self::MANAGED_TOKEN_NAMES);
+        }
+        for name in candidates {
+            let Some(path) = self.credentials_path(name) else {
+                continue;
+            };
+            let Ok(body) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(token) = serde_json::from_str::<StoredToken>(&body) else {
+                continue;
+            };
+            if !token.refresh_token.is_empty() {
+                return Ok(ManagedToken {
+                    storage_name: name.to_string(),
+                    access_token: token.access_token,
+                    refresh_token: token.refresh_token,
+                    expires_in: token.expires_in,
+                });
+            }
+        }
+        Err("Remote Control requires a Kimi login.".into())
     }
 
     /// A usable managed access token under any alias, refreshing when the
@@ -586,7 +647,21 @@ impl OAuthManager {
 
     /// Log out the specified provider: drop the flow, the in-memory token,
     /// and the persisted credentials file.
+    ///
+    /// A managed Kimi logout also runs the server's remote-control cleanup
+    /// around the wipe (upstream couples the two in the logout route).
     pub fn logout(&self, provider: &str) -> bool {
+        if let Some(hook) = self.remote_control_logout.get()
+            && Self::MANAGED_TOKEN_NAMES.contains(&provider)
+        {
+            let mut dropped = false;
+            hook.around_logout(&mut || dropped = self.logout_inner(provider));
+            return dropped;
+        }
+        self.logout_inner(provider)
+    }
+
+    fn logout_inner(&self, provider: &str) -> bool {
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
         let had_flow = self.inner.flows.lock().unwrap().remove(provider).is_some();
         let had_token = self.inner.tokens.lock().unwrap().remove(provider).is_some();

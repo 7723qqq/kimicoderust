@@ -173,10 +173,17 @@ napi 函数名、配置键、shell 顺序），**不比对行为语义**——�
 - **判断**：中期全 Rust 目标倾向「Rust 为唯一配置解析者、TS 经 napi 反查」（方案 b），
   但影响 TUI 热加载，工作量大；DEVELOPMENT-OPTIMIZATION §4 建议先 (a) 制度化双源，
   (b) 单独立项。**本报告把它列为最大单项技术债，而非某个待移植模块。**
+- **2026-11-04 进展（方案 a 已落地）**：`scripts/config-registry.json` +
+  `bun run check:config-registry` 把「配置段 → 解析方 → napi 字段 → 消费点」变成
+  可执行两向门禁（34 段登记、34 处 napi 字段引用、8 项自测、变异验证通过）。
+  双源本身仍在：本批只是让「哪一侧真正解释哪个段」不再靠口头传递，
+  (b) 的单源收敛仍按 §5 阶段 0 的裁决顺序留待后续。
 
 ---
 
-## 3. 缺口清单 B：已登记的上游行为 delta（57 条 tracked 全量）
+## 3. 缺口清单 B：已登记的上游行为 delta（**2026-11-04 tracked 归零**：99 条全 triaged，
+ported 59 / not-applicable 40；剩余缺口只有环境阻塞（B-27/notify）、TUI 产品面、A8(b) 三类，
+详见 ROADMAP §55.4。以下清单为历史记录，处置状态以 allowlist 为准）
 
 来源：`scripts/upstream-v2-delta-allowlist.json`（verdict=tracked，本轮全量提取）+
 ROADMAP §6.46 分组。**验证状态**：[已核实]=本轮回源码确认仍存在；[台账待核]=allowlist
@@ -203,9 +210,9 @@ note 含 file:line 证据但本轮未复核（验证方法随条给出）；[政
 
 | # | 条目（sha） | 缺什么 | 涉及文件 | 状态 |
 |---|---|---|---|---|
-| 13 | 空闲会话回收（`366fafbf92`） | kap-server 的超时回收（环境变量可配）；Rust server 无 | `server/engine.rs`、`server/mod.rs` | [台账待核] |
-| 14 | close/archive 时驱逐广播事件状态（`5710c5496a`） | fork 仅空闲+容量驱逐（note 指 `hub.rs:541`） | `server/hub.rs` | [台账待核] |
-| 15 | transcript 冷重建 ordinal 对齐 wire id + wedged 标记（`67325c1b25`） | 冷重建轮次序号与循环看门狗诊断 | `server/transcript/` | [台账待核] |
+| 13 | 空闲会话回收（`366fafbf92`） | kap-server 的超时回收（环境变量可配）；Rust server 无（2026-11-04 复核：会话状态族 active_turns/steer_queues/session_mcp/status_hashes/media_* 只增不减，`evict_idle_lane` 只是事件 lane LRU） | `server/engine.rs`、`server/mod.rs` | [政策待裁 2026-11-04]：移植前必须先定回收语义——(a) 维持现状记 not-applicable（真实内存压力后再立项）；(b) 会话状态 LRU，在途 turn 存在则跳过；(c) 全对齐上游 #4284（可配超时 + 主动取消在途 turn + MCP 连接处置）。三选项已在 ROADMAP §51.5 列明，待裁决 |
+| 14 | ~~close/archive 时驱逐广播事件状态（`5710c5496a`）~~ | fork 仅空闲+容量驱逐 | `server/hub.rs` | [**已落地 2026-11-03**]：`EventHub.evict_lane`（hub.rs:352）接进 archive（route_sessions.rs:537）与两处 delete（route_sessions.rs:583、route_session_ops.rs:528），lane 删除即序号/epoch 作废；fork 无 close 生命周期事件、无 transcript per-session 缓存（上游两臂无对应物），既有 idle+cap 驱逐保留。判定与 note 见 allowlist `5710c5496a`；本行原状态「台账待核」系该批落地时未回填本表（2026-11-04 复核修正） |
+| 15 | ~~transcript 冷重建 ordinal 对齐 wire id + wedged 标记（`67325c1b25`）~~ | 冷重建轮次序号与循环看门狗诊断 | `server/transcript/` | [**引擎侧已落地 2026-11-03**]：A-1 回退位 max+1、A-2 startedAt 取日志 created_at（apply_event_at 扩展）、A-3 冷重建 wedged（mark_wedged_turns + activeWireTurnId 穿透路由/WS）、A-4 实时 TurnStarted 关闭前 Running turn、A-5 wire 可选 wedged；TS 半已由另一线落地；诊断半已落地（2026-11-03：turn_loop/watch.rs per-turn watchdog + task_runner 守卫告警/debug；AppendLogStore 两项与 eventDispatcher 判无结构对应物不移植，落点与判定见 allowlist `67325c1b25` note）；build_items 轴差的残余**已闭环（2026-11-04）**：`cold_items` + `realign_wire_turn_ids` + `rename_nested_ids`（transcript.rs），调用点全切（route_sessions 4 处 + ws 冷基线），判定 `dual_path_fixture`/`wire_axis` 三测——详见 allowlist `67325c1b25` note。本行「台账待核」期问 trust 测试红是该行唯一未决项，现已绿（`workspace_require_trust_config_controls_effective_trust` 通过）。**B-15 整体关闭（2026-11-04 复核）** |
 | 16 | 大会话恢复性能对等（`256ce61f0c`） | fork 仅压缩锚点，无基准——**先做基准再谈移植** | `session/`、`storage/` | [台账待核]（验证方法=基准先行） |
 | 17 | 默认工作区（`47002256a0`+`e5e56bc5fe`） | 无项目会话的默认工作区置于 home 下 | `server/`、宿主 | [台账待核] |
 | 18 | `/reload` 后通知代理外部变更（`18c6d64272`） | changeNotifier 服务与变更快照（`changeNotifier` 全仓零命中，本轮已核实）；**依赖 fs watch 地基（B-4 #27）** | `server/`、`injection/` | [已核实] |
@@ -216,10 +223,10 @@ note 含 file:line 证据但本轮未复核（验证方法随条给出）；[政
 
 | # | 条目（sha） | 缺什么 | 涉及文件 | 状态 |
 |---|---|---|---|---|
-| 21 | 多根工作区注册表 + source folders（`093e8f46c4` 等 5 条：`3ed0e68f3b` skill 跨目录合并、`7d72ae3965` trust 可配置、`67045e5ec5` 重复 source folder 去重、`bfdfde1e20` fs 搜索覆盖全部 source folders） | **架构级**：Rust 是否引入 source folders 概念要先裁决 | `server/`、`config/`、`skills/` | [政策待裁] |
-| 22 | `fs:list` 支持 `allow_ignored_globs`（`5b93669767`） | fork 只读 path（`allow_ignored_globs` 零命中，本轮已核实） | `server/fs_routes.rs` | [已核实] |
-| 23 | 目录范围 git status（`1853dae4ff`） | fork 仅 work_dir 全量 | `server/fs_routes.rs` 或 tools | [台账待核] |
-| 24 | 文件树符号链接（`e2ad1dcf21`） | 缺 `allow_external_symlinks`、扩张预算与根前缀检测（`metadata()` 已跟随链接） | `server/fs_routes.rs` / fs 列表 | [台账待核] |
+| 21 | 多根工作区注册表 + source folders（`093e8f46c4` 等 4 条：`3ed0e68f3b` skill 跨目录合并、`67045e5ec5` 重复 source folder 去重、`bfdfde1e20` fs 搜索覆盖全部 source folders；`7d72ae3965` trust 可配置已于 2026-11-04 移植） | **架构级**：Rust 是否引入 source folders 概念要先裁决 | `server/`、`config/`、`skills/` | [政策待裁] |
+| 22 | `fs:list` 支持 `allow_ignored_globs`（`5b93669767`） | fork 只读 path（`allow_ignored_globs` 零命中，本轮已核实） | `server/fs_routes.rs` | [**已落地 2026-11-03**]：F0 过滤基线 + F1 `allow_ignored_globs`（祖先保留 + 共享预算探测 + 段前缀 DP glob），落点与测试名见 allowlist `5b936697` note |
+| 23 | 目录范围 git status（`1853dae4ff`） | fork 仅 work_dir 全量（2026-11-03 复核：`handle_git_status` 不接 body；上游 schema 在 agent-core-v2 `app/git/git.ts`，上游无 protocol 包；另 fork unmerged 产出 `conflict` 越枚举，应为 `conflicted`） | `server/fs_routes.rs` 或 tools | [**已落地 2026-11-03**]：F3 全量（root/paths/include_pull_request、diff root、git_status:batch/pull_request/pull_request:batch），落点与测试名见 allowlist `1853dae4ff` note；顺手修了 entries 对象值→字符串与 `conflict`→`conflicted` 两个 wire 偏差 |
+| 24 | 文件树符号链接（`e2ad1dcf21`） | 缺 `allow_external_symlinks`、扩张预算与根前缀检测；2026-11-03 复核：fork `metadata()` 跟随链接致 `kind:"symlink"` 永不可达——**F0 已改 lstat 修复** | `server/fs_routes.rs` / fs 列表 | [**已落地 2026-11-03**]：F2 全量（展开/预算/`is_directory`/下载 query/`/workspace/fs::list`），落点与测试名见 allowlist `e2ad1dcf21` note |
 
 ### B-4 交互体验 / 提示词 / 通知
 
@@ -229,11 +236,11 @@ note 含 file:line 证据但本轮未复核（验证方法随条给出）；[政
 | 26 | NotifyUser：中途进度文字 + 按轮次计静默（`7091138f5e`）；title + 宿主进度展示（`0a3a2fbafa`）；无更新面板的宿主停 nudge（`4fbe065442`，v2 双输入门禁 vs fork 单输入，note 指 `tools/mod.rs:1547` 一带） | 显示层 + 引擎节流 | [台账待核] |
 | 27 | 文件系统 watch 默认开启（`c7dd84124a`） | v2 的 watch 地基在 fork 完全缺席（`KIMI_CODE_WATCH` 全仓零命中，本轮已核实）；ROADMAP §6.25 记 v2 `src/runtime/` capability 层在 fork 不存在 | [已核实]——**这是 B-2#18、AGENTS.md 变更通告两个缺口的共同前置** |
 | 28 | 中断提醒随 undo 移除（`e3bf50c083`） | v2 五行：`ownerPromptId` 挂到 undo 锚点 | [台账待核] |
-| 29 | UserPromptSubmit hook 输出折进 prompt 消息（`06ebfc821e`） | v2 不再产独立 `hook_result` 用户消息；fork 该 hook 仍只观察（§42 剩余亦记此） | [台账待核] |
+| 29 | UserPromptSubmit hook 输出折进 prompt 消息（`06ebfc821e`） | v2 不再产独立 `hook_result` 用户消息；fork 该 hook 仍只观察（§42 剩余亦记此） | [**协议面已落地 2026-11-03**]：F4 加 `ContentBlock::Text.meta` + kosong/protocol meta + transcript annotate-then-filter（allowlist `06ebfc821e` note）；hook 折叠生产者继续挂账（observe-only，external_hooks.rs:311）；**TurnStarted 剥离 2026-11-03 复核为结构性不适用**——fork prompt 为 `Option<String>` 纯字符串（events/types.rs:113-119），无 hook 部件可剥离，随生产者移植时再评 |
 | 30 | 工作区信任汇总面板（`395d537237`） | 激活摘要取代裸 MCP 命令打印（TUI 侧为主） | [台账待核] |
 | 31 | ~~select_tools 区分会话失效/策略禁用/未知并解释连续失败（`e4c99a3bad`）~~ | **已移植（2026-11-02；本行原描述已过期）**：五桶分类与 v2 顺序一致（policyDenied→loadable→staticCallable→staleLoaded→unknown）在 `tools/select_tools.rs::evaluate_load_tools`；失败记账 `SelectionFailureTracker`（STOP_RETRY_THRESHOLD=2、混合批次诚实计数、环境指纹重置）挂 `tools/mod.rs` session 级 `selection_failures`；空 loadable 一次性公告在 `tools/toolset.rs::take_disclosure_announcement`；策略源只接全局 `[tools]` 层（v2 的 profile/session/workspace 三层 deny 源在 fork 无对应物，allowlist note 已登记）。判定：`test_policy_denied_buckets`、`test_stale_loaded_is_not_reported_as_available`、`test_failure_tracking_escalates_and_resets`、`select_tools_remembers_loaded_names_and_announces_them` | [已关闭] |
-| 32 | 插件技能限定名 `pluginId:skill` + 放宽校验 + 插件命令优先（`3f0857eb7d`） | 技能注册面 | [台账待核] |
-| 33 | WaitFor 另一半（`20a2cea72f`） | 90s 上限已移植（`tools/task_tools.rs:28`）；「新输入结束等待」一半未做 | [台账待核] |
+| 32 | ~~插件技能限定名 `pluginId:skill` + 放宽校验 + 插件命令优先（`3f0857eb7d`）~~ | 技能注册面 | [**引擎侧已落地 2026-11-03**]：限定名注册（skills/mod.rs qualify/scan_plugin_directory + 全部消费面接线：catalog、scan_skill、skills_renderer+PromptBuilder、napi prompt、四处 REST）；校验放宽经核实 fork 已覆盖（`the_safe_plugin_id_accepts_everything_upstream_relaxed_regex_accepts`，逐字采正则属收紧政策项不随批）；插件命令优先落宿主侧（apps/kimi-code resolve.ts），按协调规则转交。判定：4 个新测 + 2 个改写测试 |
+| 33 | ~~WaitFor 另一半（`20a2cea72f`）~~ | 90s 上限已移植（`tools/task_tools.rs:28`）；「新输入结束等待」一半未做 | [**已关闭 2026-11-03**]：repeat tally + `[wait_warning]`（WaitTally 挂 Toolset `wait_tally`，三臂 advice：subagent/goal-active/default，goal 活性经 state bridge 读）、`formatTimeout` 主/子双文案、警告与超时文案随调用名参数化；描述文与 TUI 半为文档化刻意偏差/不适用（allowlist `20a2cea72f` note；台账修正：上游无 task-wait-subagent.md，差异为内联文案）。判定：`the_second_wait_in_a_turn_appends_the_repeat_warning` 等 7 个新测 + `test_format_wait_seconds_matches_v2` |
 | 34 | 待办提醒两组上游改写（`47a518ed4e`/`da5918c0c8`） | §18 已移植 todoListReminder；这两条是后续的按步数计数与文案放宽 | [台账待核]（注意与工作区未提交的 todo 提醒改动可能交叠，动手前先 diff） |
 | 35 | 子代理停止后回传部分输出（`93137cad20`）、Tools 列表按可用性过滤（`85077a4190`） | 子代理收尾语义 | [台账待核] |
 | 36 | 2.4.0 prompt/工具描述成批改写（`cca9bae3d7`）+ 按请求类型决定交付物（`39d149eb64`）+ 验证范围限定本次改动（`3154ec41f0`） | 触及 `prompt/system.md` 与工具描述，**需先定 prompt 政策**（工作区 `prompt/system.md` 恰有未提交改动，动手前必须先 diff） | [政策待裁] |
@@ -280,15 +287,20 @@ note 含 file:line 证据但本轮未复核（验证方法随条给出）；[政
 
 ### 阶段 0：政策裁决（不碰代码，解锁后续批次）
 
-| 裁决项 | 影响的缺口 | 选项 |
-|---|---|---|
-| MCP 自动重连 vs 既定「无重连」政策 | B-41 | 维持现状记 not-applicable / 移植上游重连（退避+状态迁移） |
-| 远程执行环境 vs kaos 处置 | B-42、A5 | 退役 kaos 死代码 + Rust 实现远程环境 / 都不要 |
-| Plan 模式协议（删 EnterPlanMode） | B-25 | 跟上游删 / 保留现协议 |
-| prompt 成批改写（2.4.0 sync） | B-36 | 逐段裁决 fork 独有段落（#9 一并） |
-| 多根工作区是否进 Rust | B-21 | 架构级，单独 RFC |
-| 会话全文检索是否需要 | A4 | 决定 minidb 处置 |
-| prompt cache 遥测 | B-40 | 跳过 / 落宿主遥测 |
+> **2026-11-04：七项已逐项成文（ROADMAP §53）并按建议案全部裁决落地——
+> 五项 not-applicable（allowlist verdict 已改），两项执行批（53.4 prompt 行为句、
+> 53.7 cache-hit-rate 聚合）。其中 53.2 纠正本表一处表述：packages/kaos
+> 不是死代码（node-sdk 三文件仍是活依赖）。**
+
+| 裁决项 | 影响的缺口 | 选项 | 建议见 |
+|---|---|---|---|
+| MCP 自动重连 vs 既定「无重连」政策 | B-41 | **已裁决 not-applicable**（2026-11-04，allowlist `4be3f0b741`） | §53.1 |
+| 远程执行环境 vs kaos 处置 | B-42、A5 | **已裁决 not-applicable**（`5f3ab5fac8`；kaos 维持现状，A5"死代码"表述已纠正） | §53.2 |
+| Plan 模式协议（删 EnterPlanMode） | B-25 | **已裁决 not-applicable**（`0325b755db`，保留现协议） | §53.3 |
+| prompt 成批改写（2.4.0 sync） | B-36 | **已落地**（搬两处行为句，`cca9bae3d7`/`39d149eb64`/`3154ec41f0` 判 ported） | §53.4 |
+| 多根工作区是否进 Rust | B-21 | **已裁决 not-applicable**（`093e8f46c4`/`67045e5ec5`/`bfdfde1e20`/`3ed0e68f3b` 同记） | §53.5 |
+| 会话全文检索是否需要 | A4 | **已裁决**：minidb 保留现状（活消费是 TUI worker） | §53.6 |
+| prompt cache 遥测 | B-40 | **已落地轻量半**（宿主 `llm_cache_usage` 聚合，`CacheUsageAggregator`）；`fed19d24f0` 前缀半 not-applicable | §53.7 |
 
 ### 阶段 1：高影响 × 低成本（每条独立成批）
 
@@ -296,8 +308,7 @@ note 含 file:line 证据但本轮未复核（验证方法随条给出）；[政
 2. **B-43 hooks 会话 cwd**：`HostCallbacks`/pipeline 把会话 work_dir 传进
    `notify_*` 的载荷与 spawn 默认 cwd。改动面收敛在 `external_hooks.rs` + 调用点。
 3. ~~**B-11 `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS`**~~ **已落地（2026-11-02）**：见 B-1 表 #11。
-4. **B-22 `allow_ignored_globs`**：fs:list 路由加参数。TS manifest + Rust 路由 +
-   parity 自动卡一致性。
+4. ~~**B-22 `allow_ignored_globs`**~~ **已落地（2026-11-03）**：见 B-3 表 #22。
 5. **B-39 global 遥测端点 + 统一 /models schema**：纯 `packages/oauth` 宿主侧，
    不碰 Rust。可先落地。
 6. ~~**B-5 子代理 allowlist 三跳管道**~~ **已落地（2026-11-02）**：见 B-1 表 #5。
@@ -321,10 +332,26 @@ note 含 file:line 证据但本轮未复核（验证方法随条给出）；[政
    QuickJS 内嵌）届时再评。
 2. **B-27 fs watch 地基**：引擎侧 watch 服务（`notify` crate）+ `KIMI_CODE_WATCH`
    配置面；解锁 B-18（/reload 变更通知）与 #13（AGENTS.md 变更通告）。
-3. **A8 配置/LLM 双源收敛**：先 (a) 制度化（每个配置面登记 + parity 扩字段级 diff），
-   再评估 (b) Rust 单源。
-4. **B-13/B-14/B-15 服务端生命周期**：空闲回收、关闭驱逐、transcript 重建对齐。
-5. **B-16 大会话恢复基准**：先建基准，不达标再移植 v2 优化。
+3. **A8 配置/LLM 双源收敛**：~~先 (a) 制度化（每个配置面登记 + parity 扩字段级 diff）~~
+   **方案 (a) 已落地（2026-11-04）**：`scripts/config-registry.json` 登记 34 个配置段
+   （engine 17 / host 1 / both 16），每段记 `parsedBy` / `rustConsumer` / `napiFields`，
+   由新门禁 `bun run check:config-registry` 两向核对——TS schema 顶层键未登记即失败、
+   登记了 schema 已删的段即失败、`napiFields` 指向 `JsRunTurnParams` 不存在的字段即失败、
+   `parsedBy` 与 `napiFields` 自相矛盾即失败。`engineOnly`（`cron` / `workspace`）
+   标记引擎自有、TS 不声明的段，豁免两向核对但仍约束 `parsedBy`。门禁自带 8 项测试
+   （`scripts/check-config-registry.test.mjs`，含变异验证：删一条登记即 exit 1）。
+   这回答的是 parity 答不了的问题——「谁真正解释这个段、它过缝要带哪些字段」，
+   把「加一个配置面要改几层」从口头约束变成可执行清单。
+   **(b) Rust 单源仍待裁决**：影响 TUI 热加载，按 `DECISION-POINTS-2026-11.md` §1
+   留待 Rust 原生入口裁撤后再立项，本批未动。
+4. **B-13/B-14/B-15 服务端生命周期**：~~关闭驱逐~~（**已落地 2026-11-03**，台账 #14 已核回填）、
+   ~~transcript 重建对齐~~（**已落地 2026-11-03/04**，残余 `build_items` 轴差已闭环，台账 #15 关闭）、
+   空闲回收**待裁决**（三选项见台账 #13 与 ROADMAP §51.5）。
+5. **B-16 大会话恢复基准**：~~先建基准~~ **已落地（2026-11-04）**：`tests/resume_bench.rs`
+   （`--ignored`，模式对齐 turn_bench），实测 8 000 turns / 16 000 messages 冷投影
+   **21.4ms**、压缩边界后 **734µs**——"恢复慢"在当前规模不成立，`256ce61f0c` 移植无可回收
+   收益点，杠杆（若有）在 compaction 频率而非 fold 算法。**是否移植升级为有数据裁决项**；
+   顺手修掉 `#![cfg(feature = "cli")]` 门在无 feature release 下把文件编译成 0 tests 的坑。
 
 ### 阶段 4：产品面与 TS-only 包终态
 

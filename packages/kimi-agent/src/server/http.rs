@@ -106,6 +106,9 @@ pub async fn serve(addr: &str, server: Arc<HttpServer>) -> io::Result<ServerHand
         ));
     }
 
+    // Install once at the composition root, where Arc<HttpServer> is available.
+    // Every subsequent turn binds its session-cached runtime into a fresh toolset.
+    server.install_tower_wake_driver();
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -179,6 +182,7 @@ async fn serve_connection(mut stream: TcpStream, server: Arc<HttpServer>) -> io:
                 store: Some(server.store_arc()),
                 engine: server.engine(),
                 terminal_manager: Some(server.terminal_manager()),
+                prompt_queue: Some(server.prompt_queue.clone()),
             },
         )
         .await

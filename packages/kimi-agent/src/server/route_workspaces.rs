@@ -48,7 +48,9 @@ impl HttpServer {
                     return HttpResponse::not_found();
                 }
                 match self.store.is_workspace_trusted(workspace_id) {
-                    Ok(trusted) => HttpResponse::ok(&json!({ "trusted": trusted })),
+                    Ok(persisted) => HttpResponse::ok(&json!({
+                        "trusted": self.effective_workspace_trust(persisted).await,
+                    })),
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
                 }
             }
@@ -71,12 +73,19 @@ impl HttpServer {
                     Ok(v) => v,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
                 };
+                // Fail-closed: a body without an explicit `trusted` boolean is
+                // not a grant; only `{"trusted": true}` records trust.
                 let trusted = body
                     .get("trusted")
                     .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
+                    .unwrap_or(false);
                 match self.store.set_workspace_trusted(workspace_id, trusted) {
-                    Ok(_) => HttpResponse::ok(&json!({ "trusted": trusted })),
+                    // Upstream #4517 (kap-server `/untrust`): the answer is the
+                    // *effective* state after the write, which stays `true`
+                    // while a process or config override applies.
+                    Ok(_) => HttpResponse::ok(&json!({
+                        "trusted": self.effective_workspace_trust(trusted).await,
+                    })),
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
                 }
             }
@@ -94,11 +103,12 @@ impl HttpServer {
                 let root_path = std::path::PathBuf::from(&ws.root);
                 let config = self.config().await;
                 let merge = config.resolve_merge_all_available_skills();
-                let mut extra = config.extra_skill_dirs_paths();
-                extra.extend(self.plugin_manager.plugin_skill_dir_paths());
-                let skills = crate::skills::scan_all_skills_with_extra_and_merge(
+                let extra = config.extra_skill_dirs_paths();
+                let plugin_dirs = self.plugin_manager.plugin_skill_dirs();
+                let skills = crate::skills::scan_all_skills_with_extra_merge_and_plugins(
                     Some(&root_path),
                     &extra,
+                    &plugin_dirs,
                     merge,
                 );
                 HttpResponse::ok(&json!({ "skills": skills }))
@@ -465,5 +475,16 @@ impl HttpServer {
             _ => return HttpResponse::route_miss(),
         };
         finalize_response(req, resp)
+    }
+
+    /// The trust routes report the *effective* state (upstream #4517): the
+    /// persisted flag OR'd with the `KIMI_CODE_TRUST_WORKSPACE` process
+    /// override, short-circuited to trusted while `[workspace] require_trust`
+    /// is `false`. The persisted record is what `set_workspace_trusted`
+    /// writes; the overrides never rewrite it.
+    async fn effective_workspace_trust(&self, persisted: bool) -> bool {
+        !self.config().await.resolve_workspace_require_trust()
+            || crate::workspace_trust::env_trust_override()
+            || persisted
     }
 }

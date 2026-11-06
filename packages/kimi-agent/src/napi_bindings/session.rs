@@ -318,6 +318,16 @@ pub fn create_engine_session(
                 initial_usage,
             )
             .await;
+            if let Some(toolset) = pipeline.toolset.as_ref() {
+                let driver = Arc::new(crate::session::wake::EngineSessionWakeDriver::new(
+                    session.clone(),
+                ));
+                let handler = toolset.bind_tower_wake_driver(driver);
+                session.set_wake_replay_handler(
+                    crate::tools::tower::wake::TOWER_INBOX_WAKE_VARIANT,
+                    handler,
+                );
+            }
 
             let session_id = format!("session-{}", SESSION_NEXT_ID.fetch_add(1, Ordering::SeqCst));
             // #3717 late-settle silence: the registry holds the only strong
@@ -537,6 +547,285 @@ pub fn session_set_permission_mode(session_id: String, mode: String) -> napi::Re
         engine.set_mode(new_mode);
         Ok(true)
     })
+}
+
+#[napi(object)]
+pub struct JsTowerStatusMissionTask {
+    pub text: String,
+    pub done: bool,
+    pub dropped: bool,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusMission {
+    pub id: String,
+    pub title: String,
+    pub slug: String,
+    pub kind: String,
+    pub scope: Vec<String>,
+    pub branch: String,
+    pub worktree: String,
+    pub spawn_base: Option<String>,
+    pub deps: Vec<String>,
+    pub status: String,
+    pub owner: Option<String>,
+    pub context: Option<String>,
+    pub tasks: Vec<JsTowerStatusMissionTask>,
+    pub notes: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusRosterEntry {
+    pub name: String,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub kind: String,
+    pub mission_id: Option<String>,
+    pub review_target: Option<String>,
+    pub review_mission_id: Option<String>,
+    pub worktree: Option<String>,
+    pub branch: Option<String>,
+    pub spawned_at: String,
+    pub died_at: Option<String>,
+    pub death_status: Option<String>,
+    pub death_reason: Option<String>,
+    pub status: Option<String>,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusRoster {
+    pub agents: Vec<JsTowerStatusRosterEntry>,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusState {
+    pub base: String,
+    pub mode: String,
+    pub recovered_at: Option<String>,
+    pub missions: Vec<JsTowerStatusMission>,
+    pub roster: JsTowerStatusRoster,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusGateBlock {
+    pub reason: String,
+    pub message: String,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusReview {
+    pub reviewer: String,
+    pub target: String,
+    pub round: u32,
+    pub status: String,
+    pub merge: String,
+    pub reviewed_commit: String,
+    pub date: String,
+    pub file: String,
+    pub mission: Option<String>,
+    pub seq: Option<f64>,
+    pub modified_at_ms: f64,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusGate {
+    pub mission_id: String,
+    pub branch: String,
+    pub status: String,
+    pub ready: bool,
+    pub noop: bool,
+    pub reasons: Vec<String>,
+    pub blocks: Vec<JsTowerStatusGateBlock>,
+    pub selected_review: Option<JsTowerStatusReview>,
+    pub review_binding: Option<String>,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusInbox {
+    pub count: u32,
+}
+
+#[napi(object)]
+pub struct JsTowerStatusConcurrency {
+    pub budget: u32,
+    pub inflight: u32,
+    pub blocked_until: Option<f64>,
+}
+
+/// Structured deterministic tower status. No model or prompt rendering is
+/// involved at this boundary; the SDK chooses its own summary presentation.
+#[napi(object)]
+pub struct JsTowerStatus {
+    pub active: bool,
+    pub initialized: bool,
+    pub state_lost: bool,
+    pub state: Option<JsTowerStatusState>,
+    pub caller: Option<String>,
+    pub gate: Option<Vec<JsTowerStatusGate>>,
+    pub inbox: Option<JsTowerStatusInbox>,
+    pub concurrency: Option<JsTowerStatusConcurrency>,
+    pub recent_activity: Option<Vec<String>>,
+}
+
+fn tower_status_to_napi(
+    snapshot: crate::tools::tower::status_reader::TowerStatusSnapshot,
+) -> JsTowerStatus {
+    let crate::tools::tower::status_reader::TowerStatusSnapshot {
+        active,
+        initialized,
+        state_lost,
+        state,
+        recovered_at,
+        caller,
+        gates,
+        inbox_count,
+        concurrency,
+        recent_activity,
+    } = snapshot;
+    let state = state.map(|state| JsTowerStatusState {
+        base: state.base,
+        mode: state.mode,
+        recovered_at,
+        missions: state
+            .missions
+            .into_iter()
+            .map(|mission| JsTowerStatusMission {
+                id: mission.id,
+                title: mission.title,
+                slug: mission.slug,
+                kind: mission.kind.as_str().to_string(),
+                scope: mission.scope,
+                branch: mission.branch,
+                worktree: mission.worktree,
+                spawn_base: mission.spawn_base,
+                deps: mission.deps,
+                status: mission.status.as_str().to_string(),
+                owner: mission.owner,
+                context: mission.context,
+                tasks: mission
+                    .tasks
+                    .into_iter()
+                    .map(|task| JsTowerStatusMissionTask {
+                        text: task.text,
+                        done: task.done,
+                        dropped: task.dropped,
+                    })
+                    .collect(),
+                notes: mission.notes,
+                blockers: mission.blockers,
+            })
+            .collect(),
+        roster: JsTowerStatusRoster {
+            agents: state
+                .roster
+                .agents
+                .into_iter()
+                .map(|agent| JsTowerStatusRosterEntry {
+                    name: agent.name,
+                    agent_id: agent.agent_id,
+                    session_id: agent.session_id,
+                    kind: agent.kind.as_str().to_string(),
+                    mission_id: agent.mission_id,
+                    review_target: agent.review_target,
+                    review_mission_id: agent.review_mission_id,
+                    worktree: agent.worktree,
+                    branch: agent.branch,
+                    spawned_at: agent.spawned_at,
+                    died_at: agent.died_at,
+                    death_status: agent.death_status,
+                    death_reason: agent.death_reason,
+                    status: agent.status,
+                })
+                .collect(),
+        },
+    });
+    JsTowerStatus {
+        active,
+        initialized,
+        state_lost,
+        state,
+        caller: initialized.then_some(caller),
+        gate: initialized.then(|| {
+            gates
+                .into_iter()
+                .map(|gate| JsTowerStatusGate {
+                    mission_id: gate.mission_id,
+                    branch: gate.branch,
+                    status: gate.status,
+                    ready: gate.ready,
+                    noop: gate.noop,
+                    reasons: gate.reasons,
+                    blocks: gate
+                        .blocks
+                        .into_iter()
+                        .map(|block| JsTowerStatusGateBlock {
+                            reason: block.reason.to_string(),
+                            message: block.message,
+                        })
+                        .collect(),
+                    selected_review: gate.selected_review.map(|review| JsTowerStatusReview {
+                        reviewer: review.reviewer,
+                        target: review.target,
+                        round: review.round,
+                        status: review.status,
+                        merge: review.merge,
+                        reviewed_commit: review.reviewed_commit,
+                        date: review.date,
+                        file: review.file,
+                        mission: review.mission,
+                        seq: review.seq.map(|seq| seq as f64),
+                        modified_at_ms: review.modified_at_ms as f64,
+                    }),
+                    review_binding: gate.binding,
+                })
+                .collect()
+        }),
+        inbox: initialized.then_some(JsTowerStatusInbox {
+            count: inbox_count as u32,
+        }),
+        concurrency: initialized.then_some(JsTowerStatusConcurrency {
+            budget: concurrency.budget as u32,
+            inflight: concurrency.inflight as u32,
+            blocked_until: concurrency.blocked_until.map(|until| until as f64),
+        }),
+        recent_activity: initialized.then_some(recent_activity),
+    }
+}
+
+/// Read the session repository's deterministic tower snapshot for the SDK.
+/// `active` is the host's tower-mode flag; it changes presentation, not the
+/// persisted state or gate evaluation.
+#[napi]
+pub fn session_tower_status(
+    env: Env,
+    session_id: String,
+    active: bool,
+    max_running_tasks: Option<u32>,
+) -> napi::Result<JsObject> {
+    let entry = session_entry(&session_id)?;
+    let repo_root = crate::tools::tower::paths::resolve_tower_repo_root(&entry.workspace);
+    let store = crate::tools::tower::store::TowerStore::new(std::path::PathBuf::from(repo_root));
+    let task_runner = SUBAGENT_MANAGER.get_task_runner_sync();
+    env.execute_tokio_future(
+        async move {
+            let state_lock = store.state_lock();
+            let _state_guard = state_lock.lock().await;
+            let active_agent_ids =
+                crate::tools::tower::active_tower_agent_ids(task_runner.as_deref());
+            let mut snapshot = crate::tools::tower::status_reader::read_tower_status(
+                &store,
+                "main",
+                active_agent_ids.as_ref(),
+                max_running_tasks,
+            )
+            .await
+            .map_err(napi::Error::from_reason)?;
+            snapshot.active = active;
+            Ok(tower_status_to_napi(snapshot))
+        },
+        |_env, status| Ok(status),
+    )
 }
 
 /// Live session shape: the active turn id and the queued turn ids.
@@ -1133,4 +1422,132 @@ async fn compact_session_with_summary(
         "tokensAfter": tokens_after,
         "summary": summary,
     }))
+}
+
+#[cfg(test)]
+mod tower_status_tests {
+    use super::*;
+    use crate::tools::tower::mission_gate::TowerGateBlock;
+    use crate::tools::tower::rate_limit::TowerRateLimitSnapshot;
+    use crate::tools::tower::status_reader::{TowerStatusGate, TowerStatusSnapshot};
+    use crate::tools::tower::types::{
+        TowerAgentKind, TowerMission, TowerMissionStatus, TowerReviewInfo, TowerRoster,
+        TowerRosterEntry, TowerState,
+    };
+
+    #[test]
+    fn tower_status_napi_preserves_structured_state_gate_and_concurrency() {
+        let mission = TowerMission {
+            id: "M1".into(),
+            title: "Build engine".into(),
+            slug: "build-engine".into(),
+            kind: Default::default(),
+            scope: vec!["src/**".into()],
+            branch: "feat/build".into(),
+            worktree: "wt-build".into(),
+            spawn_base: Some("base123".into()),
+            deps: vec!["M0".into()],
+            status: TowerMissionStatus::Active,
+            owner: Some("w1".into()),
+            context: Some("briefing".into()),
+            tasks: Vec::new(),
+            notes: vec!["note".into()],
+            blockers: vec!["blocker".into()],
+        };
+        let agent = TowerRosterEntry {
+            name: "w1".into(),
+            agent_id: "agent-w1".into(),
+            session_id: Some("session-main".into()),
+            kind: TowerAgentKind::Worker,
+            mission_id: Some("M1".into()),
+            review_target: None,
+            review_mission_id: None,
+            worktree: Some("wt-build".into()),
+            branch: Some("feat/build".into()),
+            spawned_at: "2026-11-04T00:00:00Z".into(),
+            died_at: Some("2026-11-04T01:00:00Z".into()),
+            death_status: Some("failed".into()),
+            death_reason: Some("provider blew up".into()),
+            status: Some("dead".into()),
+        };
+        let review = TowerReviewInfo {
+            reviewer: "r1".into(),
+            target: "feat/build".into(),
+            round: 1,
+            status: "clean".into(),
+            merge: "merge".into(),
+            reviewed_commit: "abc123".into(),
+            date: "2026-11-04T00:00:00Z".into(),
+            file: "reviews/1.md".into(),
+            mission: Some("M1".into()),
+            seq: Some(1),
+            modified_at_ms: 42,
+        };
+        let snapshot = TowerStatusSnapshot {
+            active: true,
+            initialized: true,
+            state_lost: false,
+            state: Some(TowerState {
+                version: 1,
+                base: "main".into(),
+                mode: "branch".into(),
+                created_at: "2026-11-04T00:00:00Z".into(),
+                session_id: Some("session-main".into()),
+                roster: TowerRoster {
+                    agents: vec![agent],
+                },
+                missions: vec![mission],
+            }),
+            recovered_at: Some("2026-11-04T02:00:00Z".into()),
+            caller: "tower".into(),
+            gates: vec![TowerStatusGate {
+                mission_id: "M1".into(),
+                branch: "feat/build".into(),
+                status: "active".into(),
+                ready: false,
+                noop: false,
+                reasons: vec!["not-clean".into()],
+                blocks: vec![TowerGateBlock::new(
+                    "not-clean",
+                    "merge blocked: fix findings",
+                )],
+                selected_review: Some(review),
+                binding: Some("exact-tip".into()),
+            }],
+            inbox_count: 3,
+            concurrency: TowerRateLimitSnapshot {
+                budget: 2,
+                inflight: 1,
+                blocked_until: Some(1_800_000),
+            },
+            recent_activity: vec!["tower init".into()],
+        };
+
+        let status = tower_status_to_napi(snapshot);
+        assert!(status.active);
+        assert!(status.initialized);
+        assert!(!status.state_lost);
+        assert_eq!(status.caller.as_deref(), Some("tower"));
+        assert_eq!(status.inbox.as_ref().map(|inbox| inbox.count), Some(3));
+        let state = status.state.expect("initialized state");
+        assert_eq!(state.base, "main");
+        assert_eq!(state.recovered_at.as_deref(), Some("2026-11-04T02:00:00Z"));
+        assert_eq!(state.missions[0].owner.as_deref(), Some("w1"));
+        assert_eq!(state.missions[0].deps, vec!["M0"]);
+        assert_eq!(state.roster.agents[0].kind, "worker");
+        assert_eq!(
+            state.roster.agents[0].death_status.as_deref(),
+            Some("failed")
+        );
+        let gate = status.gate.expect("gate").remove(0);
+        assert_eq!(gate.blocks[0].reason, "not-clean");
+        assert_eq!(gate.blocks[0].message, "merge blocked: fix findings");
+        assert_eq!(gate.selected_review.map(|review| review.round), Some(1));
+        assert_eq!(gate.review_binding.as_deref(), Some("exact-tip"));
+        let concurrency = status.concurrency.expect("concurrency");
+        assert_eq!(concurrency.budget, 2);
+        assert_eq!(concurrency.inflight, 1);
+        assert_eq!(concurrency.blocked_until, Some(1_800_000.0));
+        assert_eq!(status.recent_activity, Some(vec!["tower init".into()]));
+    }
 }

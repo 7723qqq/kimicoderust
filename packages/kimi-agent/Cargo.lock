@@ -1321,6 +1321,7 @@ dependencies = [
  "httparse",
  "ignore",
  "image",
+ "kimi-ui-core",
  "libc",
  "memchr",
  "napi",
@@ -1353,6 +1354,14 @@ dependencies = [
  "which",
  "whoami",
  "zip",
+]
+
+[[package]]
+name = "kimi-ui-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

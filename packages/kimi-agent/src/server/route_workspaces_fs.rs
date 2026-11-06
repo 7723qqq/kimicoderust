@@ -64,7 +64,14 @@ impl HttpServer {
                                     .map(|h| h.is_empty())
                                     .unwrap_or(true)
                         })
-                        .map(|s| format_wire_session(s, &self.store, self.engine.as_ref()))
+                        .map(|s| {
+                            format_wire_session(
+                                s,
+                                &self.store,
+                                self.engine.as_ref(),
+                                self.default_workspace_root().as_deref(),
+                            )
+                        })
                         .collect();
                     let total = items.len();
                     let page: Vec<Value> = items.into_iter().take(page_size).collect();

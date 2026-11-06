@@ -1,6 +1,6 @@
 {
   "note": "Intra-crate module dependency graph of packages/kimi-agent, keyed `from -> to` at top-level-module granularity. Two-way ratchet: a new unrecorded pair fails, and so does a recorded one that is gone. Re-record with `bun run check:rust-module-deps -- --update`; see the script header for the extraction rules and the blind spots.",
-  "generatedAt": "2026-11-01",
+  "generatedAt": "2026-11-06",
   "source": "packages/kimi-agent/src",
   "extraction": {
     "granularity": "top-level module: first path segment under src/ (directory name or .rs file stem)",
@@ -15,9 +15,9 @@
       "the crate boundary: main.rs reaches the library through kimi_agent::… and contributes no edges today"
     ],
     "includesTestCode": true,
-    "files": 295,
-    "modules": 39,
-    "sites": 2724
+    "files": 373,
+    "modules": 42,
+    "sites": 3081
   },
   "edges": [
     "acp -> callbacks",
@@ -64,6 +64,8 @@
     "config -> storage",
     "config -> subagent",
     "config -> tools",
+    "default_workspace -> config",
+    "default_workspace -> session",
     "events -> callbacks",
     "events -> llm",
     "events -> rpc",
@@ -72,9 +74,9 @@
     "injection -> goal",
     "injection -> permission",
     "injection -> swarm",
+    "injection -> tools",
     "injection -> turn_loop",
     "lib -> callbacks",
-    "lib -> engine",
     "lib -> i18n",
     "lib -> mcp",
     "lib -> native",
@@ -118,6 +120,8 @@
     "napi_bindings -> tools",
     "napi_bindings -> turn_events",
     "napi_bindings -> turn_loop",
+    "napi_bindings -> workspace_trust",
+    "napi_bindings -> workspace_trust_disclosure",
     "native -> cron",
     "native -> i18n",
     "native -> llm",
@@ -170,6 +174,7 @@
     "server -> compaction",
     "server -> config",
     "server -> cron",
+    "server -> default_workspace",
     "server -> events",
     "server -> goal",
     "server -> injection",
@@ -191,6 +196,7 @@
     "server -> turn_events",
     "server -> turn_loop",
     "server -> workflow",
+    "server -> workspace_trust",
     "session -> callbacks",
     "session -> compaction",
     "session -> cron",
@@ -204,7 +210,9 @@
     "session -> tools",
     "session -> turn_events",
     "session -> turn_loop",
+    "skills -> env",
     "skills -> frontmatter",
+    "storage -> env",
     "storage -> goal",
     "storage -> injection",
     "storage -> rpc",
@@ -256,6 +264,7 @@
     "tools -> subagent",
     "tools -> swarm",
     "tools -> team",
+    "tools -> test_support",
     "tools -> turn_loop",
     "tools -> workflow",
     "turn_loop -> callbacks",
@@ -270,8 +279,15 @@
     "turn_loop -> server",
     "turn_loop -> storage",
     "turn_loop -> swarm",
+    "turn_loop -> test_support",
     "turn_loop -> tool_input_display",
     "turn_loop -> tools",
-    "workflow -> subagent"
+    "workflow -> subagent",
+    "workspace_trust -> config",
+    "workspace_trust -> env",
+    "workspace_trust_disclosure -> config",
+    "workspace_trust_disclosure -> project_local_config",
+    "workspace_trust_disclosure -> prompt",
+    "workspace_trust_disclosure -> skills"
   ]
 }

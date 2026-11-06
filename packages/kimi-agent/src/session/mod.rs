@@ -29,6 +29,7 @@ pub mod sqlite_store;
 pub mod title;
 pub mod token_counting;
 pub mod usage;
+pub mod wake;
 
 pub(crate) mod goal_turn;
 
@@ -48,6 +49,9 @@ use crate::turn_loop::run_turn::run_turn_continued;
 use crate::turn_loop::types::{GoalContext, LLM, LLMMessage, RunTurnInput, ToolInfo, TurnResult};
 
 use goal_turn::GoalTurnEnd;
+use wake::{
+    enqueue_replayed_wake_locked, enqueue_task_notification_turn, spawn_notification_waiter,
+};
 
 /// How an enqueued prompt joins the turn pipeline (v2 `StepRequest.admission`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +352,8 @@ struct PendingTurn {
     /// cancel path takes it out to deliver `CancelledBeforeStart`. `None`
     /// after one of those has run.
     outcome: Option<oneshot::Sender<Result<TurnOutcome, String>>>,
+    /// Generic notification data retained for user-interruption replay.
+    wake: Option<wake::WakePayload>,
 }
 
 /// State shared between the public API and the pump. Guarded by one mutex;
@@ -357,6 +363,24 @@ struct Core {
     pending: Vec<PendingTurn>,
     active_turn_id: Option<u64>,
     active_cancel: Option<Arc<AtomicBool>>,
+    /// The active notification payload, if any. A user prompt takes this value
+    /// into `deferred_wakes` and cancels the turn before admitting itself.
+    active_wake: Option<wake::WakePayload>,
+    /// Wake batches interrupted by user input. They become fresh turns only
+    /// after the user turns and every other already-queued turn have drained.
+    deferred_wakes: Vec<wake::WakePayload>,
+    /// Prevents the cancelled wake's own `turn.ended` from immediately
+    /// replaying it ahead of the user prompt that interrupted it.
+    wake_waiting_for_user: bool,
+    /// Optional per-variant replay owners. Missing entries keep the original
+    /// engine-driven replay behavior.
+    wake_replay_handlers: std::collections::HashMap<String, wake::WakeReplayHandler>,
+    /// Delegated handlers currently running, keyed by variant. Settlement and
+    /// quiescence stay blocked until every handler has returned.
+    wake_replay_inflight: std::collections::HashMap<String, usize>,
+    /// Last delegated replay failure per variant; the original payload remains
+    /// in `deferred_wakes` for inspection and a later turn's retry.
+    wake_replay_errors: std::collections::HashMap<String, String>,
     /// Steer receipts waiting on the active turn's outcome.
     steer_waiters: Vec<(u64, oneshot::Sender<Result<TurnOutcome, String>>)>,
     /// Cross-turn conversation history (system message excluded — run_turn
@@ -393,11 +417,29 @@ struct HeldTurn {
     request: TurnRequest,
     cancel: Arc<AtomicBool>,
     outcome: Option<oneshot::Sender<Result<TurnOutcome, String>>>,
+    wake: Option<wake::WakePayload>,
+}
+
+#[derive(Default)]
+struct WakeInterruption {
+    active: Option<u64>,
+    queued: Vec<u64>,
+}
+
+#[derive(Default)]
+struct TurnPlacement {
+    preallocated_id: Option<u64>,
+    wake: Option<wake::WakePayload>,
 }
 
 /// Resolve every [`Core::settle_waiters`] when the session is fully idle.
 fn maybe_settle_locked(core: &mut Core) {
-    if core.active_turn_id.is_none() && core.pending.is_empty() && core.held.is_empty() {
+    if core.active_turn_id.is_none()
+        && core.pending.is_empty()
+        && core.held.is_empty()
+        && core.deferred_wakes.is_empty()
+        && core.wake_replay_inflight.is_empty()
+    {
         for tx in std::mem::take(&mut core.settle_waiters) {
             let _ = tx.send(());
         }
@@ -540,6 +582,12 @@ impl EngineSession {
             pending: Vec::new(),
             active_turn_id: None,
             active_cancel: None,
+            active_wake: None,
+            deferred_wakes: Vec::new(),
+            wake_waiting_for_user: false,
+            wake_replay_handlers: std::collections::HashMap::new(),
+            wake_replay_inflight: std::collections::HashMap::new(),
+            wake_replay_errors: std::collections::HashMap::new(),
             steer_waiters: Vec::new(),
             history: Vec::new(),
             quiescence_depth: 0,
@@ -646,7 +694,7 @@ impl EngineSession {
     ///
     /// While a [`QuiescenceGuard`] is alive the request is parked (M1c
     /// backpressure, v2 `heldAdmissions`) and only admitted on guard release.
-    pub fn enqueue_turn(&self, request: TurnRequest) -> Result<TurnReceipt, String> {
+    pub fn enqueue_turn(&self, mut request: TurnRequest) -> Result<TurnReceipt, String> {
         let (outcome_tx, outcome_rx) = oneshot::channel();
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         // v2 `publishPromptQueued`: a *user* prompt admitted behind an active
@@ -654,6 +702,16 @@ impl EngineSession {
         // admissions never do — upstream routes them through `PromptSteered`,
         // which has no hook.
         let user_prompt = request.origin.get("kind").and_then(|kind| kind.as_str()) == Some("user");
+        let interruption = if user_prompt {
+            Self::interrupt_wakes_locked(&mut core)
+        } else {
+            WakeInterruption::default()
+        };
+        // A normal prompt must become its own turn after interrupting a wake,
+        // not steer into the turn whose cancellation it just requested.
+        if interruption.active.is_some() && request.admission == Admission::ActiveOrNewTurn {
+            request.admission = Admission::NewTurn;
+        }
         let queued_behind_active = core.active_turn_id.is_some();
         let prompt_text = request.prompt.content.clone();
         if core.quiescence_depth > 0 {
@@ -668,9 +726,11 @@ impl EngineSession {
                 request,
                 cancel: Arc::new(AtomicBool::new(false)),
                 outcome: Some(outcome_tx),
+                wake: None,
             });
             let queue_length = core.held.len();
             drop(core);
+            self.emit_wake_interruption(interruption);
             if user_prompt {
                 self.fire_user_prompt_queued(turn_id, &prompt_text, queue_length);
             }
@@ -683,13 +743,14 @@ impl EngineSession {
             &mut core,
             request,
             outcome_tx,
-            None,
+            TurnPlacement::default(),
             &self.steer_queue,
             &self.steer_slot,
             &self.wakeup,
         )?;
         let queue_length = core.pending.len();
         drop(core);
+        self.emit_wake_interruption(interruption);
         if user_prompt && queued_behind_active {
             self.fire_user_prompt_queued(turn_id, &prompt_text, queue_length);
         }
@@ -715,8 +776,8 @@ impl EngineSession {
         });
     }
 
-    /// Shared admission logic (v2 `admit`, :242-265). `preallocated_id` is
-    /// set when replaying a quiescence-held turn whose id was already handed
+    /// Shared admission logic (v2 `admit`, :242-265). `placement` carries the
+    /// preallocated id when replaying a quiescence-held turn whose id was handed
     /// out at enqueue time. Notifies the pump after queueing; the caller may
     /// still hold the core lock — `Notify` is non-blocking and the pump
     /// takes the lock only after waking.
@@ -724,14 +785,14 @@ impl EngineSession {
         core: &mut Core,
         request: TurnRequest,
         outcome_tx: oneshot::Sender<Result<TurnOutcome, String>>,
-        preallocated_id: Option<u64>,
+        placement: TurnPlacement,
         steer_queue: &Mutex<Vec<LLMMessage>>,
         steer_slot: &Option<Arc<Mutex<Option<crate::subagent::types::ParentCancel>>>>,
         wakeup: &Notify,
     ) -> Result<u64, String> {
         match request.admission {
             Admission::NewTurn | Admission::ActiveOrNextTurn => {
-                let turn_id = match preallocated_id {
+                let turn_id = match placement.preallocated_id {
                     Some(id) => id,
                     None => {
                         let id = core.next_turn_id;
@@ -746,6 +807,7 @@ impl EngineSession {
                     origin: request.origin,
                     cancel: Arc::new(AtomicBool::new(false)),
                     outcome: Some(outcome_tx),
+                    wake: placement.wake,
                 });
                 wakeup.notify_one();
                 Ok(turn_id)
@@ -774,7 +836,7 @@ impl EngineSession {
                 } else if request.admission == Admission::ActiveTurnOnly {
                     Err("Step request requires an active turn".to_string())
                 } else {
-                    let turn_id = match preallocated_id {
+                    let turn_id = match placement.preallocated_id {
                         Some(id) => id,
                         None => {
                             let id = core.next_turn_id;
@@ -789,6 +851,7 @@ impl EngineSession {
                         origin: request.origin,
                         cancel: Arc::new(AtomicBool::new(false)),
                         outcome: Some(outcome_tx),
+                        wake: placement.wake,
                     });
                     wakeup.notify_one();
                     Ok(turn_id)
@@ -817,6 +880,7 @@ impl EngineSession {
                 Some(id) if core.active_turn_id == Some(id) => match &core.active_cancel {
                     Some(flag) => {
                         flag.store(true, Ordering::SeqCst);
+                        core.active_wake = None;
                         Decision::CancelActive { turn_id: Some(id) }
                     }
                     None => Decision::Nothing,
@@ -845,6 +909,7 @@ impl EngineSession {
                 None => match &core.active_cancel {
                     Some(flag) => {
                         flag.store(true, Ordering::SeqCst);
+                        core.active_wake = None;
                         // v2 always attributes the cancellation to the active
                         // turn's id, even when the caller said "cancel all".
                         Decision::CancelActive {
@@ -909,6 +974,8 @@ impl EngineSession {
             || core.active_turn_id.is_some()
             || !core.pending.is_empty()
             || !core.held.is_empty()
+            || !core.deferred_wakes.is_empty()
+            || !core.wake_replay_inflight.is_empty()
         {
             return None;
         }
@@ -925,7 +992,11 @@ impl EngineSession {
     /// right now — the non-blocking probe behind [`EngineSession::settled`].
     pub fn is_settled(&self) -> bool {
         let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-        core.active_turn_id.is_none() && core.pending.is_empty() && core.held.is_empty()
+        core.active_turn_id.is_none()
+            && core.pending.is_empty()
+            && core.held.is_empty()
+            && core.deferred_wakes.is_empty()
+            && core.wake_replay_inflight.is_empty()
     }
 
     /// Resolves once the session is fully idle: no active turn, no pending
@@ -934,7 +1005,12 @@ impl EngineSession {
     pub async fn settled(&self) {
         let rx = {
             let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-            if core.active_turn_id.is_none() && core.pending.is_empty() && core.held.is_empty() {
+            if core.active_turn_id.is_none()
+                && core.pending.is_empty()
+                && core.held.is_empty()
+                && core.deferred_wakes.is_empty()
+                && core.wake_replay_inflight.is_empty()
+            {
                 return;
             }
             let (tx, rx) = oneshot::channel();
@@ -1063,6 +1139,7 @@ impl Drop for QuiescenceGuard {
                     request,
                     cancel: _,
                     outcome,
+                    wake,
                 } = entry;
                 // The outcome sender is always `Some` here — only the cancel
                 // path takes it, and a cancelled held turn never reaches the
@@ -1076,7 +1153,10 @@ impl Drop for QuiescenceGuard {
                     &mut core,
                     request,
                     outcome,
-                    Some(turn_id),
+                    TurnPlacement {
+                        preallocated_id: Some(turn_id),
+                        wake,
+                    },
                     &self.steer_queue,
                     &self.steer_slot,
                     &self.wakeup,
@@ -1173,6 +1253,7 @@ async fn pump(
                     let entry = core.pending.remove(pos);
                     core.active_turn_id = Some(entry.turn_id);
                     core.active_cancel = Some(entry.cancel.clone());
+                    core.active_wake = entry.wake.clone();
                     (entry, core.history.clone())
                 })
             }
@@ -1194,7 +1275,9 @@ async fn pump(
                 // after `prompt()` already resolved.
                 if ctx.print_background.is_none() {
                     let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
-                    if enqueue_task_notification_turn(&ctx, &mut core) {
+                    if let Some(receipt) = enqueue_task_notification_turn(&ctx, &mut core, &wakeup)
+                    {
+                        spawn_notification_waiter(receipt);
                         continue;
                     }
                 }
@@ -1230,6 +1313,7 @@ async fn pump(
             input,
             origin,
             cancel,
+            wake,
             ..
         } = entry;
         let started = std::time::Instant::now();
@@ -1331,10 +1415,14 @@ async fn pump(
         // Fold the turn's final messages into the session history (system
         // message excluded — run_turn rebuilds it per turn), release the
         // active slot, and resolve steer receipts with the turn's outcome.
-        let steer_receipts = {
+        let (steer_receipts, delegated_wake_replays) = {
             let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
             core.active_turn_id = None;
             core.active_cancel = None;
+            core.active_wake = None;
+            if wake.is_none() {
+                core.wake_waiting_for_user = false;
+            }
             if let Some(slot) = &ctx.agent_cancel_slot {
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
@@ -1394,9 +1482,32 @@ async fn pump(
                 goal_continuation,
                 cron_followups,
             ));
+            let mut delegated_wake_replays = Vec::new();
+            if !core.wake_waiting_for_user
+                && core.pending.is_empty()
+                && core.held.is_empty()
+                && core.quiescence_depth == 0
+            {
+                for payload in std::mem::take(&mut core.deferred_wakes) {
+                    if let Some(handler) = core.wake_replay_handlers.get(&payload.variant).cloned()
+                    {
+                        *core
+                            .wake_replay_inflight
+                            .entry(payload.variant.clone())
+                            .or_default() += 1;
+                        delegated_wake_replays.push((payload, handler));
+                    } else {
+                        let receipt = enqueue_replayed_wake_locked(&mut core, &wakeup, payload);
+                        spawn_notification_waiter(receipt);
+                    }
+                }
+            }
             // Wake `settled()` waiters when nothing else is queued (M1c).
             maybe_settle_locked(&mut core);
-            std::mem::take(&mut core.steer_waiters)
+            (
+                std::mem::take(&mut core.steer_waiters),
+                delegated_wake_replays,
+            )
         };
         // Durable: the host folds this into `turnKey.lastEnded` and drives any
         // terminal-state display from it.
@@ -1437,6 +1548,31 @@ async fn pump(
         }
         for (_, receipt) in steer_receipts {
             let _ = receipt.send(outcome.clone());
+        }
+        for (payload, handler) in delegated_wake_replays {
+            let variant = payload.variant.clone();
+            let result = handler(payload.clone()).await;
+            let mut core = core.lock().unwrap_or_else(|e| e.into_inner());
+            let remove_inflight =
+                core.wake_replay_inflight
+                    .get_mut(&variant)
+                    .is_some_and(|count| {
+                        *count = count.saturating_sub(1);
+                        *count == 0
+                    });
+            if remove_inflight {
+                core.wake_replay_inflight.remove(&variant);
+            }
+            match result {
+                Ok(()) => {
+                    core.wake_replay_errors.remove(&variant);
+                }
+                Err(error) => {
+                    core.deferred_wakes.insert(0, payload);
+                    core.wake_replay_errors.insert(variant, error);
+                }
+            }
+            maybe_settle_locked(&mut core);
         }
     }
 }
@@ -1847,43 +1983,8 @@ fn enqueue_print_followup_turn(
         origin,
         cancel: Arc::new(AtomicBool::new(false)),
         outcome: entry_outcome.take(),
+        wake: None,
     });
-}
-
-/// Queue this session's completed background tasks as a synthetic turn
-/// (v2 `taskService.notifyAgentTask` → `loop.notify`). Returns whether a turn
-/// was queued.
-///
-/// The turn is ordinary on the host side — `turn.started` with a `task`
-/// origin, a model response, the notification text in the transcript — but
-/// it has no prompt receipt: nothing is waiting on it, the way v2's
-/// `notify` never resolves a prompt.
-fn enqueue_task_notification_turn(ctx: &SessionContext, core: &mut Core) -> bool {
-    let Some(runner) = &ctx.task_runner else {
-        return false;
-    };
-    let session_id = ctx.session_id.as_deref();
-    if runner.pending_notification_count(session_id) == 0 {
-        return false;
-    }
-    let notifications = runner.take_pending_notifications(session_id);
-    let Some(first) = notifications.first() else {
-        return false;
-    };
-    let text = render_task_notifications(&notifications);
-    let mut no_receipt = None;
-    enqueue_print_followup_turn(
-        core,
-        &mut no_receipt,
-        text,
-        serde_json::json!({
-            "kind": "task",
-            "taskId": &first.task_id,
-            "status": first.status.as_str(),
-            "notificationId": format!("{}-{}", first.task_id, first.ended_at),
-        }),
-    );
-    true
 }
 
 /// The user-role text a steer turn hands the model: one block per completed

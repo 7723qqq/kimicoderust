@@ -207,7 +207,12 @@ impl HttpServer {
                     })
                     .collect();
 
-                let wire_session = format_wire_session(&session, &self.store, self.engine.as_ref());
+                let wire_session = format_wire_session(
+                    &session,
+                    &self.store,
+                    self.engine.as_ref(),
+                    self.default_workspace_root().as_deref(),
+                );
 
                 let subagent_manager = self.subagent_manager();
                 let subagent_list = subagent_manager.list().await;
@@ -306,16 +311,26 @@ impl HttpServer {
                         .store
                         .load_session_history(session_id)
                         .unwrap_or_default();
-                    let items = crate::server::transcript::build_items(&history);
+                    let items =
+                        crate::server::transcript::cold_items(&self.store, session_id, &history);
                     let snapshot = json!({
                         "items": items,
-                        "tasks": crate::server::transcript::cold_tasks(&self.store, session_id),
+                        "tasks": crate::server::transcript::cold_tasks(
+                            &self.store,
+                            session_id,
+                            self.prompt_queue
+                                .active_turn_number(session_id)
+                                .map(i64::from)
+                        ),
                         "interactions": [],
                         "attachments": [],
                         "todos": [],
                         "prompts": crate::server::transcript::cold_prompts(
                             &self.store,
-                            session_id
+                            session_id,
+                            self.prompt_queue
+                                .active_turn_number(session_id)
+                                .map(i64::from)
                         ),
                         "meta": {},
                     });
@@ -353,7 +368,8 @@ impl HttpServer {
                     .store
                     .load_session_history(session_id)
                     .unwrap_or_default();
-                let items = crate::server::transcript::build_items(&history);
+                let items =
+                    crate::server::transcript::cold_items(&self.store, session_id, &history);
                 let messages = crate::server::transcript::project_user_messages(&items);
                 HttpResponse::ok(&json!({
                     "agents": [{
@@ -376,7 +392,8 @@ impl HttpServer {
                     .store
                     .load_session_history(session_id)
                     .unwrap_or_default();
-                let items = crate::server::transcript::build_items(&history);
+                let items =
+                    crate::server::transcript::cold_items(&self.store, session_id, &history);
                 let plans =
                     crate::server::transcript::project_plans(&items, tool_call_id.as_deref());
                 if tool_call_id.is_some() && plans.is_empty() {
@@ -403,7 +420,8 @@ impl HttpServer {
                     .store
                     .load_session_history(session_id)
                     .unwrap_or_default();
-                let items = crate::server::transcript::build_items(&history);
+                let items =
+                    crate::server::transcript::cold_items(&self.store, session_id, &history);
                 let page = crate::server::transcript::TurnPageQuery {
                     before_turn: req.query_param("before_turn"),
                     after_turn: req.query_param("after_turn"),
@@ -424,7 +442,10 @@ impl HttpServer {
                     "todos": [],
                     "prompts": crate::server::transcript::cold_prompts(
                         &self.store,
-                        session_id
+                        session_id,
+                        self.prompt_queue
+                            .active_turn_number(session_id)
+                            .map(i64::from)
                     ),
                     "meta": {},
                     "agents": [{
@@ -490,9 +511,12 @@ impl HttpServer {
                         // session's document, nothing wrapped around it.
                         let created = self.store.get_session(&new_session_id).ok().flatten();
                         let wire = match created {
-                            Some(ref session) => {
-                                format_wire_session(session, &self.store, self.engine.as_ref())
-                            }
+                            Some(ref session) => format_wire_session(
+                                session,
+                                &self.store,
+                                self.engine.as_ref(),
+                                self.default_workspace_root().as_deref(),
+                            ),
                             None => json!({}),
                         };
                         HttpResponse::ok(&wire)
@@ -516,9 +540,12 @@ impl HttpServer {
                         // (kap-server/src/routes/sessions.ts:976).
                         let summary = self.store.get_session(session_id).ok().flatten();
                         let wire = match summary {
-                            Some(ref session) => {
-                                format_wire_session(session, &self.store, self.engine.as_ref())
-                            }
+                            Some(ref session) => format_wire_session(
+                                session,
+                                &self.store,
+                                self.engine.as_ref(),
+                                self.default_workspace_root().as_deref(),
+                            ),
                             None => json!({}),
                         };
                         HttpResponse::ok(&wire)
@@ -596,7 +623,14 @@ impl HttpServer {
                     Ok(children) => {
                         let items: Vec<Value> = children
                             .into_iter()
-                            .map(|s| format_wire_session(&s, &self.store, self.engine.as_ref()))
+                            .map(|s| {
+                                format_wire_session(
+                                    &s,
+                                    &self.store,
+                                    self.engine.as_ref(),
+                                    self.default_workspace_root().as_deref(),
+                                )
+                            })
                             .collect();
                         // v2 answers the paged `{items, has_more}` contract
                         // (kap-server routes/sessions.ts:694,
@@ -647,7 +681,12 @@ impl HttpServer {
                 }
                 let created_session = self.store.get_session(&child_session_id).ok().flatten();
                 let session_val = if let Some(ref s) = created_session {
-                    format_wire_session(s, &self.store, self.engine.as_ref())
+                    format_wire_session(
+                        s,
+                        &self.store,
+                        self.engine.as_ref(),
+                        self.default_workspace_root().as_deref(),
+                    )
                 } else {
                     json!(created_session)
                 };
@@ -1107,11 +1146,12 @@ impl HttpServer {
                 };
                 let config = self.config().await;
                 let merge = config.resolve_merge_all_available_skills();
-                let mut extra = config.extra_skill_dirs_paths();
-                extra.extend(self.plugin_manager.plugin_skill_dir_paths());
-                let skills = crate::skills::scan_all_skills_with_extra_and_merge(
+                let extra = config.extra_skill_dirs_paths();
+                let plugin_dirs = self.plugin_manager.plugin_skill_dirs();
+                let skills = crate::skills::scan_all_skills_with_extra_merge_and_plugins(
                     ws_root.as_deref(),
                     &extra,
+                    &plugin_dirs,
                     merge,
                 );
                 HttpResponse::ok(&json!({
@@ -1149,11 +1189,12 @@ impl HttpServer {
                 };
                 let config = self.config().await;
                 let merge = config.resolve_merge_all_available_skills();
-                let mut extra = config.extra_skill_dirs_paths();
-                extra.extend(self.plugin_manager.plugin_skill_dir_paths());
-                let skills = crate::skills::scan_all_skills_with_extra_and_merge(
+                let extra = config.extra_skill_dirs_paths();
+                let plugin_dirs = self.plugin_manager.plugin_skill_dirs();
+                let skills = crate::skills::scan_all_skills_with_extra_merge_and_plugins(
                     ws_root.as_deref(),
                     &extra,
+                    &plugin_dirs,
                     merge,
                 );
                 if !skills.iter().any(|s| s.name == skill_name) {

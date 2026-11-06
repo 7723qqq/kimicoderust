@@ -1,0 +1,12 @@
+[package]
+name = "kimi-ui-core"
+version = "0.1.0"
+edition = "2024"
+description = "Shared contract types for the Rust UI migration (EntryId, EntryOp, event classification, render backends)."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"

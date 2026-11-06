@@ -279,6 +279,32 @@ fn scan_directory(
     out: &mut Vec<SkillDescriptor>,
     seen: &mut HashSet<String>,
 ) {
+    scan_directory_for_plugin(dir, source, None, out, seen);
+}
+
+/// [`scan_directory`] for a plugin-contributed root: every descriptor's name
+/// is qualified as `<plugin_id>:<bare>` (v2 `registerPluginSkill`), so plugin
+/// skills never collide with — or shadow — the bare names of other scopes.
+fn scan_plugin_directory(
+    dir: &Path,
+    plugin_id: &str,
+    out: &mut Vec<SkillDescriptor>,
+    seen: &mut HashSet<String>,
+) {
+    // A plugin root reaches the wire as `extra` — v2 tags plugin roots the
+    // same way (`manager.pluginSkillRoots`, `manager.ts:314`), and the
+    // plugin's identity rides the prompt prefix and now the qualified name,
+    // not the descriptor's `source`.
+    scan_directory_for_plugin(dir, "extra", Some(plugin_id), out, seen);
+}
+
+fn scan_directory_for_plugin(
+    dir: &Path,
+    source: &str,
+    plugin_id: Option<&str>,
+    out: &mut Vec<SkillDescriptor>,
+    seen: &mut HashSet<String>,
+) {
     let read_dir = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,
@@ -309,7 +335,10 @@ fn scan_directory(
                     source,
                     out,
                     seen,
-                    None,
+                    NameQualifiers {
+                        sub_skill_parent: None,
+                        plugin_id,
+                    },
                 )
                 && meta.has_sub_skill
             {
@@ -330,18 +359,47 @@ fn scan_directory(
                     source,
                     out,
                     seen,
-                    None,
+                    NameQualifiers {
+                        sub_skill_parent: None,
+                        plugin_id,
+                    },
                 );
             }
         }
     }
 }
 
+/// v2 `registerPluginSkill` (`3f0857eb7d` #4188): a plugin skill's catalog
+/// name is the qualified `<plugin_id>:<bare>` — never the bare name, so two
+/// plugins can ship the same bare name without the dedupe set dropping one,
+/// and a plugin skill can no longer shadow a project/user/extra skill under
+/// that bare name. `bare` strips a pre-existing `<plugin_id>:` prefix, so
+/// re-registering an already-qualified skill stays idempotent (v2's
+/// `lark:lark:lark-doc` case).
+fn qualify_plugin_skill_name(plugin_id: &str, name: &str) -> String {
+    let prefix = format!("{plugin_id}:");
+    let bare = name.strip_prefix(&prefix).unwrap_or(name);
+    format!("{prefix}{bare}")
+}
+
+/// The two optional name qualifications [`push_descriptor`] applies, in
+/// order: the `has-sub-skill` parent first (`<parent>.<child>`), then the
+/// plugin prefix (`<plugin_id>:<bare>`, idempotent — the prefix is stripped
+/// first, so a plugin's sub-skill chain qualifies exactly once).
+#[derive(Debug, Clone, Copy, Default)]
+struct NameQualifiers<'a> {
+    sub_skill_parent: Option<&'a str>,
+    plugin_id: Option<&'a str>,
+}
+
 /// Parse one skill file and append its descriptor under the given source,
 /// honoring the case-insensitive dedupe set. `sub_skill_parent` names the
 /// `has-sub-skill: true` parent whose child this is: the descriptor then takes
 /// the qualified `<parent>.<child>` name and is marked as a sub-skill (v2
-/// `parseAndRegister`'s `subSkillParentName` branch).
+/// `parseAndRegister`'s `subSkillParentName` branch). `plugin_id` qualifies
+/// the name as `<plugin_id>:<bare>` (v2 `registerPluginSkill`); applied after
+/// the sub-skill qualification, and idempotent because the prefix is stripped
+/// first, so a plugin's `<parent>.<child>` chain qualifies exactly once.
 ///
 /// Returns the metadata of the descriptor it appended, so the caller can act
 /// on `has_sub_skill`; `None` when the name was already taken.
@@ -352,11 +410,14 @@ fn push_descriptor(
     source: &str,
     out: &mut Vec<SkillDescriptor>,
     seen: &mut HashSet<String>,
-    sub_skill_parent: Option<&str>,
+    qualifiers: NameQualifiers<'_>,
 ) -> Option<ParsedSkillMeta> {
     let mut meta = parse_skill_frontmatter(content, fallback_name);
-    if let Some(parent) = sub_skill_parent {
+    if let Some(parent) = qualifiers.sub_skill_parent {
         meta.name = qualify_sub_skill_name(parent, &meta.name);
+    }
+    if let Some(plugin_id) = qualifiers.plugin_id {
+        meta.name = qualify_plugin_skill_name(plugin_id, &meta.name);
     }
     if !seen.insert(meta.name.to_lowercase()) {
         return None;
@@ -368,7 +429,7 @@ fn push_descriptor(
         path: path.replace('\\', "/"),
         disable_model_invocation: meta.disable_model_invocation,
         scopes: meta.scopes.clone(),
-        is_sub_skill: sub_skill_parent.map(|_| true),
+        is_sub_skill: qualifiers.sub_skill_parent.map(|_| true),
         skill_type: meta.skill_type.clone(),
     });
     Some(meta)
@@ -412,11 +473,13 @@ pub struct PluginSkillDir {
 
 impl SkillScanRoots {
     /// The catalog this session advertises: project scope, the user scope, the
-    /// extra roots, the plugin roots, then the builtins.
+    /// extra roots, the plugin roots (registered under qualified
+    /// `<plugin_id>:<skill>` names, v2 `registerPluginSkill`), then the builtins.
     pub fn catalog(&self) -> Vec<SkillDescriptor> {
-        scan_all_skills_with_extra_and_merge(
+        scan_all_skills_with_extra_merge_and_plugins(
             self.root.as_deref(),
-            &self.roots_in_precedence_order(),
+            &self.extra_dirs,
+            &self.plugin_dirs,
             self.merge_all_available_skills,
         )
     }
@@ -491,7 +554,12 @@ fn scan_sub_skills(
             source,
             out,
             seen,
-            Some(parent_name),
+            // The parent already carries any plugin qualification; the
+            // `<parent>.<child>` chain inherits it through the parent name.
+            NameQualifiers {
+                sub_skill_parent: Some(parent_name),
+                plugin_id: None,
+            },
         );
     }
 }
@@ -656,6 +724,25 @@ pub fn scan_all_skills_with_extra_and_merge(
     extra_dirs: &[PathBuf],
     merge_all_available_skills: bool,
 ) -> Vec<SkillDescriptor> {
+    scan_all_skills_with_extra_merge_and_plugins(
+        workspace_root,
+        extra_dirs,
+        &[],
+        merge_all_available_skills,
+    )
+}
+
+/// [`scan_all_skills_with_extra_and_merge`] plus plugin-contributed roots
+/// (v2 `manager.pluginSkillRoots`): scanned after the declared extra roots and
+/// before the builtins (`extra` 10 > `plugin` 5 > `builtin` 0), each
+/// registered under its qualified `<plugin_id>:<skill>` name (v2
+/// `registerPluginSkill`, `3f0857eb7d` #4188).
+pub fn scan_all_skills_with_extra_merge_and_plugins(
+    workspace_root: Option<&Path>,
+    extra_dirs: &[PathBuf],
+    plugin_dirs: &[PluginSkillDir],
+    merge_all_available_skills: bool,
+) -> Vec<SkillDescriptor> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -703,7 +790,13 @@ pub fn scan_all_skills_with_extra_and_merge(
         scan_directory(dir, "extra", &mut out, &mut seen);
     }
 
-    // 4. Builtin skills — v2's lowest rank (0), so anything above shadows them.
+    // 4. Plugin roots (v2 rank 5): qualified `<plugin_id>:<skill>` names, so a
+    // plugin skill never shadows — or collides with — the bare names above.
+    for plugin in plugin_dirs {
+        scan_plugin_directory(&plugin.dir, &plugin.plugin_id, &mut out, &mut seen);
+    }
+
+    // 5. Builtin skills — v2's lowest rank (0), so anything above shadows them.
     for builtin in builtin_skills() {
         let key = builtin.name.to_lowercase();
         if seen.insert(key) {
@@ -802,6 +895,7 @@ This is the first paragraph describing the skill.
     /// is pinned by [`plugin_roots_rank_below_extra_dirs`].
     #[test]
     fn test_extra_dirs_rank_below_user_and_report_their_own_source() {
+        let _env_guard = crate::env::ENV_TEST_LOCK.blocking_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         let proj_root = temp_dir.path();
         let extra_root = temp_dir.path().join("extra-root");
@@ -832,13 +926,37 @@ This is the first paragraph describing the skill.
         };
         let prev_home = std::env::var("HOME").ok();
         let prev_profile = std::env::var("USERPROFILE").ok();
+        // #region debug-point A:skills-before-set
+        eprintln!(
+            "{}",
+            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"skills/mod.rs:test_extra_dirs_rank_below_user_and_report_their_own_source:before-set","msg":"[DEBUG] skills before env set","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"old_HOME":prev_home.as_deref(),"old_USERPROFILE":prev_profile.as_deref(),"new_home":home.display().to_string(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
+        );
+        // #endregion
         restore("HOME", Some(home.to_string_lossy().into_owned()));
         restore("USERPROFILE", Some(home.to_string_lossy().into_owned()));
+        // #region debug-point A:skills-after-set
+        eprintln!(
+            "{}",
+            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"skills/mod.rs:test_extra_dirs_rank_below_user_and_report_their_own_source:after-set","msg":"[DEBUG] skills after env set","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"HOME":std::env::var("HOME").ok(),"USERPROFILE":std::env::var("USERPROFILE").ok(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
+        );
+        // #endregion
 
         let list = scan_all_skills_with_extra(Some(proj_root), &[extra_root]);
 
+        // #region debug-point A:skills-before-restore
+        eprintln!(
+            "{}",
+            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"skills/mod.rs:test_extra_dirs_rank_below_user_and_report_their_own_source:before-restore","msg":"[DEBUG] skills before env restore","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"HOME":std::env::var("HOME").ok(),"USERPROFILE":std::env::var("USERPROFILE").ok(),"restore_HOME":prev_home.as_deref(),"restore_USERPROFILE":prev_profile.as_deref(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
+        );
+        // #endregion
         restore("HOME", prev_home);
         restore("USERPROFILE", prev_profile);
+        // #region debug-point A:skills-after-restore
+        eprintln!(
+            "{}",
+            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"skills/mod.rs:test_extra_dirs_rank_below_user_and_report_their_own_source:after-restore","msg":"[DEBUG] skills after env restore","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"HOME":std::env::var("HOME").ok(),"USERPROFILE":std::env::var("USERPROFILE").ok(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
+        );
+        // #endregion
 
         let shared = list.iter().find(|s| s.name == "shared-skill").unwrap();
         assert_eq!(
@@ -904,16 +1022,148 @@ This is the first paragraph describing the skill.
         };
         let list = roots.catalog();
 
+        // v2 `registerPluginSkill` (#4188): the extra dir keeps the bare name
+        // (`extra` 10 > `plugin` 5), and the plugin's copy registers under its
+        // qualified name instead of shadowing or being dropped.
         let clash = list.iter().find(|s| s.name == "clash").unwrap();
         assert_eq!(
             clash.description, "From an extra dir",
             "extra (10) outranks plugin (5) in v2"
         );
-        assert!(list.iter().any(|s| s.name == "plugin-only"));
+        let qualified = list.iter().find(|s| s.name == "demo:clash").unwrap();
+        assert_eq!(qualified.description, "From a plugin");
+        assert!(list.iter().any(|s| s.name == "demo:plugin-only"));
+        assert!(!list.iter().any(|s| s.name == "plugin-only"));
         // A plugin root reaches the wire as `extra` — v2 tags plugin roots the
         // same way (`manager.pluginSkillRoots`, `manager.ts:314`), and the
-        // plugin's identity rides the prompt, not the descriptor.
+        // plugin's identity rides the prompt prefix and the qualified name,
+        // not the descriptor's `source`.
         assert_eq!(clash.source, "extra");
+        assert_eq!(qualified.source, "extra");
+    }
+
+    #[test]
+    fn same_named_skills_from_different_plugins_stay_visible_under_qualified_names() {
+        // v2 `keeps same-named skills from different plugins visible under
+        // qualified names only` (registry.test.ts, #4188).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plugin_a = temp_dir.path().join("plugin-a");
+        let plugin_b = temp_dir.path().join("plugin-b");
+        for (root, description) in [(&plugin_a, "from plugin a"), (&plugin_b, "from plugin b")] {
+            std::fs::create_dir_all(root.join("lark-doc")).unwrap();
+            std::fs::write(
+                root.join("lark-doc").join("SKILL.md"),
+                format!("---\nname: lark-doc\ndescription: {description}\n---\n"),
+            )
+            .unwrap();
+        }
+        let roots = SkillScanRoots {
+            root: None,
+            extra_dirs: Vec::new(),
+            plugin_dirs: vec![
+                PluginSkillDir {
+                    dir: plugin_a,
+                    plugin_id: "plugin-a".into(),
+                    instructions: None,
+                },
+                PluginSkillDir {
+                    dir: plugin_b,
+                    plugin_id: "plugin-b".into(),
+                    instructions: None,
+                },
+            ],
+            merge_all_available_skills: true,
+        };
+        let list = roots.catalog();
+
+        assert!(list.iter().all(|s| s.name != "lark-doc"));
+        assert_eq!(
+            list.iter()
+                .find(|s| s.name == "plugin-a:lark-doc")
+                .unwrap()
+                .description,
+            "from plugin a"
+        );
+        assert_eq!(
+            list.iter()
+                .find(|s| s.name == "plugin-b:lark-doc")
+                .unwrap()
+                .description,
+            "from plugin b"
+        );
+    }
+
+    #[test]
+    fn plugin_skill_does_not_shadow_a_bare_name_from_another_scope() {
+        // v2 `does not let plugin skills shadow bare names from other sources`.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let proj_root = temp_dir.path();
+        let plugin_root = proj_root.join("plugin");
+        std::fs::create_dir_all(plugin_root.join("review")).unwrap();
+        std::fs::write(
+            plugin_root.join("review").join("SKILL.md"),
+            "---\nname: review\ndescription: from plugin\n---\n",
+        )
+        .unwrap();
+        let project_skill = proj_root.join(".kimi-code").join("skills").join("review");
+        std::fs::create_dir_all(&project_skill).unwrap();
+        std::fs::write(
+            project_skill.join("SKILL.md"),
+            "---\nname: review\ndescription: from project\n---\n",
+        )
+        .unwrap();
+
+        let roots = SkillScanRoots {
+            root: Some(proj_root.to_path_buf()),
+            extra_dirs: Vec::new(),
+            plugin_dirs: vec![PluginSkillDir {
+                dir: plugin_root,
+                plugin_id: "superpowers".into(),
+                instructions: None,
+            }],
+            merge_all_available_skills: true,
+        };
+        let list = roots.catalog();
+
+        let bare = list.iter().find(|s| s.name == "review").unwrap();
+        assert_eq!(bare.description, "from project");
+        assert_eq!(bare.source, "project");
+        assert_eq!(
+            list.iter()
+                .find(|s| s.name == "superpowers:review")
+                .unwrap()
+                .description,
+            "from plugin"
+        );
+    }
+
+    #[test]
+    fn re_registering_a_qualified_plugin_skill_stays_idempotent() {
+        // v2 `stays idempotent when a merged catalog re-registers listed
+        // skills` (`lark:lark:lark-doc` must never appear).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plugin_root = temp_dir.path().join("plugin");
+        std::fs::create_dir_all(plugin_root.join("lark-doc")).unwrap();
+        std::fs::write(
+            plugin_root.join("lark-doc").join("SKILL.md"),
+            "---\nname: lark:lark-doc\ndescription: from plugin\n---\n",
+        )
+        .unwrap();
+
+        let roots = SkillScanRoots {
+            root: None,
+            extra_dirs: Vec::new(),
+            plugin_dirs: vec![PluginSkillDir {
+                dir: plugin_root,
+                plugin_id: "lark".into(),
+                instructions: None,
+            }],
+            merge_all_available_skills: true,
+        };
+        let list = roots.catalog();
+
+        assert!(list.iter().any(|s| s.name == "lark:lark-doc"));
+        assert!(list.iter().all(|s| s.name != "lark:lark:lark-doc"));
     }
 
     #[test]

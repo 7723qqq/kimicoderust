@@ -17,7 +17,7 @@
 
 use serde_json::Value;
 
-use crate::injection::{InjectionContext, InjectionRegistry};
+use crate::injection::{DomainValueSource, InjectionContext, InjectionRegistry};
 use crate::turn_loop::types::LLMMessage;
 
 /// v2 `TODO_LIST_TOOL_NAME`.
@@ -234,14 +234,18 @@ pub fn todo_list_stale_reminder(
 }
 
 /// Register the stale-todo provider. The caller has already applied v2's
-/// registration gates (main agent, `TodoList` active, state bridge present)
-/// and resolved the current todo state; the provider re-evaluates the
-/// counters from the live history on every step.
-pub fn register_todo_reminder(registry: &mut InjectionRegistry, todos: Value) {
-    let items = read_reminder_items(&todos);
+/// registration gates (main agent, `TodoList` active, state bridge present).
+/// Both the counters and the todo value are read on every step, matching v2's
+/// `memory.get()` + `runtime.getState()` provider body.
+pub fn register_todo_reminder<S>(registry: &mut InjectionRegistry, state: std::sync::Arc<S>)
+where
+    S: DomainValueSource + Send + Sync + 'static,
+{
     registry.register(
         TODO_LIST_REMINDER_VARIANT,
         Box::new(move |ctx: &InjectionContext| {
+            let todos = state.read_domain("todo").unwrap_or(Value::Null);
+            let items = read_reminder_items(&todos);
             todo_list_stale_reminder_for_items(true, ctx.history, &items)
         }),
     );
@@ -474,8 +478,18 @@ mod tests {
 
     #[test]
     fn test_registered_provider_injects_through_the_registry() {
+        struct StaticTodos(Value);
+        impl DomainValueSource for StaticTodos {
+            fn read_domain(&self, domain: &str) -> Option<Value> {
+                (domain == "todo").then(|| self.0.clone())
+            }
+        }
+
         let mut registry = InjectionRegistry::new();
-        register_todo_reminder(&mut registry, todos_value());
+        register_todo_reminder(
+            &mut registry,
+            std::sync::Arc::new(StaticTodos(todos_value())),
+        );
         assert_eq!(registry.names(), vec![TODO_LIST_REMINDER_VARIANT]);
 
         let mut history = vec![todo_list_write(&todos_value())];

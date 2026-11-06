@@ -611,6 +611,11 @@ pub struct NativeToolCallbacks {
     /// gate used to be `tower_worktree_root.is_some()`, which no production
     /// caller ever set, so the whole tower toolset was unreachable there.
     pub tower_enabled: bool,
+    /// Whether NotifyUser is available (`KIMI_CODE_EXPERIMENTAL_NOTIFY_USER`
+    /// flag AND a host that can show an update — upstream #4054's
+    /// `notifyUserAvailable` two-input gate; #4153's nudge service keys off
+    /// the same answer). Gates the advertised NotifyUser tool.
+    pub notify_user_enabled: bool,
     pub sandbox_policy: Option<crate::tools::sandbox::SandboxExecutionPolicy>,
 }
 
@@ -667,6 +672,7 @@ impl HostCallbacks for NativeToolCallbacks {
             todo_tool_veto: self.todo_tool_veto.clone(),
             tower_worktree_root: self.tower_worktree_root.clone(),
             tower_enabled: self.tower_enabled,
+            notify_user_enabled: self.notify_user_enabled,
             sandbox_policy: self.sandbox_policy.clone(),
         };
         Box::pin(async move {
@@ -1265,12 +1271,14 @@ impl HostCallbacks for NativeToolCallbacks {
         let inner = self.inner.clone();
         let toolset = self.toolset.clone();
         let tower_enabled = self.tower_enabled;
+        let notify_user_enabled = self.notify_user_enabled;
         let mcp_mgr = self.toolset.mcp_manager().cloned();
         Box::pin(async move {
             let filter = toolset.tools_filter().cloned();
-            let mut tools = crate::tools::tool_policy::native_tool_defs(
+            let mut tools = crate::tools::tool_policy::native_tool_defs_with_notify(
                 toolset.github_credentials().is_some(),
                 tower_enabled,
+                notify_user_enabled,
                 filter.as_ref(),
                 toolset.secondary_model().map(|pool| pool.as_ref()),
             );
@@ -1317,17 +1325,31 @@ impl HostCallbacks for NativeToolCallbacks {
                         crate::tools::tool_policy::matches_profile_tool_pattern(pattern, name)
                     })
                 };
-                // v2's allowlist-filtered listing: the advertised types are
-                // exactly the ones the spawn gate admits, including the
-                // turn's discovered definitions.
-                let spawn_catalog = match toolset.subagent_manager() {
-                    Some(manager) => manager.spawn_catalog(crate::callbacks::MAIN_AGENT_ID).await,
-                    None => None,
+                // v2's allowlist-filtered listing and background gate are
+                // caller-relative: the live table must offer all three Task
+                // tools, and the caller's own profile must enable them too.
+                let caller_id = crate::tools::CALLER_AGENT_ID
+                    .try_with(|id| id.clone())
+                    .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
+                let (spawn_catalog, background_available) = match toolset.subagent_manager() {
+                    Some(manager) => {
+                        let catalog = manager.spawn_catalog(&caller_id).await;
+                        let available =
+                            crate::tools::agent_tool::background_agent_available_for_caller(
+                                manager,
+                                &caller_id,
+                                &is_available,
+                            )
+                            .await;
+                        (catalog, available)
+                    }
+                    None => (None, false),
                 };
-                *slot = crate::tools::agent_tool::agent_tool_def_filtered(
+                *slot = crate::tools::agent_tool::agent_tool_def_filtered_with_background(
                     toolset.secondary_model().map(|pool| pool.as_ref()),
                     &is_available,
                     spawn_catalog.as_ref(),
+                    background_available,
                 );
             }
             // Progressive tool disclosure (v2 `shapeTools`): with the
@@ -1390,6 +1412,9 @@ pub struct CountingCallbacks {
     pub event_count: Arc<AtomicU32>,
     /// Optional in-process event bus (P26 batch 5) for decoupled in-Rust event consumers.
     pub bus: Option<Arc<crate::events::EventBus>>,
+    /// Installed once the pipeline has built its task runner. The slot lets the
+    /// outermost callback observe native and host-proxy subagent streams alike.
+    pub subagent_task_runner: Arc<std::sync::Mutex<Option<Arc<crate::storage::TaskRunner>>>>,
 }
 
 impl CountingCallbacks {
@@ -1398,12 +1423,43 @@ impl CountingCallbacks {
             inner,
             event_count,
             bus: None,
+            subagent_task_runner: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     pub fn with_bus(mut self, bus: Arc<crate::events::EventBus>) -> Self {
         self.bus = Some(bus);
         self
+    }
+
+    pub fn with_subagent_task_runner_slot(
+        mut self,
+        slot: Arc<std::sync::Mutex<Option<Arc<crate::storage::TaskRunner>>>>,
+    ) -> Self {
+        self.subagent_task_runner = slot;
+        self
+    }
+
+    fn observe_subagent_event(&self, event: &serde_json::Value) {
+        let runner = self
+            .subagent_task_runner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(runner) = runner {
+            runner.observe_subagent_event(event);
+        }
+    }
+
+    fn observe_subagent_telemetry(&self, event: &serde_json::Value) {
+        let runner = self
+            .subagent_task_runner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(runner) = runner {
+            runner.observe_subagent_telemetry(event);
+        }
     }
 }
 
@@ -1491,6 +1547,7 @@ impl HostCallbacks for CountingCallbacks {
 
     fn emit_event(&self, event: serde_json::Value) {
         self.event_count.fetch_add(1, Ordering::Relaxed);
+        self.observe_subagent_event(&event);
         if let Some(ref bus) = self.bus {
             bus.publish_json(event.clone());
             // Web-vocabulary aliases ride the same lane (server-side only —
@@ -1518,6 +1575,7 @@ impl HostCallbacks for CountingCallbacks {
     fn telemetry(&self, event: serde_json::Value) {
         // Not counted, same reasoning as `turn_event`: fixed three events per
         // turn (started / [interrupted] / ended), not overhead telemetry.
+        self.observe_subagent_telemetry(&event);
         if let Some(ref bus) = self.bus {
             bus.publish_json(event.clone());
         }

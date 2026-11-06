@@ -43,6 +43,7 @@ import {
   type ServicesConfig,
   type SubagentConfig,
   type SwarmConfig,
+  type TaskConfig,
   type ToolsConfig,
   type ThinkingConfig,
   validateConfig,
@@ -360,6 +361,8 @@ export function transformTomlData(data: Record<string, unknown>): Record<string,
       result[targetKey] = transformLoopControlData(value);
     } else if (targetKey === 'background' && isPlainObject(value)) {
       result[targetKey] = transformPlainObject(value);
+    } else if (targetKey === 'task' && isPlainObject(value)) {
+      result[targetKey] = transformPlainObject(value);
     } else if (targetKey === 'tools' && isPlainObject(value)) {
       result[targetKey] = transformPlainObject(value);
     } else if (targetKey === 'image' && isPlainObject(value)) {
@@ -446,6 +449,12 @@ function transformPermissionData(data: Record<string, unknown>): Record<string, 
   appendPermissionRules(rules, raw['ask'], 'ask');
   if (rules.length > 0) {
     out['rules'] = rules;
+  }
+  // `dangerous_command_guard` is a declared schema key the policy snapshot
+  // resolver reads (`config.permission?.dangerousCommandGuard`); dropping it
+  // here would make the file setting a silent no-op.
+  if (typeof raw['dangerousCommandGuard'] === 'boolean') {
+    out['dangerousCommandGuard'] = raw['dangerousCommandGuard'];
   }
   return out;
 }
@@ -584,6 +593,7 @@ export function configToTomlData(config: KimiConfig): Record<string, unknown> {
   setSection(out, 'services', config.services, servicesToToml);
   setSection(out, 'loop_control', config.loopControl, loopControlToToml);
   setSection(out, 'background', config.background, backgroundToToml);
+  setSection(out, 'task', config.task, taskToToml);
   setSection(out, 'tools', config.tools, toolsToToml);
   setSection(out, 'subagent', config.subagent, subagentToToml);
   setSection(out, 'swarm', config.swarm, swarmToToml);
@@ -725,6 +735,9 @@ function permissionToToml(
   } else {
     delete out['rules'];
   }
+  // Declared schema key (`[permission] dangerous_command_guard` on disk);
+  // `setDefined` drops a file key whose in-memory value was cleared.
+  setDefined(out, 'dangerous_command_guard', permission.dangerousCommandGuard);
   return out;
 }
 
@@ -789,6 +802,14 @@ function backgroundToToml(
 ): Record<string, unknown> {
   const out = cloneRecord(rawBackground);
   for (const [key, value] of Object.entries(background)) {
+    setDefined(out, camelToSnake(key), value);
+  }
+  return out;
+}
+
+function taskToToml(task: TaskConfig, rawTask: unknown): Record<string, unknown> {
+  const out = cloneRecord(rawTask);
+  for (const [key, value] of Object.entries(task)) {
     setDefined(out, camelToSnake(key), value);
   }
   return out;

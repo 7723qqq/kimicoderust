@@ -348,7 +348,7 @@ async fn select_tools_remembers_loaded_names_and_announces_them() {
         .blocks
         .iter()
         .find_map(|b| match b {
-            crate::rpc::types::ContentBlock::Text { text } => Some(text.as_str()),
+            crate::rpc::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .expect("a text block");
@@ -425,6 +425,88 @@ async fn disclosure_shapes_the_tool_table_and_announces_on_new_turns() {
     assert!(first.contains("mcp__github__github_sample_tool"), "{first}");
     // The second turn has nothing new: no announcement.
     assert!(ts.take_disclosure_announcement().is_none());
+}
+
+/// A loaded deferred tool comes back into the offered table with its **real**
+/// schema: the model must see the full definition, not only the
+/// `<tools_added>` text (v2 delivers the schema as a system message carrying
+/// `tools`; this engine's equivalent channel is the per-step tool table).
+#[tokio::test]
+async fn disclosure_readvertises_the_loaded_tool_schema() {
+    let (_dir, ts) = setup();
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    manager
+        .configure(
+            "github",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_client(crate::mcp::client::McpClient::mock("github"))
+        .await;
+    let ts = ts
+        .with_mcp(manager.clone())
+        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_tool_select_enabled(true);
+
+    // The table the host serves is the real catalogue, schemas included.
+    let mcp_tool = manager
+        .list_tool_infos()
+        .await
+        .into_iter()
+        .find(|tool| tool.name == "mcp__github__github_sample_tool")
+        .expect("the mock server's tool is in the catalogue");
+    let table = vec![tool_info("Read"), mcp_tool.clone()];
+
+    // Unloaded: advertised table hides it (only select_tools stands in).
+    let before = ts.shape_tool_table(table.clone());
+    assert!(
+        !before
+            .iter()
+            .any(|tool| tool.name == "mcp__github__github_sample_tool"),
+        "unloaded deferred tools stay out of the table"
+    );
+
+    let load = ts
+        .execute_tool(
+            "select_tools",
+            &json!({ "names": ["mcp__github__github_sample_tool"] }),
+        )
+        .await
+        .expect("select_tools is a native tool");
+    assert!(!load.is_error, "{}", load.content);
+
+    // Loaded: the definition is advertised with the catalogue's schema, not
+    // merely announced by name in the delivered text.
+    let after = ts.shape_tool_table(table);
+    let advertised = after
+        .iter()
+        .find(|tool| tool.name == "mcp__github__github_sample_tool")
+        .expect("a loaded deferred tool must be advertised again");
+    assert_eq!(
+        advertised.input_schema, mcp_tool.input_schema,
+        "the advertised entry must carry the real tool schema"
+    );
+    assert_eq!(
+        advertised.input_schema["properties"]["query"]["type"], "string",
+        "the schema must be the MCP definition, not a placeholder"
+    );
+
+    // Nothing new to load the second time: the set does not grow or duplicate.
+    let names: Vec<&str> = after.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| **name == "mcp__github__github_sample_tool")
+            .count(),
+        1,
+        "loaded tools appear once: {names:?}"
+    );
 }
 
 /// Without the capability or the flag, the table passes through
@@ -2390,13 +2472,11 @@ async fn bash_run_in_background_falls_back_to_host() {
 async fn bash_timeout_kills_and_reports_without_falling_back() {
     let Some(shell) = find_bash() else { return };
     let (_dir, ts) = setup_with_shell(Some(&shell));
-    // `sleep`-style command that outlives a 1s timeout. On timeout the
-    // command must be killed and reported — never re-run by the host.
-    let command = if cfg!(windows) {
-        "ping -n 6 127.0.0.1 >nul"
-    } else {
-        "sleep 5"
-    };
+    // A `sleep` that outlives the 1s timeout — every bash flavor ships it,
+    // while msys2's own `ping` cannot open raw sockets and exits at once.
+    // On timeout the command must be killed and reported — never re-run by
+    // the host.
+    let command = "sleep 5";
     let result = ts
         .execute_mutating("Bash", &json!({ "command": command, "timeout": 1 }))
         .await
@@ -3453,11 +3533,13 @@ async fn test_native_bash_background_task_runner() {
         .trim()
         .trim_end_matches(['.', ')']);
 
-    // 10s, not 2s: this wait races a real shell spawn, and on a loaded
-    // machine (parallel builds, ConPTY tests spawning powershells) 2s
-    // intermittently expired before the task finished — a flake, not a
-    // regression. The happy path still returns in milliseconds.
-    let wait_res = runner.wait(task_id, 10_000).await;
+    // 60s, not 2s: this wait races a real shell spawn, and on a loaded
+    // machine (parallel builds, ConPTY tests spawning powershells) shorter
+    // budgets intermittently expired before the task finished — a flake, not
+    // a regression. 10s still lost that race when a second full test suite
+    // ran concurrently, so the bound now covers what the product itself
+    // allows a shell task. The happy path still returns in milliseconds.
+    let wait_res = runner.wait(task_id, 60_000).await;
     assert!(matches!(
         wait_res,
         crate::storage::TaskWaitResult::Completed(_)
@@ -3908,21 +3990,47 @@ mod mode_mutex_dispatch {
         );
     }
 
-    /// A worker's TowerSend to the tower wakes the main session through
-    /// the shared task runner (v2 `towerService`'s coalesced wake,
-    /// #3648): one pending notification for the session that ran
-    /// TowerInit, drained into a follow-up turn by the session pump.
-    /// Main's own sends wake nothing, and teardown drops a queued wake.
+    /// A worker's TowerSend uses the shared rich-wake runtime for the session
+    /// that ran TowerInit, with no main-self wake and a variant-scoped drop on
+    /// teardown. Same-task burst coalescing is covered by the runtime tests.
     #[tokio::test]
     async fn worker_tower_send_wakes_the_main_session() {
+        #[derive(Default)]
+        struct Driver {
+            payloads: std::sync::Mutex<Vec<(String, crate::session::wake::WakePayload)>>,
+            drops: std::sync::Mutex<Vec<(String, String)>>,
+        }
+        impl crate::session::wake::TowerWakeDriver for Driver {
+            fn enqueue(
+                &self,
+                session_id: &str,
+                payload: crate::session::wake::WakePayload,
+            ) -> Result<(), String> {
+                self.payloads
+                    .lock()
+                    .unwrap()
+                    .push((session_id.to_string(), payload));
+                Ok(())
+            }
+
+            fn drop_wakes(&self, session_id: &str, variant: &str) -> bool {
+                self.drops
+                    .lock()
+                    .unwrap()
+                    .push((session_id.to_string(), variant.to_string()));
+                true
+            }
+        }
+
         let dir = init_repo();
-        let runner = Arc::new(crate::storage::TaskRunner::new(None));
+        let driver = Arc::new(Driver::default());
+        let runtime = crate::tools::tower::wake::TowerWakeRuntime::new(driver.clone());
         let (callbacks, _) = host(false);
         let main = NativeToolset::new(dir.path().to_str().unwrap(), None)
             .unwrap()
             .with_callbacks(callbacks)
-            .with_session_id("session-main")
-            .with_task_runner(runner.clone());
+            .with_session_id("session-main");
+        let _main_replay = main.bind_tower_wake_runtime(runtime.clone());
 
         let init = main
             .execute_tool("TowerInit", &json!({}))
@@ -3957,8 +4065,8 @@ mod mode_mutex_dispatch {
         let worker = NativeToolset::new(dir.path().to_str().unwrap(), None)
             .unwrap()
             .with_callbacks(worker_callbacks)
-            .with_caller_agent_id("w1")
-            .with_task_runner(runner.clone());
+            .with_caller_agent_id("w1");
+        let _worker_replay = worker.bind_tower_wake_runtime(runtime);
 
         let sent = worker
             .execute_tool(
@@ -3968,9 +4076,6 @@ mod mode_mutex_dispatch {
             .await
             .expect("TowerSend is native");
         assert!(!sent.is_error, "{}", sent.content);
-        assert_eq!(runner.pending_notification_count(Some("session-main")), 1);
-
-        // A second worker message coalesces: still one wake.
         let sent2 = worker
             .execute_tool(
                 "TowerSend",
@@ -3979,7 +4084,36 @@ mod mode_mutex_dispatch {
             .await
             .expect("TowerSend is native");
         assert!(!sent2.is_error, "{}", sent2.content);
-        assert_eq!(runner.pending_notification_count(Some("session-main")), 1);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let items: usize = driver
+                    .payloads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(_, payload)| payload.items.len())
+                    .sum();
+                if items == 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rich wake was not enqueued");
+        let payload_count = {
+            let payloads = driver.payloads.lock().unwrap();
+            assert!(
+                payloads
+                    .iter()
+                    .all(|(session, _)| session == "session-main")
+            );
+            assert!(payloads.iter().all(|(_, payload)| {
+                payload.variant == "tower_inbox" && payload.message.content.contains("TowerInbox")
+            }));
+            payloads.len()
+        };
 
         // Main's own sends wake nothing.
         let main_send = main
@@ -3990,15 +4124,16 @@ mod mode_mutex_dispatch {
             .await
             .expect("TowerSend is native");
         assert!(!main_send.is_error, "{}", main_send.content);
-        assert_eq!(runner.pending_notification_count(Some("session-main")), 1);
+        assert_eq!(driver.payloads.lock().unwrap().len(), payload_count);
 
-        let drained = runner.take_pending_notifications(Some("session-main"));
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].task_id, crate::tools::tower::TOWER_WAKE_TASK_ID);
-        assert!(
-            drained[0].description.contains("TowerInbox"),
-            "{}",
-            drained[0].description
+        let teardown = main
+            .execute_tool("TowerTeardown", &json!({}))
+            .await
+            .expect("TowerTeardown is native");
+        assert!(!teardown.is_error, "{}", teardown.content);
+        assert_eq!(
+            driver.drops.lock().unwrap().as_slice(),
+            &[("session-main".to_string(), "tower_inbox".to_string())]
         );
     }
 }

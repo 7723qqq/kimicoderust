@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   fsDownloadParamsSchema,
+  fsDiffRequestSchema,
+  fsGitStatusBatchRequestSchema,
+  fsGitStatusBatchResponseSchema,
   fsGitStatusRequestSchema,
   fsGitStatusResponseSchema,
   fsGrepRequestSchema,
@@ -12,6 +15,7 @@ import {
   fsListResponseSchema,
   fsMkdirRequestSchema,
   fsMkdirResponseSchema,
+  fsPullRequestBatchResponseSchema,
   fsReadRequestSchema,
   fsReadResponseSchema,
   fsSearchRequestSchema,
@@ -46,10 +50,16 @@ describe('fsListRequestSchema', () => {
       show_hidden: true,
       follow_gitignore: false,
       exclude_globs: ['**/node_modules/**'],
+      allow_ignored_globs: ['.tmp', 'ignored-dir/keep.txt'],
+      allow_external_symlinks: true,
       sort: 'mtime_desc' as const,
       include_git_status: true,
     };
     expect(fsListRequestSchema.parse(body)).toEqual(body);
+  });
+
+  it('leaves allow_ignored_globs undefined by default', () => {
+    expect(fsListRequestSchema.parse({}).allow_ignored_globs).toBeUndefined();
   });
 
   it('rejects depth > 10', () => {
@@ -121,6 +131,16 @@ describe('fsReadRequestSchema', () => {
     expect(
       fsReadRequestSchema.safeParse({ path: 'a', offset: -1 }).success,
     ).toBe(false);
+  });
+
+  it('accepts allow_external_symlinks as an optional boolean (v2 #4457)', () => {
+    expect(
+      fsReadRequestSchema.parse({ path: 'a', allow_external_symlinks: true })
+        .allow_external_symlinks,
+    ).toBe(true);
+    expect(
+      fsReadRequestSchema.parse({ path: 'a' }).allow_external_symlinks,
+    ).toBeUndefined();
   });
 });
 
@@ -470,10 +490,76 @@ describe('fsGitStatusRequestSchema (W11.2)', () => {
     expect(parsed.paths).toEqual(['a', 'b']);
   });
 
+  it('accepts folder scope and the pull-request switch (v2 #4527)', () => {
+    const parsed = fsGitStatusRequestSchema.parse({
+      root: 'pkg',
+      paths: ['a.ts'],
+      include_pull_request: false,
+    });
+    expect(parsed).toEqual({
+      root: 'pkg',
+      paths: ['a.ts'],
+      include_pull_request: false,
+    });
+  });
+
+  it('rejects an empty root', () => {
+    expect(fsGitStatusRequestSchema.safeParse({ root: '' }).success).toBe(false);
+  });
+
   it('rejects empty path strings inside paths', () => {
     expect(
       fsGitStatusRequestSchema.safeParse({ paths: [''] }).success,
     ).toBe(false);
+  });
+});
+
+describe('fsGitStatusBatchRequestSchema / fsPullRequest* (v2 #4527)', () => {
+  it('caps roots at 32 and rejects an empty batch', () => {
+    expect(
+      fsGitStatusBatchRequestSchema.safeParse({ roots: [] }).success,
+    ).toBe(false);
+    expect(
+      fsGitStatusBatchRequestSchema.safeParse({ roots: Array(33).fill('x') })
+        .success,
+    ).toBe(false);
+    expect(
+      fsGitStatusBatchRequestSchema.parse({ roots: ['a', 'b'] }).roots,
+    ).toEqual(['a', 'b']);
+  });
+
+  it('round-trips batch responses with per-root errors', () => {
+    const status = {
+      branch: 'main',
+      ahead: 0,
+      behind: 0,
+      entries: { 'a.ts': 'modified' as const },
+      additions: 1,
+      deletions: 0,
+      pullRequest: null,
+    };
+    expect(
+      fsGitStatusBatchResponseSchema.parse({
+        results: { pkg: status },
+        errors: { missing: { code: 40001, msg: 'nope' } },
+      }),
+    ).toEqual({
+      results: { pkg: status },
+      errors: { missing: { code: 40001, msg: 'nope' } },
+    });
+    expect(
+      fsPullRequestBatchResponseSchema.parse({
+        results: { pkg: null },
+        errors: {},
+      }),
+    ).toEqual({ results: { pkg: null }, errors: {} });
+  });
+
+  it('fsDiffRequestSchema takes an optional root', () => {
+    expect(fsDiffRequestSchema.parse({ path: 'a.ts', root: 'pkg' }).root).toBe(
+      'pkg',
+    );
+    expect(fsDiffRequestSchema.parse({ path: 'a.ts' }).root).toBeUndefined();
   });
 });
 

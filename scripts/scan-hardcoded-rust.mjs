@@ -90,16 +90,102 @@ const FIXTURE_FILES = new Set(['packages/kimi-agent/src/acp/events_map_golden.rs
 
 // ── literal extraction ──────────────────────────────────────────────────────
 
-/** Byte offset of the first `#[cfg(test)]`, or -1. Everything from there is test code. */
-function testModuleStart(content) {
-  const m = content.match(/^[ \t]*#\[cfg\(test\)\]/m);
-  return m === null ? -1 : m.index;
+/**
+ * Mask each `#[cfg(test)]` item, preserving offsets and line numbers so product
+ * code after the item remains scannable. Semicolon-terminated items (including
+ * external test modules) end at `;`; braced items end at their matching `}`.
+ */
+function maskTestItems(content) {
+  const attribute = /^[ \t]*#\[cfg\(test\)\]/gm;
+  let masked = '';
+  let copiedThrough = 0;
+  let match;
+  while ((match = attribute.exec(content)) !== null) {
+    const start = match.index;
+    const end = testItemEnd(content, start);
+    masked += content.slice(copiedThrough, start);
+    masked += content.slice(start, end).replace(/[^\r\n]/g, ' ');
+    copiedThrough = end;
+    attribute.lastIndex = end;
+  }
+  return masked + content.slice(copiedThrough);
+}
+
+/** End offset of the item following a `#[cfg(test)]` attribute. */
+function testItemEnd(content, start) {
+  let depth = 0;
+  for (let i = start; i < content.length; i++) {
+    const c = content[i];
+
+    if (c === '/' && content[i + 1] === '/') {
+      const newline = content.indexOf('\n', i + 2);
+      if (newline === -1) return content.length;
+      i = newline;
+      continue;
+    }
+    if (c === '/' && content[i + 1] === '*') {
+      let commentDepth = 1;
+      i += 2;
+      while (i < content.length && commentDepth > 0) {
+        if (content.startsWith('/*', i)) {
+          commentDepth++;
+          i += 2;
+        } else if (content.startsWith('*/', i)) {
+          commentDepth--;
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      i--;
+      continue;
+    }
+
+    const rawString =
+      c === 'r' || c === 'b' || c === 'c'
+        ? content.slice(i).match(/^(?:r|br|cr)(#*)"/)
+        : null;
+    if (rawString) {
+      const terminator = `"${rawString[1]}`;
+      const close = content.indexOf(terminator, i + rawString[0].length);
+      if (close === -1) return content.length;
+      i = close + terminator.length - 1;
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < content.length && content[i] !== '"') {
+        i += content[i] === '\\' ? 2 : 1;
+      }
+      continue;
+    }
+    const charLiteral =
+      c === "'"
+        ? content
+            .slice(i)
+            .match(/^'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\}|[\s\S])|[^\\'])'/u)
+        : null;
+    if (charLiteral) {
+      i += charLiteral[0].length - 1;
+      continue;
+    }
+
+    if (c === '{') {
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0) return i + 1;
+    } else if (c === ';' && depth === 0) {
+      return i + 1;
+    }
+  }
+  return content.length;
 }
 
 /**
  * Whole files that are the target of an external `#[cfg(test)] mod <name>;`.
  *
- * The inline form is cut by `testModuleStart`, but a split-out `tests.rs` has
+ * The inline form is masked by `maskTestItems`, but a split-out `tests.rs` has
  * no attribute inside it: the declaration lives in its parent module. Without
  * this set every assertion message in those files is reported as product prose
  * (they are test data, not copy a user ever sees).
@@ -301,8 +387,7 @@ function collectComparisonOperands(files) {
   for (const file of files) {
     const raw = readFileSync(file, 'utf-8');
     // Test modules may assert on a string without making it a protocol token.
-    const testStart = testModuleStart(raw);
-    const content = testStart === -1 ? raw : raw.slice(0, testStart);
+    const content = maskTestItems(raw);
     for (const re of patterns) {
       for (const m of content.matchAll(re)) {
         tokens.add(unescapeRust(m[1]));
@@ -318,15 +403,15 @@ function collectComparisonOperands(files) {
 const unescapeRust = (s) => s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
 
 /**
- * Is `literal` a protocol token? True when it equals an operand, or when an
- * operand is a substantial substring of it (the sentinel prefix case above).
- * The substring must be at least 8 characters so a short incidental overlap
- * cannot silence a real finding.
+ * Is `literal` a protocol token? True when it equals an operand, or when a
+ * multi-word operand is a substantial substring of it (the sentinel prefix case
+ * above). Single-word operands stay equality-only so words such as "lifecycle"
+ * cannot exempt every message that happens to mention them.
  */
 function isWireToken(literal, tokens) {
   for (const t of tokens) {
     if (literal === t) return true;
-    if (t.length >= 8 && literal.includes(t)) return true;
+    if (t.length >= 8 && /\s/.test(t.trim()) && literal.includes(t)) return true;
   }
   return false;
 }
@@ -343,8 +428,7 @@ function isWireToken(literal, tokens) {
 function scanFile(file, relPath, wireTokens) {
   if (FIXTURE_FILES.has(relPath)) return [];
   const raw = readFileSync(file, 'utf-8');
-  const testStart = testModuleStart(raw);
-  const content = testStart === -1 ? raw : raw.slice(0, testStart);
+  const content = maskTestItems(raw);
   const lines = content.split('\n');
   const findings = [];
 

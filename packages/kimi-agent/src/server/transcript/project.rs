@@ -24,6 +24,34 @@ struct Cursor {
     frame: Option<usize>,
 }
 
+/// Projection layer: `EngineEvent` → `Vec<TranscriptOperation>`, the wire the
+/// REST/WS clients render (`/api/v1/transcript/*`, `transcript.ops`).
+///
+/// ## Relationship to the entry projector (deliberate divergence, audited
+/// 2026-11-04)
+///
+/// `events/project.rs` consumes the same events into `EntryOp` for the Rust
+/// TUI. Two consumers, two output contracts — merging them is wrong; the
+/// *interpretation* of a shared event must not diverge, and the twelve shared
+/// events were audited pairwise (the full notes live on the entry
+/// projector's header). Summary of this side's postures:
+///
+/// - **`llm.delta`**: not handled here, and that is a decision — the WS
+///   clients render the typed deltas (`assistant.delta` / `stream.segment`);
+///   the raw transport part reaches only the entry projector.
+/// - **`tool.call.started` / `completed` catch-up**: this fold *invents* a
+///   frame when a completion arrives with no started frame (a snapshot
+///   catch-up can legitimately see the completion first); the entry fold
+///   drops the same shape as an ordering bug. Different carriers, different
+///   failure posture.
+/// - **`tool.native` / `tool.call.completed`**: the result is kept
+///   structurally (`frame.output` is the JSON value) rather than flattened to
+///   display text — the WS clients render the card; text extraction is the
+///   entry projection's job.
+///
+/// The shared classifications (`Projection::of`) and the raw-delta part
+/// vocabulary (`classify_delta_part`) live in `kimi_ui_core`; coverage is
+/// gated by `bun run check:event-coverage`.
 pub struct TranscriptProjector {
     turns: Vec<TranscriptTurn>,
     turn_indices: HashMap<String, usize>,
@@ -78,14 +106,47 @@ impl TranscriptProjector {
         }
     }
 
+    /// Fold one live event: no journal timestamp is available, so any turn
+    /// the fold opens stamps `now` (v2 `onTurnStarted` semantics).
     pub fn apply_event(&mut self, event: &EngineEvent) -> Vec<TranscriptOperation> {
+        self.apply_event_at(event, None)
+    }
+
+    /// [`Self::apply_event`] with the journal record's timestamp (`created_at`
+    /// epoch millis, upstream `recordTimeIso`): a cold replay passes it so the
+    /// rebuilt turns recover their real `startedAt` (upstream #4280); the live
+    /// path passes `None` and falls back to `now`.
+    pub fn apply_event_at(
+        &mut self,
+        event: &EngineEvent,
+        at: Option<i64>,
+    ) -> Vec<TranscriptOperation> {
         match event {
             EngineEvent::TurnStarted {
                 turn_id, prompt, ..
             } => {
-                let turn_idx = self.ensure_turn(&turn_key(turn_id));
+                let key = turn_key(turn_id);
+                // Close the previous running turn as wedged before the new one
+                // opens (upstream #4280, `ops/apply.ts`): its loop never wrote
+                // a terminal event, so it renders `failed` with the flag.
+                let mut ops = Vec::new();
+                if let Some(prev_idx) = self
+                    .turns
+                    .iter()
+                    .rposition(|turn| turn.state == TurnState::Running && turn.turn_id != key)
+                {
+                    let prev = &mut self.turns[prev_idx];
+                    prev.state = TurnState::Failed;
+                    prev.wedged = Some(true);
+                    prev.ended_at = Some(at.map(epoch_ms_iso).unwrap_or_else(now_iso));
+                    ops.push(TranscriptOperation::TurnUpsert {
+                        turn: turn_header(prev),
+                    });
+                }
+                let turn_idx = self.ensure_turn(&key, at);
                 self.turns[turn_idx].state = TurnState::Running;
-                self.turns[turn_idx].started_at = Some(now_iso());
+                self.turns[turn_idx].started_at =
+                    Some(at.map(epoch_ms_iso).unwrap_or_else(now_iso));
                 if let Some(prompt) = prompt
                     && !prompt.is_empty()
                 {
@@ -96,12 +157,13 @@ impl TranscriptProjector {
                     step: 0,
                     frame: None,
                 });
-                vec![TranscriptOperation::TurnUpsert {
+                ops.push(TranscriptOperation::TurnUpsert {
                     turn: turn_header(&self.turns[turn_idx]),
-                }]
+                });
+                ops
             }
             EngineEvent::LlmStepBegin { turn_id, step, .. } => {
-                let turn_idx = self.ensure_turn(&turn_key(turn_id));
+                let turn_idx = self.ensure_turn(&turn_key(turn_id), at);
                 let step_idx = self.ensure_step(turn_idx, i64::from(*step));
                 self.cursor = Some(Cursor {
                     turn: turn_idx,
@@ -119,11 +181,11 @@ impl TranscriptProjector {
                 ops
             }
             EngineEvent::AssistantDelta { turn_id, delta, .. } => {
-                let turn_idx = self.ensure_turn(&turn_key(turn_id));
+                let turn_idx = self.ensure_turn(&turn_key(turn_id), at);
                 self.push_delta(turn_idx, delta, false)
             }
             EngineEvent::ThinkingDelta { turn_id, delta, .. } => {
-                let turn_idx = self.ensure_turn(&turn_key(turn_id));
+                let turn_idx = self.ensure_turn(&turn_key(turn_id), at);
                 self.push_delta(turn_idx, delta, true)
             }
             EngineEvent::ToolCallStarted {
@@ -133,7 +195,7 @@ impl TranscriptProjector {
                 args,
                 ..
             } => {
-                let turn_idx = self.ensure_turn(&turn_key(turn_id));
+                let turn_idx = self.ensure_turn(&turn_key(turn_id), at);
                 if let Some((step_idx, frame_idx)) = self.find_tool_frame(turn_idx, tool_call_id) {
                     if let TranscriptFrame::Tool(frame) =
                         &mut self.turns[turn_idx].steps[step_idx].frames[frame_idx]
@@ -248,7 +310,7 @@ impl TranscriptProjector {
                 is_error,
                 ..
             } => {
-                let turn_idx = self.ensure_turn(&turn_key(turn_id));
+                let turn_idx = self.ensure_turn(&turn_key(turn_id), at);
                 let state = if *is_error {
                     ToolFrameState::Error
                 } else {
@@ -303,7 +365,7 @@ impl TranscriptProjector {
                 timing,
                 ..
             } => {
-                let turn_idx = self.ensure_turn(&turn_key(turn_id));
+                let turn_idx = self.ensure_turn(&turn_key(turn_id), at);
                 let step_idx = self.ensure_step(turn_idx, i64::from(*step));
                 {
                     let step = &mut self.turns[turn_idx].steps[step_idx];
@@ -369,7 +431,7 @@ impl TranscriptProjector {
                 // `packages/transcript` — present only in the upstream
                 // checkout — is queued/running/completed/failed/cancelled), and
                 // the client validates that enum.
-                let turn_idx = self.ensure_turn(&turn_key(turn_id));
+                let turn_idx = self.ensure_turn(&turn_key(turn_id), at);
                 let state = match reason.as_str() {
                     "cancelled" => TurnState::Cancelled,
                     "failed" | "blocked" => TurnState::Failed,
@@ -399,7 +461,7 @@ impl TranscriptProjector {
                     "failed" | "blocked" => StepState::Failed,
                     _ => StepState::Completed,
                 };
-                let ended_at = now_iso();
+                let ended_at = at.map(epoch_ms_iso).unwrap_or_else(now_iso);
                 self.turns[turn_idx].state = state;
                 self.turns[turn_idx].ended_at = Some(ended_at.clone());
                 let turn_id = self.turns[turn_idx].turn_id.clone();
@@ -499,7 +561,7 @@ impl TranscriptProjector {
                     let Some(delta) = value.get("delta").and_then(|v| v.as_str()) else {
                         return Vec::new();
                     };
-                    let Some(turn_idx) = self.custom_delta_turn(value) else {
+                    let Some(turn_idx) = self.custom_delta_turn(value, at) else {
                         return Vec::new();
                     };
                     self.push_delta(turn_idx, delta, false)
@@ -512,7 +574,7 @@ impl TranscriptProjector {
                     let Some(delta) = value.get("delta").and_then(|v| v.as_str()) else {
                         return Vec::new();
                     };
-                    let Some(turn_idx) = self.custom_delta_turn(value) else {
+                    let Some(turn_idx) = self.custom_delta_turn(value, at) else {
                         return Vec::new();
                     };
                     self.push_delta(turn_idx, delta, true)
@@ -636,7 +698,7 @@ impl TranscriptProjector {
                             .strip_prefix("msg-u")
                             .and_then(|digits| digits.parse::<u64>().ok())
                     {
-                        let turn_idx = self.ensure_turn(&turn_key_u64(turn_number));
+                        let turn_idx = self.ensure_turn(&turn_key_u64(turn_number), at);
                         self.turns[turn_idx].attachment_ids = Some(attachment_ids);
                     }
                     ops
@@ -789,6 +851,33 @@ impl TranscriptProjector {
                 task
             })
             .collect()
+    }
+
+    /// Finalize a COLD rebuild (upstream #4280 `foldWireRecordFacts`' wedged
+    /// pass): a turn whose loop died before writing a terminal event is left
+    /// `running` by the replay. Every non-tail `running` turn is wedged — a
+    /// later turn prompt exists in the wire, so its loop is provably dead.
+    /// The tail turn is wedged too unless it is the live active one
+    /// (`active_wire_turn_id`, the engine's running wire turn number; `None`
+    /// after a restart, when nothing is live and the tail is dead as well).
+    /// The live path needs no call: a new `TurnStarted` closes the previous
+    /// running turn the same way.
+    pub fn mark_wedged_turns(&mut self, active_wire_turn_id: Option<i64>) {
+        let Some(tail) = self.turns.iter().map(|turn| turn.ordinal).max() else {
+            return;
+        };
+        let ended_at = now_iso();
+        for turn in self.turns.iter_mut() {
+            if turn.state != TurnState::Running {
+                continue;
+            }
+            if turn.ordinal == tail && active_wire_turn_id == Some(tail) {
+                continue;
+            }
+            turn.state = TurnState::Failed;
+            turn.wedged = Some(true);
+            turn.ended_at = Some(ended_at.clone());
+        }
     }
 
     fn upsert_interaction(&mut self, interaction: TranscriptInteraction) -> TranscriptOperation {
@@ -1178,9 +1267,9 @@ impl TranscriptProjector {
     /// the projector needs no cursor established by an earlier lifecycle
     /// event — the server path emits no typed `TurnStarted`. A payload
     /// without a turn id still falls back to the cursor for older producers.
-    fn custom_delta_turn(&mut self, value: &Value) -> Option<usize> {
+    fn custom_delta_turn(&mut self, value: &Value, at: Option<i64>) -> Option<usize> {
         match value.get("turn_id").and_then(|v| v.as_u64()) {
-            Some(turn_id) => Some(self.ensure_turn(&turn_key_u64(turn_id))),
+            Some(turn_id) => Some(self.ensure_turn(&turn_key_u64(turn_id), at)),
             None => self.cursor.map(|cursor| cursor.turn),
         }
     }
@@ -1240,15 +1329,28 @@ impl TranscriptProjector {
     /// (`transcript/src/history/groupTurns.ts`), so both agree on a fresh
     /// session. A positional ordinal drifts from `turnId` as soon as a
     /// projector starts mid-session — this one is created per subscriber — and
-    /// the client keys the user bubble's `daemonTurnId` off it.
-    fn ensure_turn(&mut self, key: &str) -> usize {
+    /// the client keys the user bubble's `daemonTurnId` off it. The fallback
+    /// for an unparseable key therefore claims `max(ordinals in use) + 1`
+    /// instead of the positional slot: deterministic within a replay, and it
+    /// cannot collide with an earlier claim (a wire id arriving *after* a
+    /// fallback claimed its number keeps its own ordinal, matching upstream's
+    /// tolerance for unmatched positional turns).
+    fn ensure_turn(&mut self, key: &str, at: Option<i64>) -> usize {
         if let Some(&idx) = self.turn_indices.get(key) {
             return idx;
         }
-        let ordinal = key
+        let ordinal = match key
             .strip_prefix('t')
             .and_then(|digits| digits.parse::<i64>().ok())
-            .unwrap_or(self.turns.len() as i64);
+        {
+            Some(parsed) => parsed,
+            None => self
+                .turns
+                .iter()
+                .map(|turn| turn.ordinal)
+                .max()
+                .map_or(0, |max| max + 1),
+        };
         let idx = self.turns.len();
         self.turns.push(TranscriptTurn {
             turn_id: key.to_string(),
@@ -1259,11 +1361,12 @@ impl TranscriptProjector {
             prompt: None,
             attachment_ids: None,
             steps: Vec::new(),
-            started_at: Some(now_iso()),
+            started_at: Some(at.map(epoch_ms_iso).unwrap_or_else(now_iso)),
             ended_at: None,
             usage: None,
             duration_ms: None,
             error: None,
+            wedged: None,
         });
         self.turn_indices.insert(key.to_string(), idx);
         idx
@@ -1609,6 +1712,7 @@ pub(crate) fn turn_header(turn: &TranscriptTurn) -> TurnHeader {
         usage: turn.usage.clone(),
         duration_ms: turn.duration_ms,
         error: turn.error.clone(),
+        wedged: turn.wedged,
     }
 }
 
@@ -1651,6 +1755,15 @@ fn turn_key_u64(raw: u64) -> String {
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// The journal record's own timestamp as ISO-8601 (upstream
+/// `recordTimeIso`): epoch milliseconds on the wire record, so a cold rebuild
+/// restores a turn's real `startedAt` instead of stamping the rebuild time.
+fn epoch_ms_iso(epoch_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(epoch_ms)
+        .map(|instant| instant.to_rfc3339())
+        .unwrap_or_else(now_iso)
 }
 
 fn progress_from_update(update: &Value) -> ToolFrameProgress {

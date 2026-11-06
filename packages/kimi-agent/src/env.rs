@@ -26,6 +26,16 @@ pub fn env_switch_default_off(name: &str) -> bool {
     parse_bool_env(std::env::var(name).ok().as_deref()) == Some(true)
 }
 
+/// Serializes tests that read or write process-global environment variables.
+/// Environment variables are one mutable map per process, so two tests
+/// touching the same name race each other (one removes the value the other
+/// just armed); hold this lock for the entire window, including the
+/// save/restore. A `tokio` mutex so an async test can hold it across `.await`
+/// without tripping `clippy::await_holding_lock`.
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 #[cfg(test)]
 mod tests {
     use super::*;

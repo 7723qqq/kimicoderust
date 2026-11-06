@@ -78,6 +78,7 @@ import type {
   Unsubscribe,
   UploadFileOptions,
   WorkspaceTrustInfo,
+  WorkspaceTrustInfoOptions,
 } from '#/types';
 
 const MAIN_AGENT_ID = 'main';
@@ -315,8 +316,12 @@ export abstract class SDKRpcClientBase {
    * so it reports an always-trusted workspace and the trust write is a no-op;
    * `SDKRpcClientNative` overrides these.
    */
-  async getWorkspaceTrustInfo(workDir: string): Promise<WorkspaceTrustInfo> {
+  async getWorkspaceTrustInfo(
+    workDir: string,
+    options?: WorkspaceTrustInfoOptions,
+  ): Promise<WorkspaceTrustInfo> {
     void workDir;
+    void options;
     return { trusted: true, gatedMcpServers: [] };
   }
 
@@ -775,6 +780,13 @@ export abstract class SDKRpcClientBase {
     throw new KimiError(
       ErrorCodes.NOT_IMPLEMENTED,
       'setTowerMode is only available on the native engine client.',
+    );
+  }
+
+  async getTowerStatus(_input: SessionIdRpcInput): Promise<string> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'Tower status is not implemented for this engine',
     );
   }
 

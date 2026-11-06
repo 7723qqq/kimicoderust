@@ -800,7 +800,10 @@ async fn test_unexpected_close_marks_failed_and_emits() {
         .await
         .expect("server connects");
 
-    let entry = tokio::time::timeout(Duration::from_secs(5), rx)
+    // The entry arrives only after the spawned process is reaped, so the
+    // budget must cover process startup+exit under scheduler load (a 5s
+    // window flaked when a second test suite ran concurrently).
+    let entry = tokio::time::timeout(Duration::from_secs(30), rx)
         .await
         .expect("unexpected close must notify listeners")
         .expect("failed entry must be sent");

@@ -22,30 +22,31 @@ use super::tool_scheduler::{self, ScheduledToolCall};
 use super::turn_step::execute_loop_step_with_retry;
 use super::types::*;
 use super::wall_time;
+use super::watch::TurnPhase;
 use crate::callbacks::HostCallbacks;
 use crate::llm::files_upload::UploadError;
 use crate::llm::media_budget::{MEDIA_BUDGET_EXCEEDED_CODE, MediaBudget};
 use crate::llm::media_resolver::{MediaResolver, ResolvedRequest, has_media_refs, inline_entries};
 use crate::rpc::types::{BoxFuture, TokenUsage, ToolExecuteRequest};
 
-/// Goal/plan state snapshot backed by the host callbacks.
+/// Goal/plan/todo state snapshot backed by the host callbacks.
 ///
 /// The injection providers render synchronously, while the state authority is
 /// behind the async `host/state_read` channel — so the turn loop refreshes
 /// this snapshot at each step head (see the injection pass) and the providers
 /// read the cached values. A failed read keeps the previous value, so a host
-/// without the state bridge degrades to "no goal/plan reminder" instead of
-/// erroring the turn.
+/// without the state bridge degrades to no reminder instead of erroring the turn.
 #[derive(Default)]
 struct CallbackStateSnapshot {
     goal: std::sync::Mutex<Option<serde_json::Value>>,
     plan: std::sync::Mutex<Option<serde_json::Value>>,
+    todo: std::sync::Mutex<Option<serde_json::Value>>,
 }
 
 impl CallbackStateSnapshot {
-    async fn refresh(&self, callbacks: &dyn HostCallbacks) {
-        // The two domains are independent host round-trips; issue them
-        // concurrently so the step pays one latency instead of two.
+    async fn refresh(&self, callbacks: &dyn HostCallbacks, include_todo: bool) {
+        // The domains are independent host round-trips; issue them
+        // concurrently so the step pays one latency instead of two (or three).
         let read = |domain: &str| {
             callbacks.state_read(crate::rpc::types::StateReadRequest {
                 domain: domain.to_string(),
@@ -54,9 +55,19 @@ impl CallbackStateSnapshot {
                 tool_call_id: String::new(),
             })
         };
-        let (goal, plan) = futures_util::future::join(read("goal"), read("plan")).await;
-        *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = goal.ok().map(|r| r.value);
-        *self.plan.lock().unwrap_or_else(|e| e.into_inner()) = plan.ok().map(|r| r.value);
+        if include_todo {
+            let (goal, plan, todo) =
+                futures_util::future::join3(read("goal"), read("plan"), read("todo")).await;
+            *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = goal.ok().map(|r| r.value);
+            *self.plan.lock().unwrap_or_else(|e| e.into_inner()) = plan.ok().map(|r| r.value);
+            if let Ok(response) = todo {
+                *self.todo.lock().unwrap_or_else(|e| e.into_inner()) = Some(response.value);
+            }
+        } else {
+            let (goal, plan) = futures_util::future::join(read("goal"), read("plan")).await;
+            *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = goal.ok().map(|r| r.value);
+            *self.plan.lock().unwrap_or_else(|e| e.into_inner()) = plan.ok().map(|r| r.value);
+        }
     }
 }
 
@@ -65,6 +76,7 @@ impl crate::injection::DomainValueSource for CallbackStateSnapshot {
         let slot = match domain {
             "goal" => &self.goal,
             "plan" => &self.plan,
+            "todo" => &self.todo,
             _ => return None,
         };
         slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -322,8 +334,7 @@ pub fn run_turn_with_telemetry<'a>(
 /// The turn's submitted prompt for `UserPromptSubmit` hooks (v2
 /// `agentExternalHooksService.notifyUserPromptSubmit`): the latest
 /// user-role message, mirroring what the model will see this turn. Empty
-/// when the turn carries no user message (the hook side treats that as
-/// observe-only).
+/// when the turn carries no user message; the dispatch below skips that case.
 fn latest_user_text(user_messages: &[LLMMessage]) -> String {
     user_messages
         .iter()
@@ -494,7 +505,7 @@ pub fn run_turn_continued<'a>(
                     // v2 closes the mode from a `TurnEnded` subscription, so it
                     // fires however the turn ended. The normal end below is the
                     // only other exit, and this is the one that would otherwise
-                    // leave a tool-opened swarm latched.
+                    // leave a task-opened (or legacy tool-opened) swarm latched.
                     crate::swarm::mode::exit_tool_swarm_at_turn_end(callbacks.as_ref(), &agent_id);
                     return Err(error);
                 }
@@ -523,8 +534,8 @@ pub fn run_turn_continued<'a>(
                     result.llm_retries = llm_retries;
                     result.stop_hook_continuation = None;
                     // v2 `AgentSwarmService`'s `TurnEnded` subscription: a
-                    // swarm the tool (or a task) opened closes itself here. A
-                    // manually opened swarm stays until the user leaves it.
+                    // task-opened (or legacy tool-opened) swarm closes itself
+                    // here. A manually opened swarm stays until the user leaves it.
                     // Closing it emits `swarm_mode.exit` plus the status update
                     // the host folds, so the indicator clears and a `task`
                     // swarm renders its "ended" marker.
@@ -688,13 +699,22 @@ pub fn run_turn<'a>(
     callbacks.set_turn_goal(&turn_id, goal.as_ref().map(|g| g.goal_id.as_str()));
 
     Box::pin(async move {
-        // Fire-and-forget once per turn before the step loop (v2 wires this
-        // at the same point); hooks observe but never block the prompt.
-        if let Some(ref guard) = hook_guard {
-            guard
-                .notify_user_prompt_submit(&turn_id, &submitted_prompt)
-                .await;
-        }
+        // Per-turn watchdog (v2 `AgentLoopService.armTurnWatch`, upstream
+        // #4280 diagnostics half): warns when the turn produces no observable
+        // progress — steps, streamed deltas, tool activity, phase — for
+        // `TURN_WATCH_WARN_MS`. Stack-owned like the deadline guard below:
+        // every turn exit path drops it, which aborts the sampler
+        // (`disarmTurnWatch`). The transport is handed the state so its
+        // streamed fragments count as progress too.
+        let turn_watch_state = Arc::new(crate::turn_loop::watch::TurnWatchState::default());
+        let _turn_watchdog = crate::turn_loop::watch::TurnWatchdog::arm(
+            &input.agent_id,
+            &turn_id,
+            Arc::clone(&turn_watch_state),
+        );
+        input
+            .llm
+            .set_turn_watch(Some(Arc::clone(&turn_watch_state)));
         let mut total_usage = crate::rpc::types::TokenUsage::default();
         // The most recent step's own usage: the measured context anchor a
         // caller puts on the conversation (v2 `TokenCountingAgentModel`).
@@ -736,6 +756,53 @@ pub fn run_turn<'a>(
             ..Default::default()
         }];
         messages.extend(user_messages);
+
+        // v2 `onBeforeSubmitPrompt`: matching hooks settle before the model
+        // call. A block appends the rendered assistant result and skips the
+        // step loop; appends fold into content position 0 of the same prompt.
+        if let Some(ref guard) = hook_guard
+            && let Some(prompt_index) = messages.iter().rposition(|m| m.role == "user")
+        {
+            let outcome = guard
+                .run_user_prompt_submit(&turn_id, &submitted_prompt)
+                .await;
+            if let Some(block) = outcome.block {
+                messages.push(LLMMessage {
+                    role: "assistant".into(),
+                    content: block,
+                    origin: Some(serde_json::json!({
+                        "kind": "hook_result",
+                        "event": "UserPromptSubmit",
+                        "blocked": true,
+                    })),
+                    ..Default::default()
+                });
+                return Ok(turn_result(
+                    LoopTurnStopReason::EndTurn,
+                    0,
+                    crate::rpc::types::TokenUsage::default(),
+                    0,
+                    0,
+                    messages,
+                ));
+            }
+            if !outcome.append.is_empty() {
+                let prompt = &mut messages[prompt_index];
+                // Provider projections prefer blocks over plain content. A
+                // text-only prompt therefore needs its original text
+                // materialized behind the new hook parts, not left only in
+                // `content` where the blocks would shadow it.
+                let original_parts = if prompt.blocks.is_empty() {
+                    vec![ContentBlock::Text {
+                        text: prompt.content.clone(),
+                        meta: None,
+                    }]
+                } else {
+                    std::mem::take(&mut prompt.blocks)
+                };
+                prompt.blocks = outcome.append.into_iter().chain(original_parts).collect();
+            }
+        }
 
         // Running token estimate for the injection-free history (see
         // [`ContextTokens`]).
@@ -884,6 +951,7 @@ pub fn run_turn<'a>(
         // read also doubles as the capability probe: a host without the
         // state bridge cannot persist todo state, so reminding the model to
         // maintain a list that cannot be saved would be worse than silence.
+        let mut todo_reminder_registered = false;
         if input.agent_id == crate::callbacks::MAIN_AGENT_ID
             && input.llm.transport() != "host-proxy"
             && tool_defs
@@ -898,10 +966,15 @@ pub fn run_turn<'a>(
                 })
                 .await
         {
+            *goal_plan_state
+                .todo
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(response.value);
             crate::injection::todo_reminder::register_todo_reminder(
                 &mut injection_registry,
-                response.value,
+                goal_plan_state.clone(),
             );
+            todo_reminder_registered = true;
         }
         // Swarm mode is a mode like plan mode, so it announces itself the same
         // way (v2 `SwarmInjection`): the `swarm_mode` variant injects an
@@ -988,6 +1061,7 @@ pub fn run_turn<'a>(
 
         for step_num in 0..max_steps {
             steps = step_num + 1;
+            turn_watch_state.note_steps(steps as u64);
             let turn_wall_clock_ms = elapsed_wall_clock_ms(turn_started);
 
             // ── Goal budget check ──────────────────────────────────────────
@@ -1097,6 +1171,7 @@ pub fn run_turn<'a>(
                 // time; a host without the bridge or without todos degrades
                 // to a plain summary.
                 let todos = crate::compaction::read_todos_for_summary(callbacks.as_ref()).await;
+                turn_watch_state.set_phase(TurnPhase::Compacting);
                 match crate::compaction::compact_messages_with_summary_at_report(
                     &messages,
                     context_tokens.tokens(),
@@ -1172,11 +1247,14 @@ pub fn run_turn<'a>(
                 {
                     toolset.wait_for_mcp_discovery_before_disclosure().await;
                 }
-                // Refresh the goal/plan snapshot through the host callbacks so
+                // Refresh the state snapshots through the host callbacks so
                 // the injections render the state the tools just wrote — the
-                // same channel, so a mid-turn plan exit or goal pause shows up
-                // at this step head. A failed read keeps the previous value.
-                goal_plan_state.refresh(callbacks.as_ref()).await;
+                // same channel, so a mid-turn plan exit, goal pause, or todo
+                // update shows up at this step head. A failed read keeps the
+                // previous value. The turn-start todo read already covers step 0.
+                goal_plan_state
+                    .refresh(callbacks.as_ref(), todo_reminder_registered && step_num > 0)
+                    .await;
                 // `step_num` is zero-based: the turn's first step is 0, not 1.
                 // Passing `step_num == 1` here made every turn-scoped provider
                 // (the goal reminder is the only one) inject a step late — so
@@ -1228,6 +1306,9 @@ pub fn run_turn<'a>(
             // loop so an overflow round does not announce the same step twice.
             emit_step_begin_event(callbacks.as_ref(), &input.agent_id, &turn_id, steps);
             let step_result = 'overflow_recovery: loop {
+                // Set inside the loop: an overflow round leaves the phase at
+                // `Compacting`, and the retried request is an LLM wait again.
+                turn_watch_state.set_phase(TurnPhase::Llm);
                 let request_messages = match budgeted_request(
                     &mut media_budget,
                     input.media,
@@ -1507,6 +1588,7 @@ pub fn run_turn<'a>(
                     // v2's `compaction_failed` carries `duration_ms`: the time
                     // until the failure, measured around the failing call.
                     let compaction_started = std::time::Instant::now();
+                    turn_watch_state.set_phase(TurnPhase::Compacting);
                     let compacted_report =
                         crate::compaction::force_compact_messages_with_summary_report(
                             &messages,
@@ -1747,16 +1829,18 @@ pub fn run_turn<'a>(
                     }
 
                     // Swarm gate (v2 `AgentSwarmService.onBeforeExecuteTool`):
-                    // a model response may issue `AgentSwarm` only on its own.
-                    // Two swarms, or a swarm mixed with other tools, are
-                    // refused before anything runs — otherwise the batch and
-                    // the sibling calls race inside one turn.
-                    if let Some(veto) = crate::swarm::mode::veto_swarm_batch(
-                        &tool_calls
-                            .iter()
-                            .map(|tc| tc.name.as_str())
-                            .collect::<Vec<_>>(),
-                    ) {
+                    // while swarm mode is active, a model response may issue
+                    // `AgentSwarm` only on its own. While it is off the shape
+                    // veto is skipped entirely, so sibling tools still run and
+                    // AgentSwarm receives its own mode-off refusal at execution.
+                    if crate::swarm::mode::swarm_mode_registry().is_active(&input.agent_id)
+                        && let Some(veto) = crate::swarm::mode::veto_swarm_batch(
+                            &tool_calls
+                                .iter()
+                                .map(|tc| tc.name.as_str())
+                                .collect::<Vec<_>>(),
+                        )
+                    {
                         let refusal = crate::swarm::mode::veto_message(veto);
                         for tc in &tool_calls {
                             messages.push(LLMMessage {
@@ -1954,7 +2038,86 @@ pub fn run_turn<'a>(
                             }
                         }
                     };
-                    let scheduled: Vec<ScheduledToolCall> = tool_calls
+                    // Tower protocol guard: destructive shell commands are
+                    // refused before scheduling. Unowned workspaces skip the
+                    // parser entirely; an owned but unparseable command is
+                    // refused conservatively by the pure tower analyzer.
+                    let mut schedulable = Vec::with_capacity(tool_calls.len());
+                    let mut tower_denials = Vec::new();
+                    for tc in &tool_calls {
+                        if tc.name.eq_ignore_ascii_case("bash")
+                            && let Some(toolset) = input.toolset.as_ref()
+                            && let Some(command) =
+                                tc.arguments.get("command").and_then(|value| value.as_str())
+                            && crate::tools::tower::bash_guard::command_needs_tower_guard(command)
+                        {
+                            let main_checkout =
+                                crate::tools::strip_verbatim_prefix(std::path::PathBuf::from(
+                                    crate::tools::tower::paths::resolve_tower_repo_root(
+                                        &toolset.tower_root().to_string_lossy(),
+                                    ),
+                                ));
+                            let state_file =
+                                main_checkout.join(crate::tools::tower::paths::STATE_FILE);
+                            let owned = tokio::fs::read_to_string(&state_file)
+                                .await
+                                .map(|raw| {
+                                    crate::tools::tower::bash_guard::tower_workspace_owned_json(
+                                        &raw,
+                                    )
+                                })
+                                .unwrap_or(false);
+                            if owned {
+                                let process_cwd = std::env::current_dir()
+                                    .ok()
+                                    .and_then(|cwd| std::fs::canonicalize(&cwd).ok())
+                                    .map(crate::tools::strip_verbatim_prefix)
+                                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                                let cwd = tc
+                                    .arguments
+                                    .get("cwd")
+                                    .and_then(|value| value.as_str())
+                                    .filter(|cwd| !cwd.is_empty())
+                                    .map_or(process_cwd.clone(), |cwd| {
+                                        let path = std::path::Path::new(cwd);
+                                        crate::tools::strip_verbatim_prefix(if path.is_absolute() {
+                                            path.to_path_buf()
+                                        } else {
+                                            process_cwd.join(path)
+                                        })
+                                    });
+                                let veto =
+                                    crate::tools::tower::bash_guard::analyze_tower_bash_command(
+                                        &crate::tools::tower::bash_guard::TowerBashGuardTarget {
+                                            command: command.to_string(),
+                                            cwd: cwd.clone(),
+                                            main_checkout: main_checkout.clone(),
+                                        },
+                                        crate::tools::tower::bash_guard::parse_shell_script,
+                                    );
+                                if let Some(veto) = veto {
+                                    tower_denials.push((tc.id.clone(), veto));
+                                    continue;
+                                }
+                            }
+                        }
+                        schedulable.push(tc.clone());
+                    }
+                    for (tool_call_id, veto) in tower_denials {
+                        messages.push(LLMMessage {
+                            role: "tool".into(),
+                            content: veto,
+                            blocks: Vec::new(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: Some(tool_call_id),
+                            prompt_id: None,
+                            origin: None,
+                        });
+                    }
+                    if schedulable.is_empty() {
+                        continue;
+                    }
+                    let scheduled: Vec<ScheduledToolCall> = schedulable
                         .iter()
                         .map(|tc| ScheduledToolCall {
                             tool_call: tc.clone(),
@@ -2044,6 +2207,7 @@ pub fn run_turn<'a>(
                             }
                         }
                     }
+                    turn_watch_state.set_phase(TurnPhase::Tools);
                     let (mut results, durations_ms, _batch_cancelled) =
                         match tool_scheduler::execute_scheduled(
                             input.cancellation.as_ref(),
@@ -2076,6 +2240,7 @@ pub fn run_turn<'a>(
                                 return Err(err);
                             }
                         };
+                    turn_watch_state.note_tool_activity();
 
                     // Dedup finalize (v2 `finalizeResult` + `endStep`):
                     // streak reminders are appended to the originals'
@@ -2203,6 +2368,8 @@ Deliver your final response as text now. Further tool calls are refused.",
                         });
 
                         steps += 1;
+                        turn_watch_state.note_steps(steps as u64);
+                        turn_watch_state.set_phase(TurnPhase::Llm);
                         // The handoff step sits outside the `for` loop, so it
                         // needs its own boundary pair — without it the final
                         // reply would stream into the card of the step that

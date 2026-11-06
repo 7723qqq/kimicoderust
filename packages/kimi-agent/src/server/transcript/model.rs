@@ -459,6 +459,14 @@ pub struct TranscriptTurn {
     pub duration_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Set when the turn's loop died before writing a terminal event (upstream
+    /// #4280 `TranscriptTurn.wedged`): a cold rebuild marks it `failed` with
+    /// this flag once a later turn prompt exists in the wire, and the live
+    /// projector closes the previous running turn this way when a new turn
+    /// starts. Additive optional — released clients parse the transcript
+    /// unchanged and render the turn as failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wedged: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

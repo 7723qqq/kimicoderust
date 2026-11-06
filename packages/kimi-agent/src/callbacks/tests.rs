@@ -183,6 +183,7 @@ fn gate_setup(
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     (dir, native, permission_calls, executed, native_count)
@@ -273,6 +274,7 @@ fn veto_setup(agent_tool_veto: Option<String>, tools_veto: Option<String>) -> Ve
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     (dir, native, permission_calls, executed, events)
@@ -621,6 +623,7 @@ async fn test_native_write_checkpoints_prepare_and_record() {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     let response = native
@@ -888,6 +891,7 @@ fn stale_gate_setup(
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     (dir, native, executed, native_count, events, state_reads)
@@ -1167,6 +1171,7 @@ fn goal_gate_setup(
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     (
@@ -1380,6 +1385,7 @@ fn hook_gate_setup(
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     (
@@ -1632,6 +1638,7 @@ async fn test_native_tool_callbacks_forwards_ask_question() {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     let mut request = sample_ask_question_request();
@@ -1837,6 +1844,7 @@ async fn test_native_tool_callbacks_forwards_state_bridge() {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     let mut read_request = sample_state_read_request();
@@ -2211,6 +2219,7 @@ async fn test_native_tool_callbacks_list_tools_merges_mcp_tools() {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
 
@@ -2223,9 +2232,100 @@ async fn test_native_tool_callbacks_list_tools_merges_mcp_tools() {
     );
 }
 
-/// The napi harness has no host tool table (its `host/list_tools` errors):
-/// the engine-owned definitions must stand alone instead of leaving the
-/// model with nothing to call.
+/// The model-facing seam must re-advertise a loaded deferred tool with its
+/// real schema. Merely delivering the `<tools_added>` text leaves the model
+/// without a definition (the audit's gap: "activates, but only text arrives").
+#[tokio::test]
+async fn test_native_tool_callbacks_readvertise_a_loaded_deferred_tool_schema() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mcp_mgr = Arc::new(crate::mcp::McpManager::new());
+    mcp_mgr
+        .configure(
+            "github",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    mcp_mgr
+        .add_client(crate::mcp::client::McpClient::mock("github"))
+        .await;
+    let toolset = Arc::new(
+        NativeToolset::new(tmp.path().to_str().unwrap(), None)
+            .unwrap()
+            .with_mcp(mcp_mgr)
+            .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+            .with_tool_select_enabled(true),
+    );
+    let inner = Arc::new(HostWithToolsCallbacks { tools: vec![] });
+    let callbacks = NativeToolCallbacks {
+        inner,
+        toolset,
+        native_count: Arc::new(AtomicU32::new(0)),
+        truncator: None,
+        permission_engine: None,
+        plan_guard: None,
+        stale_guard: None,
+        goal_guard: None,
+        hook_guard: None,
+        agent_tool_veto: None,
+        tools_veto: None,
+        todo_tool_veto: None,
+        tower_worktree_root: None,
+        tower_enabled: false,
+        notify_user_enabled: true,
+        sandbox_policy: None,
+    };
+
+    // Before loading: the deferred tool is hidden and select_tools stands in.
+    let before = callbacks.list_tools().await.unwrap();
+    assert!(
+        !before
+            .tools
+            .iter()
+            .any(|tool| tool.name == "mcp__github__github_sample_tool"),
+        "the unloaded deferred tool must stay out of the table"
+    );
+    assert!(
+        before.tools.iter().any(|tool| tool.name == "select_tools"),
+        "select_tools replaces the deferred entries"
+    );
+
+    let loaded = callbacks
+        .execute_tool(ToolExecuteRequest {
+            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+            turn_id: "t".into(),
+            tool_call_id: "c1".into(),
+            tool_name: "select_tools".into(),
+            arguments: serde_json::json!({ "names": ["mcp__github__github_sample_tool"] }),
+        })
+        .await
+        .unwrap();
+    assert!(!loaded.is_error, "{}", loaded.content);
+    assert!(
+        loaded.delivery.as_ref().is_some_and(|delivery| delivery
+            .blocks
+            .iter()
+            .any(|block| matches!(block, crate::rpc::types::ContentBlock::Text { .. }))),
+        "the announcement text still rides the delivery channel"
+    );
+
+    // The very next table the loop pulls carries the definition itself.
+    let after = callbacks.list_tools().await.unwrap();
+    let advertised = after
+        .tools
+        .iter()
+        .find(|tool| tool.name == "mcp__github__github_sample_tool")
+        .expect("a loaded deferred tool must be advertised again");
+    assert_eq!(
+        advertised.input_schema["properties"]["query"]["type"], "string",
+        "the entry must carry the MCP tool's real schema"
+    );
+}
+
 #[tokio::test]
 async fn test_native_tool_callbacks_list_tools_survives_a_missing_host_table() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2245,6 +2345,7 @@ async fn test_native_tool_callbacks_list_tools_survives_a_missing_host_table() {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
 
@@ -2305,6 +2406,7 @@ async fn test_native_tool_callbacks_list_tools_applies_the_tools_filter() {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
 
@@ -2385,6 +2487,7 @@ fn capturing_setup() -> (
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
     (dir, native, seen)
@@ -2487,6 +2590,7 @@ async fn a_deny_verdict_keeps_its_reason_on_the_returned_decision() {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         sandbox_policy: None,
     };
 

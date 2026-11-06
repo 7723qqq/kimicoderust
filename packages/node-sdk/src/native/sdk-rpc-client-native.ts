@@ -60,7 +60,6 @@ import {
   type KimiConfigPatch,
 } from '#/config-local';
 import { resolveConfigPath, resolveKimiHome } from '#/config-local/path';
-import { parseBooleanEnv } from '#/config-local/resolve';
 import { ErrorCodes, KimiError } from '#/error-protocol';
 import { ImageLimits } from '#/image-limits';
 import { KimiHarness } from '#/kimi-harness';
@@ -162,6 +161,8 @@ import type {
   TelemetryClient,
   UploadFileOptions,
   WorkspaceTrustInfo,
+  WorkspaceTrustInfoOptions,
+  WorkspaceTrustInstructionSources,
   WorkspaceTrustMcpServerInfo,
 } from '#/types';
 
@@ -170,7 +171,13 @@ import {
   materializeBuiltinPlugins,
   setBuiltinPluginOptOut,
 } from './builtin-normify';
-import { lookupModelAlias, probeShellPath, resolveModelContextWindow } from './native-llm-resolver';
+import {
+  lookupModelAlias,
+  probeShellPath,
+  resolveBackgroundLimits,
+  resolveModelContextWindow,
+} from './native-llm-resolver';
+import { readNativeTowerStatus, renderTowerStatusSummary } from './tower-status';
 import { buildSessionHandle, type BuildHandleDeps } from './sdk-client/build-handle';
 import {
   toTurnEndReason,
@@ -190,7 +197,6 @@ import {
   posixPath,
   expandCommandArguments,
   normalizeRequiredWorkDir,
-  workspaceTrustKey,
   assertSessionIdSegment,
   MAX_TITLE_LENGTH,
   promptMetadataTextFromText,
@@ -1279,6 +1285,23 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     } catch {
       // Best-effort: the next turn or getUsage reads the engine again.
     }
+  }
+
+  override async getTowerStatus(input: SessionIdRpcInput): Promise<string> {
+    const meta = this.requireSession(input.sessionId);
+    if (!meta.handle) {
+      throw new KimiError(
+        ErrorCodes.SESSION_NOT_FOUND,
+        `cannot read tower status for session "${input.sessionId}" without a live engine handle`,
+      );
+    }
+    const background = resolveBackgroundLimits(loadRuntimeConfigLenient(this.configPath));
+    const status = await readNativeTowerStatus(
+      meta.handle.id,
+      meta.towerMode,
+      background?.maxRunningTasks,
+    );
+    return renderTowerStatusSummary(status);
   }
 
   override async getStatus(input: SessionIdRpcInput): Promise<SessionStatus> {
@@ -3897,70 +3920,10 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     return resolveExperimentalFeatures(loadRuntimeConfigLenient(this.configPath));
   }
 
-  /**
-   * The project-level MCP servers that trusting this workspace would enable,
-   * in the shape the trust prompt renders.
-   *
-   * Read straight from the two project candidates rather than through
-   * `listWorkspaceMcpServers`: that method ignores its `workDir` and answers
-   * the *user-global* `mcp.json` (its own comment says so), so it would
-   * disclose servers the user already chose instead of the ones this project
-   * gates. Showing the wrong set here is worse than showing none: the prompt
-   * asks the user to judge a directory on the strength of that list.
-   *
-   * Deliberately the safe subset. `env`, headers and anything else the config
-   * carries are what a planted `.mcp.json` would exfiltrate, and this prompt
-   * runs *before* the workspace is trusted, so they are not carried into it.
-   * The renderer sanitizes control characters on top of that.
-   */
-  private readProjectMcpDisclosure(workDir: string): WorkspaceTrustMcpServerInfo[] {
-    const candidates = [join(workDir, '.mcp.json'), join(workDir, '.kimi-code', 'mcp.json')];
-    const disclosure: WorkspaceTrustMcpServerInfo[] = [];
-    for (const file of candidates) {
-      let parsed: { mcpServers?: Record<string, unknown> };
-      try {
-        parsed = JSON.parse(readFileSync(file, 'utf-8')) as {
-          mcpServers?: Record<string, unknown>;
-        };
-      } catch {
-        // Missing or unparseable: the same silent skip the vscode handler makes.
-        continue;
-      }
-      const servers = parsed?.mcpServers;
-      if (servers === null || typeof servers !== 'object') continue;
-      for (const [name, raw] of Object.entries(servers)) {
-        if (raw === null || typeof raw !== 'object') continue;
-        const cfg = raw as Record<string, unknown>;
-        const command = typeof cfg['command'] === 'string' ? cfg['command'] : undefined;
-        const url = typeof cfg['url'] === 'string' ? cfg['url'] : undefined;
-        const declared = cfg['transport'];
-        const transport =
-          declared === 'stdio' || declared === 'http' || declared === 'sse'
-            ? declared
-            : command !== undefined
-              ? ('stdio' as const)
-              : url !== undefined
-                ? ('http' as const)
-                : undefined;
-        // Neither a command nor a url: there is nothing to describe, and
-        // guessing a transport would put a claim in front of the user that the
-        // config never made.
-        if (transport === undefined) continue;
-        const args = cfg['args'];
-        disclosure.push({
-          name,
-          transport,
-          command,
-          args: Array.isArray(args) ? args.map(String) : undefined,
-          cwd: typeof cfg['cwd'] === 'string' ? cfg['cwd'] : undefined,
-          url,
-        });
-      }
-    }
-    return disclosure;
-  }
-
-  override async getWorkspaceTrustInfo(workDir: string): Promise<WorkspaceTrustInfo> {
+  override async getWorkspaceTrustInfo(
+    workDir: string,
+    options?: WorkspaceTrustInfoOptions,
+  ): Promise<WorkspaceTrustInfo> {
     // Fail closed: a workspace is untrusted until the user explicitly trusts it.
     // The previous `trusted: true` stub silently disabled the TUI's "do you trust
     // this folder?" gate, so an unfamiliar checkout's workspace-level MCP servers
@@ -3968,48 +3931,57 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     // empty until the MCP catalog is wired; the trust decision itself is persisted
     // so the prompt is shown once, not on every launch.
     //
-    // `KIMI_CODE_TRUST_WORKSPACE` (upstream #4059) ORs over the persisted
-    // decision, so a non-interactive host can opt every workspace in without a
-    // persisted record. It wins over the record, which means untrusting has no
-    // observable effect while it is set — the same trade upstream made. Only the
-    // truthy spellings count; `parseBooleanEnv` returns undefined for anything it
-    // does not recognise, so a typo leaves the normal prompt in place instead of
-    // silently trusting everything.
-    const envTrusted = parseBooleanEnv(process.env['KIMI_CODE_TRUST_WORKSPACE']) === true;
-    const trusted =
-      envTrusted ||
-      this.readTrustedWorkspaces().some(
-        (entry) => workspaceTrustKey(entry) === workspaceTrustKey(workDir),
-      );
-    return { trusted, gatedMcpServers: this.readProjectMcpDisclosure(workDir) };
+    // The decision itself lives in the engine (`workspaceTrustState`): it
+    // combines `[workspace] require_trust` (upstream #4517 — `false`
+    // short-circuits every workspace to trusted), the
+    // `KIMI_CODE_TRUST_WORKSPACE` process override (upstream #4059 — ORs over
+    // the persisted record while the gate is on; a falsy spelling does not
+    // re-enable a disabled gate) and the persisted `trusted-workspaces.json`
+    // record, re-reading all three on every call so a config edit or a fresh
+    // record applies to the next query (v2 `WorkspaceTrustEntry.refresh`,
+    // which the MCP registry consults on every cwd-scoped listing).
+    const { workspaceTrustState, workspaceTrustDisclosure } = await import(
+      '@moonshot-ai/kimi-agent/native'
+    );
+    const trusted = workspaceTrustState(this.homeDir, workDir);
+    if (trusted) {
+      // A trusted workspace discloses nothing: the prompt only exists to ask.
+      return { trusted: true, gatedMcpServers: [] };
+    }
+    // The disclosure is the engine's, not the host's: it owns the project
+    // config layers, the skill scan and the AGENTS.md discovery, and a second
+    // parser here would be a second answer to the same question (v2
+    // `trustDisclosureService`, upstream #4056).
+    const activation = JSON.parse(
+      workspaceTrustDisclosure(
+        workDir,
+        false,
+        undefined,
+        options?.additionalDirs === undefined ? undefined : [...options.additionalDirs],
+      ),
+    ) as {
+      mcpServers: WorkspaceTrustMcpServerInfo[];
+      additionalDirs: string[];
+      additionalDirSources: string[];
+      warnings: string[];
+      instructionSources: WorkspaceTrustInstructionSources;
+    };
+    return {
+      trusted: false,
+      gatedMcpServers: activation.mcpServers,
+      gatedAdditionalDirs: activation.additionalDirs,
+      additionalDirSources: activation.additionalDirSources,
+      warnings: activation.warnings,
+      instructionSources: activation.instructionSources,
+    };
   }
 
   override async trustWorkspace(workDir: string): Promise<void> {
-    const trusted = this.readTrustedWorkspaces();
-    if (!trusted.some((entry) => workspaceTrustKey(entry) === workspaceTrustKey(workDir))) {
-      trusted.push(workDir);
-      this.writeTrustedWorkspaces(trusted);
-    }
-  }
-
-  private readTrustedWorkspaces(): string[] {
-    try {
-      const raw = readFileSync(join(this.homeDir, 'trusted-workspaces.json'), 'utf8');
-      const parsed = JSON.parse(raw) as unknown;
-      return Array.isArray(parsed)
-        ? parsed.filter((entry): entry is string => typeof entry === 'string')
-        : [];
-    } catch {
-      return [];
-    }
-  }
-
-  private writeTrustedWorkspaces(list: readonly string[]): void {
-    writeFileSync(
-      join(this.homeDir, 'trusted-workspaces.json'),
-      JSON.stringify(list, null, 2),
-      'utf8',
-    );
+    // The record write is the engine's too: it owns the key normalization
+    // (real path, Windows case) that keeps differently-spelled roots from
+    // duplicating an entry.
+    const { workspaceTrustRecord } = await import('@moonshot-ai/kimi-agent/native');
+    workspaceTrustRecord(this.homeDir, workDir);
   }
 
   private requireSession(sessionId: string): NativeSessionMeta {

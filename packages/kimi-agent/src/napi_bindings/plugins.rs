@@ -87,15 +87,6 @@ pub(crate) fn plugin_skill_dirs() -> Vec<crate::skills::PluginSkillDir> {
         .unwrap_or_default()
 }
 
-/// The same roots as bare paths, for the prompt builder: it scans the list but
-/// has no per-skill plugin identity to attach.
-fn plugin_skill_dir_paths() -> Vec<std::path::PathBuf> {
-    plugin_skill_dirs()
-        .into_iter()
-        .map(|entry| entry.dir)
-        .collect()
-}
-
 /// Resolve the system prompt for a napi-owned session.
 ///
 /// The host may pass a prompt of its own (`[models.<alias>].systemPrompt` is
@@ -129,26 +120,19 @@ pub(crate) fn build_session_system_prompt(params: &JsRunTurnParams) -> String {
         // fabricating an environment section for an unknown root.
         return params.system_prompt.clone();
     };
-    let skill_dirs = plugin_skill_dir_paths();
-    // The same roots the pipeline spec carries (`with_skill_scan`), so the
-    // prompt's skills section and the `Skill` tool's scan cannot disagree. The
-    // prompt only needs the paths — which plugin contributed a skill is the
-    // renderer's business, not the section's.
+    let plugin_dirs = plugin_skill_dirs();
+    // The same roots the pipeline spec carries (`with_skill_scan`: empty
+    // `skill_dirs` plus these plugin roots), so the prompt's skills section
+    // and the `Skill` tool's scan cannot disagree — plugin skills render
+    // under their qualified `<plugin_id>:<skill>` names in both.
     let merge_all_available_skills = crate::config::resolved_merge_all_available_skills();
+    let builder = crate::prompt::SystemPromptBuilder::new(root)
+        .with_plugin_skill_dirs(plugin_dirs)
+        .with_merge_all_available_skills(merge_all_available_skills)
+        .with_memory(true);
     match params.agent_profile.as_deref().map(str::trim) {
-        Some(profile) if !profile.is_empty() => {
-            crate::prompt::SystemPromptBuilder::build_for_profile(
-                root,
-                skill_dirs,
-                merge_all_available_skills,
-                profile,
-            )
-        }
-        _ => crate::prompt::SystemPromptBuilder::build_default_with_skill_config(
-            root,
-            skill_dirs,
-            merge_all_available_skills,
-        ),
+        Some(profile) if !profile.is_empty() => builder.with_profile(profile).build(),
+        _ => builder.build(),
     }
 }
 

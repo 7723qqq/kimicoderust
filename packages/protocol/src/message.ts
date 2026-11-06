@@ -8,6 +8,9 @@ export type MessageRole = z.infer<typeof messageRoleSchema>;
 export const textContentSchema = z.object({
   type: z.literal('text'),
   text: z.string(),
+  // v2 `TextPart.meta` (#4081): provenance tags (`source`, `contentType`,
+  // `activationId`), open-ended record. Absent when unset.
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 export type TextContent = z.infer<typeof textContentSchema>;
 

@@ -1627,7 +1627,7 @@ PTY 终端接口；仅在 loopback 绑定时挂载（非 loopback 绑定会跳�
 
 #### `GET /api/v1/workspaces/{workspace_id}/trust`
 
-读取工作区信任状态。信任状态决定是否为该工作区加载项目级 MCP 配置。
+读取工作区的有效信任状态：持久化记录与 `KIMI_CODE_TRUST_WORKSPACE` 进程级覆盖取或，且当 [`[workspace] require_trust = false`](../configuration/config-files.md#workspace-trust) 关闭信任机制时恒为 `true`。信任状态决定是否为该工作区加载项目级 MCP 配置。
 
 | 参数 | 位置 | 类型 | 说明 |
 | --- | --- | --- | --- |
@@ -1639,13 +1639,13 @@ PTY 终端接口；仅在 loopback 绑定时挂载（非 loopback 绑定会跳�
 
 #### `POST /api/v1/workspaces/{workspace_id}/trust`
 
-将工作区标记为信任，并加载其项目级 MCP 配置。
+将工作区标记为信任，并加载其项目级 MCP 配置。传入 JSON 请求体 `{ "trusted": false }` 则改为撤销持久化信任记录；如果进程或配置覆盖没有使工作区保持受信任，则同时卸载其项目级 MCP 配置。
 
 | 参数 | 位置 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `workspace_id` | path | string | **必填。** 工作区 id |
 
-成功时 `data` 为 `{ trusted: true }`。
+成功时 `data` 为 `{ trusted }`，表示写入后的有效信任状态。授予时通常为 `{ trusted: true }`；撤销时通常为 `{ trusted: false }`，但如果 `KIMI_CODE_TRUST_WORKSPACE` 或 [`[workspace] require_trust = false`](../configuration/config-files.md#workspace-trust) 生效，则仍为 `true`。
 
 - `40410`：工作区不存在
 
@@ -1679,10 +1679,11 @@ PTY 终端接口；仅在 loopback 绑定时挂载（非 loopback 绑定会跳�
 
 ### 文件系统
 
-会话内文件操作走 `POST /api/v1/sessions/{session_id}/fs:{action}`，请求体为 JSON；动作包括 `list` / `read` / `list_many` / `stat` / `stat_many` / `mkdir` / `search` / `grep` / `git_status` / `diff` / `open` / `open-in` / `reveal`。每个动作的请求体还接受可选的 `runtime_id`（string，默认 `local`），用于选择执行操作的运行时；`open`、`open-in` 与 `reveal` 仅在 `local` 运行时上可用。另有：
+会话内文件操作走 `POST /api/v1/sessions/{session_id}/fs:{action}`，请求体为 JSON；动作包括 `list` / `read` / `list_many` / `stat` / `stat_many` / `mkdir` / `search` / `grep` / `git_status` / `git_status:batch` / `pull_request` / `pull_request:batch` / `diff` / `open` / `open-in` / `reveal`。每个动作的请求体还接受可选的 `runtime_id`（string，默认 `local`），用于选择执行操作的运行时；`open`、`open-in` 与 `reveal` 仅在 `local` 运行时上可用。另有：
 
 | 方法与路径 | 说明 |
 | --- | --- |
+| `POST /api/v1/workspace/fs:list` | 无会话的工作区目录列表 |
 | `POST /api/v1/workspace/fs:search` | 无会话的工作区搜索（body 携带工作区引用） |
 | `POST /api/v1/workspace/fs:suggest` | 无会话的文件补全候选（用于 `@` 文件提及） |
 | `GET /api/v1/sessions/{session_id}/fs/{path}:download` | 下载会话文件（二进制，见下文） |
@@ -1704,10 +1705,12 @@ PTY 终端接口；仅在 loopback 绑定时挂载（非 loopback 绑定会跳�
 | `show_hidden` | body | boolean | 包含点文件。默认 `false` |
 | `follow_gitignore` | body | boolean | 跳过 gitignore 的路径。默认 `true` |
 | `exclude_globs` | body | string[] | 额外要跳过的 glob |
+| `allow_ignored_globs` | body | string[] | 即使被 gitignore 也要显示的 glob（如 `.tmp`）。匹配项被忽略的祖先目录会保留，使匹配保持可达。放行点路径还需 `show_hidden: true` |
+| `allow_external_symlinks` | body | boolean | 跟随目标在工作区外的符号链接目录。默认 `false` |
 | `sort` | body | string | `type_first`（默认）/ `name_asc` / `name_desc` / `mtime_desc` / `size_desc` |
 | `include_git_status` | body | boolean | 附带每个条目的 git 状态。默认 `false` |
 
-成功时 `data` 为 `{ items, truncated }`——`depth` 大于 1 时另附 `children_by_path`（路径 → 条目的映射）。每项是一个条目对象 `{ path, name, kind, size?, modified_at, etag?, mime?, language_id?, is_binary?, is_symlink_to?, git_status?, child_count? }`，其中 `kind` 为 `file` / `directory` / `symlink`；`git_status`（仅 `include_git_status: true` 时存在）为 `clean` / `modified` / `added` / `deleted` / `renamed` / `untracked` / `ignored` / `conflicted` 之一；`truncated` 表示 `limit` 截断了列表。
+成功时 `data` 为 `{ items, truncated }`——`depth` 大于 1 时另附 `children_by_path`（路径 → 条目的映射）。每项是一个条目对象 `{ path, name, kind, size?, modified_at, etag?, mime?, language_id?, is_binary?, is_directory?, is_symlink_to?, git_status?, child_count? }`，其中 `kind` 为 `file` / `directory` / `symlink`，`is_directory` 标记目标为目录的符号链接；`git_status`（仅 `include_git_status: true` 时存在）为 `clean` / `modified` / `added` / `deleted` / `renamed` / `untracked` / `ignored` / `conflicted` 之一；`truncated` 表示 `limit` 或递归符号链接预算截断了列表。经符号链接目录展开的条目每次请求以 10,000 条为上限；普通目录递归不设此上限。
 
 - `40001`：请求体校验失败
 - `40401`：会话不存在
@@ -1725,6 +1728,7 @@ PTY 终端接口；仅在 loopback 绑定时挂载（非 loopback 绑定会跳�
 | `offset` | body | integer | 起始字节偏移。默认 `0` |
 | `length` | body | integer | 读取字节数，1–10485760（10 MiB）。默认 `1048576`（1 MiB） |
 | `encoding` | body | string | `auto`（默认）/ `utf-8` / `base64` |
+| `allow_external_symlinks` | body | boolean | 允许穿过目标在工作区外的符号链接读取。默认 `false` |
 
 成功时 `data` 为 `{ path, content, encoding, size, truncated, etag, mime, language_id?, line_count?, is_binary }`，其中 `encoding` 报告实际使用的编码（`utf-8` 或 `base64`），`size` 为文件完整大小。`encoding: "auto"` 时文本以 `utf-8` 返回（非 UTF-8 文本会被转码），二进制内容以 `base64` 返回；`encoding: "utf-8"` 强制按文本读取并拒绝二进制文件。
 
@@ -1842,18 +1846,66 @@ PTY 终端接口；仅在 loopback 绑定时挂载（非 loopback 绑定会跳�
 
 #### `POST /api/v1/sessions/{session_id}/fs:git_status`
 
-读取会话工作区的 git 状态，可选限定在一组路径内。
+读取 git 状态，可选限定在一组路径内。提供 `root` 时，条目路径相对于该目录；省略时状态覆盖整个 Git 工作树，条目路径相对于仓库根。
 
 | 参数 | 位置 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `session_id` | path | string | **必填。** 会话 id |
-| `paths` | body | string[] | 将状态限定在这些路径；省略表示整个工作区 |
+| `root` | body | string | 要限定范围的工作区目录。省略时状态覆盖整个 Git 工作树；相对值从会话工作目录解析 |
+| `paths` | body | string[] | 将状态限定在这些路径。提供 `root` 时相对路径从 `root` 解析，否则从会话工作目录解析 |
+| `include_pull_request` | body | boolean | 包含关联的 pull request。默认 `true` |
 
 成功时 `data` 为 `{ branch, ahead, behind, entries, additions, deletions, pullRequest }`，其中 `entries` 把每个变更路径映射到其状态（`clean` / `modified` / `added` / `deleted` / `renamed` / `untracked` / `ignored` / `conflicted`），`pullRequest` 为 `{ number, state, url }`（`state` 为 `open` / `merged` / `closed` / `draft`）或 `null`。
 
 - `40001`：请求体校验失败
 - `40401`：会话不存在
 - `40908`：git 不可用（不是仓库，或没有 git 可执行文件）
+- `41304`：路径越出会话工作区
+
+#### `POST /api/v1/sessions/{session_id}/fs:git_status:batch`
+
+一次调用读取多个工作区目录的 git 状态。失败的目录折进 `errors`，不让整个请求失败。
+
+| 参数 | 位置 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `session_id` | path | string | **必填。** 会话 id |
+| `roots` | body | string[] | **必填。** 要检查的工作区目录，1–32 条 |
+| `include_pull_request` | body | boolean | 在每个结果中包含关联的 pull request。默认 `true` |
+
+成功时 `data` 为 `{ results, errors }`。`results` 把每个成功的 root 映射到与 `fs:git_status` 相同的状态对象；`errors` 把每个失败的 root 映射到其 `{ code, msg }` 错误，错误码与单目录动作一致。
+
+- `40001`：请求体校验失败
+- `40401`：会话不存在
+
+#### `POST /api/v1/sessions/{session_id}/fs:pull_request`
+
+读取会话工作区目录关联的 pull request。
+
+| 参数 | 位置 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `session_id` | path | string | **必填。** 会话 id |
+| `root` | body | string | 要检查的工作区目录。默认为会话工作目录；相对值从它解析 |
+
+成功时 `data` 为 `{ number, state, url }`（`state` 为 `open` / `merged` / `closed` / `draft`）；未找到 pull request 时为 `null`。
+
+- `40001`：请求体校验失败
+- `40401`：会话不存在
+- `40908`：git 不可用（不是仓库，或没有 git 可执行文件）
+- `41304`：路径越出会话工作区
+
+#### `POST /api/v1/sessions/{session_id}/fs:pull_request:batch`
+
+一次调用读取多个工作区目录的 pull request。失败的目录折进 `errors`，不让整个请求失败。
+
+| 参数 | 位置 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `session_id` | path | string | **必填。** 会话 id |
+| `roots` | body | string[] | **必填。** 要检查的工作区目录，1–32 条 |
+
+成功时 `data` 为 `{ results, errors }`。`results` 把每个成功的 root 映射到与 `fs:pull_request` 相同的 pull request 对象或 `null`；`errors` 把每个失败的 root 映射到其 `{ code, msg }` 错误。
+
+- `40001`：请求体校验失败
+- `40401`：会话不存在
 
 #### `POST /api/v1/sessions/{session_id}/fs:diff`
 
@@ -1863,6 +1915,7 @@ PTY 终端接口；仅在 loopback 绑定时挂载（非 loopback 绑定会跳�
 | --- | --- | --- | --- |
 | `session_id` | path | string | **必填。** 会话 id |
 | `path` | body | string | **必填。** 要 diff 的文件，相对于会话工作目录 |
+| `root` | body | string | 将 diff 限定到该工作区目录，`path` 从它解析。默认为会话工作目录 |
 
 成功时 `data` 为 `{ path, diff, truncated }`，其中 `diff` 为 unified diff 文本，`truncated` 表示过长的 diff 被截断。
 
@@ -1932,11 +1985,35 @@ PTY 终端接口；仅在 loopback 绑定时挂载（非 loopback 绑定会跳�
 | `session_id` | path | string | **必填。** 会话 id |
 | `path` | path | string | **必填。** 相对于工作区的文件路径，加 `:download` 后缀 |
 | `runtime_id` | query | string | 从哪个运行时读取。默认 `local` |
+| `allow_external_symlinks` | query | string | 传 `true` 可穿过指向工作区外的符号链接下载。默认 `false` |
 
 - `40001`：路径缺失或为空
 - `40401`：会话不存在
 - `40409`：路径不存在
 - `41304`：路径越出会话工作区
+
+#### `POST /api/v1/workspace/fs:list`
+
+`fs:list` 的无会话形式：工作区改由请求体而非 URL 携带。
+
+| 参数 | 位置 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `workspace` | body | string | **必填。** 已注册工作区 id 或绝对根路径 |
+| `path` | body | string | 要列出的目录，相对于工作区根。默认 `.` |
+| `depth` | body | integer | 递归深度，1–10。默认 `1` |
+| `limit` | body | integer | 最大条目数，1–1000。默认 `200` |
+| `show_hidden` | body | boolean | 包含点文件。默认 `false` |
+| `follow_gitignore` | body | boolean | 跳过 gitignore 的路径。默认 `true` |
+| `exclude_globs` | body | string[] | 额外要跳过的 glob |
+| `allow_ignored_globs` | body | string[] | 即使被 gitignore 也要显示的 glob |
+| `allow_external_symlinks` | body | boolean | 跟随目标在工作区外的符号链接目录。默认 `false` |
+| `sort` | body | string | `type_first`（默认）/ `name_asc` / `name_desc` / `mtime_desc` / `size_desc` |
+
+成功时 `data` 的形状同 `fs:list`。
+
+- `40001`：请求体校验失败
+- `40409`：路径不存在或不是目录
+- `41304`：路径经符号链接逸出工作区且未开启 `allow_external_symlinks`
 
 #### `POST /api/v1/workspace/fs:search`
 

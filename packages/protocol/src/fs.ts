@@ -27,6 +27,9 @@ export const fsEntrySchema = z.object({
   mime: z.string().optional(),
   language_id: z.string().optional(),
   is_binary: z.boolean().optional(),
+  // Marks a symlink whose target is a directory (v2 #4457) — the file tree
+  // renders such an entry as an expandable directory.
+  is_directory: z.boolean().optional(),
   is_symlink_to: z.string().optional(),
   git_status: fsGitStatusSchema.optional(),
   child_count: z.number().int().nonnegative().optional(),

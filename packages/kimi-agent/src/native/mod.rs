@@ -14,7 +14,6 @@ pub(crate) mod fetch_url;
 mod file_cache;
 pub mod file_type;
 mod glob;
-pub mod goal;
 mod grep;
 pub mod image_compress;
 pub(crate) mod line_endings;

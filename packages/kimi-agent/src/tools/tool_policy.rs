@@ -432,6 +432,28 @@ pub fn native_tool_defs(
     filter: Option<&ToolsFilter>,
     secondary_model: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> Vec<ToolInfo> {
+    native_tool_defs_with_notify(
+        github_available,
+        tower_enabled,
+        true,
+        filter,
+        secondary_model,
+    )
+}
+
+/// [`native_tool_defs`] with the NotifyUser availability split out
+/// (upstream #4054/#4153: `notifyUserAvailable(flags, bootstrap)` — the flag
+/// AND a host that can actually show an update). `notify_user_enabled` is the
+/// resolved flag AND host-capability answer; `false` keeps the tool out of
+/// the advertised table instead of registering a tool whose updates land
+/// nowhere.
+pub fn native_tool_defs_with_notify(
+    github_available: bool,
+    tower_enabled: bool,
+    notify_user_enabled: bool,
+    filter: Option<&ToolsFilter>,
+    secondary_model: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
+) -> Vec<ToolInfo> {
     let mut defs = crate::tools::core_tool_defs::core_tool_defs();
     defs.extend(subagent_defs(secondary_model));
     defs.push(crate::tools::todo_list::todo_list_tool_def());
@@ -457,8 +479,13 @@ pub fn native_tool_defs(
     if github_available {
         defs.extend(crate::tools::github::github_tool_defs());
     }
+    if notify_user_enabled {
+        defs.push(crate::tools::core_tool_defs::notify_user_tool_def());
+    }
     if tower_enabled {
-        defs.extend(crate::tools::tower::tower_tool_defs());
+        defs.extend(crate::tools::tower::tower_tool_defs_with_models(
+            secondary_model,
+        ));
     }
     match filter {
         Some(filter) => filter.apply(defs),

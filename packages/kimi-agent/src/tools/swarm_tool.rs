@@ -39,6 +39,9 @@ const PROMPT_TEMPLATE_PLACEHOLDER: &str = "{{item}}";
 /// Maximum number of subagents in a single swarm call (`MAX_AGENT_SWARM_SUBAGENTS`).
 const MAX_AGENT_SWARM_SUBAGENTS: usize = 128;
 
+const AGENT_SWARM_DESCRIPTION: &str = include_str!("../swarm/agent-swarm.md");
+const SWARM_MODE_OFF_RESULT: &str = include_str!("../swarm/mode-off-result.md");
+
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct AgentSwarmToolInput {
@@ -67,6 +70,10 @@ fn err_result(msg: impl Into<String>) -> ExecutableToolResult {
         note: None,
         display: None,
     }
+}
+
+fn swarm_mode_off_result() -> ExecutableToolResult {
+    err_result(SWARM_MODE_OFF_RESULT)
 }
 
 /// The launch-shape rejections, as engine-owned text (v2 raises the same five
@@ -280,6 +287,15 @@ pub async fn execute_agent_swarm(
     tool_call_id: Option<&str>,
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> Option<ExecutableToolResult> {
+    let caller_agent_id = crate::tools::CALLER_AGENT_ID
+        .try_with(|id| id.clone())
+        .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
+    // v2 `resolveExecution`: reject before argument validation or runtime
+    // fallback, so a model cannot enter the mode implicitly or start members.
+    if !crate::swarm::mode::swarm_mode_registry().is_active(&caller_agent_id) {
+        return Some(swarm_mode_off_result());
+    }
+
     // The engine absorbs the `model` parameter with or without a pool: with
     // one it binds the requested alias; without one only omitting the
     // parameter is legal — any value, `primary` included (v2 #4418), is the
@@ -323,9 +339,6 @@ pub async fn execute_agent_swarm(
         .unwrap_or(DEFAULT_SUBAGENT_TYPE)
         .trim();
     let is_fork = input.fork.unwrap_or(false);
-    let caller_agent_id = crate::tools::CALLER_AGENT_ID
-        .try_with(|id| id.clone())
-        .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
     if item_count > 0
         && subagent_type != "self"
         && manager.get_definition(subagent_type).await.is_none()
@@ -380,12 +393,6 @@ pub async fn execute_agent_swarm(
     let mut tasks: Vec<AgentRunTask<SwarmTaskSpec>> = Vec::new();
     let parent_tool_call_id = tool_call_id.unwrap_or("swarm").to_string();
 
-    // v2 `AgentSwarmTool.execution` opens swarm mode with the `tool` trigger
-    // before running the batch (`agentSwarmTool.ts:128`). The mode is what
-    // makes the swarm a feature the agent is *in*, rather than one more tool
-    // it called; the turn-end hook in `run_turn` closes it again. Entering
-    // emits the mode event pair, so the host's indicator tracks it.
-    crate::swarm::mode::enter_tool_swarm(runtime.callbacks.as_ref(), &caller_agent_id);
     // Host-resolved swarm timeout (v2 `resolveSwarmTimeoutMs`): a dedicated
     // knob — unlike `Agent` turns, swarms never inherit the subagent
     // timeout. `0` = "no timeout armed" (v2 `taskService`), so it maps to
@@ -555,6 +562,13 @@ pub async fn execute_agent_swarm(
         }
     }
 
+    // v2 `execution`: check again after argument resolution, immediately
+    // before any member can be spawned, in case the user left the mode while
+    // the call was waiting to execute.
+    if !crate::swarm::mode::swarm_mode_registry().is_active(&caller_agent_id) {
+        return Some(swarm_mode_off_result());
+    }
+
     // The swarm layer owns the run: the tool hands it a launcher and the
     // task list, and gets per-member results back (v2: `AgentSwarmTool`
     // delegates to `ISessionSwarmService.run`).
@@ -590,18 +604,7 @@ pub fn agent_swarm_tool_def(
 ) -> ToolInfo {
     // v2 `tools/agent-swarm/agent-swarm.md`, verbatim: the description the
     // model reads.
-    let mut description = r#"Launch multiple subagents from one prompt template, existing agent resumes, or both.
-
-Use AgentSwarm when many subagents should run the same kind of task over different inputs. The placeholder is exactly `{{item}}`. For example, with `prompt_template` set to `Review {{item}} for likely regressions.` and `items` set to `["src/a.ts", "src/b.ts"]`, AgentSwarm launches two new subagents with those two concrete prompts. For a few differently-shaped tasks, make separate `Agent` calls in one message instead.
-
-Use `resume_agent_ids` to continue subagents that already exist from earlier work, such as ones that failed or timed out: map each agent id to the prompt for that resumed subagent (usually `continue` if no extra information is needed). You may combine `resume_agent_ids` with `items` in the same call to resume existing subagents and launch new ones. Do not duplicate resumed work in `items`.
-
-Each of these is enforced — a violation is rejected before any subagent starts: provide at least 2 `items` unless you pass `resume_agent_ids`; whenever `items` are present, `prompt_template` is required and must contain `{{item}}`; and the filled-in prompts must be distinct (two items that expand to the same prompt are rejected).
-
-Use enough subagents to keep the work focused and parallel. AgentSwarm supports up to 128 subagents, and launches are queued automatically, so it is safe to split large tasks into many clear, independent items.
-
-If `AgentSwarm` is called, that call must be the only tool call in the response."#
-        .to_string();
+    let mut description = AGENT_SWARM_DESCRIPTION.to_string();
     // v2 `buildSubagentModelDescriptions`: the listing and the `model`
     // parameter appear only when the pool offers a real choice (v2
     // `exposesSubagentModelChoice`); a single entry pins every spawn.
@@ -692,6 +695,17 @@ mod tests {
         assert!(def.input_schema.get("properties").is_some());
     }
 
+    #[test]
+    fn tool_description_requires_user_enabled_swarm_mode() {
+        let def = agent_swarm_tool_def(None);
+        assert!(def.description.contains(
+            "AgentSwarm runs only while swarm mode is on, and only the user can turn swarm mode on."
+        ));
+        assert!(def.description.contains(
+            "When swarm mode is off, do not call AgentSwarm: the call is rejected and no subagents start."
+        ));
+    }
+
     /// v2 #4418 `exposesSubagentModelChoice`: only a pool with a real choice
     /// advertises the listing and the `model` parameter — a single entry
     /// pins every spawn and hides both.
@@ -762,7 +776,7 @@ mod tests {
             "prompt_template": "check {{item}}",
             "model": "k3"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, None, None)
+        let res = execute_with_swarm(&mgr, &args, None, None, None, None)
             .await
             .expect("no-pool model overrides are error results, not host fallbacks");
         assert!(res.is_error);
@@ -926,7 +940,12 @@ mod tests {
         }
     }
 
-    struct TestNoopCallbacks;
+    type TestEvents = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+    struct TestNoopCallbacks {
+        events: TestEvents,
+    }
+
     impl HostCallbacks for TestNoopCallbacks {
         fn llm_chat(
             &self,
@@ -963,9 +982,63 @@ mod tests {
         fn list_tools(&self) -> BoxFuture<'static, Result<ListToolsResponse, String>> {
             Box::pin(async { Ok(ListToolsResponse { tools: vec![] }) })
         }
+        fn emit_event(&self, event: serde_json::Value) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    static SWARM_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn execute_with_swarm(
+        mgr: &Arc<SubagentManager>,
+        args: &Value,
+        timeout_ms: Option<u64>,
+        parent_cancel: Option<&ParentCancel>,
+        tool_call_id: Option<&str>,
+        pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
+    ) -> Option<ExecutableToolResult> {
+        execute_with_swarm_mode(
+            true,
+            mgr,
+            args,
+            timeout_ms,
+            parent_cancel,
+            tool_call_id,
+            pool,
+        )
+        .await
+    }
+
+    async fn execute_with_swarm_mode(
+        active: bool,
+        mgr: &Arc<SubagentManager>,
+        args: &Value,
+        timeout_ms: Option<u64>,
+        parent_cancel: Option<&ParentCancel>,
+        tool_call_id: Option<&str>,
+        pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
+    ) -> Option<ExecutableToolResult> {
+        let _guard = SWARM_TEST_MUTEX.lock().await;
+        let caller = crate::tools::CALLER_AGENT_ID
+            .try_with(|id| id.clone())
+            .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
+        let registry = crate::swarm::mode::swarm_mode_registry();
+        registry.exit(&caller);
+        if active {
+            assert!(registry.enter(&caller, crate::swarm::mode::SwarmModeTrigger::Manual));
+        }
+        let result =
+            execute_agent_swarm(mgr, args, timeout_ms, parent_cancel, tool_call_id, pool).await;
+        registry.exit(&caller);
+        result
     }
 
     async fn manager_with_runtime() -> Arc<SubagentManager> {
+        manager_with_runtime_and_events().await.0
+    }
+
+    async fn manager_with_runtime_and_events() -> (Arc<SubagentManager>, TestEvents) {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mgr = Arc::new(SubagentManager::new());
         mgr.register_definition(crate::subagent::types::SubagentDefinition {
             name: "coder".into(),
@@ -973,15 +1046,22 @@ mod tests {
             system_prompt: "You are coder.".into(),
             tools: vec![],
             disallowed_tools: vec![],
+            when_to_use: None,
             prompt_prefix: None,
             summary_policy: None,
             model: None,
             subagents: None,
         })
         .await;
-        mgr.set_runtime(Arc::new(TestSummaryLlm), Arc::new(TestNoopCallbacks), None)
-            .await;
-        mgr
+        mgr.set_runtime(
+            Arc::new(TestSummaryLlm),
+            Arc::new(TestNoopCallbacks {
+                events: events.clone(),
+            }),
+            None,
+        )
+        .await;
+        (mgr, events)
     }
 
     /// Two profiles, so a test can ask for one that differs from the caller's
@@ -994,6 +1074,7 @@ mod tests {
             system_prompt: "You review.".into(),
             tools: vec![],
             disallowed_tools: vec![],
+            when_to_use: None,
             prompt_prefix: None,
             summary_policy: None,
             model: None,
@@ -1123,6 +1204,7 @@ mod tests {
             system_prompt: "You are coder.".into(),
             tools: vec!["probe_tool".into()],
             disallowed_tools: vec![],
+            when_to_use: None,
             prompt_prefix: None,
             summary_policy: None,
             model: None,
@@ -1248,8 +1330,57 @@ mod tests {
             "items": ["a", "b"],
             "prompt_template": "check {{item}}"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, None, None).await;
+        let res = execute_with_swarm(&mgr, &args, None, None, None, None).await;
         assert!(res.is_none());
+    }
+
+    #[tokio::test]
+    async fn swarm_mode_off_rejects_without_starting_subagents() {
+        let (mgr, events) = manager_with_runtime_and_events().await;
+        let args = serde_json::json!({
+            "description": "code review",
+            "items": ["src/main.rs", "src/lib.rs"],
+            "prompt_template": "review {{item}}"
+        });
+
+        let res = execute_with_swarm_mode(false, &mgr, &args, None, None, None, None)
+            .await
+            .expect("swarm-mode refusal is an engine result, not a host fallback");
+
+        assert!(res.is_error, "the call must be refused: {}", res.content);
+        assert!(
+            res.content
+                .contains("Swarm mode is off, so AgentSwarm did not run"),
+            "{}",
+            res.content
+        );
+        assert!(
+            res.content.contains("no subagents were started"),
+            "{}",
+            res.content
+        );
+        // Upstream #4497 (2.4.0 sync `d18a7bcd31`): the refusal now tells the
+        // model how to hand the request back to the user instead of leaving a
+        // dead end.
+        assert!(res.content.contains("run /swarm <task>"), "{}", res.content);
+        assert!(
+            res.content.contains("do not mention swarm mode"),
+            "{}",
+            res.content
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "swarm_mode.enter"),
+            "a rejected tool call must not enter swarm mode: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "subagent.spawned"),
+            "a rejected tool call must not start subagents: {events:?}"
+        );
     }
 
     #[tokio::test]
@@ -1259,7 +1390,7 @@ mod tests {
             "items": ["a", "b"],
             "prompt_template": "check {{item}}"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, None, None)
+        let res = execute_with_swarm(&mgr, &args, None, None, None, None)
             .await
             .unwrap();
         assert!(res.is_error);
@@ -1274,7 +1405,7 @@ mod tests {
             "items": ["a"],
             "prompt_template": "check {{item}}"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, None, None)
+        let res = execute_with_swarm(&mgr, &args, None, None, None, None)
             .await
             .unwrap();
         assert!(res.is_error);
@@ -1288,7 +1419,7 @@ mod tests {
             "description": "missing template",
             "items": ["a", "b"]
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, None, None)
+        let res = execute_with_swarm(&mgr, &args, None, None, None, None)
             .await
             .unwrap();
         assert!(res.is_error);
@@ -1303,7 +1434,7 @@ mod tests {
             "items": ["a", "b"],
             "prompt_template": "check all items"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, None, None)
+        let res = execute_with_swarm(&mgr, &args, None, None, None, None)
             .await
             .unwrap();
         assert!(res.is_error);
@@ -1318,7 +1449,7 @@ mod tests {
             "items": ["a", "a"],
             "prompt_template": "check {{item}}"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, None, None)
+        let res = execute_with_swarm(&mgr, &args, None, None, None, None)
             .await
             .unwrap();
         assert!(res.is_error);
@@ -1333,7 +1464,7 @@ mod tests {
             "items": ["src/main.rs", "src/lib.rs"],
             "prompt_template": "review {{item}}"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-1"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-1"), None)
             .await
             .unwrap();
         assert!(!res.is_error, "Swarm execution failed: {}", res.content);
@@ -1371,7 +1502,7 @@ mod tests {
             "description": "resuming work",
             "resume_agent_ids": resumes
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-2"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-2"), None)
             .await
             .unwrap();
         assert!(!res.is_error, "Resume swarm failed: {}", res.content);
@@ -1403,7 +1534,7 @@ mod tests {
             "description": "reaching for another agent's worker",
             "resume_agent_ids": { foreign.clone(): "continue" }
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-x"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-x"), None)
             .await
             .unwrap();
         // v2 shape: the gate throws inside the launcher's resume, which the
@@ -1431,7 +1562,7 @@ mod tests {
             "description": "reaching for the main agent",
             "resume_agent_ids": { crate::callbacks::MAIN_AGENT_ID: "continue" }
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-y"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-y"), None)
             .await
             .unwrap();
         assert!(!res.is_error, "{}", res.content);
@@ -1468,7 +1599,7 @@ mod tests {
             "description": "resuming a busy member",
             "resume_agent_ids": { agent_id.clone(): "continue" }
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-busy"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-busy"), None)
             .await
             .unwrap();
         assert!(
@@ -1512,7 +1643,7 @@ mod tests {
             "description": "resuming work",
             "resume_agent_ids": { agent_id: "continue" }
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-z"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-z"), None)
             .await
             .unwrap();
         assert!(!res.is_error, "{}", res.content);
@@ -1537,7 +1668,7 @@ mod tests {
             "fork": true,
             "subagent_type": "reviewer"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-f1"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-f1"), None)
             .await
             .unwrap();
         assert!(res.is_error, "fork must not take a different profile");
@@ -1580,7 +1711,7 @@ mod tests {
             "fork": true,
             "model": "fast"
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-f2"), Some(&pool))
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-f2"), Some(&pool))
             .await
             .unwrap();
         assert!(res.is_error, "fork must not switch model: {}", res.content);
@@ -1649,7 +1780,7 @@ mod tests {
         let res = crate::tools::CALLER_AGENT_ID
             .scope(
                 caller_id.clone(),
-                execute_agent_swarm(&mgr, &args, None, None, None, None),
+                execute_with_swarm(&mgr, &args, None, None, None, None),
             )
             .await
             .expect("the fork batch runs natively");
@@ -1683,7 +1814,7 @@ mod tests {
             "resume_agent_ids": { agent_id: "continue" },
             "fork": true
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-f3"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-f3"), None)
             .await
             .unwrap();
         assert!(res.is_error, "fork cannot be combined with a resume");
@@ -1706,7 +1837,7 @@ mod tests {
             "prompt_template": "review {{item}}",
             "fork": true
         });
-        let res = execute_agent_swarm(&mgr, &args, None, None, Some("call-f4"), None)
+        let res = execute_with_swarm(&mgr, &args, None, None, Some("call-f4"), None)
             .await
             .unwrap();
         assert!(!res.is_error, "a plain fork must run: {}", res.content);

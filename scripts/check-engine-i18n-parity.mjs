@@ -142,18 +142,18 @@ function cfgTestModuleFiles(files) {
  */
 function testModuleRanges(src) {
   const ranges = [];
-  // Anchored to line start, and a `mod <name> {` must follow. Both conditions
-  // are load-bearing on this crate: `lib.rs` names `#[cfg(test)] mod
-  // engine_tests` inside a doc comment, `acp/mod.rs` declares a brace-less
-  // `#[cfg(test)] mod events_map_golden;`, and many files gate a single item.
-  // Matching the attribute alone would open a range from the wrong brace and
-  // swallow the production code after it.
-  const re = /^[ \t]*#\[cfg\(test\)\]/gm;
+  // The attribute must be followed directly by an inline `mod <name> {`. A
+  // brace-less `#[cfg(test)] mod fixtures;` declares a *file*, and scanning
+  // forward from its attribute for the next braced `mod` would open a range
+  // that starts at that declaration and ends at whatever inline test module
+  // comes later — swallowing the production code in between. `lib.rs` put
+  // three `LocalizedText` uses on the wrong side of exactly such a range when
+  // `mod test_support;` was declared above them.
+  const re =
+    /^[ \t]*#\[cfg\(test\)\][ \t]*(?:\r?\n[ \t]*)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/gm;
   let match;
   while ((match = re.exec(src)) !== null) {
-    const modMatch = /\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/.exec(src.slice(match.index));
-    if (!modMatch) continue;
-    const braceOpen = match.index + modMatch.index + modMatch[0].length - 1;
+    const braceOpen = match.index + match[0].length - 1;
     let depth = 0;
     let i = braceOpen;
     while (i < src.length) {

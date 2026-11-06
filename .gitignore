@@ -28,7 +28,13 @@ docker-compose.yml
 .dockerignore
 
 docs/superpowers/
-reports/
+reports/*
+# Two report directories tracked files cite: AGENTS.md's mandatory development
+# rules link into the runbook, and the Rust UI contract is cited by
+# architecture.json, kimi-ui-core and the engine projection. Ignoring the whole
+# tree left those citations pointing at files no clone would have.
+!reports/design/
+!reports/runbooks/
 .superpowers/
 /plan/
 

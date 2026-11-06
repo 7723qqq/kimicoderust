@@ -24,6 +24,11 @@ use crate::turn_loop::types::ExecutableToolResult;
 /// state for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot create a goal.";
 
+/// v2 `MAX_GOAL_OBJECTIVE_LENGTH` (`goalService.ts:85`). The same ceiling
+/// bounds the completion criterion (`MAX_GOAL_COMPLETION_CRITERION_LENGTH`,
+/// `goalService.ts:87`).
+const MAX_GOAL_OBJECTIVE_CHARS: usize = 4000;
+
 /// Wire shape of the goal domain (`GoalToolResult`): the host returns the
 /// full `GoalSnapshot` (including `goalId`) or `null` when no goal exists.
 #[derive(Deserialize, Serialize)]
@@ -88,8 +93,19 @@ pub async fn execute_create_goal(
     let Some(objective) = args.get("objective").and_then(|o| o.as_str()) else {
         return arg_error("CreateGoal", "objective", "engine.tools.argMustBeString");
     };
+    // v2 `validateObjective` (`goalService.ts:298-308`): the objective is
+    // trimmed, rejected when empty, and refused above
+    // `MAX_GOAL_OBJECTIVE_LENGTH` (4000, `goalService.ts:85`) with a sentence
+    // that points the model at a file instead. Domain text v2 ships verbatim
+    // stays English (ROADMAP §6.19), like the status refusal below.
+    let objective = objective.trim();
     if objective.is_empty() {
         return arg_error("CreateGoal", "objective", "engine.tools.argMustNotBeEmpty");
+    }
+    if objective.chars().count() > MAX_GOAL_OBJECTIVE_CHARS {
+        return err_result(format!(
+            "Invalid CreateGoal arguments: `objective` cannot exceed {MAX_GOAL_OBJECTIVE_CHARS} characters. Put long content in a file and reference the file path."
+        ));
     }
     // The wire contract carries no replace flag; a model that asks for it
     // must not get a silent no-op create.
@@ -102,7 +118,22 @@ pub async fn execute_create_goal(
     let completion_criterion = match args.get("completionCriterion") {
         None => None,
         Some(value) => match value.as_str() {
-            Some(criterion) => Some(criterion.to_string()),
+            // v2 `normalizeCompletionCriterion` (`goalService.ts:1045-1051`):
+            // trimmed, dropped when blank, and truncated — not refused — at
+            // the same 4000-character ceiling.
+            Some(criterion) => {
+                let trimmed = criterion.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        trimmed
+                            .chars()
+                            .take(MAX_GOAL_OBJECTIVE_CHARS)
+                            .collect::<String>(),
+                    )
+                }
+            }
             None => {
                 return arg_error(
                     "CreateGoal",
@@ -425,6 +456,93 @@ mod tests {
         .await;
         assert!(result.is_error);
         assert_eq!(result.content, STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE);
+    }
+
+    /// v2 `validateObjective` (`goalService.ts:298-308`): a blank objective is
+    /// rejected after trimming, and one past `MAX_GOAL_OBJECTIVE_LENGTH` is
+    /// refused rather than silently truncated. Both answers name the field and
+    /// the tool, and neither reaches the host.
+    #[tokio::test]
+    async fn test_objective_is_trimmed_and_length_bounded() {
+        let (callbacks, _) = scripted(read_ok(Value::Null), write_ok(created_goal()));
+
+        let blank = execute_create_goal(
+            &callbacks,
+            "main",
+            &serde_json::json!({ "objective": "   " }),
+        )
+        .await;
+        assert!(blank.is_error);
+        assert!(
+            blank.content.contains("must not be empty"),
+            "{}",
+            blank.content
+        );
+
+        let too_long = format!("x{}", "y".repeat(MAX_GOAL_OBJECTIVE_CHARS));
+        let rejected = execute_create_goal(
+            &callbacks,
+            "main",
+            &serde_json::json!({ "objective": too_long }),
+        )
+        .await;
+        assert!(rejected.is_error);
+        assert!(
+            rejected
+                .content
+                .contains(&MAX_GOAL_OBJECTIVE_CHARS.to_string()),
+            "{}",
+            rejected.content
+        );
+
+        // Exactly at the ceiling is accepted, and the surrounding whitespace is
+        // gone before it becomes the stored objective.
+        let at_cap = "y".repeat(MAX_GOAL_OBJECTIVE_CHARS);
+        let (callbacks, write_received) = scripted(read_ok(Value::Null), write_ok(created_goal()));
+        let accepted = execute_create_goal(
+            &callbacks,
+            "main",
+            &serde_json::json!({ "objective": format!("  {at_cap}  ") }),
+        )
+        .await;
+        assert!(!accepted.is_error, "{}", accepted.content);
+        let request = write_received.lock().unwrap().clone().unwrap();
+        assert_eq!(request.value["objective"], at_cap.as_str());
+    }
+
+    /// v2 `normalizeCompletionCriterion` (`goalService.ts:1045-1051`): blank
+    /// becomes absent, and an over-long one is truncated rather than refused.
+    #[tokio::test]
+    async fn test_completion_criterion_is_normalized_not_refused() {
+        let (callbacks, write_received) = scripted(read_ok(Value::Null), write_ok(created_goal()));
+        let long = "z".repeat(MAX_GOAL_OBJECTIVE_CHARS + 50);
+        let result = execute_create_goal(
+            &callbacks,
+            "main",
+            &serde_json::json!({ "objective": "Do the thing", "completionCriterion": format!("  {long}  ") }),
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        let request = write_received.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            request.value["completion_criterion"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_GOAL_OBJECTIVE_CHARS
+        );
+
+        let (callbacks, write_received) = scripted(read_ok(Value::Null), write_ok(created_goal()));
+        let blank = execute_create_goal(
+            &callbacks,
+            "main",
+            &serde_json::json!({ "objective": "Do the thing", "completionCriterion": "   " }),
+        )
+        .await;
+        assert!(!blank.is_error, "{}", blank.content);
+        let request = write_received.lock().unwrap().clone().unwrap();
+        assert!(request.value.get("completion_criterion").is_none());
     }
 
     #[tokio::test]

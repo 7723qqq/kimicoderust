@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -162,6 +162,11 @@ pub struct RemoteControlHandle {
     device_id: String,
     device_name: String,
     url: String,
+    /// Local loopback origin this tunnel forwards to, reported as the conflict
+    /// holder's `local_origin`.
+    local_origin: String,
+    /// Epoch milliseconds when this runtime took the local slot.
+    started_at: u64,
     status: Arc<Mutex<RemoteControlStatusWire>>,
     shutdown: tokio_util::sync::CancellationToken,
     _task: tokio::task::JoinHandle<()>,
@@ -181,6 +186,16 @@ impl RemoteControlHandle {
     /// Public Remote Control URL (built from `device_id` + relay origin).
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Local loopback origin reported when this runtime is the conflict holder.
+    pub fn local_origin(&self) -> &str {
+        &self.local_origin
+    }
+
+    /// Epoch milliseconds when this runtime took the local slot.
+    pub fn started_at(&self) -> u64 {
+        self.started_at
     }
 
     /// Current status, serialized to the existing wire shape in `server/mod.rs`.
@@ -233,10 +248,143 @@ impl RemoteControlRuntime {
             device_id: handle_options.device_id.clone(),
             device_name: handle_options.device_name.clone(),
             url,
+            local_origin: handle_options.local_base_url.clone(),
+            started_at: epoch_millis(),
             status,
             shutdown,
             _task: task,
         }
+    }
+}
+
+/// Epoch milliseconds, the `started_at` unit on the conflict wire shape.
+fn epoch_millis() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+/// Trim and validate a rename alias: 1..=50 characters after trimming, the
+/// same transform as the protocol's `renameRemoteControlDeviceRequestSchema`.
+pub fn normalize_device_alias(value: &JsonValue) -> std::result::Result<String, String> {
+    let alias = value
+        .as_str()
+        .ok_or_else(|| "Field 'alias' must be a string.".to_string())?
+        .trim();
+    if alias.is_empty() {
+        return Err("Field 'alias' must not be empty.".to_string());
+    }
+    if alias.chars().count() > 50 {
+        return Err("Field 'alias' must be at most 50 characters.".to_string());
+    }
+    Ok(alias.to_string())
+}
+
+/// The in-process equivalent of upstream's `server/rc.json` start gate.
+///
+/// The fork runtime has a single owner (`remote_control_runtime`) and no
+/// cross-process lock, so the slot mutex is the mutual-exclusion primitive.
+/// Logout still needs a short-lived flag: it keeps a start from racing the
+/// credential wipe and the delayed teardown that follows the logout response.
+#[derive(Default)]
+pub struct RemoteControlLogoutGate {
+    active: std::sync::atomic::AtomicBool,
+    started_at: std::sync::atomic::AtomicU64,
+}
+
+/// Origin marker carried by a logout-held gate, mirroring upstream's
+/// `REMOTE_CONTROL_LOGOUT_GATE_ORIGIN`.
+pub const REMOTE_CONTROL_LOGOUT_GATE_ORIGIN: &str = "logout in progress";
+
+const LOGOUT_TUNNEL_TEARDOWN_DELAY_MS: u64 = 250;
+
+impl RemoteControlLogoutGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark the gate held and return its `started_at`.
+    pub fn begin(&self) -> u64 {
+        let started_at = epoch_millis();
+        self.started_at
+            .store(started_at, std::sync::atomic::Ordering::SeqCst);
+        self.active.store(true, std::sync::atomic::Ordering::SeqCst);
+        started_at
+    }
+
+    pub fn end(&self) {
+        self.active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The holder's `started_at` while the gate is held.
+    pub fn active_since(&self) -> Option<u64> {
+        if self.active.load(std::sync::atomic::Ordering::SeqCst) {
+            Some(self.started_at.load(std::sync::atomic::Ordering::SeqCst))
+        } else {
+            None
+        }
+    }
+}
+
+/// Remote-control cleanup the server wires into the managed Kimi logout: drop
+/// the relay session cache around the credential wipe, then stop the local
+/// tunnel after the response (upstream `registerOAuthRoutes` logout branch).
+pub struct RemoteControlLogoutCleanup {
+    runtime: Arc<tokio::sync::Mutex<Option<RemoteControlHandle>>>,
+    state: Arc<tokio::sync::Mutex<crate::server::RemoteControlStatusWire>>,
+    devices: Arc<RemoteControlDeviceClient>,
+    gate: Arc<RemoteControlLogoutGate>,
+    /// Serialises concurrent logouts, like upstream's `kimiLogoutQueue`.
+    serial: std::sync::Mutex<()>,
+}
+
+impl RemoteControlLogoutCleanup {
+    pub fn new(
+        runtime: Arc<tokio::sync::Mutex<Option<RemoteControlHandle>>>,
+        state: Arc<tokio::sync::Mutex<crate::server::RemoteControlStatusWire>>,
+        devices: Arc<RemoteControlDeviceClient>,
+        gate: Arc<RemoteControlLogoutGate>,
+    ) -> Self {
+        Self {
+            runtime,
+            state,
+            devices,
+            gate,
+            serial: std::sync::Mutex::new(()),
+        }
+    }
+}
+
+impl crate::server::oauth::RemoteControlLogoutHook for RemoteControlLogoutCleanup {
+    fn around_logout(&self, logout: &mut dyn FnMut()) {
+        let _serial = self
+            .serial
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.gate.begin();
+        self.devices.clear_sessions();
+        logout();
+        self.devices.clear_sessions();
+
+        let Ok(tokio_handle) = tokio::runtime::Handle::try_current() else {
+            // No async runtime to schedule the delayed teardown on: the
+            // credential wipe already makes the cached cookie unreachable.
+            self.gate.end();
+            return;
+        };
+        let runtime = self.runtime.clone();
+        let state = self.state.clone();
+        let devices = self.devices.clone();
+        let gate = self.gate.clone();
+        tokio_handle.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(LOGOUT_TUNNEL_TEARDOWN_DELAY_MS)).await;
+            let taken = runtime.lock().await.take();
+            if let Some(handle) = taken {
+                handle.close().await;
+            }
+            devices.clear_sessions();
+            *state.lock().await = crate::server::RemoteControlStatusWire::off();
+            gate.end();
+        });
     }
 }
 
@@ -1283,6 +1431,350 @@ where
 }
 
 // ----------------------------------------------------------------------------
+// Device management cloud client (v2 remote-control/src/device-client.ts)
+// ----------------------------------------------------------------------------
+
+const DEVICE_REQUEST_TIMEOUT_MS: u64 = 15_000;
+const UNEXPECTED_LIST_RESPONSE: &str =
+    "Remote Control device list returned an unexpected response.";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteControlDeviceStatus {
+    Online,
+    Offline,
+}
+
+/// The documented device fields. Unknown cloud-only fields are discarded by
+/// deserialization, matching the explicit projection in the TS client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteControlDevice {
+    pub device_id: String,
+    pub alias: String,
+    pub status: RemoteControlDeviceStatus,
+    pub platform: String,
+    pub client_version: String,
+    pub local_base_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_remote_access_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteControlDeviceList {
+    pub devices: Vec<RemoteControlDevice>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_devices: Option<serde_json::Number>,
+}
+
+fn deserialize_present_number<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<serde_json::Number>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // `Option<Number>` alone would accept an explicit null as an absent value;
+    // upstream accepts a missing key but rejects every present non-number.
+    serde_json::Number::deserialize(deserializer).map(Some)
+}
+
+/// Credential slot and relay selected from the same configured OAuth ref.
+pub struct RemoteControlDeviceAuth {
+    pub relay_origin: String,
+    pub storage_name: String,
+    /// The standalone Web UI's historical `kimi.json` alias is valid only when
+    /// config has no explicit slot; an explicit custom/global slot never falls
+    /// back to a different account.
+    pub allow_managed_aliases: bool,
+}
+
+/// Relay HTTP session client. Cookies are keyed by relay and credential, and a
+/// `OnceCell` per key coalesces concurrent exchanges just like the TS promise
+/// map. A cloud 401 drops that cell, exchanges once, and retries once.
+pub struct RemoteControlDeviceClient {
+    client: reqwest::Client,
+    sessions: Arc<Mutex<HashMap<String, Arc<tokio::sync::OnceCell<String>>>>>,
+}
+
+impl Default for RemoteControlDeviceClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RemoteControlDeviceClient {
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_millis(DEVICE_REQUEST_TIMEOUT_MS))
+                .build()
+                .unwrap_or_default(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn list_devices(
+        &self,
+        oauth: &crate::server::oauth::OAuthManager,
+        auth: &RemoteControlDeviceAuth,
+    ) -> std::result::Result<RemoteControlDeviceList, String> {
+        let response = self
+            .request(
+                oauth,
+                auth,
+                reqwest::Method::GET,
+                "/v1/remote/devices",
+                None,
+            )
+            .await?;
+        let body = response
+            .json::<JsonValue>()
+            .await
+            .map_err(|_| "Remote Control device list returned invalid JSON.".to_string())?;
+        serde_json::from_value(body).map_err(|_| UNEXPECTED_LIST_RESPONSE.to_string())
+    }
+
+    /// `PATCH /v1/remote/devices/{id}` with the trimmed alias (ts `renameDevice`).
+    pub async fn rename_device(
+        &self,
+        oauth: &crate::server::oauth::OAuthManager,
+        auth: &RemoteControlDeviceAuth,
+        device_id: &str,
+        alias: &str,
+    ) -> std::result::Result<(), String> {
+        self.request(
+            oauth,
+            auth,
+            reqwest::Method::PATCH,
+            &format!("/v1/remote/devices/{}", pct(device_id)),
+            Some(&serde_json::json!({ "alias": alias })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `POST /v1/remote/devices/{id}/deactivate` (ts `deactivateDevice`).
+    pub async fn deactivate_device(
+        &self,
+        oauth: &crate::server::oauth::OAuthManager,
+        auth: &RemoteControlDeviceAuth,
+        device_id: &str,
+    ) -> std::result::Result<(), String> {
+        self.request(
+            oauth,
+            auth,
+            reqwest::Method::POST,
+            &format!("/v1/remote/devices/{}/deactivate", pct(device_id)),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Drop every cached relay session, so the next call exchanges again with
+    /// whatever credential is current (ts `clear`, called around logout).
+    pub fn clear_sessions(&self) {
+        self.sessions.lock().unwrap().clear();
+    }
+
+    pub async fn delete_device(
+        &self,
+        oauth: &crate::server::oauth::OAuthManager,
+        auth: &RemoteControlDeviceAuth,
+        device_id: &str,
+    ) -> std::result::Result<(), String> {
+        self.request(
+            oauth,
+            auth,
+            reqwest::Method::DELETE,
+            &format!("/v1/remote/devices/{}", pct(device_id)),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn context(
+        &self,
+        oauth: &crate::server::oauth::OAuthManager,
+        auth: &RemoteControlDeviceAuth,
+    ) -> std::result::Result<DeviceContext, String> {
+        let token =
+            oauth.managed_remote_control_token(&auth.storage_name, auth.allow_managed_aliases)?;
+        let relay_origin = auth.relay_origin.trim_end_matches('/').to_string();
+        let cache_key = format!(
+            "{}\0{}\0{}",
+            token.storage_name, relay_origin, token.refresh_token
+        );
+        Ok(DeviceContext {
+            relay_origin,
+            cache_key,
+            token,
+        })
+    }
+
+    async fn request(
+        &self,
+        oauth: &crate::server::oauth::OAuthManager,
+        auth: &RemoteControlDeviceAuth,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&JsonValue>,
+    ) -> std::result::Result<reqwest::Response, String> {
+        let context = self.context(oauth, auth)?;
+        let cookie = self.session_cookie(&context, false).await?;
+        let mut response = self
+            .send(&context, method.clone(), path, body, &cookie)
+            .await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let cookie = self.session_cookie(&context, true).await?;
+            response = self.send(&context, method, path, body, &cookie).await?;
+        }
+        if !response.status().is_success() {
+            return Err(
+                device_response_error("Remote Control device request failed", response).await,
+            );
+        }
+        Ok(response)
+    }
+
+    async fn send(
+        &self,
+        context: &DeviceContext,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&JsonValue>,
+        cookie: &str,
+    ) -> std::result::Result<reqwest::Response, String> {
+        let url = relay_http_url(&context.relay_origin, path)
+            .map_err(|error| format!("Remote Control device request failed: {error}"))?;
+        let mut request = self
+            .client
+            .request(method, url)
+            .header(reqwest::header::COOKIE, cookie);
+        if let Some(body) = body {
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .json(body);
+        }
+        request
+            .send()
+            .await
+            .map_err(|error| format!("Remote Control device request failed: {error}"))
+    }
+
+    async fn session_cookie(
+        &self,
+        context: &DeviceContext,
+        refresh: bool,
+    ) -> std::result::Result<String, String> {
+        if refresh {
+            self.sessions.lock().unwrap().remove(&context.cache_key);
+        }
+        let cell = {
+            let mut sessions = self.sessions.lock().unwrap();
+            sessions
+                .entry(context.cache_key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+        match cell.get_or_try_init(|| self.exchange(context)).await {
+            Ok(cookie) => Ok(cookie.clone()),
+            Err(error) => {
+                let mut sessions = self.sessions.lock().unwrap();
+                if sessions
+                    .get(&context.cache_key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &cell))
+                {
+                    sessions.remove(&context.cache_key);
+                }
+                Err(error.clone())
+            }
+        }
+    }
+
+    async fn exchange(&self, context: &DeviceContext) -> std::result::Result<String, String> {
+        let url = relay_http_url(&context.relay_origin, "/auth/exchange")
+            .map_err(|error| format!("Remote Control session exchange failed: {error}"))?;
+        let response = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "access_token": context.token.access_token,
+                "refresh_token": context.token.refresh_token,
+                "expires_in": context.token.expires_in,
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("Remote Control session exchange failed: {error}"))?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            return Err(
+                device_response_error("Remote Control session exchange failed", response).await,
+            );
+        }
+        let cookie = response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| value.split(';').next())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ");
+        if cookie.is_empty() {
+            return Err(
+                "Remote Control session exchange did not return a session cookie.".to_string(),
+            );
+        }
+        Ok(cookie)
+    }
+}
+
+struct DeviceContext {
+    relay_origin: String,
+    cache_key: String,
+    token: crate::server::oauth::ManagedToken,
+}
+
+fn relay_http_url(origin: &str, path: &str) -> std::result::Result<String, String> {
+    let mut url = Url::parse(origin).map_err(|error| error.to_string())?;
+    let relay_path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{relay_path}{path}"));
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+async fn device_response_error(action: &str, response: reqwest::Response) -> String {
+    let status = response.status().as_u16();
+    let detail = response
+        .json::<JsonValue>()
+        .await
+        .ok()
+        .and_then(|body| cloud_error_message(&body));
+    match detail {
+        Some(detail) => format!("{action} (HTTP {status}): {detail}"),
+        None => format!("{action} (HTTP {status})."),
+    }
+}
+
+fn cloud_error_message(value: &JsonValue) -> Option<String> {
+    let raw = value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(JsonValue::as_str)
+        .or_else(|| value.get("message").and_then(JsonValue::as_str))?;
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let message = normalized.chars().take(300).collect::<String>();
+    (!message.is_empty()).then_some(message)
+}
+
+// ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
 
@@ -1437,5 +1929,788 @@ mod tests {
         let s = status.lock().unwrap();
         assert!(!s.enabled);
         assert_eq!(s.state, "off");
+    }
+
+    #[derive(Clone, Debug)]
+    struct CloudRequest {
+        method: String,
+        path: String,
+        raw: String,
+    }
+
+    struct DeviceCloud {
+        origin: String,
+        requests: Arc<Mutex<Vec<CloudRequest>>>,
+        list_responses: Arc<Mutex<std::collections::VecDeque<(u16, String)>>>,
+        exchanges: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl DeviceCloud {
+        async fn spawn() -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let list_responses = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+            let exchanges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let server_requests = requests.clone();
+            let server_lists = list_responses.clone();
+            let server_exchanges = exchanges.clone();
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let requests = server_requests.clone();
+                    let lists = server_lists.clone();
+                    let exchanges = server_exchanges.clone();
+                    tokio::spawn(async move {
+                        let mut data = Vec::new();
+                        let expected = loop {
+                            if let Some(head_end) = memchr::memmem::find(&data, b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&data[..head_end]);
+                                let content_length = head
+                                    .split("\r\n")
+                                    .find_map(|line| {
+                                        let (name, value) = line.split_once(':')?;
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then(|| value.trim().parse::<usize>().ok())
+                                            .flatten()
+                                    })
+                                    .unwrap_or(0);
+                                let expected = head_end + 4 + content_length;
+                                if data.len() >= expected {
+                                    break expected;
+                                }
+                            }
+                            let mut chunk = [0u8; 4096];
+                            let n = socket.read(&mut chunk).await.unwrap_or(0);
+                            if n == 0 {
+                                return;
+                            }
+                            data.extend_from_slice(&chunk[..n]);
+                        };
+                        data.truncate(expected);
+                        let raw = String::from_utf8_lossy(&data).into_owned();
+                        let head_end = memchr::memmem::find(data.as_slice(), b"\r\n\r\n").unwrap();
+                        let head = String::from_utf8_lossy(&data[..head_end]);
+                        let request_line = head.split("\r\n").next().unwrap_or_default();
+                        let mut parts = request_line.split_whitespace();
+                        let method = parts.next().unwrap_or_default().to_string();
+                        let path = parts.next().unwrap_or_default().to_string();
+                        requests.lock().unwrap().push(CloudRequest {
+                            method: method.clone(),
+                            path: path.clone(),
+                            raw: raw.clone(),
+                        });
+
+                        let (status, response_body, cookies) =
+                            if path == "/coding-relay/auth/exchange" && method == "POST" {
+                                let generation = exchanges.fetch_add(1, Ordering::SeqCst) + 1;
+                                (
+                                    204,
+                                    String::new(),
+                                    vec![
+                                        format!("rc_session={generation}; Path=/; HttpOnly"),
+                                        "theme=dark; Path=/".to_string(),
+                                    ],
+                                )
+                            } else if path == "/coding-relay/v1/remote/devices" && method == "GET" {
+                                let (status, body) = lists
+                                    .lock()
+                                    .unwrap()
+                                    .pop_front()
+                                    .unwrap_or((200, "{\"devices\":[]}".to_string()));
+                                (status, body, Vec::new())
+                            } else if path.starts_with("/coding-relay/v1/remote/devices/")
+                                && path.contains("device-broken")
+                            {
+                                (
+                                    500,
+                                    "{\"error\":{\"message\":\"relay rejected the mutation\"}}"
+                                        .to_string(),
+                                    Vec::new(),
+                                )
+                            } else if path.starts_with("/coding-relay/v1/remote/devices/")
+                                && (method == "DELETE"
+                                    || method == "PATCH"
+                                    || (method == "POST" && path.ends_with("/deactivate")))
+                            {
+                                (204, String::new(), Vec::new())
+                            } else {
+                                (404, String::new(), Vec::new())
+                            };
+                        let reason = if status == 204 { "No Content" } else { "OK" };
+                        let mut response = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nConnection: close\r\n"
+                        );
+                        for cookie in cookies {
+                            response.push_str(&format!("Set-Cookie: {cookie}\r\n"));
+                        }
+                        response.push_str(&format!(
+                            "Content-Length: {}\r\n\r\n{response_body}",
+                            response_body.len()
+                        ));
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.flush().await;
+                    });
+                }
+            });
+            Self {
+                origin: format!("http://{addr}/coding-relay/"),
+                requests,
+                list_responses,
+                exchanges,
+            }
+        }
+
+        fn queue_list(&self, status: u16, body: serde_json::Value) {
+            self.list_responses
+                .lock()
+                .unwrap()
+                .push_back((status, body.to_string()));
+        }
+
+        fn requests(&self) -> Vec<CloudRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    static RELAY_ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    struct RelayEnvGuard(Option<std::ffi::OsString>);
+
+    impl RelayEnvGuard {
+        fn set(origin: &str) -> Self {
+            let previous = std::env::var_os(REMOTE_CONTROL_RELAY_URL_ENV);
+            unsafe { std::env::set_var(REMOTE_CONTROL_RELAY_URL_ENV, origin) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for RelayEnvGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => unsafe { std::env::set_var(REMOTE_CONTROL_RELAY_URL_ENV, value) },
+                None => unsafe { std::env::remove_var(REMOTE_CONTROL_RELAY_URL_ENV) },
+            }
+        }
+    }
+
+    fn write_managed_credential(
+        directory: &std::path::Path,
+        name: &str,
+        access_token: &str,
+        refresh_token: &str,
+    ) {
+        std::fs::write(
+            directory.join(format!("{name}.json")),
+            serde_json::json!({
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "expires_at": chrono::Utc::now().timestamp() + 3600,
+                "scope": "kimi",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn device_server(cloud: &DeviceCloud) -> (tempfile::TempDir, super::super::HttpServer) {
+        let credentials = tempfile::tempdir().unwrap();
+        write_managed_credential(credentials.path(), "kimi", "access-1", "refresh-1");
+        let oauth = crate::server::oauth::OAuthManager::with_hosts(
+            cloud.origin.clone(),
+            cloud.origin.clone(),
+            Some(credentials.path().to_path_buf()),
+        );
+        let server = super::super::HttpServer::in_memory()
+            .unwrap()
+            .with_oauth_manager(Arc::new(oauth))
+            .with_config(crate::config::KimiConfig::default());
+        (credentials, server)
+    }
+
+    fn device_request(
+        method: &str,
+        path: impl Into<String>,
+        body: Option<JsonValue>,
+    ) -> super::super::HttpRequest {
+        super::super::HttpRequest {
+            method: method.to_string(),
+            path: path.into(),
+            query: None,
+            headers: HashMap::new(),
+            body: body
+                .map(|value| serde_json::to_vec(&value).unwrap())
+                .unwrap_or_default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn device_routes_exchange_once_and_proxy_list_and_delete() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+        cloud.queue_list(
+            200,
+            serde_json::json!({
+                "devices": [{
+                    "device_id": "device/one",
+                    "alias": "Workstation",
+                    "status": "online",
+                    "platform": "win32",
+                    "client_version": "kimi-code/1.0.0",
+                    "local_base_url": "http://127.0.0.1:3461",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "updated_at": "2026-01-01T00:00:00.000Z",
+                    "last_remote_access_at": "2026-01-01T00:00:00.000Z",
+                    "internal_note": "cloud-only"
+                }],
+                "max_devices": 3
+            }),
+        );
+
+        let listed = server
+            .handle_request(&device_request(
+                "GET",
+                "/api/v1/remote-control/devices",
+                None,
+            ))
+            .await;
+        assert_eq!(listed.status, 200);
+        let listed: JsonValue = serde_json::from_slice(&listed.body).unwrap();
+        assert_eq!(listed["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["devices"][0]["device_id"], "device/one");
+        assert_eq!(listed["max_devices"], 3);
+        assert!(listed["devices"][0].get("internal_note").is_none());
+
+        let deleted = server
+            .handle_request(&device_request(
+                "DELETE",
+                "/api/v1/remote-control/devices/device%2Fone",
+                None,
+            ))
+            .await;
+        assert_eq!(deleted.status, 200);
+        let deleted: JsonValue = serde_json::from_slice(&deleted.body).unwrap();
+        assert_eq!(deleted, serde_json::json!({"ok": true}));
+
+        let requests = cloud.requests();
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/coding-relay/auth/exchange");
+        assert!(requests[0].raw.contains("\"access_token\":\"access-1\""));
+        assert!(requests[0].raw.contains("\"refresh_token\":\"refresh-1\""));
+        assert!(requests[0].raw.contains("\"expires_in\":3600"));
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(requests[2].method, "DELETE");
+        assert_eq!(
+            requests[2].path,
+            "/coding-relay/v1/remote/devices/device%2Fone"
+        );
+        for request in &requests[1..] {
+            assert!(
+                request
+                    .raw
+                    .to_ascii_lowercase()
+                    .contains("cookie: rc_session=1; theme=dark"),
+                "{}",
+                request.raw
+            );
+        }
+        assert_eq!(cloud.exchanges.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn device_list_reexchanges_and_retries_once_after_401() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+        cloud.queue_list(
+            401,
+            serde_json::json!({"error": {"message": "session expired"}}),
+        );
+        cloud.queue_list(200, serde_json::json!({"devices": []}));
+
+        let listed = server
+            .handle_request(&device_request(
+                "GET",
+                "/api/v1/remote-control/devices",
+                None,
+            ))
+            .await;
+        assert_eq!(listed.status, 200);
+        let requests = cloud.requests();
+        assert_eq!(requests.len(), 4, "{requests:?}");
+        assert_eq!(requests[0].path, "/coding-relay/auth/exchange");
+        assert_eq!(requests[2].path, "/coding-relay/auth/exchange");
+        assert!(
+            requests[1]
+                .raw
+                .to_ascii_lowercase()
+                .contains("rc_session=1")
+        );
+        assert!(
+            requests[3]
+                .raw
+                .to_ascii_lowercase()
+                .contains("rc_session=2")
+        );
+        assert_eq!(cloud.exchanges.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn device_list_rejects_malformed_cloud_payload() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+        cloud.queue_list(200, serde_json::json!({"devices": [{"alias": "missing"}]}));
+
+        let listed = server
+            .handle_request(&device_request(
+                "GET",
+                "/api/v1/remote-control/devices",
+                None,
+            ))
+            .await;
+        assert_eq!(listed.status, 500);
+        let error: JsonValue = serde_json::from_slice(&listed.body).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unexpected response"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_list_uses_configured_oauth_slot() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (credentials, server) = device_server(&cloud);
+        write_managed_credential(credentials.path(), "kimi", "wrong-access", "wrong-refresh");
+        write_managed_credential(
+            credentials.path(),
+            "kimi-code-env-0e4f99c69cc27850",
+            "custom-access",
+            "custom-refresh",
+        );
+        let config: crate::config::KimiConfig = concat!(
+            "[providers.\"managed:kimi-code\"]\n",
+            "type = \"kimi\"\n\n",
+            "[providers.\"managed:kimi-code\".oauth]\n",
+            "key = \"oauth/kimi-code-env-0e4f99c69cc27850\"\n",
+            "oauthHost = \"https://auth.kimi.ai\"\n",
+        )
+        .parse()
+        .unwrap();
+        let server = server.with_config(config);
+        cloud.queue_list(200, serde_json::json!({"devices": []}));
+
+        let listed = server
+            .handle_request(&device_request(
+                "GET",
+                "/api/v1/remote-control/devices",
+                None,
+            ))
+            .await;
+        assert_eq!(listed.status, 200);
+        let requests = cloud.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(
+            requests[0]
+                .raw
+                .contains("\"access_token\":\"custom-access\"")
+        );
+        assert!(
+            requests[0]
+                .raw
+                .contains("\"refresh_token\":\"custom-refresh\"")
+        );
+        assert!(!requests[0].raw.contains("wrong-refresh"));
+    }
+
+    #[tokio::test]
+    async fn device_list_reexchanges_when_stored_credential_changes() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (credentials, server) = device_server(&cloud);
+        cloud.queue_list(200, serde_json::json!({"devices": []}));
+        cloud.queue_list(200, serde_json::json!({"devices": []}));
+
+        let first = server
+            .handle_request(&device_request(
+                "GET",
+                "/api/v1/remote-control/devices",
+                None,
+            ))
+            .await;
+        assert_eq!(first.status, 200);
+        write_managed_credential(credentials.path(), "kimi", "access-1", "refresh-2");
+        let second = server
+            .handle_request(&device_request(
+                "GET",
+                "/api/v1/remote-control/devices",
+                None,
+            ))
+            .await;
+        assert_eq!(second.status, 200);
+
+        let requests = cloud.requests();
+        assert_eq!(requests.len(), 4, "{requests:?}");
+        assert!(requests[0].raw.contains("\"refresh_token\":\"refresh-1\""));
+        assert!(requests[2].raw.contains("\"refresh_token\":\"refresh-2\""));
+        assert!(
+            requests[1]
+                .raw
+                .to_ascii_lowercase()
+                .contains("rc_session=1")
+        );
+        assert!(
+            requests[3]
+                .raw
+                .to_ascii_lowercase()
+                .contains("rc_session=2")
+        );
+        assert_eq!(cloud.exchanges.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn deleting_current_device_closes_the_local_runtime() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let enabled = server
+            .handle_request(&device_request(
+                "POST",
+                "/api/v1/remote-control",
+                Some(serde_json::json!({"enabled": true, "refresh_token": "refresh-1"})),
+            ))
+            .await;
+        assert_eq!(enabled.status, 200);
+        let enabled: JsonValue = serde_json::from_slice(&enabled.body).unwrap();
+        let device_id = enabled["device_id"].as_str().unwrap().to_string();
+
+        let deleted = server
+            .handle_request(&device_request(
+                "DELETE",
+                format!("/api/v1/remote-control/devices/{device_id}"),
+                None,
+            ))
+            .await;
+        assert_eq!(deleted.status, 200);
+        assert!(server.remote_control_runtime.lock().await.is_none());
+
+        let status = server
+            .handle_request(&device_request("GET", "/api/v1/remote-control", None))
+            .await;
+        let status: JsonValue = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["state"], "off");
+        assert!(
+            cloud.requests().iter().any(|request| {
+                request.method == "DELETE"
+                    && request.path == format!("/coding-relay/v1/remote/devices/{device_id}")
+            }),
+            "{:?}",
+            cloud.requests()
+        );
+    }
+
+    #[tokio::test]
+    async fn renaming_a_device_patches_the_alias_through_the_relay_session() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let renamed = server
+            .handle_request(&device_request(
+                "PATCH",
+                "/api/v1/remote-control/devices/device%2Fone",
+                Some(serde_json::json!({"alias": "  Lab machine  "})),
+            ))
+            .await;
+        assert_eq!(renamed.status, 200);
+        let body: JsonValue = serde_json::from_slice(&renamed.body).unwrap();
+        assert_eq!(body, serde_json::json!({"ok": true}));
+
+        let requests = cloud.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[1].method, "PATCH");
+        assert_eq!(
+            requests[1].path,
+            "/coding-relay/v1/remote/devices/device%2Fone"
+        );
+        assert!(
+            requests[1]
+                .raw
+                .to_ascii_lowercase()
+                .contains("content-type: application/json")
+        );
+        assert!(requests[1].raw.contains(r#"{"alias":"Lab machine"}"#));
+    }
+
+    #[tokio::test]
+    async fn renaming_rejects_an_empty_or_overlong_alias() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        for alias in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::json!("x".repeat(51)),
+            serde_json::json!(null),
+        ] {
+            let rejected = server
+                .handle_request(&device_request(
+                    "PATCH",
+                    "/api/v1/remote-control/devices/device-1",
+                    Some(serde_json::json!({ "alias": alias })),
+                ))
+                .await;
+            assert_eq!(rejected.status, 400);
+            let body: JsonValue = serde_json::from_slice(&rejected.body).unwrap();
+            assert_eq!(body["code"], 40001u32);
+        }
+        assert!(cloud.requests().is_empty(), "{:?}", cloud.requests());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_rename_reports_the_internal_error_code() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let rejected = server
+            .handle_request(&device_request(
+                "PATCH",
+                "/api/v1/remote-control/devices/device-broken",
+                Some(serde_json::json!({"alias": "Lab machine"})),
+            ))
+            .await;
+        assert_eq!(rejected.status, 500);
+        let body: JsonValue = serde_json::from_slice(&rejected.body).unwrap();
+        assert_eq!(body["code"], 50001u32);
+        assert!(
+            body["msg"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("relay rejected the mutation"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deactivating_a_foreign_device_posts_to_the_deactivate_endpoint() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let deactivated = server
+            .handle_request(&device_request(
+                "POST",
+                "/api/v1/remote-control/devices/device%2Ftwo/deactivate",
+                None,
+            ))
+            .await;
+        assert_eq!(deactivated.status, 200);
+        let body: JsonValue = serde_json::from_slice(&deactivated.body).unwrap();
+        assert_eq!(body, serde_json::json!({"ok": true}));
+
+        let requests = cloud.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(
+            requests[1].path,
+            "/coding-relay/v1/remote/devices/device%2Ftwo/deactivate"
+        );
+    }
+
+    #[tokio::test]
+    async fn deactivating_the_current_device_stops_the_local_runtime_and_the_cloud_entry() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let enabled = server
+            .handle_request(&device_request(
+                "POST",
+                "/api/v1/remote-control",
+                Some(serde_json::json!({"enabled": true, "refresh_token": "refresh-1"})),
+            ))
+            .await;
+        assert_eq!(enabled.status, 200);
+        let enabled: JsonValue = serde_json::from_slice(&enabled.body).unwrap();
+        let device_id = enabled["device_id"].as_str().unwrap().to_string();
+
+        let deactivated = server
+            .handle_request(&device_request(
+                "POST",
+                format!("/api/v1/remote-control/devices/{device_id}/deactivate"),
+                None,
+            ))
+            .await;
+        assert_eq!(deactivated.status, 200);
+        assert!(server.remote_control_runtime.lock().await.is_none());
+        let status = server
+            .handle_request(&device_request("GET", "/api/v1/remote-control", None))
+            .await;
+        let status: JsonValue = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["state"], "off");
+        assert!(
+            cloud.requests().iter().any(|request| {
+                request.method == "POST"
+                    && request.path
+                        == format!("/coding-relay/v1/remote/devices/{device_id}/deactivate")
+            }),
+            "{:?}",
+            cloud.requests()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_enable_reports_already_running_with_holder_details() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let first = server
+            .handle_request(&device_request(
+                "POST",
+                "/api/v1/remote-control",
+                Some(serde_json::json!({"enabled": true, "refresh_token": "refresh-1"})),
+            ))
+            .await;
+        assert_eq!(first.status, 200);
+        let first: JsonValue = serde_json::from_slice(&first.body).unwrap();
+        assert!(first.get("already_running").is_none());
+
+        let second = server
+            .handle_request(&device_request(
+                "POST",
+                "/api/v1/remote-control",
+                Some(serde_json::json!({"enabled": true, "refresh_token": "refresh-1"})),
+            ))
+            .await;
+        assert_eq!(second.status, 409);
+        let second: JsonValue = serde_json::from_slice(&second.body).unwrap();
+        assert_eq!(second["code"], 40928u32);
+        assert!(
+            second["msg"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already running"),
+            "{second}"
+        );
+        let details = &second["details"];
+        assert_eq!(details["device_id"], first["device_id"]);
+        assert_eq!(details["url"], first["url"]);
+        assert_eq!(details["local_origin"], "http://127.0.0.1");
+        assert_eq!(details["pid"], serde_json::json!(std::process::id()));
+        assert!(details["started_at"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn a_held_logout_gate_rejects_starts_and_shows_up_as_the_status_conflict() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let started_at = server.remote_control_logout_gate.begin();
+        let rejected = server
+            .handle_request(&device_request(
+                "POST",
+                "/api/v1/remote-control",
+                Some(serde_json::json!({"enabled": true, "refresh_token": "refresh-1"})),
+            ))
+            .await;
+        assert_eq!(rejected.status, 409);
+        let rejected: JsonValue = serde_json::from_slice(&rejected.body).unwrap();
+        assert_eq!(rejected["code"], 40928u32);
+        assert_eq!(rejected["details"]["local_origin"], "logout in progress");
+        assert_eq!(rejected["details"]["started_at"], started_at);
+
+        let status = server
+            .handle_request(&device_request("GET", "/api/v1/remote-control", None))
+            .await;
+        let status: JsonValue = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["conflict"]["local_origin"], "logout in progress");
+        assert_eq!(status["conflict"]["started_at"], started_at);
+
+        server.remote_control_logout_gate.end();
+        assert!(cloud.requests().is_empty(), "{:?}", cloud.requests());
+    }
+
+    #[tokio::test]
+    async fn logout_clears_the_device_session_and_stops_the_local_tunnel() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let enabled = server
+            .handle_request(&device_request(
+                "POST",
+                "/api/v1/remote-control",
+                Some(serde_json::json!({"enabled": true, "refresh_token": "refresh-1"})),
+            ))
+            .await;
+        assert_eq!(enabled.status, 200);
+
+        server.oauth_manager().logout("kimi");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert!(server.remote_control_runtime.lock().await.is_none());
+        let status = server
+            .handle_request(&device_request("GET", "/api/v1/remote-control", None))
+            .await;
+        let status: JsonValue = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["state"], "off");
+        assert_eq!(status["enabled"], false);
+
+        // Logging out again is a no-op and must not resurrect the tunnel.
+        assert!(!server.oauth_manager().logout("kimi"));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(server.remote_control_runtime.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn logging_out_another_provider_leaves_the_tunnel_running() {
+        let _lock = RELAY_ENV_LOCK.lock().await;
+        let cloud = DeviceCloud::spawn().await;
+        let _env = RelayEnvGuard::set(&cloud.origin);
+        let (_credentials, server) = device_server(&cloud);
+
+        let enabled = server
+            .handle_request(&device_request(
+                "POST",
+                "/api/v1/remote-control",
+                Some(serde_json::json!({"enabled": true, "refresh_token": "refresh-1"})),
+            ))
+            .await;
+        assert_eq!(enabled.status, 200);
+
+        server.oauth_manager().logout("other-provider");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(server.remote_control_runtime.lock().await.is_some());
     }
 }

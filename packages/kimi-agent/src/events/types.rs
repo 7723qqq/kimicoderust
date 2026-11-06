@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use kimi_ui_core::{SeqSpan, StreamKind};
+
 use crate::rpc::types::TokenUsage;
 
 /// Engine lifecycle and streaming events emitted during a turn.
@@ -202,6 +204,25 @@ pub enum EngineEvent {
     },
     #[serde(rename = "subagent.failed")]
     SubagentFailed { subagent_id: String, error: String },
+    /// Batched stream segment — the merged-delta shape of the batching
+    /// contract (one event folds a coalesced span of deltas instead of one
+    /// event per token; `span` covers the folded engine seqs, `is_final`
+    /// marks the stream-closing segment so the tail cannot be lost silently).
+    /// Skeleton phase: defined, not yet emitted; the per-delta variants keep
+    /// flowing until the behavior slice switches emission over.
+    #[serde(rename = "stream.segment")]
+    StreamSegment {
+        #[serde(default = "crate::rpc::types::main_agent_id")]
+        agent_id: String,
+        turn_id: String,
+        stream: StreamKind,
+        /// Merged text of every coalesced delta, in seq order.
+        text: String,
+        /// Inclusive span of engine seqs folded into this segment.
+        span: SeqSpan,
+        /// True on the stream-closing segment (tail-loss guard).
+        is_final: bool,
+    },
     #[serde(untagged)]
     Custom(Value),
 }
@@ -239,6 +260,7 @@ impl EngineEvent {
             EngineEvent::SubagentCompleted { .. } => "subagent.completed",
             EngineEvent::SubagentFailed { .. } => "subagent.failed",
             EngineEvent::CronFired { .. } => "cron.fired",
+            EngineEvent::StreamSegment { .. } => "stream.segment",
             EngineEvent::Custom(v) => v.get("type").and_then(|t| t.as_str()).unwrap_or("custom"),
         }
     }
@@ -263,10 +285,61 @@ impl EngineEvent {
             | EngineEvent::TurnStarted { agent_id, .. }
             | EngineEvent::TurnEnded { agent_id, .. }
             | EngineEvent::ToolCallCompleted { agent_id, .. }
-            | EngineEvent::ToolCallFailed { agent_id, .. } => Some(agent_id.as_str()),
+            | EngineEvent::ToolCallFailed { agent_id, .. }
+            | EngineEvent::StreamSegment { agent_id, .. } => Some(agent_id.as_str()),
             EngineEvent::Custom(value) => value.get("agent_id").and_then(|v| v.as_str()),
             _ => None,
         }
+    }
+}
+
+/// In-process sequencing envelope for [`EngineEvent`].
+///
+/// Carries the optional per-`(agent_id, turn_id)` monotonic `seq` the event
+/// contract reserves (design `reports/design/RUST-UI-DECOUPLING.md` §1.1).
+/// Scope: engine internals and the napi bindings layer only. The wire is
+/// untouched — `EngineEvent` itself gains no field, this wrapper is not
+/// serialized onto either channel (TSFN / WS), and even an explicit envelope
+/// serialization omits `seq` while unset.
+///
+/// Why an envelope rather than a field on each variant: a new variant field
+/// must be named at every literal construction site, including `acp/` test
+/// code that is outside this phase's editable scope. The envelope carries the
+/// same information with zero churn; collapsing it into per-variant fields is
+/// a mechanical follow-up once that scope opens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequencedEngineEvent {
+    /// Monotonic within the event's `(agent_id, turn_id)` scope; `None` until
+    /// the emission layer stamps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    pub event: EngineEvent,
+}
+
+impl SequencedEngineEvent {
+    /// An unstamped envelope.
+    pub fn new(event: EngineEvent) -> Self {
+        Self { seq: None, event }
+    }
+
+    /// An envelope stamped with `seq`.
+    pub fn with_seq(seq: u64, event: EngineEvent) -> Self {
+        Self {
+            seq: Some(seq),
+            event,
+        }
+    }
+
+    pub fn seq(&self) -> Option<u64> {
+        self.seq
+    }
+
+    pub fn event(&self) -> &EngineEvent {
+        &self.event
+    }
+
+    pub fn into_event(self) -> EngineEvent {
+        self.event
     }
 }
 
@@ -328,5 +401,218 @@ mod tests {
             written.get("swarm_index").is_none(),
             "omitted, not null: {written}"
         );
+    }
+
+    /// The envelope defaults to unstamped and stamps explicitly.
+    #[test]
+    fn sequenced_envelope_defaults_to_none() {
+        let event = EngineEvent::TurnEnded {
+            agent_id: "main".into(),
+            turn_id: "t".into(),
+            reason: "done".into(),
+        };
+        let envelope = SequencedEngineEvent::new(event.clone());
+        assert_eq!(envelope.seq(), None);
+        assert_eq!(envelope.event().event_type(), "turn.ended");
+        let stamped = SequencedEngineEvent::with_seq(41, event);
+        assert_eq!(stamped.seq(), Some(41));
+        assert_eq!(stamped.into_event().event_type(), "turn.ended");
+    }
+
+    /// `seq` stays off the wire while unset, and serializes only when stamped.
+    #[test]
+    fn sequenced_envelope_omits_seq_until_stamped() {
+        let event = EngineEvent::AssistantDelta {
+            agent_id: "main".into(),
+            turn_id: "t".into(),
+            delta: "d".into(),
+        };
+        let plain = serde_json::to_value(SequencedEngineEvent::new(event.clone())).unwrap();
+        assert!(plain.get("seq").is_none(), "unset seq leaks: {plain}");
+        let stamped = serde_json::to_value(SequencedEngineEvent::with_seq(7, event)).unwrap();
+        assert_eq!(stamped["seq"], 7);
+        assert_eq!(stamped["event"]["type"], "assistant.delta");
+        let back: SequencedEngineEvent = serde_json::from_value(stamped).unwrap();
+        assert_eq!(back.seq(), Some(7));
+    }
+
+    /// The batched-segment variant round-trips with its span and stream tag.
+    #[test]
+    fn stream_segment_round_trips() {
+        let event = EngineEvent::StreamSegment {
+            agent_id: "main".into(),
+            turn_id: "t".into(),
+            stream: StreamKind::ToolCall {
+                tool_call_id: "c".into(),
+            },
+            text: "merged".into(),
+            span: SeqSpan::new(3, 9),
+            is_final: true,
+        };
+        assert_eq!(event.event_type(), "stream.segment");
+        assert_eq!(event.agent_id(), Some("main"));
+        let json = event.to_json();
+        assert_eq!(json["type"], "stream.segment");
+        assert_eq!(json["stream"]["stream"], "tool_call");
+        assert_eq!(json["stream"]["tool_call_id"], "c");
+        assert_eq!(json["span"], serde_json::json!({ "first": 3, "last": 9 }));
+        assert_eq!(json["is_final"], true);
+        assert!(matches!(
+            EngineEvent::from_json(json),
+            EngineEvent::StreamSegment {
+                is_final: true,
+                span: SeqSpan { first: 3, last: 9 },
+                ..
+            }
+        ));
+    }
+
+    /// Wire regression pin: no event variant may ever serialize a `seq` key.
+    /// Sequencing is in-process only (the envelope); the WS contract and the
+    /// TSFN payload shape stay unchanged.
+    #[test]
+    fn no_variant_serializes_a_seq_field() {
+        let events = vec![
+            EngineEvent::LlmStepBegin {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                step: 0,
+            },
+            EngineEvent::LlmDelta {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                step: 0,
+                part: Value::Null,
+            },
+            EngineEvent::LlmStepEnd {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                step: 0,
+                usage: None,
+                timing: None,
+            },
+            EngineEvent::ToolNative {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                tool_call_id: "c".into(),
+                tool_name: "Read".into(),
+                arguments: Value::Null,
+                content: String::new(),
+                is_error: false,
+                note: None,
+            },
+            EngineEvent::GoalBudgetLimitReached {
+                turn_id: "t".into(),
+                goal_id: "g".into(),
+            },
+            EngineEvent::CronFired {
+                entry_id: "e".into(),
+                prompt: "p".into(),
+            },
+            EngineEvent::AssistantDelta {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                delta: "d".into(),
+            },
+            EngineEvent::ThinkingDelta {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                delta: "d".into(),
+            },
+            EngineEvent::ToolCallDelta {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                tool_call_id: "c".into(),
+                name: None,
+                arguments_part: None,
+            },
+            EngineEvent::ToolCallStarted {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                tool_call_id: "c".into(),
+                name: "Read".into(),
+                args: Value::Null,
+            },
+            EngineEvent::ToolProgress {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                tool_call_id: "c".into(),
+                update: Value::Null,
+            },
+            EngineEvent::TurnStarted {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                prompt: None,
+            },
+            EngineEvent::TurnEnded {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                reason: "done".into(),
+            },
+            EngineEvent::SessionStatusChanged {
+                status: "s".into(),
+                previous_status: "p".into(),
+            },
+            EngineEvent::SessionWorkChanged {
+                busy: false,
+                main_turn_active: false,
+                pending_interaction: String::new(),
+                last_turn_reason: None,
+            },
+            EngineEvent::ToolCallCompleted {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                tool_call_id: "c".into(),
+                result: Value::Null,
+            },
+            EngineEvent::ToolCallFailed {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                tool_call_id: "c".into(),
+                error: "e".into(),
+            },
+            EngineEvent::SessionMetaUpdated {
+                session_id: "s".into(),
+                meta: Value::Null,
+            },
+            EngineEvent::ConfigChanged {
+                changed_fields: vec![],
+                config: Value::Null,
+            },
+            EngineEvent::SubagentSpawned {
+                subagent_id: "s".into(),
+                subagent_name: None,
+                parent_tool_call_id: None,
+                description: None,
+                run_in_background: false,
+                swarm_index: None,
+            },
+            EngineEvent::SubagentCompleted {
+                subagent_id: "s".into(),
+                result_summary: None,
+                usage: None,
+            },
+            EngineEvent::SubagentFailed {
+                subagent_id: "s".into(),
+                error: "e".into(),
+            },
+            EngineEvent::StreamSegment {
+                agent_id: "main".into(),
+                turn_id: "t".into(),
+                stream: StreamKind::Assistant,
+                text: "x".into(),
+                span: SeqSpan::new(0, 1),
+                is_final: true,
+            },
+            EngineEvent::Custom(serde_json::json!({ "type": "anything" })),
+        ];
+        assert_eq!(events.len(), 24, "every variant is pinned");
+        for event in events {
+            let json = event.to_json();
+            assert!(
+                json.get("seq").is_none(),
+                "seq leaked onto the wire: {json}"
+            );
+        }
     }
 }

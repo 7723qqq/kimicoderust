@@ -37,7 +37,10 @@ You do not need to use TodoList to record this workflow.
 
 /// The reminder injected when swarm mode ends — v2
 /// `features/swarm/agent/exit-reminder.md`, verbatim.
-pub const SWARM_MODE_EXIT_REMINDER: &str = r#"## Swarm Mode Ended
+pub const SWARM_MODE_EXIT_REMINDER: &str = include_str!("../swarm/exit-reminder.md");
+
+/// Pre-#4384 exit guidance remains recognizable when older history is scanned.
+const LEGACY_SWARM_MODE_EXIT_REMINDER: &str = r#"## Swarm Mode Ended
 
 Swarm Mode has ended. You are no longer required to follow the Swarm Mode workflow.
 
@@ -62,9 +65,8 @@ pub fn register_swarm_mode_injection(
     registry.register(
         "swarm_mode",
         Box::new(move |_ctx: &InjectionContext| {
-            // v2 `reminder()`: the mode counts as active only for a trigger
-            // other than `tool` — a swarm the model just called is already
-            // evident from the tool call itself, so it is not announced.
+            // Tool-triggered entries are legacy history only: they neither
+            // activate the mode nor announce it.
             let trigger = swarm_mode_registry().trigger(&agent_id);
             let active = trigger.is_some_and(|t| t != SwarmModeTrigger::Tool);
 
@@ -104,7 +106,10 @@ pub fn scan_swarm_mode_baseline(messages: &[LLMMessage]) -> Option<bool> {
         if content.contains(ENTER_MARKER) {
             return Some(true);
         }
-        if content.contains(EXIT_MARKER) {
+        if content.contains(EXIT_MARKER)
+            && (content.contains(SWARM_MODE_EXIT_REMINDER)
+                || content.contains(LEGACY_SWARM_MODE_EXIT_REMINDER))
+        {
             return Some(false);
         }
     }
@@ -141,16 +146,16 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_opened_swarm_is_not_announced() {
+    fn tool_triggered_replay_does_not_announce_swarm_mode() {
         let agent = "swarm-injection-tool";
         swarm_mode_registry().exit(agent);
-        swarm_mode_registry().enter(agent, SwarmModeTrigger::Tool);
+        assert!(!swarm_mode_registry().enter(agent, SwarmModeTrigger::Tool));
 
         let mut registry = InjectionRegistry::new();
         register_swarm_mode_injection(&mut registry, agent.to_string(), None);
         assert!(
             registry.build_injections(true).is_empty(),
-            "a swarm the model just called is already evident from the tool call"
+            "an ignored tool-triggered history entry leaves the mode off"
         );
 
         swarm_mode_registry().exit(agent);
@@ -180,6 +185,17 @@ mod tests {
             registry.build_injections(false).is_empty(),
             "the exit reminder must not repeat"
         );
+    }
+
+    #[test]
+    fn exit_reminder_returns_agent_swarm_control_to_the_user() {
+        assert!(SWARM_MODE_EXIT_REMINDER.contains(
+            "AgentSwarm is unavailable until the user turns Swarm Mode on again, so do not call it."
+        ));
+        assert!(SWARM_MODE_EXIT_REMINDER.contains(
+            "Handle the request yourself, and launch subagents with Agent only if it explicitly asks for them."
+        ));
+        assert!(!SWARM_MODE_EXIT_REMINDER.contains("you may call the AgentSwarm tool"));
     }
 
     /// A session resumed with the enter reminder already in history must not

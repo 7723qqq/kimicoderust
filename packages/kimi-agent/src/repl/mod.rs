@@ -512,6 +512,7 @@ pub async fn start_repl(
             )
             .with_bash_auto_background(config.background.bash_auto_background_on_timeout)
             .with_bash_task_timeout(config.resolve_bash_task_timeout_s())
+            .with_tower_max_running_tasks(config.resolve_background_max_running_tasks())
             .with_model_capabilities(native_llm_def.capabilities.clone())
             .with_mcp(mcp_manager.clone())
             .with_callbacks(base_callbacks.clone())
@@ -566,6 +567,7 @@ pub async fn start_repl(
         // The REPL builds its own table and pushes the tower defs
         // unconditionally, so the gate is irrelevant on this path.
         tower_enabled: true,
+        notify_user_enabled: true,
         sandbox_policy: None,
     });
     // A picture a tool returns is painted into the scrollback the moment the
@@ -623,12 +625,20 @@ pub async fn start_repl(
         // The same Arc the tool callbacks execute on: it carries the
         // previous-session reminder runner and the disclosure announcement
         // state across turns.
-        toolset: Some(toolset),
+        toolset: Some(toolset.clone()),
         // The REPL is its own host: no host-injected telemetry context, so the
         // turn lifecycle stays off the host/telemetry seam.
         telemetry: None,
     };
     let engine_session = crate::session::EngineSession::new(session_config).await;
+    let wake_driver = Arc::new(crate::session::wake::EngineSessionWakeDriver::new(
+        engine_session.clone(),
+    ));
+    let wake_handler = toolset.bind_tower_wake_driver(wake_driver);
+    engine_session.set_wake_replay_handler(
+        crate::tools::tower::wake::TOWER_INBOX_WAKE_VARIANT,
+        wake_handler,
+    );
 
     // v2 `sessionExternalHooksService.triggerSessionStart`: the SessionStart
     // hooks fire when the session comes up (observational — verdicts are

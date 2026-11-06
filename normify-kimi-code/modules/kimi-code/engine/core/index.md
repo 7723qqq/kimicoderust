@@ -10,11 +10,23 @@ description:
   en: >
       Engine core: the run_turn state machine, session lifecycle, compaction, subagent orchestration and the event bus.
       
-revision: b2c89a8fe8d80ce9b97a5f08206c20f28072e4b0
-updated_at: "2026-11-02T16:53:34.189Z"
-fingerprint: 18fc1114754cb6755e869fcfe636482cb96dfef2d65d81841a16b5d4808263ae
+revision: 28f4b101d79bba811d53e53662341c0bb0fe93c0
+updated_at: "2026-11-06T05:19:43.861Z"
+fingerprint: 6f85dd883b0c2e94a70e26afb98630348c7f42ea154f6afeb74ebf5d38da1daa
 source:
   - path: "packages/kimi-agent/src/turn_loop/run_turn.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/mod.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/common.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/bash_operands.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/basic_loop.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/dedup_retry.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/display_lifecycle.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/finish_goal_binding.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/finish_history.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/goal_cancel.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/injection_telemetry_tools.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/overflow_compaction.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/steering_compaction.rs"
   - path: "packages/kimi-agent/src/session/mod.rs"
   - path: "packages/kimi-agent/src/pipeline/mod.rs"
 deps:

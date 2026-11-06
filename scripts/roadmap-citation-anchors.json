@@ -101,13 +101,13 @@
       "note": "§6.25/§6.43.1 — the watcher is a standalone service, not a capability. Abbreviated path."
     },
     {
-      "cited": "server/route_sessions.rs:470",
+      "cited": "server/route_sessions.rs:491",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/server/route_sessions.rs",
-      "line": 470,
+      "line": 491,
       "context": "REST 解析在 `",
       "expect": "let turn_index = match body.get(\"turnIndex\") {",
-      "note": "§10.23 REST turnIndex parse; M1 re-located this from :5165, then the mod.rs → dispatch.rs → route_sessions.rs splits moved it again. 2026-11-02: the session-occupancy takeover route + hold guards pushed it :459 → :470."
+      "note": "§10.23 REST turnIndex parse; M1 re-located this from :5165, then the mod.rs → dispatch.rs → route_sessions.rs splits moved it again. 2026-11-02: the session-occupancy takeover route + hold guards pushed it :459 → :470. 2026-11-03: the wedged-turn activeWireTurnId threading at the cold transcript baselines pushed it :470 → :482. 2026-11-04: re-located :482 → :486."
     },
     {
       "cited": "compaction/micro.rs:132-155",
@@ -120,10 +120,10 @@
       "note": "§10.25/§6.45.2 — the fork's own micro-compaction criterion (fork-original; upstream has no such module). Crate-relative sub-path form."
     },
     {
-      "cited": "packages/kimi-agent/src/server/route_session_io.rs:154",
+      "cited": "packages/kimi-agent/src/server/route_session_io.rs:159",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/server/route_session_io.rs",
-      "line": 154,
+      "line": 159,
       "context": "` 在 profil",
       "expect": "engine.publish_status_updated(session_id).await;",
       "note": "§10.34 — the explicit post-profile-write status refresh; moved from server/mod.rs → dispatch.rs → route_session_io.rs"
@@ -177,22 +177,22 @@
       "note": "§12 — the pwsh → powershell → Git Bash → cmd chain"
     },
     {
-      "cited": "packages/kimi-agent/napi-contract.d.ts:1616",
+      "cited": "packages/kimi-agent/napi-contract.d.ts:1707",
       "origin": "worktree",
       "path": "packages/kimi-agent/napi-contract.d.ts",
-      "line": 1616,
+      "line": 1707,
       "context": "to stop」（`",
       "expect": "pump task is signalled to stop",
       "note": "§10.42 — the contract wording 'signalled' the dispose note cites"
     },
     {
-      "cited": "packages/kimi-agent/src/tools/mod.rs:806",
+      "cited": "packages/kimi-agent/src/tools/mod.rs:817",
       "origin": "worktree",
       "path": "packages/kimi-agent/src/tools/mod.rs",
-      "line": 806,
+      "line": 817,
       "context": "`），把句式的可变部",
       "expect": "pub(crate) fn arg_error_text(",
-      "note": "§10 — the {{tool}}/{{field}} parameterized arg-error helper; moved down when tools/mod.rs tests left the file, then again when the select_tools failure-tracker fields joined NativeToolset"
+      "note": "§10 — the {{tool}}/{{field}} parameterized arg-error helper; moved down when tools/mod.rs tests left the file, then again when the select_tools failure-tracker fields joined NativeToolset, then again when the WaitFor repeat-tally field joined (#4061)"
     },
     {
       "cited": ":1760-1861",

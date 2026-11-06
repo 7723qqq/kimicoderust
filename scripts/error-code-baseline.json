@@ -1,0 +1,350 @@
+{
+  "version": 1,
+  "recordedAt": "2026-11-04",
+  "purpose": "Ownership ratchet for declaration/emission drift; entries are not implementation tasks.",
+  "entries": [
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40002,
+      "name": "REQUEST_MALFORMED",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40110,
+      "name": "AUTH_PROVISIONING_REQUIRED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40111,
+      "name": "AUTH_TOKEN_MISSING",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40113,
+      "name": "AUTH_MODEL_NOT_RESOLVED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40403,
+      "name": "MESSAGE_NOT_FOUND",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40404,
+      "name": "APPROVAL_NOT_FOUND",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40405,
+      "name": "QUESTION_NOT_FOUND",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40408,
+      "name": "MCP_SERVER_NOT_FOUND",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40410,
+      "name": "WORKSPACE_NOT_FOUND",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40411,
+      "name": "FS_PERMISSION_DENIED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40413,
+      "name": "MODEL_NOT_FOUND",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40416,
+      "name": "TOOL_CALL_NOT_FOUND",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40419,
+      "name": "PLUGIN_NOT_FOUND",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40902,
+      "name": "APPROVAL_ALREADY_RESOLVED",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40905,
+      "name": "MCP_ALREADY_CONNECTED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40906,
+      "name": "FS_IS_DIRECTORY",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40907,
+      "name": "FS_IS_BINARY",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40908,
+      "name": "FS_GIT_UNAVAILABLE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40909,
+      "name": "QUESTION_DISMISSED",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40910,
+      "name": "COMPACTION_UNABLE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40911,
+      "name": "SESSION_UNDO_UNAVAILABLE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40912,
+      "name": "SKILL_NOT_ACTIVATABLE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40913,
+      "name": "GOAL_ALREADY_EXISTS",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40914,
+      "name": "GOAL_NOT_FOUND",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40915,
+      "name": "GOAL_STATUS_INVALID",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40916,
+      "name": "GOAL_NOT_RESUMABLE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40917,
+      "name": "GOAL_OBJECTIVE_EMPTY",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40918,
+      "name": "GOAL_OBJECTIVE_TOO_LONG",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40919,
+      "name": "FS_ALREADY_EXISTS",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40920,
+      "name": "GOAL_UNSUPPORTED_AGENT",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 40928,
+      "name": "REMOTE_CONTROL_ALREADY_RUNNING",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 41001,
+      "name": "APPROVAL_EXPIRED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 41002,
+      "name": "QUESTION_EXPIRED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 41003,
+      "name": "FILE_EXPIRED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 41301,
+      "name": "FILE_TOO_LARGE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 41302,
+      "name": "FS_TOO_LARGE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 41303,
+      "name": "FS_TOO_MANY_RESULTS",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 41304,
+      "name": "FS_PATH_ESCAPES_SESSION",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 41305,
+      "name": "FS_GREP_TIMEOUT",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 42902,
+      "name": "FS_WATCH_LIMIT_EXCEEDED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 42903,
+      "name": "WS_SLOW_CONSUMER",
+      "rustState": "constant-only",
+      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 50003,
+      "name": "PERSISTENCE_FAILURE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 60001,
+      "name": "TOOL_EXECUTION_FAILED",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-owned-unemitted",
+      "code": 60002,
+      "name": "TOOL_NOT_AVAILABLE",
+      "rustState": "no-rust-constant",
+      "attribution": "TS declares the code, but Rust has neither its constant nor a production emission and the host has no production emission; this is not a porting task."
+    },
+    {
+      "category": "rust-undeclared",
+      "code": 500,
+      "name": null,
+      "rustState": "emitted",
+      "attribution": "Rust terminal WebSocket acks emit numeric code 500, but the TS ErrorCode table has no corresponding declaration."
+    },
+    {
+      "category": "rust-undeclared",
+      "code": 40000,
+      "name": null,
+      "rustState": "emitted",
+      "attribution": "Rust debug envelopes emit 40000 for rejected debug operations, but the TS ErrorCode table has no corresponding declaration."
+    },
+    {
+      "category": "rust-undeclared",
+      "code": 40101,
+      "name": null,
+      "rustState": "emitted",
+      "attribution": "Rust bearer authentication emits 40101; TS mentions it only in the reserved-code comment, not in the ErrorCode table."
+    },
+    {
+      "category": "rust-undeclared",
+      "code": 40400,
+      "name": null,
+      "rustState": "emitted",
+      "attribution": "Rust debug envelopes emit 40400 for missing debug resources and methods, but the TS ErrorCode table has no corresponding declaration."
+    },
+    {
+      "category": "rust-undeclared",
+      "code": 50000,
+      "name": null,
+      "rustState": "emitted",
+      "attribution": "Rust debug envelopes emit 50000 for debug-store failures, but the TS ErrorCode table has no corresponding declaration."
+    }
+  ]
+}

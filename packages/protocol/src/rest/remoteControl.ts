@@ -1,11 +1,24 @@
 /**
  * GET /v1/remote-control
  * POST /v1/remote-control
+ * GET /v1/remote-control/devices
+ * PATCH /v1/remote-control/devices/{id}
+ * POST /v1/remote-control/devices/{id}/deactivate
+ * DELETE /v1/remote-control/devices/{id}
  */
 import { z } from 'zod';
 
 export const remoteControlStateSchema = z.enum(['off', 'starting', 'on', 'stopping']);
 export type RemoteControlState = z.infer<typeof remoteControlStateSchema>;
+
+export const remoteControlConflictSchema = z.object({
+  pid: z.number().int(),
+  local_origin: z.string(),
+  device_id: z.string(),
+  url: z.string(),
+  started_at: z.number(),
+});
+export type RemoteControlConflict = z.infer<typeof remoteControlConflictSchema>;
 
 export const remoteControlStatusSchema = z.object({
   enabled: z.boolean(),
@@ -14,6 +27,7 @@ export const remoteControlStatusSchema = z.object({
   device_id: z.string().optional(),
   device_name: z.string().optional(),
   error: z.string().optional(),
+  conflict: remoteControlConflictSchema.optional(),
 });
 export type RemoteControlStatus = z.infer<typeof remoteControlStatusSchema>;
 
@@ -21,3 +35,52 @@ export const setRemoteControlRequestSchema = z.object({
   enabled: z.boolean(),
 });
 export type SetRemoteControlRequest = z.infer<typeof setRemoteControlRequestSchema>;
+
+export const remoteControlDeviceSchema = z.object({
+  device_id: z.string(),
+  alias: z.string(),
+  status: z.enum(['online', 'offline']),
+  platform: z.string(),
+  client_version: z.string(),
+  local_base_url: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  last_remote_access_at: z.string(),
+});
+export type RemoteControlDeviceResponse = z.infer<typeof remoteControlDeviceSchema>;
+
+export const remoteControlDeviceListSchema = z.object({
+  devices: z.array(remoteControlDeviceSchema),
+  max_devices: z.number().optional(),
+});
+export type RemoteControlDeviceListResponse = z.infer<typeof remoteControlDeviceListSchema>;
+
+export const remoteControlDeviceParamsSchema = z.object({
+  id: z.string().min(1),
+});
+export type RemoteControlDeviceParams = z.infer<typeof remoteControlDeviceParamsSchema>;
+
+export const renameRemoteControlDeviceRequestSchema = z.object({
+  alias: z.string().trim().min(1).max(50),
+});
+export type RenameRemoteControlDeviceRequest = z.infer<
+  typeof renameRemoteControlDeviceRequestSchema
+>;
+
+export const remoteControlAlreadyRunningDetailsSchema = z.object({
+  pid: z.number().int(),
+  local_origin: z.string(),
+  device_id: z.string(),
+  url: z.string(),
+  started_at: z.number(),
+});
+export type RemoteControlAlreadyRunningDetails = z.infer<
+  typeof remoteControlAlreadyRunningDetailsSchema
+>;
+
+export const remoteControlDeviceMutationResponseSchema = z.object({
+  ok: z.literal(true),
+});
+export type RemoteControlDeviceMutationResponse = z.infer<
+  typeof remoteControlDeviceMutationResponseSchema
+>;

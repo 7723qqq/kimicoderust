@@ -599,7 +599,7 @@ impl SqliteSessionStore {
                 name TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_opened_at INTEGER NOT NULL,
-                trusted INTEGER NOT NULL DEFAULT 1
+                trusted INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS session_file_history (
@@ -753,6 +753,22 @@ impl SqliteSessionStore {
         Ok(())
     }
 
+    /// Point an existing session at a workspace (upstream #4224: the
+    /// `default_workspace` arm registers the resolved workspace after the
+    /// session row exists, because the root is resolved + mkdir'd first).
+    pub fn set_session_workspace(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET workspace_id = ?2, updated_at = updated_at WHERE session_id = ?1",
+            params![session_id, workspace_id],
+        )?;
+        Ok(())
+    }
+
     /// List all persisted sessions ordered by last updated time.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let conn = self.conn.lock();
@@ -871,7 +887,7 @@ impl SqliteSessionStore {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO workspaces (workspace_id, root, name, created_at, last_opened_at, trusted)
-             VALUES (?1, ?2, ?3, ?4, ?4, 1)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0)
              ON CONFLICT(workspace_id) DO UPDATE SET
                 name = coalesce(?3, name),
                 last_opened_at = ?4",
@@ -995,7 +1011,9 @@ impl SqliteSessionStore {
         Ok(affected > 0)
     }
 
-    /// Query whether a workspace is trusted. Default to true if unconfigured.
+    /// Query whether a workspace is trusted. Fail-closed: a workspace without an
+    /// explicit trust record is untrusted, matching the v2 workspace trust
+    /// default and the NAPI path.
     pub fn is_workspace_trusted(&self, workspace_id: &str) -> Result<bool, rusqlite::Error> {
         let conn = self.conn.lock();
         let trusted: Option<i64> = conn
@@ -1005,7 +1023,7 @@ impl SqliteSessionStore {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(trusted.map(|v| v != 0).unwrap_or(true))
+        Ok(trusted.map(|v| v != 0).unwrap_or(false))
     }
 
     /// Set trust state for a workspace.
@@ -2328,6 +2346,40 @@ impl SqliteSessionStore {
                 })
             },
         )?;
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(EventStoreError::from)
+    }
+
+    /// The session's `turn.prompt` records, oldest first — the wire turn id
+    /// axis the cold baseline realigns its positionally-numbered turns to
+    /// (`transcript::cold_items`, upstream `foldFacts.ts`'s `wireIdByOrdinal`).
+    /// Same journal as [`Self::prompt_wire_events`], different slice.
+    pub fn turn_prompt_wire_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<WireEventRecord>, EventStoreError> {
+        let conn = self.conn.lock();
+        refuse_newer_wire_version(&conn, session_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT seq, id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at
+             FROM wire_events
+             WHERE session_id = ?1 AND event_type = 'turn.prompt'
+             ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let payload_str: String = row.get(4)?;
+            let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
+            Ok(WireEventRecord {
+                seq: row.get(0)?,
+                id: row.get(1)?,
+                session_id: row.get(2)?,
+                event_type: row.get(3)?,
+                payload,
+                is_checkpoint: row.get(5)?,
+                is_compaction: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
         rows.collect::<Result<Vec<_>, rusqlite::Error>>()
             .map_err(EventStoreError::from)
     }

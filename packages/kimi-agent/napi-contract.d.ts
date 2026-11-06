@@ -95,8 +95,8 @@ export interface CompactionUserSelection {
  * transports only — host-proxy rebuilds tools inside `llm_chat`), and the
  * goal snapshot through `goal_cb` per turn (snake_case wire goal, or null).
  * The AGENTS.md reminder's bash-operand directories are asked through
- * `parse_bash_cb` (`{"command","cwd","home"}` → JSON array, or `'null'` to
- * keep the cwd-only fallback).
+ * `parse_bash_cb` (`{"command","cwd","home"}` in, a JSON array out, or
+ * `'null'` to keep the cwd-only fallback).
  */
 export declare function createEngineSession(params: JsRunTurnParams, llmChatCb: (callbackId: number) => void, executeToolCb: (callbackId: number) => void, emitEventCb?: (callbackId: number) => void, checkPermissionCb?: (callbackId: number) => void, askQuestionCb?: (callbackId: number) => void, stateReadCb?: (callbackId: number) => void, stateWriteCb?: (callbackId: number) => void, checkpointCb?: (callbackId: number) => void, turnEventCb?: (callbackId: number) => void, telemetryCb?: (callbackId: number) => void, listToolsCb?: (callbackId: number) => void, goalCb?: (callbackId: number) => void, authTokenCb?: (callbackId: number) => void, parseBashCb?: (callbackId: number) => void): object
 
@@ -661,6 +661,8 @@ export interface JsSessionStatus {
 export interface JsSubagentProfile {
   name: string
   description?: string
+  /** Optional usage guidance from the agent file's `whenToUse` frontmatter. */
+  whenToUse?: string
   systemPrompt?: string
   /**
    * Explicit tool allowlist; empty means every tool minus
@@ -716,6 +718,116 @@ export interface JsToolDef {
    * so we pass the schema as a serialized JSON string.
    */
   inputSchema: string
+}
+
+/**
+ * Structured deterministic tower status. No model or prompt rendering is
+ * involved at this boundary; the SDK chooses its own summary presentation.
+ */
+export interface JsTowerStatus {
+  active: boolean
+  initialized: boolean
+  stateLost: boolean
+  state?: JsTowerStatusState
+  caller?: string
+  gate?: Array<JsTowerStatusGate>
+  inbox?: JsTowerStatusInbox
+  concurrency?: JsTowerStatusConcurrency
+  recentActivity?: Array<string>
+}
+
+export interface JsTowerStatusConcurrency {
+  budget: number
+  inflight: number
+  blockedUntil?: number
+}
+
+export interface JsTowerStatusGate {
+  missionId: string
+  branch: string
+  status: string
+  ready: boolean
+  noop: boolean
+  reasons: Array<string>
+  blocks: Array<JsTowerStatusGateBlock>
+  selectedReview?: JsTowerStatusReview
+  reviewBinding?: string
+}
+
+export interface JsTowerStatusGateBlock {
+  reason: string
+  message: string
+}
+
+export interface JsTowerStatusInbox {
+  count: number
+}
+
+export interface JsTowerStatusMission {
+  id: string
+  title: string
+  slug: string
+  kind: string
+  scope: Array<string>
+  branch: string
+  worktree: string
+  spawnBase?: string
+  deps: Array<string>
+  status: string
+  owner?: string
+  context?: string
+  tasks: Array<JsTowerStatusMissionTask>
+  notes: Array<string>
+  blockers: Array<string>
+}
+
+export interface JsTowerStatusMissionTask {
+  text: string
+  done: boolean
+  dropped: boolean
+}
+
+export interface JsTowerStatusReview {
+  reviewer: string
+  target: string
+  round: number
+  status: string
+  merge: string
+  reviewedCommit: string
+  date: string
+  file: string
+  mission?: string
+  seq?: number
+  modifiedAtMs: number
+}
+
+export interface JsTowerStatusRoster {
+  agents: Array<JsTowerStatusRosterEntry>
+}
+
+export interface JsTowerStatusRosterEntry {
+  name: string
+  agentId: string
+  sessionId?: string
+  kind: string
+  missionId?: string
+  reviewTarget?: string
+  reviewMissionId?: string
+  worktree?: string
+  branch?: string
+  spawnedAt: string
+  diedAt?: string
+  deathStatus?: string
+  deathReason?: string
+  status?: string
+}
+
+export interface JsTowerStatusState {
+  base: string
+  mode: string
+  recoveredAt?: string
+  missions: Array<JsTowerStatusMission>
+  roster: JsTowerStatusRoster
 }
 
 /**
@@ -1059,30 +1171,6 @@ export interface NativeFetchUrlResult {
  * @returns True if the path matches at least one pattern.
  */
 export declare function nativeGlobMatchesAny(globs: Array<string>, path: string): boolean
-
-/**
- * returns JSON of the new goal (or an error object).
- *
- * Goal JSON: `{ goalId, objective, status, tokenBudget, tokensUsed, timeUsedSeconds, blockedStreak, terminalReason? }`
- * Update JSON: `{ objective?, status?, tokenBudget?, tokensUsed?, timeUsedSeconds?, blockedStreak?, terminalReason?, expectedGoalId? }`
- * Returns: `{ ok: true, goal: {...} }` or `{ ok: false, error: "..." }`
- */
-export declare function nativeGoalApplyUpdate(goalJson: string, updateJson: string): string
-
-/** Compute the chargeable token delta between two usage snapshots. */
-export declare function nativeGoalComputeTokenDelta(prevInput: number, prevCached: number, prevOutput: number, currInput: number, currCached: number, currOutput: number): number
-
-/** Render the budget-limit wrap-up prompt. */
-export declare function nativeGoalRenderBudgetLimit(objective: string, tokensUsed: number, tokenBudget: number | undefined | null, timeUsedSeconds: number): string
-
-/** Render the continuation steering prompt. */
-export declare function nativeGoalRenderContinuation(objective: string, tokensUsed: number, tokenBudget?: number | undefined | null): string
-
-/** Render the objective-updated prompt. */
-export declare function nativeGoalRenderObjectiveUpdated(objective: string, tokensUsed: number, tokenBudget?: number | undefined | null): string
-
-/** Validate a goal objective. Returns an error message, or empty string on success. */
-export declare function nativeGoalValidateObjective(objective: string): string
 
 /**
  * Search for a pattern in files.
@@ -1753,6 +1841,13 @@ export declare function sessionStatus(sessionId: string): JsSessionStatus
 export declare function sessionTakeoverLock(sessionId: string): void
 
 /**
+ * Read the session repository's deterministic tower snapshot for the SDK.
+ * `active` is the host's tower-mode flag; it changes presentation, not the
+ * persisted state or gate evaluation.
+ */
+export declare function sessionTowerStatus(sessionId: string, active: boolean, maxRunningTasks?: number | undefined | null): object
+
+/**
  * Try to acquire quiescence (M1c): an exclusive window in which enqueued
  * turns are parked instead of admitted. Fails when a guard is already held
  * or any turn is active, pending, or held — the caller waits for
@@ -1818,6 +1913,38 @@ export interface ToolAccessMeta {
  * Returns `key` itself when the key is in neither embedded locale.
  */
 export declare function translate(key: string, params?: Record<string, string> | undefined | null): string
+
+/**
+ * What trusting `work_dir` would switch on (v2 `trustDisclosureService`,
+ * upstream #4056): project MCP servers, the extra directories those would
+ * widen the sandbox to, the instruction files the session would start
+ * reading, and one warning line per inspection that could not complete.
+ *
+ * JSON rather than a napi object: the shape is nested and optional-heavy,
+ * and the host already parses JSON from this boundary. `explicitSkillDirs`
+ * mirrors `--skill-dirs` / `KIMI_CODE_SKILL_DIRS` — when the user named the
+ * roots, the project scan is not what a trust decision activates.
+ */
+export declare function workspaceTrustDisclosure(workDir: string, explicitSkillDirs?: boolean | undefined | null, mergeAllAvailableSkills?: boolean | undefined | null, pendingAdditionalDirs?: Array<string> | undefined | null): string
+
+/**
+ * Persist a workspace trust decision (v2 `WorkspaceTrustEntry.trust`):
+ * append the root to `trusted-workspaces.json` unless a matching key is
+ * already recorded. The write happens even while `[workspace] require_trust`
+ * is `false`, so a re-enabled gate finds the records intact.
+ */
+export declare function workspaceTrustRecord(homeDir: string, workDir: string): void
+
+/**
+ * The effective workspace trust state (upstream #4517): the engine combines
+ * `[workspace] require_trust` from `<homeDir>/config.toml`, the
+ * `KIMI_CODE_TRUST_WORKSPACE` process override and the persisted
+ * `trusted-workspaces.json` record, re-reading all three on every call (v2
+ * `WorkspaceTrustEntry.refresh`, which the MCP registry consults on every
+ * cwd-scoped listing). The host's trust prompt and the project-config gates
+ * (`.mcp.json`, `workspace.additional_dir`) key off this answer.
+ */
+export declare function workspaceTrustState(homeDir: string, workDir: string): boolean
 
 /** Result of a write operation. */
 export interface WriteResult {

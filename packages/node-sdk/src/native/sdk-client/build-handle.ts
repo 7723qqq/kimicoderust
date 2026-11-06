@@ -43,6 +43,7 @@ import type { SDKRpcClientNative } from '../sdk-rpc-client-native';
 import { isApprovedForSession, rememberSessionApproval } from '../session-approvals';
 import { bashTargetDirs } from './bash-target-dirs';
 import {
+  CacheUsageAggregator,
   toTokenUsage,
   normalizeEngineTurnId,
   toTurnEndReason,
@@ -118,6 +119,15 @@ export async function buildSessionHandle(
   // host still counts on its own so the numbering stays contiguous if an
   // engine-side boundary is ever dropped.
   let stepSeq = 0;
+
+  // Cache-hit aggregation over the current turn's steps (upstream
+  // `prompt_cache_probe` / cacheProbe.ts, #4179's host-aggregation half).
+  // The engine reports `input_cache_read` / `input_cache_creation` /
+  // `input_tokens` on every addressed `llm.step.end`; folding them here and
+  // reporting one record per turn keeps the probe out of the engine and gives
+  // the hit rate the same denominator upstream uses (total input, not
+  // cacheable input).
+  const cacheAgg = new CacheUsageAggregator();
 
   // Background tasks seen this handle. `event.task.completed` carries only
   // the id and status, so the create-time facts are remembered to fill the
@@ -305,6 +315,7 @@ export async function buildSessionHandle(
         // one maps; the transport's stays the engine's own message fold.
         if (parsed.turn_id !== undefined || parsed.step !== undefined) {
           const usage = toTokenUsage(parsed.usage);
+          cacheAgg.add(usage);
           const timing = parsed.timing as
             | {
                 firstTokenLatencyMs?: number;
@@ -877,6 +888,7 @@ export async function buildSessionHandle(
       const turnId = normalizeEngineTurnId(rawTurnId);
       if (parsed.type === 'turn.started') {
         meta.currentTurnId = turnId;
+        cacheAgg.reset();
         // New turn: restart the synthesized LLM step counter.
         stepSeq = 0;
         deps.receiveEvent({
@@ -910,6 +922,16 @@ export async function buildSessionHandle(
           // this id (engine-minted `turn-<id>`).
           ...(parsed.trace_id ? { traceId: parsed.trace_id } : {}),
         });
+        const probe = cacheAgg.settle();
+        if (probe !== undefined) {
+          deps.telemetry.track('llm_cache_usage', {
+            input_tokens: probe.inputTokens,
+            input_cache_read: probe.cacheRead,
+            input_cache_creation: probe.cacheCreation,
+            output_tokens: probe.output,
+            cache_hit_rate: probe.cacheHitRate,
+          });
+        }
         meta.activeAgentId = undefined;
       } else if (parsed.type === 'turn.cancel') {
         // v2 `TurnCancel`. A turn cancelled while still queued never starts,
@@ -1104,6 +1126,7 @@ export async function buildSessionHandle(
         ? agentProfiles.map((profile) => ({
             name: profile.name,
             description: profile.description,
+            whenToUse: profile.whenToUse,
             systemPrompt: profile.prompt,
             tools: profile.tools,
             disallowedTools: profile.disallowedTools,

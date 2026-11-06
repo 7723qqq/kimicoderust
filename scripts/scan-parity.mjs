@@ -96,8 +96,17 @@ function collectTsRestEndpoints() {
   const endpoints = [];
   for (const file of readdirSync(PROTOCOL_REST_DIR).filter((f) => f.endsWith('.ts'))) {
     const text = read(join(PROTOCOL_REST_DIR, file));
-    for (const m of text.matchAll(/^\s*\*\s+(GET|POST|PUT|PATCH|DELETE)\s+(\/v1\/\S+)/gm)) {
+    const before = endpoints.length;
+    for (const m of text.matchAll(/^\s*\*\s+(GET|POST|PUT|PATCH|DELETE)\s+(\/v[12]\/\S+)/gm)) {
       endpoints.push({ file, method: m[1], path: '/api' + m[2].split('?')[0] });
+    }
+    // Fail closed on a silent manifest: a rest/*.ts file whose header declares
+    // no route used to pass while its schemas described routes the gate never
+    // checked (snapshot.ts's backticked route line, and the schema-only files
+    // config.ts / terminal.ts / guiStore.ts / modelCatalog.ts, all went dark
+    // this way).
+    if (endpoints.length === before) {
+      endpoints.push({ file, method: '', path: '', manifestError: true });
     }
   }
   return endpoints;
@@ -141,11 +150,16 @@ function collectRustRoutes() {
       // `extract_session_fs_action` is a dispatcher: the guard matches any
       // `…/fs:<action>` path, and the accepted actions live in the match arms
       // of its handler body, not in the route guard. Capture them so a
-      // declared `fs:<x>` with no arm still fails.
+      // declared `fs:<x>` with no arm still fails. Action names may carry a
+      // second colon segment (`git_status:batch`, v2 #4527).
       sessionFs: cond.includes('extract_session_fs_action')
-        ? [...source.matchAll(/"([a-z_]+)"\s*(?:\|\s*"[a-zA-Z_]+"\s*)*=>\s*fs_routes::/g)].map(
-            (x) => x[1],
-          )
+        ? [
+            ...source.matchAll(
+              // rustfmt brace-wraps match arms whose body spills over one
+              // line, so the `fs_routes::` call may sit inside a block.
+              /"([a-z_]+(?::[a-z_]+)?)"\s*(?:\|\s*"[a-zA-Z_]+(?::[a-zA-Z_]+)?"\s*)*=>\s*\{?\s*fs_routes::/g,
+            ),
+          ].map((x) => x[1])
         : null,
     });
   }
@@ -173,9 +187,10 @@ function rustRouteFor(endpoint, routes) {
       continue;
     }
     if (g.sessionFs) {
+      // The action name may carry a second colon segment (`fs:git_status:batch`).
       const fsAction =
-        endpoint.path.match(/:(fs_[a-z_]+)$/)?.[1] ??
-        endpoint.path.match(/[:/]fs[:/]([a-z_]+)$/)?.[1];
+        endpoint.path.match(/:(fs_[a-z_]+(?::[a-z_]+)?)$/)?.[1] ??
+        endpoint.path.match(/[:/]fs[:/]([a-z_]+(?::[a-z_]+)?)$/)?.[1];
       if (fsAction && g.sessionFs.includes(fsAction))
         return { method: g.method, path: '/fs:' + fsAction };
       if (fsAction) continue;
@@ -433,8 +448,12 @@ function main() {
   // ── REST ────────────────────────────────────────────────────────────────
   const tsEndpoints = collectTsRestEndpoints();
   const routes = collectRustRoutes();
-  const restMissing = tsEndpoints.filter((ep) => !rustRouteFor(ep, routes));
+  const restMissing = tsEndpoints.filter((ep) => !ep.manifestError && !rustRouteFor(ep, routes));
   for (const ep of restMissing) failures.push(`REST  ${ep.method} ${ep.path} (declared in rest/${ep.file})`);
+  for (const ep of tsEndpoints.filter((ep) => ep.manifestError))
+    failures.push(
+      `REST  rest/${ep.file} declares no endpoint in its header manifest — every manifest file must name its routes (see fs.ts/session.ts for the format)`,
+    );
 
   // ── WS events ───────────────────────────────────────────────────────────
   const webOnly = WsEventContract.webEvents.filter(
@@ -575,7 +594,7 @@ function main() {
 
   console.log('✅ Rust <-> TS interface parity OK:');
   console.log(
-    `   REST ${tsEndpoints.length} endpoints | WS events server=${WsEventContract.serverEvents.length} (web-only no-ops=${webOnly.length}) | WS ctl ${tsClientOps.size} client ops | tools ${nativeGroups.reduce((n, g) => n + (ToolNameContract[g]?.length ?? 0), 0)} | napi ${dtsNapi.size} | config ${tsConfigKeys.length} keys | model ${tsModelFields.size}/${rustModelFields.size} fields | nllm ${tsNativeLlm.size}/${rustResolvedLlm.size} fields | shell ${shellRungs}${upstreamModelNote}`,
+    `   REST ${tsEndpoints.filter((ep) => !ep.manifestError).length} endpoints | WS events server=${WsEventContract.serverEvents.length} (web-only no-ops=${webOnly.length}) | WS ctl ${tsClientOps.size} client ops | tools ${nativeGroups.reduce((n, g) => n + (ToolNameContract[g]?.length ?? 0), 0)} | napi ${dtsNapi.size} | config ${tsConfigKeys.length} keys | model ${tsModelFields.size}/${rustModelFields.size} fields | nllm ${tsNativeLlm.size}/${rustResolvedLlm.size} fields | shell ${shellRungs}${upstreamModelNote}`,
   );
 }
 

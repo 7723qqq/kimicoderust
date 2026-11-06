@@ -72,7 +72,23 @@ impl HttpServer {
                     }
                     None => {
                         let st = self.remote_control_state.lock().await.clone();
-                        HttpResponse::ok(&json!({
+                        let conflict =
+                            self.remote_control_logout_gate
+                                .active_since()
+                                .map(|started_at| {
+                                    super::RemoteControlConflictWire {
+                                pid: std::process::id(),
+                                local_origin:
+                                    crate::server::remote_control::REMOTE_CONTROL_LOGOUT_GATE_ORIGIN
+                                        .to_string(),
+                                device_id: self
+                                    .stored_remote_control_device_id()
+                                    .unwrap_or_default(),
+                                url: String::new(),
+                                started_at,
+                            }
+                                });
+                        let mut payload = json!({
                             "enabled": false,
                             "state": st.state,
                             "url": Value::Null,
@@ -81,7 +97,12 @@ impl HttpServer {
                             "available": false,
                             "reason": REMOTE_CONTROL_UNAVAILABLE,
                             "error": st.error,
-                        }))
+                        });
+                        if let Some(conflict) = conflict {
+                            payload["conflict"] =
+                                serde_json::to_value(conflict).unwrap_or(Value::Null);
+                        }
+                        HttpResponse::ok(&payload)
                     }
                 }
             }
@@ -116,24 +137,36 @@ impl HttpServer {
                         "available": false,
                     }));
                 }
-                // Start (or report the already-running) runtime.
-                let mut slot = self.remote_control_runtime.lock().await;
-                if let Some(handle) = slot.as_ref() {
-                    let st = handle.status();
+                // Start (or report the already-running) runtime. The in-process
+                // slot is the start gate: a logout that holds it or a runtime
+                // that already owns it is reported as 40928 with the holder
+                // (upstream `REMOTE_CONTROL_ALREADY_RUNNING`).
+                if let Some(started_at) = self.remote_control_logout_gate.active_since() {
                     self.emit_session_telemetry(
                         "remote_control_toggle",
                         serde_json::json!({ "enabled": true, "outcome": "already_running" }),
                     );
-                    return HttpResponse::ok(&json!({
-                        "enabled": st.enabled,
-                        "state": st.state,
-                        "url": st.url,
-                        "device_id": st.device_id,
-                        "device_name": st.device_name,
-                        "available": true,
-                        "already_running": true,
-                        "error": st.error,
-                    }));
+                    return remote_control_already_running(
+                        req,
+                        started_at,
+                        crate::server::remote_control::REMOTE_CONTROL_LOGOUT_GATE_ORIGIN,
+                        self.stored_remote_control_device_id().unwrap_or_default(),
+                        String::new(),
+                    );
+                }
+                let mut slot = self.remote_control_runtime.lock().await;
+                if let Some(handle) = slot.as_ref() {
+                    self.emit_session_telemetry(
+                        "remote_control_toggle",
+                        serde_json::json!({ "enabled": true, "outcome": "already_running" }),
+                    );
+                    return remote_control_already_running(
+                        req,
+                        handle.started_at(),
+                        handle.local_origin(),
+                        handle.device_id().to_string(),
+                        handle.url().to_string(),
+                    );
                 }
                 // The Kimi login refresh token is the WS-upgrade credential at
                 // the relay; the standalone server holds none of its own, so
@@ -152,12 +185,9 @@ impl HttpServer {
                 }
                 // Stable device id, persisted in the session store (TS:
                 // `createKimiDeviceId(homeDir)`).
-                let device_id = match self.store.get_state("remote-control", "device_id") {
-                    Ok(Some(value)) => value
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(new_device_id),
-                    _ => {
+                let device_id = match self.stored_remote_control_device_id() {
+                    Some(id) => id,
+                    None => {
                         let id = new_device_id();
                         let _ = self
                             .store
@@ -197,6 +227,180 @@ impl HttpServer {
                     "available": true,
                     "error": st.error,
                 }))
+            }
+            ("GET", "/api/v1/remote-control/devices") => {
+                let device_auth = match remote_control_device_auth(&self.config().await) {
+                    Ok(auth) => auth,
+                    Err(error) => return HttpResponse::internal_error(error),
+                };
+                match self
+                    .remote_control_devices
+                    .list_devices(&self.oauth_manager, &device_auth)
+                    .await
+                {
+                    Ok(list) => {
+                        HttpResponse::ok(&serde_json::to_value(list).unwrap_or(Value::Null))
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "remote-control device request failed");
+                        HttpResponse::internal_error(error)
+                    }
+                }
+            }
+            ("PATCH", p) if p.starts_with("/api/v1/remote-control/devices/") => {
+                let raw_id = p
+                    .strip_prefix("/api/v1/remote-control/devices/")
+                    .unwrap_or_default();
+                if raw_id.is_empty() || raw_id.contains('/') {
+                    return provider_validation_error(
+                        "Invalid remote-control device id".to_string(),
+                    );
+                }
+                let device_id = crate::server::router::decode_path_segment(raw_id);
+                if device_id.is_empty() {
+                    return provider_validation_error(
+                        "Invalid remote-control device id".to_string(),
+                    );
+                }
+                let body: Value = match serde_json::from_slice(&req.body) {
+                    Ok(v) => v,
+                    Err(_) => return provider_validation_error("Invalid JSON payload".to_string()),
+                };
+                let alias = match crate::server::remote_control::normalize_device_alias(
+                    body.get("alias").unwrap_or(&Value::Null),
+                ) {
+                    Ok(alias) => alias,
+                    Err(message) => return provider_validation_error(message),
+                };
+                let device_auth = match remote_control_device_auth(&self.config().await) {
+                    Ok(auth) => auth,
+                    Err(error) => return HttpResponse::internal_error(error),
+                };
+                match self
+                    .remote_control_devices
+                    .rename_device(&self.oauth_manager, &device_auth, &device_id, &alias)
+                    .await
+                {
+                    Ok(()) => HttpResponse::ok(&json!({"ok": true})),
+                    Err(error) => {
+                        tracing::warn!(%error, "remote-control device request failed");
+                        remote_control_internal_error(req, error)
+                    }
+                }
+            }
+            ("POST", p)
+                if p.starts_with("/api/v1/remote-control/devices/")
+                    && p.ends_with("/deactivate") =>
+            {
+                let raw_id = p
+                    .strip_prefix("/api/v1/remote-control/devices/")
+                    .and_then(|rest| rest.strip_suffix("/deactivate"))
+                    .unwrap_or_default();
+                if raw_id.is_empty() || raw_id.contains('/') {
+                    return provider_validation_error(
+                        "Invalid remote-control device id".to_string(),
+                    );
+                }
+                let device_id = crate::server::router::decode_path_segment(raw_id);
+                if device_id.is_empty() {
+                    return provider_validation_error(
+                        "Invalid remote-control device id".to_string(),
+                    );
+                }
+                let device_auth = match remote_control_device_auth(&self.config().await) {
+                    Ok(auth) => auth,
+                    Err(error) => return HttpResponse::internal_error(error),
+                };
+
+                // Same slot lock as DELETE: a local deactivate cannot race a
+                // start, and the cloud mutation happens after the tunnel is
+                // stopped (upstream disables before and after the cloud call).
+                let mut runtime = self.remote_control_runtime.lock().await;
+                let active_id = runtime
+                    .as_ref()
+                    .map(|handle| handle.device_id().to_string());
+                let is_local = active_id.as_deref() == Some(device_id.as_str())
+                    || self.stored_remote_control_device_id().as_deref()
+                        == Some(device_id.as_str());
+                if is_local {
+                    if let Some(handle) = runtime.take() {
+                        handle.close().await;
+                    }
+                    *self.remote_control_state.lock().await = RemoteControlStatusWire::off();
+                }
+                let deactivated = self
+                    .remote_control_devices
+                    .deactivate_device(&self.oauth_manager, &device_auth, &device_id)
+                    .await;
+                if is_local {
+                    *self.remote_control_state.lock().await = RemoteControlStatusWire::off();
+                }
+                drop(runtime);
+                match deactivated {
+                    Ok(()) => HttpResponse::ok(&json!({"ok": true})),
+                    Err(error) => {
+                        tracing::warn!(%error, "remote-control device request failed");
+                        remote_control_internal_error(req, error)
+                    }
+                }
+            }
+            ("DELETE", p) if p.starts_with("/api/v1/remote-control/devices/") => {
+                let raw_id = p
+                    .strip_prefix("/api/v1/remote-control/devices/")
+                    .unwrap_or_default();
+                if raw_id.is_empty() || raw_id.contains('/') {
+                    return HttpResponse::bad_request("Invalid remote-control device id");
+                }
+                let device_id = crate::server::router::decode_path_segment(raw_id);
+                if device_id.is_empty() {
+                    return HttpResponse::bad_request("Invalid remote-control device id");
+                }
+                let device_auth = match remote_control_device_auth(&self.config().await) {
+                    Ok(auth) => auth,
+                    Err(error) => return HttpResponse::internal_error(error),
+                };
+
+                // Keep the runtime slot locked across a current-device delete.
+                // POST /remote-control takes the same slot before starting, so a
+                // deleted local device cannot be re-registered behind the cloud
+                // mutation. This is the fork-runtime equivalent of upstream's
+                // start gate; no second filesystem lock is introduced here.
+                let mut runtime = self.remote_control_runtime.lock().await;
+                let active_id = runtime
+                    .as_ref()
+                    .map(|handle| handle.device_id().to_string());
+                let stored_id = self
+                    .store
+                    .get_state("remote-control", "device_id")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.as_str().map(str::to_string));
+                let is_local = active_id.as_deref() == Some(device_id.as_str())
+                    || stored_id.as_deref() == Some(device_id.as_str());
+                if is_local {
+                    if let Some(handle) = runtime.take() {
+                        handle.close().await;
+                    }
+                    *self.remote_control_state.lock().await = RemoteControlStatusWire::off();
+                }
+                let deleted = self
+                    .remote_control_devices
+                    .delete_device(&self.oauth_manager, &device_auth, &device_id)
+                    .await;
+                if is_local {
+                    // Upstream disables once more after the cloud mutation. The
+                    // slot lock already excludes new starts; repeating the state
+                    // reset preserves that externally visible postcondition.
+                    *self.remote_control_state.lock().await = RemoteControlStatusWire::off();
+                }
+                drop(runtime);
+                match deleted {
+                    Ok(()) => HttpResponse::ok(&json!({"ok": true})),
+                    Err(error) => {
+                        tracing::warn!(%error, "remote-control device request failed");
+                        HttpResponse::internal_error(error)
+                    }
+                }
             }
             // MCP endpoints
             ("GET", "/api/v1/mcp")
@@ -696,6 +900,48 @@ impl HttpServer {
     }
 }
 
+fn remote_control_device_auth(
+    config: &crate::config::KimiConfig,
+) -> Result<crate::server::remote_control::RemoteControlDeviceAuth, String> {
+    let configured = crate::region::ConfiguredOAuthRef::from_config(config);
+    let has_explicit_slot = configured.key.is_some();
+    let oauth_key = match configured.key.as_ref() {
+        Some(key) => key.clone(),
+        None => {
+            let region = crate::region::resolve_kimi_region(
+                &configured,
+                crate::workflow::kimi_home().as_deref(),
+            );
+            let profile = crate::region::kimi_region_profile(region);
+            crate::region::resolve_kimi_code_oauth_key(
+                Some(profile.oauth_host),
+                Some(profile.base_url),
+            )
+        }
+    };
+    let storage_name = remote_control_token_storage_name(&oauth_key)?;
+    Ok(crate::server::remote_control::RemoteControlDeviceAuth {
+        relay_origin: remote_control_relay_origin(config),
+        storage_name,
+        allow_managed_aliases: !has_explicit_slot,
+    })
+}
+
+/// `resolveKimiTokenStorageName`: strip the `oauth/` namespace, then reject a
+/// path-like key instead of letting the credential store sanitize it into a
+/// different account's file.
+fn remote_control_token_storage_name(oauth_key: &str) -> Result<String, String> {
+    let name = if oauth_key == "kimi-code" || oauth_key == crate::region::KIMI_CODE_OAUTH_KEY {
+        "kimi-code"
+    } else {
+        oauth_key.strip_prefix("oauth/").unwrap_or(oauth_key)
+    };
+    if name.is_empty() || name.starts_with('.') || name.chars().any(|ch| matches!(ch, '/' | '\\')) {
+        return Err(format!("Invalid Kimi OAuth token key: \"{oauth_key}\"."));
+    }
+    Ok(name.to_string())
+}
+
 /// The callback path the begin route advertises unless the caller supplies its
 /// own redirect URI.
 const MCP_AUTH_CALLBACK_PATH: &str = "/api/v1/mcp/auth/callback";
@@ -722,4 +968,56 @@ fn escape_html(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+impl HttpServer {
+    /// The persisted stable device id (ts `createKimiDeviceId(homeDir)`).
+    fn stored_remote_control_device_id(&self) -> Option<String> {
+        self.store
+            .get_state("remote-control", "device_id")
+            .ok()
+            .flatten()
+            .and_then(|value| value.as_str().map(str::to_string))
+    }
+}
+
+/// 50001 for a failed cloud device mutation, matching the upstream
+/// `handleDeviceRoute` catch-all code.
+fn remote_control_internal_error(req: &HttpRequest, message: String) -> HttpResponse {
+    HttpResponse::json(
+        500,
+        &json!({
+            "code": envelope::error_codes::INTERNAL_ERROR,
+            "msg": message,
+            "data": Value::Null,
+            "request_id": req.request_id(),
+        }),
+    )
+}
+
+/// 40928 conflict: another holder owns the remote-control start slot
+/// (upstream `REMOTE_CONTROL_ALREADY_RUNNING` with `details`).
+fn remote_control_already_running(
+    req: &HttpRequest,
+    started_at: u64,
+    local_origin: &str,
+    device_id: String,
+    url: String,
+) -> HttpResponse {
+    HttpResponse::json(
+        409,
+        &json!({
+            "code": envelope::error_codes::REMOTE_CONTROL_ALREADY_RUNNING,
+            "msg": "Remote Control is already running; stop the current session before starting another.",
+            "data": Value::Null,
+            "request_id": req.request_id(),
+            "details": {
+                "pid": std::process::id(),
+                "local_origin": local_origin,
+                "device_id": device_id,
+                "url": url,
+                "started_at": started_at,
+            },
+        }),
+    )
 }

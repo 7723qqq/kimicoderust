@@ -53,7 +53,12 @@ impl HttpServer {
                 // the model / thinking fallbacks — so the fork's separate
                 // `agent_config` / `sessionId` / `session` keys were answering a
                 // shape nothing asked for.
-                let wire_session = format_wire_session(&session, &self.store, self.engine.as_ref());
+                let wire_session = format_wire_session(
+                    &session,
+                    &self.store,
+                    self.engine.as_ref(),
+                    self.default_workspace_root().as_deref(),
+                );
                 HttpResponse::ok(&wire_session)
             }
             ("POST", p) if extract_session_action(p, "profile").is_some() => {
@@ -154,8 +159,12 @@ impl HttpServer {
                     engine.publish_status_updated(session_id).await;
                 }
 
-                let wire_session =
-                    format_wire_session(&updated_session, &self.store, self.engine.as_ref());
+                let wire_session = format_wire_session(
+                    &updated_session,
+                    &self.store,
+                    self.engine.as_ref(),
+                    self.default_workspace_root().as_deref(),
+                );
 
                 // v2 `POST /sessions/{session_id}/profile` answers the bare
                 // updated session (`success: { data: sessionSchema }`, and the
@@ -171,8 +180,9 @@ impl HttpServer {
                     Some(d) => d,
                     None => return HttpResponse::not_found(),
                 };
-                // An empty body is legitimate (`git_status` takes no arguments);
-                // only an unparsable one is a client error.
+                // An empty body is legitimate (every fs action treats a
+                // missing body as its defaults); only an unparsable one is a
+                // client error.
                 let body: Value = if req.body.iter().all(|b| b.is_ascii_whitespace()) {
                     json!({})
                 } else {
@@ -182,7 +192,16 @@ impl HttpServer {
                     }
                 };
                 match action {
-                    "git_status" | "gitStatus" => fs_routes::handle_git_status(&work_dir),
+                    "git_status" | "gitStatus" => fs_routes::handle_git_status(&work_dir, &body),
+                    "git_status:batch" | "gitStatus:batch" => {
+                        fs_routes::handle_git_status_batch(&work_dir, &body)
+                    }
+                    "pull_request" | "pullRequest" => {
+                        fs_routes::handle_pull_request(&work_dir, &body)
+                    }
+                    "pull_request:batch" | "pullRequest:batch" => {
+                        fs_routes::handle_pull_request_batch(&work_dir, &body)
+                    }
                     "diff" => fs_routes::handle_diff(&work_dir, &body),
                     "stat" => fs_routes::handle_stat(&work_dir, &body),
                     "stat_many" | "statMany" => fs_routes::handle_stat_many(&work_dir, &body),

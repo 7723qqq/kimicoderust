@@ -1013,6 +1013,7 @@ fn profile_policy_matches_mcp_tool_names_as_globs() {
         system_prompt: "s".into(),
         tools: Vec::new(),
         disallowed_tools: vec!["mcp__slack__*".into()],
+        when_to_use: None,
         prompt_prefix: None,
         summary_policy: None,
         model: None,
@@ -1436,6 +1437,7 @@ async fn spawning_records_the_calling_agent_as_the_parent() {
             system_prompt: String::new(),
             tools: vec![],
             disallowed_tools: vec![],
+            when_to_use: None,
             prompt_prefix: None,
             summary_policy: None,
             model: None,
@@ -1601,28 +1603,45 @@ fn stop_veto(reason: &str) -> String {
     }
 }
 
+/// Hook markers and subagent turns are produced by external hook
+/// subprocesses, which the product allows up to `DEFAULT_HOOK_TIMEOUT_SECS`
+/// each (30s) and a turn may fire several in sequence. The previous 2s
+/// budget asserted "faster than the product's own allowance" and failed
+/// whenever `cmd.exe` spawn was starved, so these waits use a bound that can
+/// actually cover the work being observed.
+const HOOK_VISIBILITY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 async fn wait_for_marker(path: &std::path::Path) -> String {
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + HOOK_VISIBILITY_WAIT;
+    loop {
         if let Ok(text) = std::fs::read_to_string(path)
             && !text.trim().is_empty()
         {
             return text;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "marker {} was never written within {HOOK_VISIBILITY_WAIT:?}",
+            path.display()
+        );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("marker {} was never written", path.display());
 }
 
 async fn wait_for_completion(manager: &Arc<SubagentManager>, id: &str) {
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + HOOK_VISIBILITY_WAIT;
+    loop {
         if let Some(instance) = manager.get_instance(id).await
             && instance.state == SubagentState::Completed
         {
             return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "subagent did not complete within {HOOK_VISIBILITY_WAIT:?}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("subagent did not complete");
 }
 
 /// v2 instantiates `AgentExternalHooksService` per agent, so a subagent turn

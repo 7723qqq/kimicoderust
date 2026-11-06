@@ -20,15 +20,81 @@ impl HttpServer {
                     .get("workspaceId")
                     .or_else(|| body.get("workspace_id"))
                     .and_then(|v| v.as_str());
+                let use_default =
+                    body.get("default_workspace").and_then(|v| v.as_bool()) == Some(true);
+
+                // Upstream #4224 (`kap-server/src/routes/sessions.ts:213-231` @
+                // `e5e56bc5fe`): `default_workspace: true` is exclusive with
+                // workspace_id and metadata, and it replaces the
+                // workspace-or-cwd requirement rather than joining it.
+                // Upstream #4224 makes `default_workspace` exclusive with
+                // workspace_id/metadata, and *requires* one of the latter
+                // (`sessions.ts:216-231` @ `e5e56bc5fe`). The exclusivity half
+                // is kept; the requirement half is deliberately NOT — this
+                // fork's create route has always accepted a bare `{title}`
+                // body and creates the session in the process cwd (seven
+                // server tests and the TUI's own call depend on it). Recorded
+                // in ROADMAP §54.2 as a fork deviation.
+                if use_default && (workspace_id.is_some() || body.get("metadata").is_some()) {
+                    return HttpResponse::bad_request(
+                        "default_workspace cannot be combined with workspace_id or metadata",
+                    );
+                }
+
+                // `default_workspace` arm: resolve, mkdir on first use, reuse
+                // afterwards, and register the workspace under the resolved
+                // root (upstream `IDefaultWorkspace.ensure` +
+                // `registry.createOrTouch`). A failure answers the classified
+                // reason and never relocates silently (#4277's rule).
+                let default_root = if use_default {
+                    let config = self.config().await;
+                    match crate::default_workspace::ensure(
+                        &config,
+                        &crate::default_workspace::user_home_dir().unwrap_or_else(|| {
+                            std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        }),
+                    ) {
+                        Ok(root) => Some(root),
+                        Err(unavailable) => {
+                            return HttpResponse::json(
+                                409,
+                                &json!({
+                                    "code": crate::server::router::AUTH_ERROR_CODE,
+                                    "error": unavailable.to_string(),
+                                    "path": unavailable.path,
+                                    "reason": unavailable.reason,
+                                }),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 match self
                     .store
                     .create_session_with_workspace(&session_id, title, workspace_id)
                 {
                     Ok(_) => {
+                        if let Some(ref root) = default_root {
+                            let ws = self
+                                .store
+                                .create_workspace(&root.display().to_string(), None)
+                                .map_err(|e| {
+                                    HttpResponse::internal_error(format!("Database error: {e}"))
+                                })
+                                .unwrap();
+                            let _ = self.store.set_session_workspace(&session_id, &ws.id);
+                        }
                         let created_session = self.store.get_session(&session_id).ok().flatten();
                         let session_val = if let Some(ref s) = created_session {
-                            format_wire_session(s, &self.store, self.engine.as_ref())
+                            format_wire_session(
+                                s,
+                                &self.store,
+                                self.engine.as_ref(),
+                                self.default_workspace_root().as_deref(),
+                            )
                         } else {
                             json!(created_session)
                         };

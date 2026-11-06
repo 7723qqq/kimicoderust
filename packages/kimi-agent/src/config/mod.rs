@@ -274,11 +274,37 @@ pub struct PermissionConfig {
     pub mode: Option<String>,
     #[serde(default)]
     pub rules: Option<Vec<PermissionRuleConfig>>,
-    /// `[permission] dangerousCommandGuard` (v2
+    /// `[permission] dangerous_command_guard` (v2
     /// `isDangerousCommandGuardEnabled`): `false` skips the engine's
-    /// DangerousCommandAsk policy. Unset keeps the guard on.
-    #[serde(rename = "dangerousCommandGuard", default)]
+    /// DangerousCommandAsk policy. Unset keeps the guard on. Snake_case is the
+    /// documented file spelling (config-files.md); the camelCase alias covers
+    /// the `POST /config` JSON body (`patchConfigRequestSchema`).
+    #[serde(
+        rename = "dangerous_command_guard",
+        alias = "dangerousCommandGuard",
+        default
+    )]
     pub dangerous_command_guard: Option<bool>,
+}
+
+/// `[workspace]` workspace settings (v2 `workspaceTrust/configSection.ts`,
+/// upstream #4517): the startup trust gate. See
+/// [`KimiConfig::resolve_workspace_require_trust`].
+/// `[default_workspace]` (upstream #4224, `app/defaultWorkspace/configSection.ts`):
+/// where a session lives when the request names no workspace and no cwd.
+/// `path` is absolute (or `~/…`); a relative value is refused, never guessed.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DefaultWorkspaceConfig {
+    #[serde(rename = "path", default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkspaceConfig {
+    /// Snake_case is the documented file spelling (config-files.md); the
+    /// camelCase alias covers the upstream schema spelling (`requireTrust`).
+    #[serde(rename = "require_trust", alias = "requireTrust", default)]
+    pub require_trust: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -537,6 +563,8 @@ pub enum ExperimentalValue {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BackgroundConfig {
     /// Concurrent running background tasks; further spawns are refused.
+    /// This is the legacy location of the shared task cap; `[task]` wins when
+    /// both sections configure it.
     #[serde(rename = "max_running_tasks", alias = "maxRunningTasks", default)]
     pub max_running_tasks: Option<u32>,
     /// When a foreground Bash command times out, move it to the background
@@ -555,6 +583,14 @@ pub struct BackgroundConfig {
     /// considered killed. Defaults to 5s when unset.
     #[serde(rename = "kill_grace_period_ms", alias = "killGracePeriodMs", default)]
     pub kill_grace_period_ms: Option<u64>,
+}
+
+/// The `[task]` section (v2 `agent/task/configSection.ts`). Its values override
+/// the legacy `[background]` keys while task configuration is being renamed.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskConfig {
+    #[serde(rename = "max_running_tasks", alias = "maxRunningTasks", default)]
+    pub max_running_tasks: Option<u32>,
 }
 
 /// The global `[tools]` switch (schema `tools.enabled` / `tools.disabled`):
@@ -595,6 +631,15 @@ pub struct KimiConfig {
     pub thinking: ThinkingConfig,
     #[serde(default)]
     pub permission: Option<PermissionConfig>,
+    /// `[workspace]` settings (v2 `workspaceTrust/configSection.ts`); see
+    /// [`KimiConfig::resolve_workspace_require_trust`].
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+    /// `[default_workspace]` (upstream #4224 `app/defaultWorkspace`): where a
+    /// session lives when the request names no workspace and no cwd. See
+    /// [`crate::default_workspace`].
+    #[serde(rename = "default_workspace", alias = "defaultWorkspace", default)]
+    pub default_workspace: DefaultWorkspaceConfig,
     #[serde(rename = "mcp_servers", default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// Global MCP defaults (v2 `[mcp]` section).
@@ -635,9 +680,12 @@ pub struct KimiConfig {
     /// file-reading entries (REPL / `--serve` / `--acp`) build it here.
     #[serde(default)]
     pub tools: ToolsConfig,
-    /// Background task knobs (schema `[background]`).
+    /// Background task knobs (legacy `[background]` location).
     #[serde(default)]
     pub background: BackgroundConfig,
+    /// Current task knobs; individual values override `[background]`.
+    #[serde(default)]
+    pub task: TaskConfig,
     /// Free-form feature flags (schema `[experimental]`).
     #[serde(default)]
     pub experimental: HashMap<String, ExperimentalValue>,
@@ -1436,15 +1484,23 @@ impl KimiConfig {
             .or(self.image.max_edge_px.filter(|value| *value > 0))
     }
 
-    /// Resolve the concurrent-background-task cap: env
-    /// `KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS` over
-    /// `[background].max_running_tasks` (the env var has priority, and a
-    /// non-positive/invalid value is ignored). `None` keeps the engine
-    /// default (unlimited).
+    /// Resolve the configured concurrent-task cap before the environment
+    /// overlay: `[task].max_running_tasks` wins over the legacy
+    /// `[background].max_running_tasks` (v2 `resolveAgentTaskConfig`).
+    fn configured_max_running_tasks(&self) -> Option<u32> {
+        self.task
+            .max_running_tasks
+            .filter(|value| *value > 0)
+            .or(self.background.max_running_tasks.filter(|value| *value > 0))
+    }
+
+    /// Resolve the concurrent-task cap: env
+    /// `KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS` over the configured task /
+    /// legacy-background value. A non-positive or invalid value is ignored.
     pub fn resolve_background_max_running_tasks(&self) -> Option<u32> {
         env_positive_u64("KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS")
             .and_then(|value| u32::try_from(value).ok())
-            .or(self.background.max_running_tasks.filter(|value| *value > 0))
+            .or_else(|| self.configured_max_running_tasks())
     }
 
     /// Resolve the default timeout for background Bash tasks (schema
@@ -1456,13 +1512,14 @@ impl KimiConfig {
 
     /// The whole `[background]` section, normalized, for the entries that read
     /// the file themselves and hand the knobs to one engine context
-    /// (`PipelineSpec`): the host-driven entries pass the equivalent values as
-    /// session params so every entry ends up with the same behavior.
+    /// (`PipelineSpec`): host-driven entries pass their resolved values as
+    /// session params.
     ///
     /// Each field is resolved as documented: `kill_grace_period_ms` and
     /// `bash_auto_background_on_timeout` pass through (unset = built-in),
-    /// `max_running_tasks` honors `KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS`,
-    /// and `bash_task_timeout_s` keeps `Some(0)` as "no timeout".
+    /// `max_running_tasks` honors the environment overlay and prefers `[task]`
+    /// over `[background]`, and `bash_task_timeout_s` keeps `Some(0)` as "no
+    /// timeout".
     pub fn background_limits(&self) -> crate::storage::BackgroundLimits {
         crate::storage::BackgroundLimits {
             kill_grace_period_ms: self.background.kill_grace_period_ms,
@@ -1486,6 +1543,14 @@ impl KimiConfig {
     /// untouched file keeps merging every discovered skill directory.
     pub fn resolve_merge_all_available_skills(&self) -> bool {
         self.merge_all_available_skills.unwrap_or(true)
+    }
+
+    /// v2 `workspaceTrustRequired` (`workspaceTrust/configSection.ts`,
+    /// upstream #4517): whether opening an untrusted workspace asks for trust
+    /// confirmation. Unset keeps the gate on — only an explicit `false`
+    /// treats every workspace as trusted and skips the prompt.
+    pub fn resolve_workspace_require_trust(&self) -> bool {
+        self.workspace.require_trust.unwrap_or(true)
     }
 
     /// Resolve the thinking effort for the wire (schema `thinking.effort`,

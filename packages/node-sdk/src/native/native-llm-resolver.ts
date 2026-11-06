@@ -455,7 +455,12 @@ export interface SecondaryModelPoolWire {
   models: SecondaryModelEntryWire[];
 }
 
-/** The engine reads snake_case `NativeLlmConfig`; the JS view is camelCase. */
+/** The engine reads snake_case `NativeLlmConfig`; the JS view is camelCase.
+ * Only for the `secondaryModelJson` path, which crosses napi as a JSON string
+ * and is serde-parsed Rust-side. The typed-object paths (`nativeLlm`,
+ * `providers[].native`) take the camelCase `JsNativeLlmConfig` as-is — napi
+ * deserializes object fields by their camelCase names and rejects snake_case
+ * keys (`Missing field \`baseUrl\``). */
 function nativeLlmWire(config: JsNativeLlmConfig): Record<string, unknown> {
   return {
     protocol: config.protocol,
@@ -563,12 +568,15 @@ function invalidConfig(message: string): KimiError {
   return new KimiError(ErrorCodes.CONFIG_INVALID, message);
 }
 
-/** One racer the engine should enter: the alias it is named by plus its transport. */
+/** One racer the engine should enter: the alias it is named by plus its transport.
+ * `native` rides the typed napi object boundary (`JsLlmProviderDef.native`), so
+ * it is the camelCase `JsNativeLlmConfig` itself — not the snake_case
+ * `nativeLlmWire` record, which only the `secondaryModelJson` string path reads. */
 export interface MultiLlmProviderWire {
   readonly name: string;
   readonly model: string;
   readonly systemPrompt: string;
-  readonly native: Record<string, unknown>;
+  readonly native: JsNativeLlmConfig;
 }
 
 /**
@@ -614,7 +622,7 @@ export function resolveMultiLlmProviders(
       name: alias,
       model: llm.model,
       systemPrompt: llm.systemPrompt ?? '',
-      native: nativeLlmWire(llm),
+      native: llm,
     };
   });
 }
@@ -755,15 +763,18 @@ export interface BackgroundLimits {
 }
 
 /**
- * `[background]` limits for the engine session params (the engine applies them
- * to the task runner it builds). The concurrency cap honors
- * `KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS` (env > config, matching the
- * Rust-side `KimiConfig::resolve_background_max_running_tasks`); the rest pass
- * through. A non-positive grace period or cap is not meaningful and resolves to
+ * `[task]` / `[background]` limits for the engine session params (the engine
+ * applies them to the task runner it builds). The concurrency cap honors
+ * `KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS`, then `[task]`, then `[background]`
+ * (matching the Rust-side `KimiConfig::resolve_background_max_running_tasks`);
+ * the rest pass through. A non-positive grace period or cap is not meaningful and resolves to
  * `undefined` (engine default), while `bashTaskTimeoutS = 0` is kept — it means
  * "no timeout", not "unset".
  */
 export function resolveBackgroundLimits(config: {
+  task?: {
+    maxRunningTasks?: number;
+  };
   background?: {
     killGracePeriodMs?: number;
     maxRunningTasks?: number;
@@ -776,6 +787,7 @@ export function resolveBackgroundLimits(config: {
   const envCap = nonNegativeInt(process.env['KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS']);
   const maxRunningTasks =
     (envCap !== undefined && envCap > 0 ? envCap : undefined) ??
+    integerAtLeast(config.task?.maxRunningTasks, 1) ??
     integerAtLeast(section?.maxRunningTasks, 1);
   const bashTaskTimeoutS = integerAtLeast(section?.bashTaskTimeoutS, 0);
   const bashAutoBackgroundOnTimeout = section?.bashAutoBackgroundOnTimeout;

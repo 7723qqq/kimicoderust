@@ -22,6 +22,7 @@ use crate::config::write::{
 };
 use crate::server::envelope::error_codes;
 use crate::server::model_catalog::{self, non_empty};
+use crate::server::models_dev;
 
 /// One protocol error: HTTP status, kap-server code, message.
 pub type WriteError = (u16, u32, String);
@@ -95,6 +96,12 @@ pub struct CreateProviderForm {
     pub provider_type: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Name of an environment variable to read the key from instead of storing
+    /// it inline (kap-server `routes/modelCatalog.ts:239`); mutually exclusive
+    /// with `api_key`. Used to hardcode `None` here, which silently dropped
+    /// the field clients sent.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -111,6 +118,11 @@ pub struct ReplaceProviderForm {
     pub provider_type: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Tri-state like `api_key` (kap-server `routes/modelCatalog.ts:328`):
+    /// omitted keeps the stored name, `""` clears it, any other value replaces
+    /// it; mutually exclusive with `api_key`.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -118,12 +130,35 @@ pub struct ReplaceProviderForm {
     pub models: Vec<ProviderModelForm>,
 }
 
+/// `api_key` and `api_key_env` are mutually exclusive (kap-server
+/// `routes/modelCatalog.ts:239,328`): submitting both non-empty fails
+/// validation. Empty strings are the replace route's clear signals, not a
+/// conflict.
+fn validate_credentials(
+    api_key: Option<&str>,
+    api_key_env: Option<&str>,
+) -> Result<(), WriteError> {
+    if non_empty(api_key).is_some() && non_empty(api_key_env).is_some() {
+        return Err(validation("api_key and api_key_env are mutually exclusive"));
+    }
+    Ok(())
+}
+
+/// Engine-generated OAuth provider ids carry this prefix
+/// (`managed:kimi-code`, provisioned by the login flow — never submitted
+/// through these routes). A user-submitted id may not claim it; the managed
+/// entry itself is unaffected because config loads never validate ids.
+const MANAGED_PROVIDER_PREFIX: &str = "managed:";
+
 fn validate_provider_id(provider_id: &str) -> Result<(), WriteError> {
-    let valid = !provider_id.is_empty()
-        && provider_id.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '-' || character == '_'
-        });
-    if valid {
+    if provider_id.starts_with(MANAGED_PROVIDER_PREFIX) {
+        return Err(validation(
+            "id must not start with \"managed:\": the prefix is reserved for OAuth-managed providers",
+        ));
+    }
+    // v2 `PROVIDER_ID_PATTERN` (`^[\p{L}\p{N}][\p{L}\p{N}\-_ ]*$`) — the same
+    // predicate the catalog-import route applies (`models_dev::is_provider_id`).
+    if models_dev::is_provider_id(provider_id) {
         Ok(())
     } else {
         Err(validation(
@@ -224,6 +259,7 @@ pub async fn create(
         form.default_model.as_deref(),
         form.base_url.as_deref(),
     )?;
+    validate_credentials(form.api_key.as_deref(), form.api_key_env.as_deref())?;
 
     let mut guard = config_lock.lock().await;
     let before = guard
@@ -250,8 +286,11 @@ pub async fn create(
             &form.id,
             &ProviderWrite {
                 provider_type: form.provider_type.clone(),
-                api_key: form.api_key.clone(),
-                api_key_env: None,
+                // Empty strings are meaningless on create: the provider
+                // carries neither credential key (mirrors `import_catalog`'s
+                // intake, and the replace route's `""`-clears semantics).
+                api_key: non_empty(form.api_key.as_deref()).map(str::to_string),
+                api_key_env: non_empty(form.api_key_env.as_deref()).map(str::to_string),
                 base_url: form.base_url.clone(),
                 default_model: default_model.clone(),
                 source: None,
@@ -291,6 +330,7 @@ pub async fn replace(
         form.default_model.as_deref(),
         form.base_url.as_deref(),
     )?;
+    validate_credentials(form.api_key.as_deref(), form.api_key_env.as_deref())?;
 
     let mut guard = config_lock.lock().await;
     let before = guard
@@ -342,7 +382,30 @@ pub async fn replace(
         None
     };
 
-    let api_key = form.api_key.clone().or_else(|| target.api_key.clone());
+    // `api_key` is tri-state (kap-server `routes/modelCatalog.ts:328`):
+    // omitted keeps the stored key, `""` clears it, any other value replaces
+    // it.
+    let api_key = match form.api_key.as_deref() {
+        Some("") => None,
+        Some(key) => Some(key.to_string()),
+        None => target.api_key.clone(),
+    };
+    // `api_key_env` follows the same tri-state: omitted keeps the stored
+    // name, `""` clears it, any other value replaces it. Setting a fresh env
+    // name clears the stored inline key, and submitting a fresh inline key
+    // clears the stored env name — the two are mutually exclusive.
+    let api_key_env = match form.api_key_env.as_deref() {
+        Some("") => None,
+        Some(env) => Some(env.to_string()),
+        None => {
+            if non_empty(form.api_key.as_deref()).is_some() {
+                None
+            } else {
+                target.api_key_env.clone()
+            }
+        }
+    };
+    let api_key = if api_key_env.is_some() { None } else { api_key };
     let default_model = form
         .default_model
         .as_ref()
@@ -359,7 +422,7 @@ pub async fn replace(
             &ProviderWrite {
                 provider_type: form.provider_type.clone(),
                 api_key: api_key.clone(),
-                api_key_env: None,
+                api_key_env: api_key_env.clone(),
                 base_url: form.base_url.clone(),
                 default_model: default_model.clone(),
                 source: None,
@@ -459,6 +522,7 @@ mod tests {
             id: "kimi-code".into(),
             provider_type: "openai".into(),
             api_key: Some("sk-test".into()),
+            api_key_env: None,
             base_url: Some("https://example.test/v1".into()),
             default_model: Some("k3".into()),
             models: vec![model("k3", 200_000), model("fast", 128_000)],
@@ -497,5 +561,291 @@ mod tests {
             .is_err()
         );
         assert!(validate_form("openai", &[model("a", 1000)], Some("a"), None).is_ok());
+    }
+
+    // ── provider id rules (v2 `PROVIDER_ID_PATTERN` + the managed prefix) ────
+
+    #[test]
+    fn provider_id_follows_the_upstream_pattern() {
+        for valid in [
+            "kimi",               // letters
+            "1st",                // a digit may lead
+            "MiniMax Token Plan", // spaces inside
+            "阶跃",               // unicode letters
+            "自定义",
+            "美团longcat", // mixed unicode + ascii
+            "my-provider_1 x",
+        ] {
+            assert!(
+                validate_provider_id(valid).is_ok(),
+                "{valid} must be accepted"
+            );
+        }
+        for invalid in [
+            "",               // empty
+            "   ",            // whitespace only
+            "-leading-dash",  // dash may not lead
+            "_leading",       // underscore may not lead
+            " leading-space", // space may not lead
+            "has:colon",
+            "line\nbreak",
+            "tab\there",
+            "has space!",
+        ] {
+            let Err((status, code, _)) = validate_provider_id(invalid) else {
+                panic!("{invalid:?} must be rejected");
+            };
+            assert_eq!((status, code), (400, error_codes::VALIDATION_FAILED));
+        }
+    }
+
+    #[test]
+    fn user_submitted_ids_may_not_claim_the_managed_prefix() {
+        for id in ["managed:kimi-code", "managed:anything"] {
+            let (status, code, message) = validate_provider_id(id).unwrap_err();
+            assert_eq!((status, code), (400, error_codes::VALIDATION_FAILED));
+            assert!(
+                message.contains("reserved for OAuth-managed providers"),
+                "{message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_the_managed_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        let mut form = create_form();
+        form.id = "managed:evil".into();
+        let (status, code, message) = create(&lock, Some(&path), &no_cached_token(), form)
+            .await
+            .unwrap_err();
+        assert_eq!((status, code), (400, error_codes::VALIDATION_FAILED));
+        assert!(
+            message.contains("reserved for OAuth-managed providers"),
+            "{message}"
+        );
+        assert!(!path.exists(), "a rejected create writes nothing");
+    }
+
+    #[test]
+    fn the_persisted_managed_provider_and_looser_user_ids_still_load() {
+        // The OAuth provisioning flow writes `managed:kimi-code` (a colon —
+        // outside the user-input pattern), and user ids the old ASCII rule
+        // rejected are persisted in the wild. Config loads never validate
+        // provider ids, so both keep loading.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.\"managed:kimi-code\"]\ntype = \"kimi\"\n\n\
+             [providers.\"managed:kimi-code\".oauth]\nkey = \"oauth/kimi-code\"\n\n\
+             [providers.\"阶跃\"]\ntype = \"anthropic\"\n\n\
+             [providers.\"MiniMax Token Plan\"]\ntype = \"anthropic\"\n",
+        )
+        .unwrap();
+        let config = crate::config::KimiConfig::from_file(&path).unwrap();
+        let managed = config.providers.get("managed:kimi-code").unwrap();
+        assert!(managed.oauth.is_some());
+        assert!(config.providers.contains_key("阶跃"));
+        assert!(config.providers.contains_key("MiniMax Token Plan"));
+    }
+
+    // ── `api_key_env` modeling and write-through (kap-server
+    // `routes/modelCatalog.ts:239,328`) ────────────────────────────────────
+
+    fn no_cached_token() -> impl Fn(&str) -> bool + Sync {
+        |_| false
+    }
+
+    fn create_env_form() -> CreateProviderForm {
+        let mut form = create_form();
+        form.api_key = None;
+        form.api_key_env = Some("KIMI_TEST_ENV_KEY".into());
+        form
+    }
+
+    fn replace_form() -> ReplaceProviderForm {
+        ReplaceProviderForm {
+            new_id: None,
+            provider_type: "openai".into(),
+            api_key: None,
+            api_key_env: None,
+            base_url: Some("https://example.test/v1".into()),
+            default_model: Some("k3".into()),
+            models: vec![model("k3", 200_000)],
+        }
+    }
+
+    fn read_back(path: &std::path::Path) -> crate::config::KimiConfig {
+        crate::config::KimiConfig::from_file(path).expect("the written config parses")
+    }
+
+    #[tokio::test]
+    async fn create_persists_api_key_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        let form = create_env_form();
+        create(&lock, Some(&path), &no_cached_token(), form)
+            .await
+            .unwrap();
+
+        let written = read_back(&path);
+        let provider = written.providers.get("kimi-code").unwrap();
+        assert_eq!(provider.api_key_env.as_deref(), Some("KIMI_TEST_ENV_KEY"));
+        assert_eq!(provider.api_key, None, "mutually exclusive: no inline key");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_api_key_and_env_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        let mut form = create_env_form();
+        form.api_key = Some("sk-inline".into());
+        let (status, code, _) = create(&lock, Some(&path), &no_cached_token(), form)
+            .await
+            .unwrap_err();
+        assert_eq!((status, code), (400, error_codes::VALIDATION_FAILED));
+    }
+
+    #[tokio::test]
+    async fn replace_keeps_the_stored_env_name_when_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        create(&lock, Some(&path), &no_cached_token(), create_env_form())
+            .await
+            .unwrap();
+
+        replace(
+            &lock,
+            Some(&path),
+            &no_cached_token(),
+            "kimi-code",
+            replace_form(),
+        )
+        .await
+        .unwrap();
+
+        let written = read_back(&path);
+        let provider = written.providers.get("kimi-code").unwrap();
+        assert_eq!(
+            provider.api_key_env.as_deref(),
+            Some("KIMI_TEST_ENV_KEY"),
+            "an omitted api_key_env keeps the stored name"
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_clears_the_inline_key_when_a_fresh_env_name_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        create(&lock, Some(&path), &no_cached_token(), create_form())
+            .await
+            .unwrap();
+
+        let mut form = replace_form();
+        form.api_key_env = Some("KIMI_FRESH_ENV".into());
+        replace(&lock, Some(&path), &no_cached_token(), "kimi-code", form)
+            .await
+            .unwrap();
+
+        let written = read_back(&path);
+        let provider = written.providers.get("kimi-code").unwrap();
+        assert_eq!(provider.api_key_env.as_deref(), Some("KIMI_FRESH_ENV"));
+        assert_eq!(
+            provider.api_key, None,
+            "setting a fresh env name clears the stored inline key"
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_clears_the_env_name_with_an_empty_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        create(&lock, Some(&path), &no_cached_token(), create_env_form())
+            .await
+            .unwrap();
+
+        let mut form = replace_form();
+        form.api_key_env = Some(String::new());
+        replace(&lock, Some(&path), &no_cached_token(), "kimi-code", form)
+            .await
+            .unwrap();
+
+        let written = read_back(&path);
+        let provider = written.providers.get("kimi-code").unwrap();
+        assert_eq!(provider.api_key_env, None, "\"\" is the clear signal");
+    }
+
+    #[tokio::test]
+    async fn replace_clears_the_stored_env_name_when_a_fresh_inline_key_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        create(&lock, Some(&path), &no_cached_token(), create_env_form())
+            .await
+            .unwrap();
+
+        let mut form = replace_form();
+        form.api_key = Some("sk-fresh".into());
+        replace(&lock, Some(&path), &no_cached_token(), "kimi-code", form)
+            .await
+            .unwrap();
+
+        let written = read_back(&path);
+        let provider = written.providers.get("kimi-code").unwrap();
+        assert_eq!(provider.api_key.as_deref(), Some("sk-fresh"));
+        assert_eq!(
+            provider.api_key_env, None,
+            "a fresh inline key clears the stored env name"
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_clears_the_inline_key_with_an_empty_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        create(&lock, Some(&path), &no_cached_token(), create_form())
+            .await
+            .unwrap();
+
+        let mut form = replace_form();
+        form.api_key = Some(String::new());
+        replace(&lock, Some(&path), &no_cached_token(), "kimi-code", form)
+            .await
+            .unwrap();
+
+        let written = read_back(&path);
+        let provider = written.providers.get("kimi-code").unwrap();
+        assert_eq!(
+            provider.api_key, None,
+            "\"\" is the tri-state clear signal (kap-server routes/modelCatalog.ts:328)"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_normalizes_an_empty_api_key_to_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let lock = Mutex::new(None);
+        let mut form = create_form();
+        form.api_key = Some(String::new());
+        create(&lock, Some(&path), &no_cached_token(), form)
+            .await
+            .unwrap();
+
+        let written = read_back(&path);
+        let provider = written.providers.get("kimi-code").unwrap();
+        assert_eq!(
+            provider.api_key, None,
+            "an empty api_key is meaningless on create: the provider carries no inline key"
+        );
     }
 }

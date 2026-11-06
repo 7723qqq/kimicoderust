@@ -332,6 +332,7 @@ fn convert_block(block: &McpContent, provider_type: Option<&str>) -> ConvertedBl
                         // block set yet; they are preserved, not inlined.
                         _ => ContentBlock::Text {
                             text: format!("MCP {} link: {uri}", kind.as_str()),
+                            meta: None,
                         },
                     }),
                     undelivered: None,
@@ -371,9 +372,11 @@ impl ConvertedBlock {
                 },
                 m if m.starts_with("audio/") => ContentBlock::Text {
                     text: "[audio attachment delivered as a reference]".to_string(),
+                    meta: None,
                 },
                 _ => ContentBlock::Text {
                     text: "[video attachment delivered as a reference]".to_string(),
+                    meta: None,
                 },
             });
         }

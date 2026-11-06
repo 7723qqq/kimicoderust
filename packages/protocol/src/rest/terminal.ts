@@ -1,3 +1,15 @@
+/**
+ *   GET  /v1/sessions/{sid}/terminals            -                     data: ListTerminalsResponse
+ *   POST /v1/sessions/{sid}/terminals            body: CreateTerminalRequest
+ *                                                data: Terminal
+ *   GET  /v1/sessions/{sid}/terminals/{tid}      -                     data: Terminal
+ *   POST /v1/sessions/{sid}/terminals/{tid}:close -                    data: CloseTerminalResponse
+ *
+ * Live I/O (`:write` / `:resize` / `output`) rides the WS terminal_* control
+ * frames (ws-control.ts); the REST server also accepts those actions, but the
+ * schemas here deliberately cover the lifecycle routes only.
+ */
+
 import { z } from 'zod';
 
 import { isoDateTimeSchema } from '../time';

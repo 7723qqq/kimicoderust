@@ -15,23 +15,23 @@
       "sha": "cca9bae3d7a4c0eba95aec76e1b7aef912238973",
       "date": "2026-10-30",
       "subject": "chore: sync release 2026-10-30 back to main (#4557)",
-      "verdict": "tracked",
-      "note": "2.4.0 sync 载体：prompt/工具描述成批改写（wait-for.md 等），需按 prompt 政策裁决",
+      "verdict": "ported",
+      "note": "2026-11-04 裁决并落地（§53.4 选 (b) 搬行为句）：#4450 的交付物分类/诊断先查因/收尾清理产物三句与 #4451 的「验证只覆盖本次改动、不重复已过检查、不修无关 bug」句搬进 prompt/system.md 的 # Delivering work 段（delivering-work.md @ a2afdbc7d 为源，逐句对齐）；8 个 fork 独有段（Untrusted content/Search/Skills 等）按裁决保留。2.4.0 sync 其余工具描述改写（wait-for.md 等）为独立文本，未搬——fork 工具描述各自维护。",
       "roadmap": "§6.46"
     },
     {
       "sha": "d37f9ccc256fc594aac4bc513916cd73e68e4199",
       "date": "2026-10-30",
       "subject": "refactor(agent-core-v2): decouple tool disclosure from execution (#4538)",
-      "verdict": "not-applicable",
-      "note": "loop/toolSelect/media 内部解耦重构，无新增可观察行为"
+      "verdict": "ported",
+      "note": "2026-11-04 复验：该条的分层与剩余项表述仍准确，保留原判定依据；剩余三项（按 history 维护 loaded、无动态加载能力模型的 strip、session tool snapshot 持久化）属 tool-select 子系统内部收尾，需与引擎的 loaded_tools 会话级模型统一后一次收口，不逐项打补丁。 2026-11-04 收口：逐项核对剩余三项——①「按 history 维护 loaded」：fork 的会话级 loaded_tools（pipeline 生命周期，toolset.rs:55）与上游 per-session snapshot 在产品行为上等价（无 turn 边界重载场景，selectToolsTool.ts @ d37f9ccc25 的差异只在 ctx.remind 通道）；②「schema 再公告」已落地（disclosure_readvertises_the_loaded_tool_schema，shape_tool_table 通道）；③「session tool snapshot 持久化」not-applicable——fork 无 session 级 tool 注册表可持久化（MCP deferred 集随会话存储在 sqlite agent_config），引入即第二份实现。判定测试两处已在（tests.rs:435 / run_turn basic_loop）。"
     },
     {
       "sha": "1853dae4ff54b36da878a08c86a7088bde0114a8",
       "date": "2026-10-30",
       "subject": "feat: support folder-scoped git status (#4527)",
-      "verdict": "tracked",
-      "note": "按目录范围查询 git status（本仓仅 work_dir 全量）。2026-11-03 核实：上游经 fsGitStatusRequestSchema（protocol 包）携带范围字段、kap-server 路由交 workspace-fs 服务；fork 的 handle_git_status（fs_routes.rs:224）不接 body 参数。移植需扩 protocol schema（fsGitStatusRequestSchema 加可选范围字段）——依赖协议面扩展，排除出低风险批，单独成批",
+      "verdict": "ported",
+      "note": "2026-11-03 落地（fs 列表协议面专项 F3）：schema `fsGitStatusRequestSchema` 加 `root`/`include_pull_request`（`paths` 本就有）、`fsDiffRequestSchema` 加 `root`、新增 `fsGitStatusBatch*`/`fsPullRequest*`/`fsBatchError`（packages/protocol/src/rest/fs.ts，manifest 头注释同步登记三个新 action）；服务端 `git_status_at`（rev-parse --show-prefix + `status -- .` + 前缀剥离 + numstat 限定）+ `resolve_git_root`/`git_status_path_filter` 逃逸检查 + 三个新 handler（packages/kimi-agent/src/server/fs_routes.rs，路由臂 route_session_io.rs）；scan-parity 的 fs action 正则扩到两段式 action 与 rustfmt 块包裹。顺带修两个 fork 既有 wire 偏差：entries 值由 `{status}` 对象改为字符串（schema/上游/dist-web 均为 record<path,enum>），unmerged `conflict`→`conflicted`。2026-11-04 补全 `include_pull_request`：`fs_routes.rs` 经 `which` 定位 `gh` 并执行 `gh pr view --json number,url,state,isDraft`（`GH_NO_UPDATE_NOTIFIER=1`、`GH_PROMPT_DISABLED=1`、5 秒超时），按 cwd 缓存成功值与 null 60 秒；`number/state/url` 归一化与 http(s) 校验，OPEN+isDraft→draft，gh 非零/非法输出均 null；status 单发/批量与 pull_request 单发/批量共用查询，false 不 spawn。集成测试 tests/fs_pull_request.rs 4 项连续 3 次通过（真实 git fixture + mock gh，无网络/凭据）；batch 并发 2 worker 改同步顺序执行（results/errors 等价）。测试：`git_status_scopes_entries_and_numstat_to_root` / `git_status_paths_filter_exact_matches` / `git_status_rejects_escaping_paths_and_bad_roots` / `git_status_batch_collects_per_root_results_and_errors` / `git_status_queries_pull_request_and_false_skips_gh` / `pull_request_null_after_query_is_distinct_from_skipped_query` / `pull_request_routes_query_and_share_the_cwd_cache` / `pull_request_output_is_normalized_and_validated` / `diff_scopes_to_root` / `parse_git_status_z_strips_scope_prefix_and_filters`（真实 git 仓库 fixture；既有用例在 fs_routes.rs，PR 用例在 tests/fs_pull_request.rs）。注：旧 note 称上游 schema 在 protocol 包——上游无 protocol 包，实际在 agent-core-v2 `app/git/git.ts`。落点 file:line：packages/protocol/src/rest/fs.ts:310-393（请求/批量 schema）与 src/fs.ts:8-17（`conflicted` 枚举）、packages/kimi-agent/src/server/fs_routes.rs:558-800（参数解析/限域/三个新 handler）与 route_session_io.rs:186-194（路由臂）。错误码面偏差（对上游 docs/en/reference/server-api.md 复核）：单发 root 非目录/路径逃逸走 fork 既有 400 {\"error\"} 风格（上游 40908/41304），非 repo 答空形 200；batch errors 统一 40001（上游按 40908/41304 等分类）。2026-11-03 复核：cargo fmt --check / clippy --all-targets --features cli -D warnings / test --lib server::（449 过，含上列 7 个判定测试）/ bun run typecheck 全绿，维持 ported。",
       "roadmap": "§6.46"
     },
     {
@@ -45,8 +45,8 @@
       "sha": "3ed0e68f3bbfb3d9ef5bfad0e7b0de2c497e3d00",
       "date": "2026-10-30",
       "subject": "feat: merge skills across workspace directories (#4520)",
-      "verdict": "tracked",
-      "note": "跨工作区目录合并 skill 根（extra_roots 未进 skill 扫描）",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验，维持 tracked 并订正口径。上游（D:\\kimi\\kimi-code @ a2afdbc7d）做的是 projectRootsForDirs(workDirs)：把 primary + cwd + sharedAdditionalDirs 的 skill 根逐个扫描并去重合并（skillRoots.ts 新增 projectRootsForDirs，rootFileSkillSource.ts 改用 this.workDirs），并连带扩展 WorkspaceTrustInfoOptions.additionalDirs 与 trust disclosure。fork 现状：SkillScanRoots.root 是单个 Option<PathBuf>（packages/kimi-agent/src/skills/mod.rs:454），扫描只走一个 workspace root；extra_roots（/add-dir 列表）确实进了沙箱但没有进 skill 扫描，与上一轮 note 一致，本轮复核成立。该项与 #4511/#4336 同属「多根工作区」地基，被 §5 阶段 0 的多根裁决阻塞，不单独成批。 2026-11-04 随 093e8f46c4 裁决同记 not-applicable（§53.5）：skill 跨目录合并的多根地基不存在且不引入。fork 的 extra_skill_dirs（schema）已覆盖显式多目录场景。",
       "roadmap": "§6.46"
     },
     {
@@ -60,8 +60,8 @@
       "sha": "5f3ab5fac81e050fc2fa10787dd560655f377d16",
       "date": "2026-10-29",
       "subject": "feat: remote environments for SSH and Docker execution targets (phase 1: creation-time binding) (#4062)",
-      "verdict": "tracked",
-      "note": "SSH/Docker 远程执行环境 phase1（创建时绑定）；与仍保留的 kaos 冲突，待裁决",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验补证：本条不消费 packages/kaos（git diff-tree -r --name-only 5f3ab5fac8 中 packages/kaos/ 命中 0 次），它落在 packages/agent-core-v2/src/remote/** 与 os/backends/remote/**，并由 node-sdk 的 exec-server.ts / ssh-askpass.ts / config/schema.ts 承接。这一点改变裁决结构：远程执行环境与 kaos 退役是两个独立决定，不是二选一——退役 kaos 不会自动满足本条，移植本条也不要求保留 kaos。上一轮 note 把两者写成二选一，本轮订正。 2026-11-04 裁决（§53.2）：远程环境（SSH/Docker 执行目标）不移植——新产品面无用户佐证；packages/kaos 维持现状（node-sdk 活依赖，非死代码——台账 A5 原表述已纠正）。",
       "roadmap": "§6.46"
     },
     {
@@ -90,8 +90,8 @@
       "sha": "7d72ae396586ad82f48ca4335956235d3c38f0d8",
       "date": "2026-10-29",
       "subject": "feat(agent-core-v2): make workspace trust configurable (#4517)",
-      "verdict": "tracked",
-      "note": "工作区信任可配置（require_trust）",
+      "verdict": "ported",
+      "note": "2026-11-04 落地。行为全部在 Rust 引擎侧（硬约束：TS 只透传）：① `[workspace] require_trust` 配置节（snake_case 文件拼写 + camelCase alias，缺省 true，config/mod.rs WorkspaceConfig:290-299 / KimiConfig.workspace:618 / resolve_workspace_require_trust:1512-1518，解析测试 config/tests.rs:1541）；② 新模块 workspace_trust.rs——effective_trust 按上游 WorkspaceTrustEntry.isTrusted 次序合成（闸门关闭短路 true → KIMI_CODE_TRUST_WORKSPACE 真值覆盖 → trusted-workspaces.json 记录比对），trust_key 移植 node-sdk workspaceTrustKey（realpath + 去 `\\\\?\\` 前缀 + '/' 归一 + win32 小写 + 尾斜杠剥离），record_trust 幂等追加（闸门关闭时也写记录，保「恢复要求后记录仍在」语义），每次调用无状态重读三来源（上游 WorkspaceTrustEntry.refresh / onDidSectionChange 的对应物——fork 无信任变更事件机制，逐查询重读天然满足「MCP 查询重读信任状态」与「配置改写即生效」）；③ napi 导出 workspaceTrustState/workspaceTrustRecord（napi_bindings/misc.rs:103,117，index.native.cjs/d.ts 包装层登记，napi-contract.d.ts 由构建再生成）；④ node-sdk getWorkspaceTrustInfo/trustWorkspace 改纯透传（sdk-rpc-client-native.ts:3963-3991），TS 侧 readTrustedWorkspaces/writeTrustedWorkspaces/workspaceTrustKey/parseBooleanEnv 调用点全删（helpers.ts 的 workspaceTrustKey 函数体随之删除）；readProjectMcpDisclosure（提示用披露数据装配）按上游 trustDisclosureService 分层保留 TS；⑤ REST server 模式（sqlite 注册表信任位）GET/POST /api/v1/workspaces/{id}/trust 返回**有效信任**——持久化位 OR env 覆盖，require_trust=false 时恒 true，撤销不再回显写入值（route_workspaces.rs:50-55,80-88,478-487）。判定测试：Rust workspace_trust 8 测（三路径/逐查询重读/env 与闸门正交/记录往返幂等/key 规范化/已删目录回落）+ server::tests::workspaces_models::workspace_require_trust_config_controls_effective_trust（缺省/true/false × GET/POST 撤销后有效状态、持久化位不被覆盖改写）+ node-sdk workspace-trust.test.ts 9 测（含预立行为测「honors [workspace] require_trust and reloads it on every query」：falsy env 不重启已关闭闸门）+ mcp-config.test.ts「loads project config without a trust record when require_trust is false」（端到端：建会话即加载项目 MCP）。文档：config-files.md 增 `## workspace trust` 节与表格行（en/zh）、server-api.md GET/POST trust 有效信任语义（en/zh）、env-vars.md KIMI_CODE_TRUST_WORKSPACE 独立性注记（en/zh）、customization/mcp.md 全局关闭指引（en/zh）。**偏差/未移植**：上游 kap-server `POST /untrust` 路由 fork 无对应物——fork 以 `POST /trust {trusted:false}` 撤销；且 fork server-api.md 的 `/untrust` 三节（en/zh 表格行与正文）为**既有文档超前于实现**（Rust 侧无该路由），本批未动该节，遗留待核。上游 config-manifest.toml 无 fork 对应物（fork 无 manifest 文件）。**2026-11-04 复核修正（A2 缺口）**：REST server 的信任缺省与 NAPI 的 fail-closed 不一致——`workspaces.trusted` 建表 `DEFAULT 1`、`create_workspace` 显式写入 1、`is_workspace_trusted` 对缺失行 `unwrap_or(true)`、`POST /trust` 缺 `trusted` 字段时 `unwrap_or(true)`。现统一为 fail-closed：建表与插入缺省 0、缺失/未知 workspace 返回 false、无显式 `trusted: true` 的 POST 不构成授权；配置闸门/env/持久化位的合成次序不变。测试：`session::sqlite_store::tests::test_workspaces_crud_trust_and_session_count`、`server::tests::workspaces_models::test_http_workspaces_crud_and_trust`（先 RED 后绿）。存量数据库行保留其历史 `trusted=1`（无法区分隐式建行与显式授权，未做破坏性迁移）。",
       "roadmap": "§6.46"
     },
     {
@@ -105,8 +105,8 @@
       "sha": "67045e5ec536e4aa70e39ab32658bd6ce755b72d",
       "date": "2026-10-29",
       "subject": "fix: handle duplicate workspace source folders and fs roots (#4513)",
-      "verdict": "tracked",
-      "note": "重复 source folder / fs roots 去重与错误码",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验订正。上游 #4513 的实际行为是：additional_dirs 含重复项或与主目录相同时，错误码从 40001 改为专用 40006 WORKSPACE_DUPLICATE_DIR，msg 为 Duplicate source folder: <绝对路径>，details 为 [{path: additional_dirs.N, directory}]（kap-server/src/routes/workspaces.ts 的 buildDuplicateDirEnvelope，en/zh server-api.md 同步）。fork 现状：POST /api/v1/workspaces（packages/kimi-agent/src/server/route_workspaces.rs:12-39）只读 root / name，完全不处理 additional_dirs，因此重复项既不会被拒也不会被分类；上游那条 40006 语义在 fork 无对应物。判为 tracked 成立，但它依赖「多根工作区注册表」（#4336）先落地——单做这一条只能得到一个没有 additional_dirs 入口的死分支，故并入多根批次，不单独成批。 2026-11-04 随 093e8f46c4 裁决同记 not-applicable（§53.5）。",
       "roadmap": "§6.46"
     },
     {
@@ -120,8 +120,8 @@
       "sha": "bfdfde1e20674c184547fd1c9c8bc24396db8079",
       "date": "2026-10-29",
       "subject": "fix(kap-server): search all workspace source folders (#4511)",
-      "verdict": "tracked",
-      "note": "fs 搜索覆盖全部 workspace source folders",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：本条与 #4513 同属「多根工作区」的 fs 搜索面——搜索需覆盖全部 workspace source folders。fork 的 fs 搜索仍是单根（route_workspaces_fs.rs / fs_routes.rs 的 roots 取自单个 workspace），与 #4520/#4513/#4336 同一地基，随多根裁决整体处理。 2026-11-04 随 093e8f46c4 裁决同记 not-applicable（§53.5）。",
       "roadmap": "§6.46"
     },
     {
@@ -135,8 +135,8 @@
       "sha": "0c63065fbd7386132b3b8c914de37adfff4c8daf",
       "date": "2026-10-28",
       "subject": "chore: sync release/2026-10-28 (2.4.0) back to main (#4497)",
-      "verdict": "tracked",
-      "note": "2.4.0 sync 载体：夹带 #4492 抑制 MCP 自动重连状态重复等发布分支行为",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：2.4.0 发布分支 sync 载体，夹带 #4492（抑制 MCP 自动重连状态重复）等行为。#4492 是自动重连的伴生修复，随 #4283 的重连裁决一起定；重连政策不变则本条无可移植内容。 2026-11-04 收口：夹带 #4492 随重连裁决 not-applicable；swarm-off 文案增量已搬（见 d18a7bcd31）。无可移植内容。",
       "roadmap": "§6.46"
     },
     {
@@ -165,8 +165,8 @@
       "sha": "093e8f46c4a44ff22f02fa5b8d7a4df4a7f47737",
       "date": "2026-10-28",
       "subject": "feat: multi-root workspace registry and source-folder management (#4336)",
-      "verdict": "tracked",
-      "note": "多根工作区注册表 + source folder 增删/REST（架构级）",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：上游 #4336 是多根工作区注册表 + source folder 增删/REST，架构级。fork 的 workspaces 表只有单 root，POST /api/v1/workspaces 不收 additional_dirs（route_workspaces.rs:12-39），REST 面与存储面都没有多根概念。本条的落地会同时决定 #4511/#4513/#4520 三条的形态，属 §5 阶段 0「多根工作区是否进 Rust」裁决项，不单独成批。 2026-11-04 裁决（§53.5）：多根工作区不进 Rust——/add-dir 已覆盖单会话扩根，多根是产品面无用户佐证。同族 67045e5ec5（重复 source folder 40006）与 bfdfde1e20（fs 搜索覆盖多根）随本裁决同记 not-applicable：它们的多根前置不复存在。",
       "roadmap": "§6.46"
     },
     {
@@ -196,8 +196,8 @@
       "sha": "e2ad1dcf214337ecfb5ca160fa36d5ef73560ab6",
       "date": "2026-10-27",
       "subject": "feat: support symlinked directories in file tree (#4457)",
-      "verdict": "tracked",
-      "note": "文件树符号链接：缺 allow_external_symlinks、扩张预算与根前缀检测（metadata() 已跟随链接）。2026-11-03 核实：allow_external_symlinks 是 fs:list 请求字段（协议面扩展），与 B-22 allow_ignored_globs 同属 fs 列表协议面——待 gitignore 过滤地基后一并评估",
+      "verdict": "ported",
+      "note": "2026-11-03 落地（fs 列表协议面专项 F2，F0 基线已先把遍历切到 lstat）：schema `fsListRequestSchema.allow_external_symlinks` / `fsReadRequestSchema.allow_external_symlinks` / `fsEntrySchema.is_directory`（packages/protocol/src/{rest/fs.ts,fs.ts}）；服务端 `resolve_lexical`（旗标下跳过 realpath 检查）+ `symlink_directory_target`（非 allow 时 realpath 须落在 realRoots 内）+ 祖先 realpath 防环 + `LIST_TOTAL_ENTRY_BUDGET=10000` 仅约束符号链接子树 + `path_has_symlink` 根前缀检测（packages/kimi-agent/src/server/fs_routes.rs）；下载路由 query `allow_external_symlinks`（route_session_ops.rs）；新增 `POST /workspace/fs::list`（单双冒号均收）。测试：`list_expands_internal_symlink_dirs_by_default` / `list_external_symlink_policy` / `list_external_symlink_root_path_requires_the_flag` / `list_symlink_loop_terminates_via_ancestor_guard` / `read_through_external_symlink_requires_the_flag` / `resolve_with_symlinks_lexical_escape_still_rejected`（cfg(unix)，fs_routes.rs tests）+ `workspace_fs_list_lists_without_a_session`（server/tests.rs）+ 协议包 fsEntry/read/list 用例。上游的 fs:list_many schema 本无此字段，fork 同样不收",
       "roadmap": "§6.46"
     },
     {
@@ -211,16 +211,16 @@
       "sha": "39d149eb64e2126e7873f00758abc07c20b88c1e",
       "date": "2026-10-27",
       "subject": "fix(agent-core-v2): answer questions without edits and clean up test leftovers (#4450)",
-      "verdict": "tracked",
-      "note": "系统提示按请求类型决定交付物、诊断先查因、清理测试产物（prompt/system.md）",
+      "verdict": "ported",
+      "note": "2026-11-04 复验补证：上游 #4450 只改 packages/agent-core-v2/src/app/agentProfileCatalog/system.md 的 Delivering work 段（按请求类型决定交付物、诊断先查因、收尾清理测试产物）。fork 同段（packages/kimi-agent/src/prompt/system.md:61-67）仍是旧文，三轮都未搬运。属 §5 阶段 0「prompt 成批改写」裁决项：fork 的 system.md 有大量 fork 独有段落，不能只搬这一段而不裁决整体保留策略。 2026-11-04 随 cca9bae3d7 裁决落地（§53.4）。",
       "roadmap": "§6.46"
     },
     {
       "sha": "3154ec41f008d22f22379fa08686693470334a70",
       "date": "2026-10-27",
       "subject": "fix(agent-core-v2): scope verification to the change and stop repeating passed checks (#4451)",
-      "verdict": "tracked",
-      "note": "验证范围限定本次改动、不重复已过检查（system.md 与压缩摘要前缀）",
+      "verdict": "ported",
+      "note": "2026-11-04 复验：上游 #4451 把「验证范围限定本次改动、不重复已通过的检查」写进 system.md 与压缩摘要前缀。fork 的 system.md 有相邻但不等价的句子（:65「Do not mark work complete while tests are red」），缺少「不重复已过检查」这一条。同属 §5 阶段 0 prompt 政策项，与 #4450 同批裁决。 2026-11-04 随 cca9bae3d7 裁决落地（§53.4）。",
       "roadmap": "§6.46"
     },
     {
@@ -234,16 +234,16 @@
       "sha": "d18a7bcd319dcc166df031b9c7e32113a58a70b5",
       "date": "2026-10-27",
       "subject": "chore: sync release/2026-10-26 (2.3.3) back to main (#4453)",
-      "verdict": "tracked",
-      "note": "2.3.3 sync 载体：跨进程会话锁/接管/模型切换确认/effort 提示//compact 排队等发布分支行为",
+      "verdict": "ported",
+      "note": "2026-11-04 复验：2.3.3 发布分支 sync 载体（跨进程会话锁/接管/模型切换确认/effort 提示//compact 排队）。其中会话锁与接管已由 #4328（e7f1a99fc5）单独登记并基本落地，本 sync 条目本身无独立可移植行为——它是载体，其内容由各被夹带的 commit 各自裁决。维持 tracked 仅作为「尚未逐条拆解完」的标记。 2026-11-04 收口：逐条核对夹带内容——模型切换确认/effort 提示（apps/kimi-code TUI 面，不在计划内）、clientConfigs（kap-server 客户端配置面，fork 无对应物）、以及 agentSwarmTool 的 swarm-off 拒绝文案增量（真缺口，已搬：mode-off-result.md 对齐 #4497，「tell them… /swarm <task>… do not mention swarm mode」三句 + 判定断言两处）。本条 ported。",
       "roadmap": "§6.46"
     },
     {
       "sha": "4be3f0b741e13677f441c84eee40795ccc1df1db",
       "date": "2026-10-27",
       "subject": "fix(agent-core-v2): reconnect MCP servers automatically after transient failures (#4283)",
-      "verdict": "tracked",
-      "note": "MCP 瞬时失败自动重连（退避/状态迁移）；与 AGENTS.md「刻意无重连」政策冲突，待裁决",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验，维持 tracked。当前状态：fork 的 McpManager::reconnect / reconnect_after_current（packages/kimi-agent/src/mcp/manager.rs:1266,1279）只提供显式按需重连，由 server 的 :reconnect / :restart 控制端点驱动；没有自动重连、没有定时器、没有退避——这正是 AGENTS.md「刻意无重连」政策所记录的现状，不是遗漏。上游 #4283 新增的正是那套自动重连。因此本条只能由政策裁决解锁（维持现状记 not-applicable / 移植自动重连），不能以「补半个退避」的形式落地。 2026-11-04 裁决（ROADMAP §53.1）：维持 AGENTS.md「刻意无重连」政策——重连策略是产品行为不是缺口，显式 :reconnect/:restart 控制端点保留。上游退避重试的语义差异就此登记为 fork 有意偏离。",
       "roadmap": "§6.46"
     },
     {
@@ -259,7 +259,7 @@
       "date": "2026-10-26",
       "subject": "fix(agent-core-v2): return a stopped subagent's partial output to the parent agent (#4430)",
       "verdict": "ported",
-      "note": "停止的子代理回传 [partial output] 节（subagent/manager.rs partial_output_section；agent_tool.rs 前台两臂与后台 TaskOutcome；swarm/service.rs completion_from_turn；测试 stopped_subagent_returns_partial_output / stopped_resume_returns_partial_output）"
+      "note": "后台 killed/failed/延迟强制 settle 均保留当前 run 的公开 assistant 文本并标 incomplete（TaskRunner 流式快照，retry attempt 丢弃，尾部 32K）；正常完成不重复，TaskStop 返回 output/output_path/resume_hint，重复 stop 不重复投递 output；既有 stopped-turn/swarm 路径保留；测试 bg_partial_output_* 5/5 连跑 3 次"
     },
     {
       "sha": "2e539f2f68c872d79a747655cb1962d5f0b596bd",
@@ -315,8 +315,8 @@
       "sha": "1011d8b63fcc150998a4710641563cd0f73369c9",
       "date": "2026-10-26",
       "subject": "chore: sync release/2026-10-25 (2.3.2) back to main (#4387)",
-      "verdict": "tracked",
-      "note": "2.3.2 sync 载体：swarm 交还用户、子代理仅显式启动（#4384/#4386）",
+      "verdict": "ported",
+      "note": "2026-11-04 全量复验：#4384 的 tool 触发拒绝/replay 忽略落 swarm/mode.rs:68-80,406-429，off 双重拒绝落 tools/swarm_tool.rs:290-297,565-570，off 跳过批次 veto 落 turn_loop/run_turn.rs:1773-1785；#4386 的显式子代理授权落 tools/agent_tool/defs.rs 与 prompt/system.md:35；transcript cold-fold 已落 packages/transcript/src/history/foldFacts.ts:505-508，Rust cold/live 投影亦等价。判定测试：the_tool_trigger_is_rejected_without_entering_or_emitting、tool_triggered_entries_are_ignored_on_replay、swarm_mode_off_rejects_without_starting_subagents、a_mixed_batch_runs_other_tools_while_swarm_mode_is_off、agent_def_requires_explicit_subagent_authorization、system_prompt_requires_explicit_subagent_authorization、an_unclosed_model_started_swarm_stays_out_of_cold_and_live_modes，以及 transcript layers.test.ts 的 keeps a model-started swarm that an older version never closed out of meta.modes",
       "roadmap": "§6.46"
     },
     {
@@ -346,16 +346,16 @@
       "sha": "0325b755db46f865f2dc0bca0d6c3d95ad817fcb",
       "date": "2026-10-22",
       "subject": "feat(agent-core-v2): leave Plan mode to the user and review every plan (#4247)",
-      "verdict": "tracked",
-      "note": "Plan 模式交还用户、每个 plan 都审阅（删 EnterPlanMode，属工具/协议面改动）",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验，维持 tracked。上游 #4247 删掉 EnterPlanMode、把 plan 模式交还用户，并让每个 plan 都经用户审阅。fork 仍保留 EnterPlanMode（packages/kimi-agent/src/tools/plan_mode.rs:241 的完整工具描述与自动进入语义），属工具/协议面改动，必须先由 §5 阶段 0「Plan 模式协议」裁决；本条与 RUST-PORT-GAP §4 #2（Plan 门禁判据换 accesses）共用同一次裁决，不分开做。 2026-11-04 裁决（§53.3）：fork 保留 EnterPlanMode 自动进入（已被用户使用，上游变更是产品方向非缺陷）。",
       "roadmap": "§6.46"
     },
     {
       "sha": "01ef64ea926c3f939da5ecc7361e504f6f519060",
       "date": "2026-10-23",
       "subject": "feat(tower): improve concurrency, locking, and per-spawn model selection (#4312)",
-      "verdict": "tracked",
-      "note": "tower 并发/锁/per-spawn 模型选择（并入既有 tower 集群）",
+      "verdict": "ported",
+      "note": "2026-11-04 全量复验：8/4 有界保序并发落 concurrency.rs:5-25 并用于 inbox/review/status/wake digest；frontmatter 分块前缀读取落 frontmatter.rs:77-99，git stdin 落 git.rs:8-39；prepare/commit 快照复核落 store.rs:130-169,434-447，state/inbox 分锁落 store/lock.rs:66-177，writeUnique 原子发布落 store.rs:2640-2725，spawn 原子注册落 store.rs:668-696；并发默认值 256、无限初值与恢复语义落 rate_limit.rs:9-14,32-38,109-137，[task] 覆盖落 config/mod.rs:579-585,1473-1490；per-spawn model 落 tools/tower/mod.rs:352-415 与 subagent/secondary.rs:127-193；富 wake 数据准备、运行时与 HTTP 每轮复用落 tools/tower/wake.rs:65-248、server/engine.rs:411-433。判定测试：file_io_is_ordered_and_bounded_to_eight、git_work_is_ordered_and_bounded_to_four、prefix_reader_keeps_frontmatter_that_crosses_a_chunk、git_with_input_writes_stdin_for_hash_object、prepared_commits_keep_retrying_beyond_eight_snapshot_conflicts、preparation_snapshot_rejects_a_changed_state_file、inbox_send_does_not_wait_for_the_state_lock、write_unique_publishes_hard_links_without_temporary_leftovers、spawned_registration_persists_roster_and_mission_atomically、default_budget_is_256_and_explicit_cap_may_exceed_it、reset_restores_infinite_capacity_and_clears_pause、tower_resolver_binds_pool_default_alias_and_primary、widening_into_an_existing_dependents_scope_does_not_create_a_cycle、initial_wake_coalesces_and_renders_bounded_gate_digests、replay_rereads_gate_and_renders_before_one_reenqueue、tower_wake_runtime_is_shared_per_session_and_isolated_across_sessions",
       "roadmap": "§6.46"
     },
     {
@@ -377,8 +377,8 @@
       "sha": "e7f1a99fc52e68d8e8a2d99d59deba38e4272754",
       "date": "2026-10-22",
       "subject": "feat: let users take over a session lock left by an exited process (#4328)",
-      "verdict": "tracked",
-      "note": "2026-11-02 重适用：锁载体已随 3079e9515f 落地。引擎+SDK 链已完成（REST :takeover、napi session_takeover_lock、session-handle takeoverSessionLock、SDKRpcClientNative.takeOverSessionLock、Session.takeOverLock）；剩余为宿主 TUI 占用提示流（上游 apps/kimi-code/src/tui/controllers/session-occupancy.ts 的 Retry/Cancel→Take over 双档对话 + occupied_* 遥测），属 apps/kimi-code 批次",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：引擎与 SDK 链已完整（REST :takeover、napi session_takeover_lock、session-handle 的 takeoverSessionLock、SDKRpcClientNative 与 Session.takeOverLock）。剩余只有宿主 TUI 的占用提示流：上游 apps/kimi-code/src/tui/controllers/session-occupancy.ts 的 Retry/Cancel→Take over 双档对话 + occupied_* 遥测。本次 grep apps/kimi-code/src 对 session-occupancy / occupied_ 零命中，确认仍缺。属 apps/kimi-code（§5「不在本计划内」清单内的 TUI 面），不作为引擎迁移项。 2026-11-04 收口：引擎+SDK 链完整（REST :takeover、napi session_takeover_lock、Session.takeOverLock，判定测试在），剩宿主 TUI 占用对话流属 apps/kimi-code「不在本计划内」清单——迁移计划的口径就此关闭，TUI 侧走前端路线。",
       "roadmap": "§6.46"
     },
     {
@@ -392,16 +392,16 @@
       "sha": "366fafbf921bb121d3906aa6b685f1045be4e54d",
       "date": "2026-10-21",
       "subject": "feat(kap-server): reclaim idle sessions (#4284)",
-      "verdict": "tracked",
-      "note": "2026-11-03 已核实现状：fork 无会话级空闲回收——engine.rs 的会话状态族（active_turns/steer_queues/session_mcp/status_hashes/media_* 等 HashMap）只增不减；hub.rs 的 evict_idle_lane 只是事件 lane 的 LRU（非会话卸载）。上游 #4284 为 kap-server 超时回收（环境变量可配）。移植前需先定 fork 的会话驻留语义（回收时在途 turn/MCP 连接如何处置），属生命周期设计，建议单独成批",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：fork 仍无会话级空闲回收。server 的会话状态族（active_turns / steer_queues / session_mcp / status_hashes / media_* 等 HashMap）只增不减，hub.rs 的 evict_idle_lane 只是事件 lane 的 LRU，不是会话卸载。本次 grep idle_timeout|reclaim|evict_session 在 server/*.rs 零命中，与上一轮一致。移植前必须先定 fork 的会话驻留语义（回收时在途 turn / MCP 连接如何处置），属生命周期设计，需单独立项。 2026-11-04 裁决（§51.5 选项 a）：空闲回收维持现状——fork 会话状态族只增不减，但无真实内存压力报告；上游 #4284 的超时回收是 kap-server 多租户场景的产物。回收语义（在途 turn / MCP 连接处置）未定前不引入半截机制。",
       "roadmap": "§6.46"
     },
     {
       "sha": "256ce61f0c1c6512d84b21e18814df60bc1f530a",
       "date": "2026-10-21",
       "subject": "perf(agent-core-v2): speed up large session resume (#4313)",
-      "verdict": "tracked",
-      "note": "2026-11-03 已核实现状：fork 仍无大会话恢复基准（tests/turn_bench.rs 是 turn 基准，非恢复基准）；按既定口径先建恢复基准（数千 wire 事件的冷投影耗时）再谈移植",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：fork 仍无大会话恢复基准——tests/ 下只有 turn_bench.rs（turn 基准）与 server_concurrency_bench.rs，没有冷投影恢复基准。按既定口径先建基准再谈移植，不先做优化。 2026-11-04 裁决：B-16 基准已建（resume_bench，21.4ms / 16 000 messages 冷投影；压缩边界后 734µs），「恢复慢」在当前规模不成立，移植无可回收收益点。not-applicable。",
       "roadmap": "§6.46"
     },
     {
@@ -415,8 +415,8 @@
       "sha": "67325c1b25e46b2fc66043bceab059221b719fa9",
       "date": "2026-10-20",
       "subject": "fix(transcript): realign rebuilt turn ordinals to wire ids and mark wedged turns (#4280)",
-      "verdict": "tracked",
-      "note": "2026-11-03 已核实现状：fork 已部分对齐——ensure_turn 按 key 自带编号解析 ordinal（project.rs:1244-1251，其注释已记录位置序号漂移问题）；缺：wedged 标记（上游 TranscriptTurn.wedged + closeWedgedCurrentTurn，coreEventMap.ts:575-623）与 wire id 回查对齐（上游 lookups.stepOrdinal 通道）。涉及两个千行级投影器逐段对照，建议单独成批",
+      "verdict": "ported",
+      "note": "2026-11-03 已核实现状：fork 已部分对齐——ensure_turn 按 key 自带编号解析 ordinal（project.rs:1244-1251，其注释已记录位置序号漂移问题）；缺：wedged 标记（上游 TranscriptTurn.wedged + closeWedgedCurrentTurn，coreEventMap.ts:575-623）与 wire id 回查对齐（上游 lookups.stepOrdinal 通道）。涉及两个千行级投影器逐段对照，建议单独成批。2026-11-03 TS 侧 packages/transcript 已对齐（另一线）：foldFacts.ts 加 activeWireTurnId/turnStartedTimes/turnPromptTimes/wireIdByOrdinal 重编号与 wedged 标记 + renameTurnStep，turn.ts/schema.ts 加可选 wedged，apply.ts turnEquals 纳入 wedged，layers.test.ts 合并 4 个旧测试并新增 realign/wedged 两测；transcript 157 测与全仓 typecheck 通过。**Rust 侧已落地（2026-11-03，本批 A-1~A-5）**：① ensure_turn 回退位由位置序号改为 max(ordinals)+1 声明式分配（unparseable key 不再随回放起点漂移，project.rs:1249-1261）；② `startedAt` 从日志 `created_at` 恢复——`apply_event` 保持原签名委托 `apply_event_at(event, Option<i64>)`，冷路（transcript.rs cold_prompts/cold_tasks）传 `RawWireEvent.created_at`（epoch_ms_iso），活路（ws.rs:464）回退 now；③ 冷重建 wedged 标记——`mark_wedged_turns(active_wire_turn_id)`（非尾 Running turn 一律 failed+wedged，尾 turn 仅当非 live active，project.rs:837-853），经 cold_prompts/cold_tasks 入口传入（路由经 `prompt_queue.active_turn_number`，ws.rs WsOptions 加 prompt_queue 字段穿透 handle_inbound）；④ 实时 `TurnStarted` 关闭前一个 Running turn 为 wedged（project.rs:101-117，先发 wedged 关闭再发新 turn upsert）；⑤ wire 加可选 `wedged`（model.rs TranscriptTurn 与 ops.rs TurnHeader，skip_serializing_if，增量可选）。判定测试：`a_new_turn_started_closes_the_previous_running_turn_as_wedged`、`a_cold_replay_restores_started_at_from_the_journal_record`（2023-11-14T22:13:20Z 取自 epoch）、`a_cold_rebuild_marks_the_unclosed_tail_wedged_only_when_it_is_not_live`（None 全 wedged / Some(2) 尾豁免）、`unparseable_turn_keys_claim_monotonic_fallback_ordinals`（5,6,7 单调）；`cold_tasks_restores_tasks_and_settles_lost_members` 扩 Some(2) 保持 running / None 落 lost 两臂。server:: 全模块 462 测通过，ws 34 测通过。**挂账（下一批起点）**：诊断半——AppendLogStore latched 失败告警 + flush 30s 待决告警 + WireService 失败路由日志 + per-turn 10min watchdog（上游 appendLogStore.ts/wireService.ts/loopService.ts），fork 对应物在 native/event_store 与 turn_loop，单独成批。**诊断半已落地（2026-11-03，本批）**：① per-turn watchdog——新建 turn_loop/watch.rs（TURN_WATCH_CHECK_MS=60s / TURN_WATCH_WARN_MS=10min，重复节流同窗；签名=steps+partials+tool_marks+phase，WatchCore 纯逻辑 5 测），run_turn 挂载（栈持守卫 Drop abort=disarmTurnWatch，arm 在 beginActiveTurn 等价点），LLM trait 加默认 no-op set_turn_watch，http.rs emit_delta 打点 partials（含被扣留片段），phase 三点（Compacting/Llm/Tools；overflow_recovery 循环顶重设 Llm 覆盖压缩重试），handoff 步补 steps+Llm 两点；② task 守卫告警——task_runner.rs settle 通知闸/终态事件闸、reconcile 入队闸、enqueue_wake 闸四处 warn（上游原义文案 taskId/status），reconcile 去重抑制 + settle buffered + take drained 三处 debug；③ WireService 失败路由既有（builder.rs persister warn、subagent/persistent.rs error、lib.rs 显式传播），零改动；④ AppendLogStore latch 失败告警与 flush 30s 挂起告警、eventDispatcher 卡派告警判为**无结构对应物不移植**——fork 持久化同步（append_wire_event_json 直写，无 pending/latch/flush 队列，失败即返回且 persister 逐次 warn，覆盖强于上游每期一次），EventBus.publish 同步内联 deliver 非阻塞 try_send 无派发队列；真挂起阻塞 lane 发布由 turn watchdog 兜底，订阅者积压由既有溢出告警覆盖；⑤ 告警载荷裁剪为 agent_id/turn_id/silent_minutes/steps/phase——上游 pendingNotifications/paused/queuedPrompts 是 loopService 机器快照字段，run_turn 作用域无对应物；host-proxy 传输的流式在宿主侧不可观测（trait 注释已记）；⑥ 扫描器盲点（既有）：含 `lifecycle` 子串的文案被 state_store.rs:621 match 臂的 wire-token 子串规则整体豁免——`task notification skipped/task terminal event dropped: agent lifecycle inactive` 两条 warn 文案不可登记（登记即 stale），4 条可登记文案已按 diagnostic 逐行登记（+4/-0/~0，插入前哈希 C3B743F0…→后 C4F2BF39…）。判定：turn_loop::watch 5 测；门禁 cargo fmt/clippy(EXIT=0)、native::event_store 16 + turn_loop:: 248 + storage::task_runner 46 测、scan:hardcoded:rust 0 新增 0 stale、check:rust-module-deps 0 新边。**已知残余（另行评估，未在本批）**：REST 分页转录的冷重建走 `build_items`（LLM 历史，0..N 位置序号，route_sessions.rs:406-416），与实时投影的 wire id 编号仍有轴差——上游 foldWireRecordFacts 的按 promptId/origin 匹配重编号在该路径尚无对应物，修复需先定 fork 的冷重建数据源语义（历史视图 vs 日志回放）。**残余已闭环（2026-11-04，本批）**：数据源语义裁决落地——`turn.prompt.turnId` 提供编号轴、`created_at` 只提供时间、历史消息只参与匹配，无需产品语义裁决。① 新增 `cold_items`（transcript.rs:252-285）：`build_items` 位置基底 + `turn_prompt_wire_events` 轴（sqlite_store.rs:2339-2367 新增切片查询），按 prompt 文本顺序匹配（fork 历史无 triggerPromptId）后重键 `t<wireId>` 且 `ordinal=wireId`；② `realign_wire_turn_ids`（transcript.rs:291-339）含 upstream `keptOrdinals` 防撞守卫——未匹配 turn 保留位置 id 并钉住该 ordinal；③ `rename_nested_ids`（transcript.rs:344-373）对应上游 `renameTurnStep`，stepId `{from}.{n}`→`{to}.{n}`、frameId 随 step 前缀同步；④ 调用点全切：route_sessions.rs 4 处（transcript/ops、user-messages、plan、transcript 分页）+ ws.rs:761 冷基线，`build_items` 本体不动。判定：`dual_path_fixture` + `wire_axis` 同 fixture 双路径三测——首轮（wire 1）、空洞（2/5/9）、尾轮未闭合（4 闭 8 开，live 尾 running），断言直接比较两路径产物的 turnId/ordinal/stepId/frameId 而非写死期望值，3 测过。门禁：cargo fmt --check=0、clippy --all-targets --features cli -D warnings=0、server::transcript 47 测=0、check:parity=0、scan:hardcoded:rust 0 新增 0 stale=0；server::tests 103 过 1 败=101——`workspaces_models::workspace_require_trust_config_controls_effective_trust`（`require_trust` 全 src 无实现消费方，属另一会话 route_workspaces 在途半成品，本批禁碰域，未处理）。",
       "roadmap": "§6.46"
     },
     {
@@ -431,8 +431,8 @@
       "sha": "ce0834a8f301b89cc4523499a3e074c36851de8f",
       "date": "2026-10-20",
       "subject": "feat: share session rating rules across CLI and server (#4272)",
-      "verdict": "tracked",
-      "note": "会话评分规则共享 + 服务端路由（新增产品包）",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：会话评分规则共享 + 服务端路由，fork 零命中（rating 在 protocol/server 面只有 saturating_* 之类假阳性）。属新增产品面，需要在 protocol 包先声明 schema，单独立项。 2026-11-04 裁决：评分规则共享是新增产品面（rating schema + 路由），无用户佐证，不引入。",
       "roadmap": "§6.46"
     },
     {
@@ -447,24 +447,24 @@
       "sha": "e5e56bc5fe93458575c027a9abf0d17747ca4a6d",
       "date": "2026-10-19",
       "subject": "feat(server): place the default workspace under the home folder (#4277)",
-      "verdict": "tracked",
-      "note": "2026-11-03 已核实：默认工作区解析为 ~/KimiCode/Default（本条把 #4224 的 Documents 方案改到 home，规避 macOS 隐私提示与 iCloud/OneDrive 同步）；fork 该特性整体缺失（server 无 default_workspace/is_default，grep 零命中），见 47002256a0",
+      "verdict": "ported",
+      "note": "2026-11-04 复验：默认工作区解析为 ~/KimiCode/Default（本条把 #4224 的 Documents 方案改到 home）。fork 的 default_workspace|is_default 在 server 与 protocol 面均零命中，确认整体缺失；与 #4224 是同一条产品面的两半，合并处理。 2026-11-04 落地（ROADMAP §54）：default_workspace.rs（解析 ~/KimiCode/Default 或 [default_workspace] path + ensure 分类失败永不搬迁）+ REST 臂（互斥校验保留、requirement 半有意不引入——fork 存量契约，双登记）+ is_default 载荷（protocol sessionSchema optional，format_wire_session 九调用点统一注入）。判定：default_workspace 7 测 + server::tests::workspaces_models 4 测。",
       "roadmap": "§6.46"
     },
     {
       "sha": "47002256a05fbeb2c73a7a7a7f80bb61feebbb36",
       "date": "2026-10-18",
       "subject": "feat: add a default workspace for chats without a project (#4224)",
-      "verdict": "tracked",
-      "note": "2026-11-03 已核实：POST /api/v1/sessions 接受 default_workspace:true（与 workspace_id/metadata.cwd 互斥），解析 ~/KimiCode/Default，REST/WS payload 带 is_default；fork server 无此面（零命中）。属新增协议面（REST + protocol schema + WS payload），单独成批",
+      "verdict": "ported",
+      "note": "2026-11-04 复验：上游 POST /api/v1/sessions 接受 default_workspace:true（与 workspace_id / metadata.cwd 互斥），REST/WS payload 带 is_default。fork 零命中。属新增协议面（REST + protocol schema + WS payload），与 #4277（e5e56bc5fe）合并为一个批次。 2026-11-04 落地（ROADMAP §54）：default_workspace.rs（解析 ~/KimiCode/Default 或 [default_workspace] path + ensure 分类失败永不搬迁）+ REST 臂（互斥校验保留、requirement 半有意不引入——fork 存量契约，双登记）+ is_default 载荷（protocol sessionSchema optional，format_wire_session 九调用点统一注入）。判定：default_workspace 7 测 + server::tests::workspaces_models 4 测。",
       "roadmap": "§6.46"
     },
     {
       "sha": "18c6d64272952503baccf706bff455bb6a2c488e",
       "date": "2026-10-16",
       "subject": "feat: notify the agent of external changes after /reload (#4019)",
-      "verdict": "tracked",
-      "note": "/reload 后通知代理外部变更（changeNotifier 服务与变更快照）",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：/reload 后通知代理外部变更（changeNotifier 服务与变更快照）。fork 对 changeNotifier|external_change 零命中。与 #4015（c7dd84124a，fs watch 默认开启）共用同一套 watch 地基（B-27），必须先有引擎侧 watch 服务；当前 notify crate 不在 Cargo.lock 也不在本机 cargo 缓存，本批无法建立该地基。 2026-11-04 裁决：changeNotifier 依赖 fs watch 地基（B-27），随 c7dd84124a 同记 not-applicable——显式 /reload 语义保留。",
       "roadmap": "§6.46"
     },
     {
@@ -487,14 +487,14 @@
       "date": "2026-10-15",
       "subject": "fix: align subagent tool descriptions with availability (#4066)",
       "verdict": "ported",
-      "note": "子代理描述的 Tools 列表按运行时真实可用性过滤（tools/tool_policy.rs matches_profile_tool_pattern；callbacks.rs list_tools 重写 Agent 定义）"
+      "note": "内建 coder/explore/plan 与发现态 agent 文件的 whenToUse 均按上游 buildProfileDescriptions 以单空格拼入 Agent 类型描述，缺省或空串不渲染；发现态字段链已贯通 node-sdk 投影、napi、SubagentProfileWire、SubagentDefinition 与快照注册，内建和发现态共用拼接函数。TaskList/TaskOutput/TaskStop 的实时表与调用者 profile 双 gate 已接 spawn/resume，禁用描述及执行错误对齐"
     },
     {
       "sha": "da5918c0c861a1d670f4523a9f9dd968647fe4cb",
       "date": "2026-10-15",
       "subject": "fix(agent-core-v2): nudge the agent to keep its todo list current (#4239)",
       "verdict": "ported",
-      "note": "提醒整套重写（open>0 门、进度/在办项文案，injection/todo_reminder.rs）+ 写入回显 next_step_hint（tools/todo_list.rs）+ 描述与系统提示段落；telemetry 三项属宿主管线未移植"
+      "note": "提醒整套重写（open>0 门、进度/在办项文案）+ 写入回显 next_step_hint + 描述与系统提示段落；provider 每 LLM step 读取当前 todo，run_turn 在后续 step 与 goal/plan 并发刷新，turn 内更新进入下一次到期提醒；telemetry 三项属宿主管线未移植"
     },
     {
       "sha": "9f0693becb63a329cbf764325688448e76f40922",
@@ -537,30 +537,30 @@
       "date": "2026-10-14",
       "subject": "feat(agent-core-v2): add global default for deferred MCP tool disclosure (#4210)",
       "verdict": "ported",
-      "note": "引擎侧 McpConfig.defaultDeferred + configure 的 逐 server > 全局 > false 解析；napi 新增 mcpDefaults 通道（JsMcpDefaults）在 connect_all 前安装到 manager，SDK 从 [mcp] 段透传并转发显式 deferred=false；manager 缓存键纳入 [mcp] 与 per-server tri-state；config 解析/优先级/缓存身份测试已加"
+      "note": "引擎侧 McpConfig.defaultDeferred + configure 的 逐 server > 全局 > false 解析；napi 新增 mcpDefaults 通道（JsMcpDefaults）在 connect_all 前安装到 manager，SDK 从 [mcp] 段透传并转发显式 deferred=false；manager 缓存键纳入 [mcp] 与 per-server tri-state；config 解析/优先级/缓存身份测试已加。另：审计发现 deferred 工具激活后只投递 <tools_added> 文本、未投递已加载 schema；该缺口已随 d37f9ccc25 在 shape_tool_table 重新上架已加载 deferred 工具（含真实 schema），并有定向测试"
     },
     {
       "sha": "0327e8e9a875949fd40141ef79f902d756dfd3db",
       "date": "2026-10-14",
       "subject": "feat: support model migration metadata (#4171)",
-      "verdict": "tracked",
-      "note": "2026-11-03 回源码核实修正口径：数据面已落地（parity 驱动的 §27.4 附带修复）——TS ModelAliasBaseSchema.upgrade（config-local/schema.ts:115-125：model/migrationMarkdown/retirementAt，override 不可改写）与 Rust ModelAliasConfig.upgrade/ModelUpgradeConfig（config/mod.rs:53-59,131-134，serde alias 双写；测试 test_model_upgrade_metadata_parses）双层在。原 note「宿主无任何 migration 字段」系按 migration 字面 grep 的误报（字段名是 upgrade/migrationMarkdown）。真实剩余缺口：TUI 迁移提示流全套（上游 tui/controllers/model-migration.ts + utils/model-migration-state.ts + 提示组件 + 编辑器 idle 延迟/cache 警告/effort 保持等边界修复，20+ 子提交的产品面）+ registry 退役默认模型切 declared replacement 的解析——属 TUI 产品面特性，建议单独立项而非混入低风险批",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：数据面（ModelAliasBaseSchema.upgrade 与 Rust ModelUpgradeConfig 双层）仍然在，真实剩余仍是 TUI 迁移提示流 + registry 退役默认模型切 declared replacement 的解析，属 TUI 产品面，在 §5「不在本计划内」清单覆盖的 apps/kimi-code 面内，不作为引擎迁移项。 2026-11-04 裁决：TUI 迁移提示流（model-migration.ts 等 20+ 子提交的产品面）属 apps/kimi-code「不在本计划内」；数据面 upgrade 字段已在（§6.23.1 附带）。",
       "roadmap": "§6.46"
     },
     {
       "sha": "b510fa9aec85f02849f64121550be2c3fbd4294d",
       "date": "2026-10-13",
       "subject": "feat(kap-server): add remote control device deletion (#4192)",
-      "verdict": "tracked",
-      "note": "remote control 设备删除",
-      "roadmap": "§6.46"
+      "verdict": "ported",
+      "note": "按 RUST-PORT-GAP B-19 范围已移植设备删除：DELETE /api/v1/remote-control/devices/{id}（route_tools_mcp.rs:220-277）经 cloud session 调 /v1/remote/devices/{id} 并返回 {ok:true}；路径 id 解码后由 client 安全再编码，401 重 exchange 复用 c69bd6c5a0 的 client。active/persisted id 命中本机时先关闭 runtime，并持 runtime slot 跨 cloud 删除以阻止重启（对应上游 start gate；fork 未另建文件锁），远端删除不主动关 tunnel。mutation/params schema 与头清单在 protocol/rest/remoteControl.ts:46-56；本机协调测试 deleting_current_device_closes_the_local_runtime。",
+      "roadmap": "待 ROADMAP 清理后回填（RUST-PORT-GAP B-19）"
     },
     {
       "sha": "3f0857eb7d612c4890c45dfa6acc8381f1e761c2",
       "date": "2026-10-13",
       "subject": "feat(agent-core-v2): register plugin skills under qualified names and relax plugin name validation (#4188)",
-      "verdict": "tracked",
-      "note": "插件技能以 pluginId:skill 注册、放宽插件名校验、插件命令优先。2026-11-03 核实：fork 插件技能以原名注册（skills/mod.rs 测试 plugin_roots_rank_below_extra_dirs 明示「插件身份骑 prompt 前缀而非 descriptor 名」），上游 registerPluginSkill（catalog/registry.ts:123-137）以 `${plugin.id}:${bareName}` 限定名入 byName、裸名入 byPluginAndName。三块联动（命名 + 校验放宽 + 命令优先），属用户可见调用名变更，建议单独成批",
+      "verdict": "ported",
+      "note": "插件技能以 pluginId:skill 注册、放宽插件名校验、插件命令优先。**限定名注册已移植（2026-11-03，引擎侧三块之一）**：`qualify_plugin_skill_name`（剥前缀幂等）+ `scan_plugin_directory` + `scan_all_skills_with_extra_merge_and_plugins`（skills/mod.rs），消费面全部接线：`SkillScanRoots::catalog`、tools/skill.rs `scan_skill`（裸名不再解析插件技能，对齐上游 `getSkill('lark-doc')` undefined）、prompt/skills_renderer + `SystemPromptBuilder.with_plugin_skill_dirs` + napi plugins prompt 装配 + server/engine.rs `session_spec` 提示词装配（2026-11-04 补全，定向回归 `server_prompt_lists_plugin_skills_under_qualified_names` 先 RED 后 GREEN）、四处 REST 路由（route_sessions skills list/activate、route_plugins_oauth /skills、route_workspaces /skills）；优先序不变（extra 10 > plugin 5 > builtin 0），descriptor.source 保持 \"extra\"（上游 descriptor 同样保留扫描 source，插件身份骑 instruction 前缀与限定名）；指令前缀机制不变（按路径认插件，`<plugin-instructions>` 渲染原样）；附带删除死代码 plugin_skill_dir_paths×2（napi/plugins.rs 与 server/plugins.rs）。判定测试：`same_named_skills_from_different_plugins_stay_visible_under_qualified_names`、`plugin_skill_does_not_shadow_a_bare_name_from_another_scope`、`re_registering_a_qualified_plugin_skill_stays_idempotent`、`qualified_names_reach_the_prompt_listing`、`plugin_roots_rank_below_extra_dirs`（改写为新语义）、`a_plugin_contributed_skill_is_prefixed_with_the_plugin_instructions`/`the_model_tool_path_prefixes_plugin_instructions_too`（改限定名激活）。**校验放宽（之二）**：fork `is_safe_plugin_id`（server/plugins.rs:652，容器安全）已接受上游放宽后正则所承认的全部形态（大写/点分段/单 @ 后缀），判定测试 `the_safe_plugin_id_accepts_everything_upstream_relaxed_regex_accepts`；逐字采用上游正则会**收紧** fork（空格/unicode/前导点名今天可装），属政策项不随批（ROADMAP:4418 已有签字要求记录）。**插件命令优先（之三）**：上游落在 apps/kimi-code resolve.ts，属宿主侧，按协调规则转交（不阻塞本条目引擎侧关闭，宿主侧落地后行为自洽：引擎目录已供限定名）。**不移植说明**：上游 byPluginAndName/getPluginSkill 的消费者是 agentPluginService.ts:215 的 pluginId:skill 会话启动面，fork 无对应物，故未建 per-plugin 裸名索引。",
       "roadmap": "§6.46"
     },
     {
@@ -575,9 +575,9 @@
       "sha": "c69bd6c5a0dc47b89c1316b85e78557a2346fce1",
       "date": "2026-10-13",
       "subject": "feat(kap-server): add remote control device management (#4169)",
-      "verdict": "tracked",
-      "note": "remote control 设备管理（列表）",
-      "roadmap": "§6.46"
+      "verdict": "ported",
+      "note": "按 RUST-PORT-GAP B-19 范围已移植设备管理：GET /api/v1/remote-control/devices（route_tools_mcp.rs:201-219）；RemoteControlDeviceClient（remote_control.rs:1289-1563）实现 /auth/exchange、15s 超时、按 relay+credential 缓存 cookie、401 重 exchange 且仅重试一次、设备字段白名单与畸形响应拒绝；OAuth slot/relay 同源（route_tools_mcp.rs:776-821、oauth.rs:300-334），磁盘凭据变化会换 session。本批补齐同提交其余行为：PATCH /devices/{id} rename（route_tools_mcp.rs:250-291，alias trim 1..50 校验、provider_validation_error，client remote_control.rs:1542）+ POST /devices/{id}/deactivate（route_tools_mcp.rs:292-345，本地 id 判定后停 runtime 再云端 deactivate）+ 锁冲突（runtime slot 互斥，占用/logout gate 返回 40928 + details，status 增 conflict，route_tools_mcp.rs:144-176、280-306、986）+ logout 清理（oauth.rs RemoteControlLogoutHook 包裹凭据擦除，设备 session 双清 + 250ms 后延迟 teardown，remote_control.rs:288-395）。fork 无 rc.json 文件锁，按既有 runtime slot + logout gate 等价实现，未引入第二套文件锁。schema 在 protocol/rest/remoteControl.ts 且头清单已登记（含 PATCH/deactivate）。仅无显式 slot 时保留 fork Web UI kimi.json 别名回退。",
+      "roadmap": "待 ROADMAP 清理后回填（RUST-PORT-GAP B-19）"
     },
     {
       "sha": "afd95f64a5444b649a4cc33504513bf88e4c54ba",
@@ -590,8 +590,8 @@
       "sha": "fed19d24f00203205b1fa4d23e60afce0609cc00",
       "date": "2026-10-13",
       "subject": "feat(agent-core-v2): report fork request prefix parity in the prompt cache probe (#4179)",
-      "verdict": "tracked",
-      "note": "prompt cache 探针上报 fork 前缀一致性遥测（ROADMAP §19 曾建议跳过遥测）",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：prompt cache 探针上报 fork 前缀一致性遥测。fork 有 prompt_cache_key 投递（llm/openai.rs:109-112、llm/http.rs:236），但没有任何探针/前缀一致性遥测上报。属 §5 阶段 0「prompt cache 遥测」裁决项（跳过 / 落宿主遥测），裁决前不动。 2026-11-04 裁决（§53.7）：#4179 前缀一致性半 not-applicable——fork 的 subagent 前缀继承已随 B-1 #6 落地，分叉风险低于上游引入场景；cache-hit-rate 聚合走宿主（tools/mod.rs 之外，telemetry 通道）。",
       "roadmap": "§6.46"
     },
     {
@@ -613,8 +613,8 @@
       "sha": "0a3a2fbafab473df9e9f6609f825af78d2c1ce6d",
       "date": "2026-10-12",
       "subject": "feat: add NotifyUser progress display to desktop and web (#4159)",
-      "verdict": "tracked",
-      "note": "NotifyUser 增加单行 title 并展示进度标题（TUI/桌面/Web 显示层）",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验订正。上游 #4159 的改动全部在显示层：apps/kimi-code/src/tui 的 notify-panel.ts / tool-call.ts / controllers/notify.ts、agent-core-v2/src/features/notify/flag.ts、app/agentProfileCatalog/profile-shared.ts 与遥测事件。fork 的 NotifyUser 工具本身存在（tools/mod.rs 的 notify_user 分派臂），缺的是单行 title 的展示与 flag。属 apps/kimi-code TUI 面，在 §5「不在本计划内」清单内；引擎侧无可移植项，建议在台账中明确标注为宿主面而非引擎缺口。 2026-11-04 裁决：#4159 的改动全部在显示层（notify-panel/tool-call 卡/遥测事件，上游 7 文件清单见前注）——fork TUI 属「不在本计划内」清单，引擎侧无可移植项。",
       "roadmap": "§6.46"
     },
     {
@@ -629,8 +629,8 @@
       "sha": "c9f01f07388abc2cdca40c9c5267f58c65086710",
       "date": "2026-10-10",
       "subject": "refactor(tower): coordinate missions with deterministic orchestration (#4074)",
-      "verdict": "tracked",
-      "note": "tower mission 确定性编排重构（并入既有 tower 集群）",
+      "verdict": "ported",
+      "note": "2026-11-04 结项（复验，非新补丁）。上一轮 note 的三组剩余项已全部关闭：1) SDK 链已补齐——Session.getTowerStatus（packages/node-sdk/src/session.ts:378）、SDKRpcClientBase.getTowerStatus 默认拒绝实现（rpc.ts:781）、native 实现（native/sdk-rpc-client-native.ts:1288）、sessionTowerStatus napi 导出（napi_bindings/session.rs）与定向测试（test/session-tower-status.test.ts、test/native-harness.test.ts:100-102）。2) TowerStatus 完整渲染已在 packages/kimi-agent/src/tools/tower/status_reader.rs 落地：Awaiting spawn（:291）、Dead workers（:341）、Done（:500）三个分区与 review-gate 绑定文本均为上游 statusTool.ts:120-260 的等价移植，不再只有简版 summary。判定测试 8 项全绿：dashboard_renders_awaiting_spawn_roster_and_review_gate、dashboard_done_requires_all_missions_terminal、dashboard_empty_and_recovered_states_keep_explicit_sections、death_warnings_split_user_stop_worker_death_and_reviewer_one_shot、death_warnings_user_stop_outranks_the_reviewer_one_shot_branch、upstream_user_stop_outranks_the_reviewer_one_shot_branch、non_cancellation_death_reasons_stay_ordinary_deaths、upstream_cancellation_reason_is_a_user_stop_and_fork_reason_still_is。上游对照：D:\\kimi\\kimi-code @ a2afdbc7d packages/agent-core-v2/src/features/tower/tools/status/statusTool.ts。",
       "roadmap": "§6.46"
     },
     {
@@ -652,16 +652,16 @@
       "sha": "7091138f5e66289d04b9b7a5cd77f94af9308be3",
       "date": "2026-10-09",
       "subject": "fix(agent-core-v2): allow mid-turn progress notes and calm NotifyUser nudges (#4153)",
-      "verdict": "tracked",
-      "note": "允许中途进度文字、按轮次计静默、软化 NotifyUser 催促",
+      "verdict": "ported",
+      "note": "2026-11-04 复验：上游 #4153 包含三件事——允许中途进度文字（system.md）、按轮次计静默的 NotifyUser 提醒服务（features/notify/notifyUserNudge.ts + notifyUserNudgeService.ts）、以及告警遥测。fork 完全没有该提醒机制：nudge|notify_streak 在 packages/kimi-agent/src/tools/*.rs 零命中。其中 system.md 那半属 §5 阶段 0 prompt 政策项；提醒服务本身与 #4054（4fbe065442，宿主能力门）是同一机制的两半，必须一次做完（nudge 服务的可用性判定就是 #4054 的那道门），不拆开做。 2026-11-04 落地（§53.4 同批的 prompt 半 + 本批机制半）：① system.md 进度句对齐（Keep progress notes between tool calls… don't narrate every tool call，@ a2afdbc7d profile-shared.ts）；② nudge 机制纯函数落地 injection/notify_user_nudge.rs（threshold=8、startsNewTurn 九臂含 stop_hook 特例、cooldown 规则、render 文案，7 测）——可用性门由 notify_user_enabled（#4054 两输入的 resolved 答案）承担：false 时 NotifyUser 不进 advertised 表，streak 无法启动，provider 不注册（无死分支）。判定：nudge 7 测 + swarm_mode_off 断言。遥测半：注入管线已被 turn telemetry 计数，独立事件会双报，不移植。",
       "roadmap": "§6.46"
     },
     {
       "sha": "5b936697670ed15444bcb4720bd91e6ee776a941",
       "date": "2026-10-08",
       "subject": "feat(kap-server): add allow_ignored_globs to fs:list for un-ignoring named paths (#4058)",
-      "verdict": "tracked",
-      "note": "fs:list 支持 allow_ignored_globs 等参数（本仓只读 path）",
+      "verdict": "ported",
+      "note": "2026-11-03 落地（fs 列表协议面专项 F1，基线 F0 同批先行）：schema `fsListRequestSchema.allow_ignored_globs`（packages/protocol/src/rest/fs.ts:97）；服务端 `list_dir_core` 祖先保留 + `probe_allowed_descendant`（共享预算 6 层/500 条、耗尽 fail-open）+ glob 语义等价物（globset literal_separator + 段前缀 DP，`glob_can_match_below`/`glob_segments_match_prefix`/`scan_glob_segments`，packages/kimi-agent/src/server/fs_routes.rs）。测试：`allow_ignored_globs_*`（6 例）+ `glob_can_match_below_prefix_semantics` + `glob_list_whole_path_segment_boundaries`（fs_routes.rs tests），协议包 `fsListRequestSchema` 用例（rest-fs.test.ts）。gitignore 匹配用 `matched_path_or_any_parents` 对齐 npm ignore 的父级感知语义",
       "roadmap": "§6.46"
     },
     {
@@ -669,7 +669,7 @@
       "date": "2026-09-30",
       "subject": "fix(agent-core-v2): omit completion token cap unless explicitly configured (#4091)",
       "verdict": "ported",
-      "note": "One commit, five hunks, and only the last is a divergence — so the verdict is per hunk, not per commit. **(a) The fix itself needs no port: it stops deriving a completion cap when the model declares no output limit, dropping v2's `DEFAULT_UNKNOWN_CONTEXT_FALLBACK = 32000` and the `reservedContextSize` fallback (`llm-adapter/model/completion-budget.ts`). The fork never had that code path to fix — `llm/openai.rs:58-62` builds the Chat Completions body as `{model, messages, stream}` and emits no `max_tokens` / `max_completion_tokens` at all, and `max_completion_tokens` has zero hits under `packages/kimi-agent/src`. The post-fix behavior (omit unless explicitly configured) is the fork's only behavior, so the 400s on strict serving stacks (bare vLLM) were never reachable here. **(b) The opt-out (`maxCompletionTokens <= 0` means 'no cap', `human/llm/protocol/format.ts`) has nothing to opt out of**: the knob the fork's docs advertise, `KIMI_MODEL_MAX_COMPLETION_TOKENS`, appears only in `docs/{en,zh}/configuration/env-vars.md:179` and in no code file; `packages/kosong/src/provider.ts`'s `maxCompletionTokens` is type surface on a provider stack the fork no longer routes through, and its own comment points at an engine field that does not exist. Same 'docs half synced, code half not ported' class §6.8.2 already records for `KIMI_CODE_WATCH` / `KIMI_CODE_SEARCH_WORKER` / `KIMI_CODE_PERSISTENCE_MINIDB_READMODEL` — recorded rather than doc-edited, per that section's convention. **(c) The new `kimiUnsetCompletionTokens` provider trait (`human/llm-kimi/trait.ts`) supplies a default cap of `max(1, window - usedContextTokens)`; same as (b), there is no cap to supply. (d) `format.ts` also stops passing `usedContextTokens` when it is undefined — no-op here, the fork has no such field. **(e) Ported this round: `human/llm/requester/bases/anthropic/profile.ts` lowers `FALLBACK_MAX_TOKENS` from 128000 to 64000.** The fork's `llm/anthropic.rs::default_max_tokens_for_model` answered 128000 for a model id its ladder does not recognize, and its doc comment plus two tests pinned that 128000 as 'the TS provider's fallback' — stale the moment the constant moved. Now 64000, with the comment naming `21406fb4c8` as the reason. Anthropic's `max_tokens` stays mandatory on the wire (`anthropic.rs:196-200`); #4091 does not relax that, because the Anthropic API requires the field. **Side effect worth keeping in mind:** the fork matches by substring where v2 parses `family-major[-minor]` and rejects marker-less ids outright, so lowering v2's fallback made that pre-existing divergence **two-directional** — `relay-opus-4-1` is 32k here against 64k there, and `my-sonnet-4-6-clone` is 128k here against 64k there, where before this commit the fork could only ever be *below* v2. `my-opus-4-5-clone` is the one relay id where the two now coincide. All three are pinned in `default_max_tokens_agrees_with_v2_on_every_real_claude_id`.",
+      "note": "One commit, five hunks, and only the last is a divergence — so the verdict is per hunk, not per commit. **(a) The fix itself needs no port: it stops deriving a completion cap when the model declares no output limit, dropping v2's `DEFAULT_UNKNOWN_CONTEXT_FALLBACK = 32000` and the `reservedContextSize` fallback (`llm-adapter/model/completion-budget.ts`). The fork never had that code path to fix — `llm/openai.rs:58-62` builds the Chat Completions body as `{model, messages, stream}` and emits no `max_tokens` / `max_completion_tokens` at all, and `max_completion_tokens` has zero hits under `packages/kimi-agent/src`. The post-fix behavior (omit unless explicitly configured) is the fork's only behavior, so the 400s on strict serving stacks (bare vLLM) were never reachable here. **(b) The opt-out (`maxCompletionTokens <= 0` means 'no cap', `human/llm/protocol/format.ts`) has nothing to opt out of**: the knob the fork's docs advertise, `KIMI_MODEL_MAX_COMPLETION_TOKENS`, appears only in `docs/{en,zh}/configuration/env-vars.md:179` and in no code file; `packages/kosong/src/provider.ts`'s `maxCompletionTokens` is type surface on a provider stack the fork no longer routes through, and its own comment points at an engine field that does not exist. Same 'docs half synced, code half not ported' class §6.8.2 already records for `KIMI_CODE_WATCH` / `KIMI_CODE_SEARCH_WORKER` / `KIMI_CODE_PERSISTENCE_MINIDB_READMODEL` — recorded rather than doc-edited, per that section's convention. **(c) The new `kimiUnsetCompletionTokens` provider trait (`human/llm-kimi/trait.ts`) supplies a default cap of `max(1, window - usedContextTokens)`; same as (b), there is no cap to supply. (d) `format.ts` also stops passing `usedContextTokens` when it is undefined — no-op here, the fork has no such field. **(e) Ported this round: `human/llm/requester/bases/anthropic/profile.ts` lowers `FALLBACK_MAX_TOKENS` from 128000 to 64000.** The fork's `llm/anthropic.rs::default_max_tokens_for_model` answered 128000 for a model id its ladder does not recognize, and its doc comment plus two tests pinned that 128000 as 'the TS provider's fallback' — stale the moment the constant moved. Now 64000, with the comment naming `21406fb4c8` as the reason. Anthropic's `max_tokens` stays mandatory on the wire (`anthropic.rs:196-200`); #4091 does not relax that, because the Anthropic API requires the field. **Side effect worth keeping in mind:** the fork matches by substring where v2 parses `family-major[-minor]` and rejects marker-less ids outright, so lowering v2's fallback made that pre-existing divergence **two-directional** — `relay-opus-4-1` is 32k here against 64k there, and `my-sonnet-4-6-clone` is 128k here against 64k there, where before this commit the fork could only ever be *below* v2. `my-opus-4-5-clone` is the one relay id where the two now coincide. All three are pinned in `default_max_tokens_agrees_with_v2_on_every_real_claude_id`. **2026-11-04 复核修正（A1 缺口）**：上文「fork 从不发送 max_tokens / max_completion_tokens」与实测不符——`llm/http.rs::completion_cap` 当时把「无声明上限」依次回落到 Anthropic 默认上限、`max_context_tokens`、`DEFAULT_FALLBACK = 32000`，四条 wire 构建路径都以 `Some(cap)` 下发（openai 的 `max_tokens`/`max_completion_tokens`、responses 的 `max_output_tokens`、google 的 `maxOutputTokens`）。现已按上游语义改为 `Option<u32>`：仅显式配置（`max_tokens`/`maxOutputSize`）才下发，`<= 0` 为 opt-out 不下发；未配置时仅 kimi 的 openai/openai_responses trait 以 `max(1, window - used)` 填充（`kimiAnthropicTrait` 无此钩子，Anthropic 仍以模型上限作为必填 `max_tokens`）。测试：`llm::http::tests::completion_cap_is_absent_unless_explicitly_configured` 与 `unconfigured_completion_budget_stays_off_the_wire`（先 RED 后绿）。",
       "roadmap": "§6.26"
     },
     {
@@ -684,24 +684,24 @@
       "sha": "20a2cea72f5d2c4be3a3845e4ff24ce302a6630e",
       "date": "2026-09-29",
       "subject": "feat: cap WaitFor at 90s and let new input end the wait (#4061)",
-      "verdict": "tracked",
-      "note": "**Cap half ported 2026-09-29.** `WAIT_FOR_MAX_TIMEOUT_S` 600 -> 90 (`tools/task_tools.rs:28`), together with every site that stated the old bound: the `parse_timeout` doc comment, the `TASK_WAIT_DESCRIPTION` timeout guideline, the JSON-schema `maximum` and its description, the schema test, and `docs/{en,zh}/reference/tools.md`. Upstream decoupled the constant from `DEFAULT_BACKGROUND_TIMEOUT_S` in this same commit (`export const WAIT_FOR_MAX_TIMEOUT_S = 90` replacing the alias); the fork's Bash background timeout stays 600, which upstream also left alone. The input schema is now **byte-identical** to upstream's `WaitForInputSchema` — both the `timeout` and the `task_id` description match character for character. **Not ported, and this is the larger half.** (a) The description prose: diffing the fork's `TASK_WAIT_DESCRIPTION` against upstream's `task-wait.md` shows 7 substantive differences beyond the number — upstream's opening is restrictive (\"Only call this tool when you really have no other work to do\") where the fork's is permissive, upstream adds \"the user is kept waiting too\" and a standalone \"they notify you automatically\" paragraph, adds a \"think about what else you can do meanwhile\" guideline and a \"the result also lists other tasks that finished during the wait window\" guideline, retightens the timeout guideline to \"Prefer moving on to other work over calling WaitFor again\", and drops the fork's steering guideline (upstream folded steering into the opening paragraph). (b) The per-turn repeat-wait tally and its `[wait_warning]` block with three advice variants (`taskWaitTool.ts` `countCall` / `withRepeatWarning` / `repeatWaitAdvice`). (c) The subagent-specific description (`task-wait-subagent.md`, appended when `scopeContext.agentId !== MAIN_AGENT_ID`) and the subagent-vs-main timeout wording. (d) The TUI half. **The fork's docs deliberately keep the `Ctrl-S`-only sentence** rather than upstream's \"pressing `Enter` ... steers the message into the turn\": steering here is gated on tower mode (`tui/controllers/message-dispatch.ts:652-666` `steerIntoCoordinator` requires `appState.towerMode`), so a plain Enter while the agent waits **queues** (`tui/commands/dispatch.ts:144-145` — \"submissions through sendNormalUserInput queue while busy\") and only `Ctrl-S` steers (`tui/controllers/editor-keyboard.ts:324` `onCtrlS`). Copying upstream's sentence would document behaviour this fork does not have.",
+      "verdict": "ported",
+      "note": "**Cap half ported 2026-09-29**（原有记录）：`WAIT_FOR_MAX_TIMEOUT_S` 600 -> 90（`tools/task_tools.rs:28`）及全部引用点（parse_timeout 注释、TASK_WAIT_DESCRIPTION 指引、JSON-schema maximum 与其描述、schema 测试、docs/{en,zh}/reference/tools.md）；input schema 与上游 `WaitForInputSchema` 逐字节一致。**Repeat-warning 与 subagent 文案已移植（2026-11-03）**：(b) per-turn repeat tally + `[wait_warning]`——`WaitTally`（turn 变更重置，`count_call`）挂 Toolset 会话级 `wait_tally`（tools/mod.rs 声明、toolset.rs 初始化，与 `selection_failures` 同型）；dispatch 装配 `WaitContext`（tally/turn_id/caller_agent_id/display_name，dispatch.rs `taskwait|waitfor` 臂）；`withRepeatWarning` 于 calls>=2 追加（`countCall` 先于一切结果渲染，故 no_tasks/not-found 也计数；参数形错误如 v2 schema 拒绝不计数不追加；host 失败中止如 v2 rethrow 不追加不累计）；waitedMs 仅在实际等待后累计。(c) 子代理文案——`is_subagent = caller_agent_id != \"main\"`；`formatTimeout` 双文案（主：Prefer continuing with other work over waiting again…；子：…ending your turn is your hand-off, and a completion notification after it reaches no one）；`repeatWaitAdvice` 三臂（subagent → goal active → default），goal 活性经 state bridge 读（host 为 goal 权威，读失败落 default，对齐 v2 `?.` 短路）。**台账修正（2026-11-03 回源码核实）**：上游无 `task-wait-subagent.md` 文件（git ls-tree 核实），子代理差异是 `taskWaitTool.ts` 内联文案；进度更新 `startWaitProgress` 来自 `01eeacb59`（#3066），不属本条目。(a) 描述文已在此前合并并带文档化刻意偏差（task_tools.rs 描述注释：不收 restrictive opening——fork 的 WaitFor 还会被 steer 提前结束；不收 completed_during_wait 行——fork 无 `collectExtras`/`markTasksDeliveredViaWait` 机制，该行与该机制保持刻意排除）。(d) TUI 半刻意不适用：fork 的 steer 仅 Ctrl-S/tower 模式，普通 Enter 排队，不抄上游 Enter 文案。名称参数化：警告与超时文案随调用名（`WaitFor` / REPL 别名 `TaskWait`），顺带修正原超时文案硬编码 TaskWait 的不一致。判定测试：`the_second_wait_in_a_turn_appends_the_repeat_warning`、`the_repeat_warning_uses_the_subagent_advice_for_a_subagent_caller`（含子代理臂不做 goal 读）、`the_repeat_warning_uses_the_goal_advice_when_a_goal_is_active`、`the_tally_resets_when_the_turn_changes`、`the_repeat_warning_names_the_repl_alias`、`a_subagent_timeout_report_uses_the_handoff_wording`、`test_format_wait_seconds_matches_v2`、`test_wait_non_terminal_status_renders_timeout`（主文案）。",
       "roadmap": "§6.24.2"
     },
     {
       "sha": "06ebfc821e304bd4ca3f828ae739954166463d65",
       "date": "2026-09-29",
       "subject": "fix(agent-core-v2): fold UserPromptSubmit hook output into the prompt message (#4081)",
-      "verdict": "tracked",
-      "note": "v2 stops making a hook's stdout a standalone `hook_result` user message and folds it into the prompt message as content parts at position 0, tagged `meta: { contentType, source: 'user prompt submit hook' }`, so one prompt always yields exactly one user message. The fork has neither producer nor marker: `tools/external_hooks.rs:273-288` `notify_user_prompt_submit` returns `()`, matches hooks and `spawn_hooks` (`:374-391`) discards every outcome — the comment at `:270-272` states the gap verbatim (\"the engine currently only fires the observe path\"). `ContentBlock` (`rpc/types.rs:487`) has no `meta` field, so there is nowhere to put the tag. `docs/{en,zh}/customization/hooks.md` claimed the blocking/append behaviour until 2026-09-29, when it was corrected to match. **Residual half-port found during triage:** the host layers still implement the pre-commit `hook_result` folding that no producer feeds — `packages/transcript/src/history/groupTurns.ts:482`, `foldFacts.ts:130`, `apps/kimi-code/src/tui/utils/message-replay.ts:332`, `session-replay.ts:215,274,338,365,651`, `node-sdk/src/types.ts:434`. The commit's companion skill-marking refactor (annotate-then-filter instead of `content.slice(bundled.length)`) is **not** a free refactor here: it needs `meta` on transcript content parts, which is the same contract change, so it travels with this entry rather than as a separate patch.",
+      "verdict": "ported",
+      "note": "2026-11-03 协议面落地（fs 列表协议面专项 F4）：`ContentBlock::Text` 加 `meta: Option<Map<String,Value>>`（serde default + skip_serializing_if，rpc/types.rs:514，wire 形态缺省不出现在 JSON）；kosong `TextPart.meta`/`TextPartMeta`（packages/kosong/src/message.ts:11,21）；protocol `textContentSchema.meta`（packages/protocol/src/message.ts:13）；transcript 移植上游 annotate-then-filter：`HistoryTextPartMeta` + `isUserPromptSubmitHookPart`/`isSkillActivationPart`/`annotateBundledSkillParts`/`withoutUserPromptSubmitHookParts`/`userPromptSubmitHookMarkerPayload`，`groupMessagesIntoSnapshot` 的 hook 标记与两处 positional-slice 消除（packages/transcript/src/history/groupTurns.ts）。测试：layers.test.ts 三处上游用例移植（hook marker 前置/steered 携带/bundled 双变体），protocol message.test.ts meta 用例，rpc/types/tests.rs `test_message_wire_contract_roundtrip` 的 meta 段。**2026-11-04 Rust hook 折叠生产者已落地**：`HookGuard::run_user_prompt_submit` 并发执行并按声明序消费，支持 exit 2/stderr 与 nested deny block（message 优先）、block 的 assistant `hook_result` 与 sink 事件、allow message/plain stdout 以 meta text parts 折入原 user message position 0；非法 JSON 走纯文本回退，结构化无 message 不注入，timeout/nonzero 不 block/append；`run_turn` block 时不进 step/LLM。测试：`user_prompt_submit_` 5 用例连跑 3 次、`tools::external_hooks::tests` 37 用例、observe lifecycle 1 用例。**仍挂账**：kap-server `projectPromptSnapshot` 对应物、skill 块引擎侧 meta 标注（fork 走独立 skill_activation origin 消息）；`hook_result` 残留消费路径按上游原样保留。**结构性不适用（2026-11-04 复核，非独立工作项）**：TurnStarted prompt 的 hook 剥离——fork `EngineEvent::TurnStarted.prompt` 为 `Option<String>` 纯字符串（events/types.rs:113-119），Rust producer 保留原始 `content`，hook parts 仅存在于 `blocks`，故该字符串无 hook 部件可剥离；上游 `turnPromptText`（turnEvents.ts:51-64）的 annotate-then-filter 是因上游在 position 0 注入 meta 部件才需要。原核实记录（2026-10 分诊）：v2 stops making a hook's stdout a standalone `hook_result` user message and folds it into the prompt message as content parts at position 0, tagged `meta: { contentType, source: 'user prompt submit hook' }`, so one prompt always yields exactly one user message. 当时 fork has neither producer nor marker；`docs/{en,zh}/customization/hooks.md` claimed the blocking/append behaviour until 2026-09-29, when it was corrected to match. Residual half-port 点位：groupTurns.ts / foldFacts.ts:130 / message-replay.ts:332 / session-replay.ts:215,274,338,365,651 / node-sdk types.ts（行号已漂移）",
       "roadmap": "§6.23.7"
     },
     {
       "sha": "395d537237d737de0239159b60d1cc160bdf04e6",
       "date": "2026-09-29",
       "subject": "feat(kimi-code): summarize workspace trust with configuration sources (#4056)",
-      "verdict": "tracked",
-      "note": "The untrusted-workspace prompt stops printing raw MCP commands and renders an activation summary instead: MCP servers that would start, folders outside the project, and instruction sources (AGENTS.md, skills, profiles), each with the config file it came from; paged with arrows and collapsed to a one-line prompt when the terminal is short. The fork has the prompt (`apps/kimi-code/src/tui/components/dialogs/trust-prompt.ts:46`) in its pre-commit shape and the trust bit, but nothing that composes \"what trusting activates\": `gatedMcpServers` is hard-coded `[]` (`sdk-rpc-client-native.ts:5209`, comment: \"stays empty until the MCP catalog is wired\"), `WorkspaceTrustInfo` has no `origin` / `gatedAdditionalDirs` / `additionalDirSources` / `warnings` / `instructionSources` (`node-sdk/src/types.ts:681-694`), and no project-origin MCP loader exists in the engine at all. The ingredients are all present separately (`project_local_config.rs:41-60` yields `config_path`, `prompt/agents_md.rs:71`, `skills/mod.rs:517`, `prompt/profiles.rs`) but unconnected. A disclosure service is a new module, so this is a feature.",
+      "verdict": "ported",
+      "note": "2026-11-04 落地（本批，一次补完整机制，非补丁）。引擎侧新增 packages/kimi-agent/src/workspace_trust_disclosure.rs（663 行，10 测）：把 v2 trustDisclosureService（D:\\kimi\\kimi-code @ a2afdbc7d packages/agent-core-v2/src/workspace/workspaceTrust/trustDisclosureService.ts）的四个并行分支合成一个 describe_gated_activation——① 项目 MCP 服务器（read_project_mcp_layers 读工程根 .mcp.json 与 .kimi-code/mcp.json 两层的合并，后者胜；cwd 按上游 normalizeStdioCwd 只归一化 stdio 条目，POSIX 绝对路径保持原样，remote 服务器的 cwd 不动；env/headers/bearer 一律不进披露）；② workspace.additional_dir 的域外目录 + 其配置来源（复用 project_local_config.rs，既有但此前只进沙箱不进披露）；③ 指令来源（AGENTS.md 经 prompt/agents_md.rs 只取工程内路径、项目 skill 经 skills/mod.rs 的 SkillScanRoots 取 source==project、agent profiles 留空并注明原因）；④ 无法完成的检查降级为 warnings 而不是静默当成「没有」。napi 新增 workspaceTrustDisclosure（napi_bindings/misc.rs，JSON 出参），index.native.cjs/d.ts 包装层同步，napi 103 -> 104。TS 侧删掉 readProjectMcpDisclosure（sdk-rpc-client-native.ts 原 63 行自写解析器）——同一件事的第二份实现就此收敛到引擎一份；getWorkspaceTrustInfo 扩为 (workDir, options?: WorkspaceTrustInfoOptions)，WorkspaceTrustInfo 增 origin / gatedAdditionalDirs / additionalDirSources / warnings / instructionSources，新增 WorkspaceTrustInstructionSources 与 WorkspaceTrustInfoOptions（含 pendingAdditionalDirs）。已信任的工作区返回空披露（提示只在要问的时候存在）。判定测试：Rust workspace_trust_disclosure 10 项（discloses_project_mcp_servers_without_their_environment / reads_both_project_layers_with_the_later_winning / skips_servers_with_neither_command_nor_url / skips_disabled_servers / normalizes_stdio_cwd_like_upstream / discloses_additional_dirs_and_their_config_source / discloses_pending_additional_dirs / discloses_project_agents_md_paths / instruction_paths_are_deduplicated / inside_or_equal_rejects_parent_escapes） + node-sdk workspace-trust.test.ts 12 项（含原有 3 项 MCP 披露，现经引擎路径；新增 discloses the instruction files and extra directories trusting would activate / discloses a directory the user is about to add / discloses nothing once the workspace is trusted）。台账同步：scripts/rust-module-deps-baseline.json 逐条登记 5 条新依赖边 259 -> 264；scripts/hardcoded-rust-allowlist.json 登记 1 条 warning 模板为 deferred 2710 -> 2711。门禁：cargo check / clippy -D warnings / fmt --check 全 0；check:parity 0（napi 104）；check:engine-i18n 0；check:rust-module-deps 0；scan:hardcoded:rust 0；check:patch-budget 0（补丁 0 行）；typecheck 0；本包文件 oxlint 0 errors。仍未覆盖（非本机制范围）：gatedAdditionalDirs 的 pending 与配置来源共用同一列表语义按上游实现，但 /add-dir 的写入面仍归宿主；agent profiles 的空列表是因为 fork 的 ProfileCatalog 只含 builtin，workspace 贡献面不存在（与 #4520 的多根/工作区 profile 地基同源）。",
       "roadmap": "§6.23.6"
     },
     {
@@ -725,31 +725,31 @@
       "date": "2026-09-28",
       "subject": "feat: trust workspace via KIMI_CODE_TRUST_WORKSPACE env var (#4059)",
       "verdict": "ported",
-      "note": "**Followed (2026-09-29).** `WorkspaceTrustService` gains an `envTrusted` flag read through `parseBooleanEnv` (`1/true/yes/on`), and `isTrusted()` returns `envTrusted || trusted` so the env outranks the persisted record. Implemented in the one place the fork keeps this state: `packages/node-sdk/src/native/sdk-rpc-client-native.ts::getWorkspaceTrustInfo` now short-circuits on the env before reading `trusted-workspaces.json`. `resolveSessionAdditionalDirs` needed no edit because it already routes through that accessor, which is what makes this a patch and not a feature. Tests: `packages/node-sdk/test/workspace-trust.test.ts` (5 cases: fail-closed, recorded trust, env outranks record, every truthy spelling, falsy or unrecognised spelling left alone). Documented in `docs/{en,zh}/configuration/env-vars.md`. Deliberately not ported: the `mcpRegistryService`/`workspaceMcpConfigService` hunks, because `gatedMcpServers` is hard-coded `[]` at `sdk-rpc-client-native.ts:5209` so there is no project-level MCP surface for trust to unlock; and the print-mode warning, whose string does not exist in this fork.",
+      "note": "**Followed (2026-09-29).** `WorkspaceTrustService` gains an `envTrusted` flag read through `parseBooleanEnv` (`1/true/yes/on`), and `isTrusted()` returns `envTrusted || trusted` so the env outranks the persisted record. Implemented in the one place the fork keeps this state: `packages/node-sdk/src/native/sdk-rpc-client-native.ts::getWorkspaceTrustInfo` now short-circuits on the env before reading `trusted-workspaces.json`. `resolveSessionAdditionalDirs` needed no edit because it already routes through that accessor, which is what makes this a patch and not a feature. Tests: `packages/node-sdk/test/workspace-trust.test.ts` (5 cases: fail-closed, recorded trust, env outranks record, every truthy spelling, falsy or unrecognised spelling left alone). Documented in `docs/{en,zh}/configuration/env-vars.md`. Deliberately not ported: the `mcpRegistryService`/`workspaceMcpConfigService` hunks, because `gatedMcpServers` is hard-coded `[]` at `sdk-rpc-client-native.ts:5209` so there is no project-level MCP surface for trust to unlock; and the print-mode warning, whose string does not exist in this fork. **2026-11-04 复核修正**：确认 NAPI 侧 `workspace_trust::effective_trust` 已 fail-closed；server 侧 sqlite 信任位缺省已统一为 0（见 7d72ae3965 条目附注），env 覆盖语义未变。",
       "roadmap": "§6.23.1"
     },
     {
       "sha": "4fbe065442179435c43d3c3dc8d11bb408b3fd30",
       "date": "2026-09-28",
       "subject": "fix(agent-core-v2): stop NotifyUser nudges in hosts without the update panel (#4054)",
-      "verdict": "tracked",
-      "note": "v2 replaces the bare `NOTIFY_USER_FLAG_ID` check with `notifyUserAvailable(flagService, bootstrapService)` — a two-input gate: the flag AND a host that actually has an update panel. The fork has one input. `tools/mod.rs:1547` (the `notifyuser` / `notify_user` dispatch arm) validates only that the message is non-empty, then reports \"Update shown to the user.\" unconditionally. The missing half is a host capability, not a case: the Rust engine has no notion of an update panel and `IBootstrapService` has no counterpart here. Porting means deciding where a host-side capability flag lives and who sets it, which is an interface decision rather than a patch.",
+      "verdict": "ported",
+      "note": "2026-11-04 复验：上游 #4054 把 NOTIFY_USER_FLAG_ID 单输入检查换成 notifyUserAvailable(flag, bootstrap) 双输入门（flag AND 宿主真的有更新面板）。fork 只有 flag 这一半，且引擎侧没有 update panel 概念。这条与本批核实的 #4153 是同一机制的两半：nudge 服务的每个判定点都要过这道门。两者必须一次做完（先定门住哪一侧——引擎能力位 or 宿主注入的 availability 回调——再落 nudge 服务），单独做任一半都会得到一个没有消费者的死分支。需要一次接口裁决。 2026-11-04 落地（§53.4 同批）：notify_user_enabled（napi param → PipelineSpec → native_tool_defs_with_notify 的 advertised-table 门）就是 notifyUserAvailable 双输入的 resolved 答案——KIMI_CODE_EXPERIMENTAL_NOTIFY_USER env（flag 半）由宿主解析注入，host update-panel 半在本 fork 恒真（TUI 有 Updates 面板）；false 时 NotifyUser 不进表（#4054 的可观测行为）。nudge 服务的每个判定点过这道门（见 7091138f5e）。判定：notify_user_tool_def 随门进/出表（tool_policy 测试路径）。",
       "roadmap": "§6.23.2"
     },
     {
       "sha": "09af3b483faac51a767aee50adb1bc1a8de4cc53",
       "date": "2026-09-28",
       "subject": "feat(tower): interrupt tower wake turns on user input and harden tower operations (#3998)",
-      "verdict": "tracked",
-      "note": "Two separable halves, six independent clusters, plus one `n/a`. (a) Tower wake turns are interrupted on user input: v2 tracks the seeded turn through a `TurnStarted` subscription filtered on `origin.variant === tower_inbox` and cancels exactly that turn on `PromptSubmitted`, then re-arms the wake. The fork has no tower service, no injection-origin wake turn to identify, and no prompt-cancels-a-turn path at all — a prompt submitted during a turn is always steered in (`server/engine.rs:575` `enqueue_steer`). Nothing to extend. (b1) `TowerTeardown` gains live-agent protection, `exclude` and `dry_run`; the fork takes a bare `force` bool (`tools/tower/store.rs:1523`, schema at `mod.rs:1291`). (b2) death writes become session-guarded and activity-logged: `mark_agent_dead` (`store.rs:403`) takes one argument, writes no log line, and there is no revive path to guard. (b3) dead-by-intent versus died needs the death reason from (b2); `types.rs:31-39` carries `death_status` / `death_reason` for round-trip but nothing writes them. (b4) an inbox-before-completion gate needs `last_inbox_read_at`; the fork has `assert_completable` only (`store.rs:698`). (b5) a cross-process lockfile: the fork serialises `state.json` with a process-global mutex (`store.rs:28-43`), which cannot satisfy the two-OS-processes guarantee v2 added. **Not applicable:** v2 also renames the `state.json` tmp suffix to include pid+uuid, and the fork already writes per-writer tmp + atomic rename (`store.rs:295-307`) — same mechanism, different suffix, no observable change. Largest delta of the seven; every cluster is new surface.",
+      "verdict": "ported",
+      "note": "2026-11-04 结项（复验）。上一轮 note 的剩余项「TowerStatus 的 dead-by-intent/died 分区警示未完整移植」已不存在：status_reader.rs:321 起按上游 statusTool.ts:238-256 分流三条文案——用户停止（dead by intent，禁止 resume/reassign）、普通 worker 死亡（先诊断，再按瞬态/系统性原因处置）、reviewer one-shot（诊断后另起新 reviewer）。判定测试 death_warnings_split_user_stop_worker_death_and_reviewer_one_shot 与 death_warnings_user_stop_outranks_the_reviewer_one_shot_branch 覆盖三分支与优先级。其余部分（用户输入打断 wake、teardown、会话守卫、inbox-before-completion、跨进程锁）上一轮已复核通过，保留原判定依据。",
       "roadmap": "§6.23.4"
     },
     {
       "sha": "c7dd84124a00d2dc1a68fbbc3e54b1095ee9ac23",
       "date": "2026-09-24",
       "subject": "feat: turn filesystem watch back on by default (#4015)",
-      "verdict": "tracked",
-      "note": "A two-line default flip in v2 (`human/utils/watch.ts` `watchEnabledFromConfig = false -> true`, `app/config/configService.ts` `?? false -> ?? true`), but the thing being flipped does not exist here: no `KIMI_CODE_WATCH`, no `setWatchEnabled`, no `[watch]` section in `packages/node-sdk/src/config-local/schema.ts`, and no watcher crate in `packages/kimi-agent/src` (no notify / inotify / ReadDirectoryChangesW). Measured port size: `watch.ts` is 756 lines exporting a whole `WatchService` + `NativeFsWatcher` runtime abstraction, with 12 production consumers (configService, fileWorkspacePersistence, app/watch/configSection, both skill sources, sessionInstructions, workspaceDirs, workspaceAgentProfileLoader, workspaceInstructions x2, workspaceMcpConfig) watching 8 kinds of config/workspace file. A subsystem port that first needs a layering decision (Rust engine vs TS host), not a default bump. Upstream hot-reloads; the fork only has explicit `/reload` and `/reload-tui`. **Docs half synced 2026-09-24** while the code half stays unported: `docs/{en,zh}/configuration/{config-files.md,env-vars.md}` taken byte-identical from `be7d5f5fea`, so the 2.1.1 changelog entry and the config reference do not contradict each other. Known resulting inaccuracy, recorded in ROADMAP §6.8.2: the fork documents `[watch] enabled` / `KIMI_CODE_WATCH` without implementing either (same class as `KIMI_CODE_SEARCH_WORKER` and `KIMI_CODE_PERSISTENCE_MINIDB_READMODEL`, both also verified absent here).",
+      "verdict": "not-applicable",
+      "note": "2026-11-04 复验：KIMI_CODE_WATCH 在 packages/kimi-agent 与 packages/node-sdk 均零命中，[watch] 配置节与 watcher 依赖（notify / inotify / ReadDirectoryChangesW）都不存在——上游只是两行默认值翻转，fork 缺的是被翻转的整个 WatchService 子系统。本批实测：notify 不在 packages/kimi-agent/Cargo.lock，也不在 ~/.cargo/registry，离线无法引入。该条与 #4019、RUST-PORT-GAP §4 #13（AGENTS.md 变更通告）共用 B-27 地基，整体阻塞于依赖可得性 + 分层裁决（Rust 引擎 vs TS 宿主）。 2026-11-04 裁决：WatchService 子系统不移植（notify crate 离线不可得 + 分层裁决未做），fork 维持显式 /reload。上游的默认翻转无被翻转物。",
       "roadmap": "§6.8.2"
     },
     {

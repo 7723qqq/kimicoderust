@@ -369,6 +369,7 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
             blocks: vec![
                 ContentBlock::Text {
                     text: "show me image".into(),
+                    meta: None,
                 },
                 ContentBlock::ImageUrl {
                     url: "https://example.com/cat.png".into(),
@@ -438,7 +439,8 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
     assert_eq!(
         loaded[0].blocks[0],
         ContentBlock::Text {
-            text: "show me image".into()
+            text: "show me image".into(),
+            meta: None,
         }
     );
     assert_eq!(
@@ -926,13 +928,15 @@ fn test_workspaces_crud_trust_and_session_count() {
         .expect("valid ISO-8601 last_opened_at");
     assert!(last_opened_dt >= created_dt);
 
-    // 2. Default trust is true
-    assert!(store.is_workspace_trusted(&ws1.id).unwrap());
-    // Toggle trust to false
-    assert!(store.set_workspace_trusted(&ws1.id, false).unwrap());
+    // 2. Fail-closed: a workspace with no explicit trust record is untrusted;
+    // an unknown workspace id is untrusted as well.
     assert!(!store.is_workspace_trusted(&ws1.id).unwrap());
+    assert!(!store.is_workspace_trusted("wd_missing_workspace").unwrap());
+    // Toggle trust to true, then revoke it again
     assert!(store.set_workspace_trusted(&ws1.id, true).unwrap());
     assert!(store.is_workspace_trusted(&ws1.id).unwrap());
+    assert!(store.set_workspace_trusted(&ws1.id, false).unwrap());
+    assert!(!store.is_workspace_trusted(&ws1.id).unwrap());
 
     // 3. Create session linked to workspace
     store

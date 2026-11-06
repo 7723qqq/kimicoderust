@@ -1239,6 +1239,7 @@ mod tests {
             thinking: if think {
                 vec![ContentBlock::Text {
                     text: "reasoning".into(),
+                    meta: None,
                 }]
             } else {
                 vec![]

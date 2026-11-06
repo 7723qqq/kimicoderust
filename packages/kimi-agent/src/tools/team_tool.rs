@@ -326,6 +326,7 @@ mod tests {
                 system_prompt: "sys".into(),
                 tools: vec![],
                 disallowed_tools: vec![],
+                when_to_use: None,
                 prompt_prefix: None,
                 subagents: None,
                 summary_policy: None,

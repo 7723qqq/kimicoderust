@@ -22,7 +22,7 @@ pub enum SwarmModeTrigger {
     Manual,
     /// A task/goal dispatch opened the swarm.
     Task,
-    /// The model called `AgentSwarm`.
+    /// Legacy entry recorded when the model called `AgentSwarm`.
     Tool,
 }
 
@@ -36,8 +36,8 @@ impl SwarmModeTrigger {
         }
     }
 
-    /// v2 `shouldAutoExit`: a swarm opened by a task or by the tool closes
-    /// itself at turn end; one the user opened stays until they leave.
+    /// v2 `shouldAutoExit`: a swarm opened by a task (or a legacy tool state)
+    /// closes itself at turn end; one the user opened stays until they leave.
     pub fn auto_exits_at_turn_end(self) -> bool {
         matches!(self, SwarmModeTrigger::Task | SwarmModeTrigger::Tool)
     }
@@ -66,7 +66,13 @@ impl SwarmModeRegistry {
     }
 
     /// v2 `enter`: a no-op when already active — the first trigger wins.
+    /// Tool-triggered entries are rejected both for live calls and when older
+    /// history is replayed, so only an external user/task transition can open
+    /// the mode.
     pub fn enter(&self, agent_id: &str, trigger: SwarmModeTrigger) -> bool {
+        if trigger == SwarmModeTrigger::Tool {
+            return false;
+        }
         let mut guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
         if guard.contains_key(agent_id) {
             return false;
@@ -92,14 +98,8 @@ pub fn swarm_mode_registry() -> &'static SwarmModeRegistry {
     REGISTRY.get_or_init(SwarmModeRegistry::new)
 }
 
-/// v2 `AgentSwarmTool.execution` opens the mode with the `tool` trigger before
-/// running the batch (`agentSwarmTool.ts:128`).
-pub fn enter_tool_swarm(callbacks: &dyn crate::callbacks::HostCallbacks, agent_id: &str) -> bool {
-    set_swarm_mode(callbacks, agent_id, Some(SwarmModeTrigger::Tool))
-}
-
-/// v2 `AgentSwarmService`'s `TurnEnded` subscription: a swarm opened by the
-/// tool or by a task closes itself at turn end.
+/// v2 `AgentSwarmService`'s `TurnEnded` subscription: a task-opened swarm (or
+/// a legacy tool-opened one) closes itself at turn end.
 pub fn exit_tool_swarm_at_turn_end(
     callbacks: &dyn crate::callbacks::HostCallbacks,
     agent_id: &str,
@@ -219,8 +219,8 @@ pub fn veto_agent_in_swarm_mode(agent_id: &str, tool_name: &str) -> Option<Swarm
 /// without a turn loop.
 ///
 /// v2 only vetoes when the batch actually conflicts: a lone `AgentSwarm`
-/// (with or without nothing else) is fine, and a batch with no
-/// `AgentSwarm` is untouched.
+/// is fine, and a batch with no `AgentSwarm` is untouched. The caller applies
+/// this shape check only while the agent's swarm mode is active.
 pub fn veto_swarm_batch(tool_names: &[&str]) -> Option<SwarmVeto> {
     // Accept both the canonical and the snake_case spelling the tool
     // dispatcher matches on (`tools/mod.rs` lowercases and strips `_`).
@@ -385,13 +385,13 @@ mod tests {
     fn mode_is_per_agent_and_first_trigger_wins() {
         let reg = SwarmModeRegistry::new();
         assert!(!reg.is_active("main"));
-        assert!(reg.enter("main", SwarmModeTrigger::Tool));
+        assert!(reg.enter("main", SwarmModeTrigger::Manual));
         // Already active: the second enter is a no-op and does not re-trigger.
-        assert!(!reg.enter("main", SwarmModeTrigger::Manual));
-        assert_eq!(reg.trigger("main"), Some(SwarmModeTrigger::Tool));
+        assert!(!reg.enter("main", SwarmModeTrigger::Task));
+        assert_eq!(reg.trigger("main"), Some(SwarmModeTrigger::Manual));
         // A different agent has its own mode.
         assert!(!reg.is_active("subagent-1"));
-        assert_eq!(reg.exit("main"), Some(SwarmModeTrigger::Tool));
+        assert_eq!(reg.exit("main"), Some(SwarmModeTrigger::Manual));
         assert!(!reg.is_active("main"));
     }
 
@@ -402,56 +402,31 @@ mod tests {
         assert_eq!(SwarmModeTrigger::Tool.as_str(), "tool");
     }
 
-    /// The two wiring entry points (`enter_tool_swarm` /
-    /// `exit_tool_swarm_at_turn_end`) must round-trip through the shared
-    /// registry *and* announce both edges — the tool opens the mode, turn end
-    /// closes it, and the host learns about each from the emitted events.
     #[test]
-    fn the_tool_trigger_opens_and_turn_end_closes_the_mode() {
-        let agent = "wiring-test-agent";
-        // Start from a known state: a previous test may have left it open.
+    fn the_tool_trigger_is_rejected_without_entering_or_emitting() {
+        let agent = "tool-trigger-denied-agent";
         swarm_mode_registry().exit(agent);
         let probe = EventProbe::new();
 
+        assert!(!set_swarm_mode(&probe, agent, Some(SwarmModeTrigger::Tool)));
         assert!(!swarm_mode_registry().is_active(agent));
-        assert!(enter_tool_swarm(&probe, agent));
-        assert_eq!(
-            swarm_mode_registry().trigger(agent),
-            Some(SwarmModeTrigger::Tool)
+        assert!(
+            probe.events().is_empty(),
+            "a rejected tool trigger emits neither a durable record nor a status update"
         );
-        assert_eq!(
-            probe.events(),
-            vec![
-                serde_json::json!({
-                    "type": "swarm_mode.enter",
-                    "agentId": agent,
-                    "trigger": "tool",
-                }),
-                serde_json::json!({
-                    "type": "agent.status.updated",
-                    "agentId": agent,
-                    "swarmMode": true,
-                }),
-            ],
-            "opening the mode emits the durable record then the status the host folds"
-        );
+    }
 
-        // Turn end closes a tool-opened swarm.
-        probe.0.lock().unwrap().clear();
-        assert!(exit_tool_swarm_at_turn_end(&probe, agent));
-        assert!(!swarm_mode_registry().is_active(agent));
-        assert_eq!(
-            probe.events(),
-            vec![
-                serde_json::json!({ "type": "swarm_mode.exit", "agentId": agent }),
-                serde_json::json!({
-                    "type": "agent.status.updated",
-                    "agentId": agent,
-                    "swarmMode": false,
-                }),
-            ],
-            "closing the mode emits the same pair with swarmMode false"
+    #[test]
+    fn tool_triggered_entries_are_ignored_on_replay() {
+        let reg = SwarmModeRegistry::new();
+
+        assert!(!reg.enter("main", SwarmModeTrigger::Tool));
+        assert!(!reg.is_active("main"));
+        assert!(
+            reg.enter("main", SwarmModeTrigger::Manual),
+            "an ignored legacy entry must not block a later user entry"
         );
+        assert_eq!(reg.trigger("main"), Some(SwarmModeTrigger::Manual));
     }
 
     /// A manually opened swarm must survive turn end — that is the whole point

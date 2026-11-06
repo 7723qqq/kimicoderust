@@ -5,7 +5,9 @@
 //! subscribe in-process; an optional UI sink forwards events to the host.
 
 pub mod bus;
+pub mod project;
 pub mod types;
 
 pub use bus::{EventBus, Subscription};
+pub use project::Projector;
 pub use types::EngineEvent;

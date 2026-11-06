@@ -22,6 +22,7 @@ fn spec() -> PipelineSpec {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tower_enabled: false,
+        notify_user_enabled: true,
         tool_select: false,
         sandbox_mode: None,
         sandbox_policy: None,
@@ -44,6 +45,67 @@ fn engine() -> ServerEngine {
         Arc::new(EventHub::new()),
         Arc::new(SqliteSessionStore::in_memory().unwrap()),
     )
+}
+
+#[tokio::test]
+async fn server_prompt_lists_plugin_skills_under_qualified_names() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("workspace");
+    let plugin_root = temp_dir.path().join("plugin");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(plugin_root.join("lark-doc")).unwrap();
+    std::fs::write(
+        plugin_root.join("lark-doc").join("SKILL.md"),
+        "---\nname: lark-doc\ndescription: from plugin a\n---\n",
+    )
+    .unwrap();
+
+    let mut spec = spec();
+    spec.workspace_root = Some(workspace.to_string_lossy().into_owned());
+    let engine = ServerEngine::new(
+        spec,
+        Arc::new(EventHub::new()),
+        Arc::new(SqliteSessionStore::in_memory().unwrap()),
+    );
+    let plugin_dirs = vec![crate::skills::PluginSkillDir {
+        dir: plugin_root,
+        plugin_id: "plugin-a".into(),
+        instructions: None,
+    }];
+    engine.with_plugin_skill_roots(Arc::new(move || plugin_dirs.clone()));
+
+    let session_spec = engine.session_spec("sess-plugin-skills").await;
+    assert!(
+        session_spec
+            .system_prompt
+            .contains("- plugin-a:lark-doc: from plugin a"),
+        "the server prompt must advertise the exact qualified name the Skill tool resolves: {}",
+        session_spec.system_prompt
+    );
+}
+
+#[test]
+fn tower_wake_runtime_is_shared_per_session_and_isolated_across_sessions() {
+    let engine = engine();
+    let server = Arc::new(crate::server::HttpServer::in_memory().unwrap());
+    engine.install_tower_wake_driver(Arc::new(crate::server::HttpServerWakeDriver::new(server)));
+    let dir = tempfile::tempdir().unwrap();
+    let first =
+        Arc::new(crate::tools::NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap());
+    let second =
+        Arc::new(crate::tools::NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap());
+    let other_session =
+        Arc::new(crate::tools::NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap());
+
+    engine.bind_tower_wake(&first, "s1").unwrap();
+    engine.bind_tower_wake(&second, "s1").unwrap();
+    engine.bind_tower_wake(&other_session, "s2").unwrap();
+
+    let first_runtime = first.tower_wake_runtime().unwrap();
+    let second_runtime = second.tower_wake_runtime().unwrap();
+    let other_runtime = other_session.tower_wake_runtime().unwrap();
+    assert!(Arc::ptr_eq(&first_runtime, &second_runtime));
+    assert!(!Arc::ptr_eq(&first_runtime, &other_runtime));
 }
 
 /// The status line's `contextTokens` used to be `content.len() / 4`, which

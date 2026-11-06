@@ -10,11 +10,26 @@ description:
   en: >
       Registered tool names: Agent, AgentSwarm, define_subagent, invoke_subagent, manage_subagents.
       
-revision: b2c89a8fe8d80ce9b97a5f08206c20f28072e4b0
-updated_at: "2026-11-02T01:57:28.866Z"
-fingerprint: 43ff3b5ef7dba37d2a7164160d4a9e92561a7b35d1411d6beaa30f57262fe5be
+revision: 28f4b101d79bba811d53e53662341c0bb0fe93c0
+updated_at: "2026-11-06T05:19:43.868Z"
+fingerprint: 7b0472c8dabe0602e2d08f184b371ebb9895b2857a8ca2a660118bd201bb7e46
 source:
   - path: "packages/kimi-agent/src/tools/agent_tool.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/defs.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/events.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/execute.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/format.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/resume.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/mod.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/common.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/display.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/events.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/fork_background.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/limits.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/pool.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/resume.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/spawn_contract.rs"
+  - path: "packages/kimi-agent/src/tools/agent_tool/tests/stopped_output.rs"
   - path: "packages/kimi-agent/src/tools/subagent_tools.rs"
   - path: "packages/kimi-agent/src/tools/select_tools.rs"
 apis:

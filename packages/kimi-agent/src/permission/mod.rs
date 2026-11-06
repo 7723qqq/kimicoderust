@@ -160,9 +160,9 @@ pub struct PolicySnapshot {
     pub tools_filter: Option<crate::tools::tool_policy::ToolsFilter>,
     /// User-configured external hooks (v2 `[hooks]`). The engine executes
     /// the `PreToolUse` ones before native tool calls (G-6 #6), notifies
-    /// the observe-only `PostToolUse` / `PostToolUseFailure` /
-    /// `UserPromptSubmit` / `PreCompact` events fire-and-forget, and lets
-    /// matching `Stop` hooks veto a clean text stop once per turn.
+    /// the observe-only `PostToolUse` / `PostToolUseFailure` / `PreCompact`
+    /// events fire-and-forget, lets `UserPromptSubmit` block or prepend
+    /// context, and lets matching `Stop` hooks veto a clean text stop once per turn.
     #[serde(default)]
     pub pre_tool_hooks: Vec<HookDef>,
     /// Why each configured rule exists, keyed by its pattern (v2

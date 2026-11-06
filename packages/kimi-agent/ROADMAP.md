@@ -3633,7 +3633,7 @@ provider 的 `FakeRegistry`，而它们测的本来就是 provider 而非 regist
 | --- | --- | --- | --- |
 | §6.23.1 | `1f6f0b1fa2` #4059 | **ported** | `KIMI_CODE_TRUST_WORKSPACE` env 短路，落在 `node-sdk`（2026-09-29 已实现） |
 | §6.23.2 | `4fbe065442` #4054 | tracked | NotifyUser 需要"宿主有更新面板"的能力位，Rust 无此概念 |
-| §6.23.3 | `a940f2ff04` #4057 | **ported**（2026-10-03 改判） | 引擎早已发 `agent.status.updated` **且带 `permission` 字段**（`server/engine.rs:1003-1026`，2026-09-12 `21403bf956` 落地，早于本条记录 19 天），profile 写入后还会刷新该事实（`src/server/route_session_io.rs:154`）。原判「引擎无该事件、无 `permission` 字段」与代码相反。余项仅时序：走会话配置路由改模式要等下一轮开始才重新发布。见 §11 |
+| §6.23.3 | `a940f2ff04` #4057 | **ported**（2026-10-03 改判） | 引擎早已发 `agent.status.updated` **且带 `permission` 字段**（`server/engine.rs:1003-1026`，2026-09-12 `21403bf956` 落地，早于本条记录 19 天），profile 写入后还会刷新该事实（`src/server/route_session_io.rs:159`）。原判「引擎无该事件、无 `permission` 字段」与代码相反。余项仅时序：走会话配置路由改模式要等下一轮开始才重新发布。见 §11 |
 | §6.23.4 | `09af3b483f` #3998 | tracked | tower 六簇加固 + wake 打断，全部是新面；仅 tmp+rename 判不适用 |
 | §6.23.5 | `e3bf50c083` #4076 | **not-applicable**（2026-11-03 改判） | fork 的提醒是回合内注入、随当回合折进历史并被 undo_turns 按 turn 整删，无上游的游离形态（详见 allowlist note） |
 | §6.23.6 | `395d537237` #4056 | tracked | workspace trust 披露服务**部分**接线（§10.41）；`gatedMcpServers` 不再是空的，但 v2 还有 `additionalDirs`/`warnings`/`instructionSources` 三类未做，且项目 `.mcp.json` 的取路径不对——见 §10.49 |
@@ -4921,7 +4921,7 @@ usage 累积 + detect() + 遥测  ← 三合一（见上表）
 |---|---|---|---|
 | 3 | **14 个 hook 事件** | 模板 `notify_pre_compact`（`external_hooks.rs:303-318`）是 16 行（原写「`:298-313` 是 15 行」——行号已漂移，且该区间的真实行数是 16 不是 15）；`notify_session_lifecycle`（`:326`）已支持任意事件名 + 三个参数，**14 个事件里 11 个可用它实现**（各加一个 8-15 行包装）。另 3 个需新方法：`SessionHeartbeat`（要 session 心跳定时器，+30 行）、`SubagentStart/Stop`（挂在 `subagent/manager.rs` 生命周期上）。插桩点已现成：`permission/mod.rs:483` `evaluate`（覆盖 Permission 两个）、`run_turn.rs:1218` `emit_step_begin_event`（覆盖 TurnStarted）、`tool_scheduler` 工具完成处（覆盖 TaskStarted）。**无否决风险**：上游 `agentExternalHooksService.ts:118-132` 的 `fireAndForget` 丢弃返回值并 `catch {}`，纯观察。**（2026-10-04 行号重定位：原引 `:298-313`/`:321`/`:475`/`:1203` 均已漂移——该项本身已于 2026-10-03 完成，见 §10.27）** | **2-3 人天** |
 | 1 | **frontmatter 真 YAML** | 引入 `serde_yaml`，替换 `skills/mod.rs:98-172`（约 75 行）与 `tower/frontmatter.rs:19-48`（30 行）两处手写解析；需保留现有 9 项 skills 测试行为并补 4 条失败用例的回归。**风险点**：`scopes` 当前的块列表解析（`skills/mod.rs:188+`）与 `_` 别名拼写（`:129-146`）不能被 YAML 库的行为覆盖。**（2026-10-04 行号重定位：该项已于 2026-10-02 完成，见 §10.24——两处手写解析已换成 `frontmatter.rs` 的 `parse_frontmatter`（`skills/mod.rs:136` 与 `tower/frontmatter.rs:56-73` 都委托它）；`scopes` 现由 `parse_scopes_value`（`skills/mod.rs:54-83`）从真 YAML 的 `Value` 读，`_`/`-` 两种拼写在 `:154-164` 手工比对——即「风险点」两条都由 YAML 库承担了，不再是风险）** | **2-3 人天** |
-| 2 | **分叉 turn_index** | `sqlite_store.rs:834-863` 加参数 + 按 v2 `forkTurnSlice.ts:80-99` 的 `origin.kind` 分类切边界 + promptId 配对（`:118-176`）；调用方两处（`src/server/mod.rs:5165` 解析 body 的 `turnIndex`、`acp/mod.rs:1015`）；**注意 fork 的历史按 `save_turn` 分行存储，切分要按 turn 而非按 message**。**（2026-10-04 行号重定位：该项已于 2026-10-02 完成，见 §10.23——`fork_session` 现在 `sqlite_store.rs:1042`；REST 解析在 `server/route_sessions.rs:470`；ACP 调用在 `acp/mod.rs:1020`。v2 侧 `origin.kind` 分类的真实位置是 `forkTurnSlice.ts:86-103` 的 `isUserVisibleTurnRecord`、promptId 配对在 `:185-190`；原引的 `:80-99`/`:118-176` 已漂移）** | **3-4 人天** |
+| 2 | **分叉 turn_index** | `sqlite_store.rs:834-863` 加参数 + 按 v2 `forkTurnSlice.ts:80-99` 的 `origin.kind` 分类切边界 + promptId 配对（`:118-176`）；调用方两处（`src/server/mod.rs:5165` 解析 body 的 `turnIndex`、`acp/mod.rs:1015`）；**注意 fork 的历史按 `save_turn` 分行存储，切分要按 turn 而非按 message**。**（2026-10-04 行号重定位：该项已于 2026-10-02 完成，见 §10.23——`fork_session` 现在 `sqlite_store.rs:1042`；REST 解析在 `server/route_sessions.rs:491`；ACP 调用在 `acp/mod.rs:1020`。v2 侧 `origin.kind` 分类的真实位置是 `forkTurnSlice.ts:86-103` 的 `isUserVisibleTurnRecord`、promptId 配对在 `:185-190`；原引的 `:80-99`/`:118-176` 已漂移）** | **3-4 人天** |
 | 5+15 | **micro `detect()` + 遥测 `api_error`** | 新增一个跨 step 的 usage 累积结构（`input_cache_read` / `input_cache_creation` / tokens），`server/engine.rs:1348` 前加判据，配置面加 2 个常量；遥测侧同源数据报 `api_error`。**（2026-10-04 状态与行号）** 两项都已完成：P1-5 见 §10.25（`compaction/micro.rs:132-155` 的 `detect_micro_compaction`，调用点 `server/engine.rs:1416-1429`），`api_error` 见 §10.39。**原估的「新增跨 step 的 usage 累积结构」被证伪**——cache-miss 判据读的是「距上次 assistant 输出的空闲时长」而非 usage（判据在**退役副本** `.tmp/v2-ref/…/agent/microCompaction/microCompactionService.ts:94-95`；**上游无该模块**，见 §1 「上下文智能压缩」行的裁定与 §6.44.1），故本行后半的合并理由不成立（§6.45.2 已记）。`server/engine.rs:1348` 现在是注释块中部，与判据无关 | **2-3 人天**（已完成） |
 | 6 | ~~**wire 版本 + metadata + 迁移链**~~ **已完成 2026-10-03**（§10.34） | 版本列 + 打戳 + 前向拒绝已落地；**五个迁移经证据核验无物可迁**（见 §10.34 三条理由），故不建空迁移链 | **已完成**（原 4-6 人天为五个迁移定价，那些迁移不适用） |
 | 7 | ~~**磁盘日志 + 导出 ZIP**~~ **原描述不成立（§10.30）**；两半残余**均已完成 2026-10-03**：引擎 REST 导出见 §10.31，会话级日志接线见 §10.33 | 引擎侧 REST 导出补 manifest + 日志成员 + 遍历会话树，参照 `packages/node-sdk/src/native/sdk-rpc-client-native.ts` 的 `exportSession`（现 `:1760-1861`，manifest 构造在 `:1802`、会话树遍历在 `:1819-1840`）。**（2026-10-04 状态与行号重定位：原引 `:3642-3698` 已漂移——那现在是 fork 的 turnIndex 越界检查，与导出无关；本行原列的「残余只剩」两项都已在 §10.31/§10.33 落地）** | **已完成** |
@@ -4979,7 +4979,7 @@ Windows 备注由常量变为 `windows_notes(shell_name)`，按 pwsh / powershel
 因此本地化它不构成对 v2 措辞的偏离。
 
 **修复**：新增 `tools/mod.rs` 的 `arg_error_text` / `arg_error` 两个辅助函数
-（`packages/kimi-agent/src/tools/mod.rs:806`），把句式的可变部分做成 `{{tool}}` / `{{field}}` 参数，
+（`packages/kimi-agent/src/tools/mod.rs:817`），把句式的可变部分做成 `{{tool}}` / `{{field}}` 参数，
 句式本身收敛为 6 个键：`engine.tools.argMustBe{String,Boolean,Number,Array}`、`argMustNotBeEmpty`、
 `argRequired`（`packages/i18n-catalog/src/locales/en.ts` 与 `zh.ts` 同步，占位符一致）。
 **实测 20 处调用点**改为按**句式**取键，而不是按（工具, 字段）组合生键，因此目录只增长 6 条。
@@ -7859,7 +7859,7 @@ variant and no `permission` field on any event ⋯⋯ **no wire representation a
 1. `packages/kimi-agent/src/server/engine.rs:1003-1010` 构造 `{"type": "agent.status.updated", "model": …, "contextTokens": …}`；
 2. 同文件 `:1020-1026` 从 `agent_config.permission_mode`（或 `metadata.permission_mode`）取值并
    **`object.insert("permission", …)`**；
-3. `packages/kimi-agent/src/server/route_session_io.rs:154` 在 profile 写入后**显式刷新该状态事实**，注释即为
+3. `packages/kimi-agent/src/server/route_session_io.rs:159` 在 profile 写入后**显式刷新该状态事实**，注释即为
    「The profile write may have changed model / thinking / **permission mode** / plan mode」；
 4. **定年**：`git log -S 'object.insert("permission"' -- packages/kimi-agent/src/server/engine.rs` 指向
    **`21403bf956`，2026-09-12**——**早于 allowlist 的 `recordedAt: 2026-10-01` 十九天**。
@@ -8207,7 +8207,7 @@ EngineSessionHandle.dispose()          session-handle.ts:486-488   → Promise<v
   → Session::shutdown(&self)           session/mod.rs:530-536       → store(true) + notify_one()
 ```
 
-契约文档自己写的是「the pump task is **signalled** to stop」（`packages/kimi-agent/napi-contract.d.ts:1616`），
+契约文档自己写的是「the pump task is **signalled** to stop」（`packages/kimi-agent/napi-contract.d.ts:1707`），
 而 `shutdown` 的文档写明释放发生在「pump **在下一轮循环顶部、in-flight turn 结束后**」。
 **所以 `await handle.dispose()` 之后调用 `rmSync` 是在赌一个没人承诺的时序。**
 
@@ -8281,7 +8281,7 @@ D1 是契约问题，会让每个"close 之后删数据目录"的宿主动作都
 | 结论 | 位置／命令 |
 |---|---|
 | dispose 只发信号 | `packages/kimi-agent/session-handle.ts:486-488,729-731`；`src/napi_bindings.rs:3178-3193`；`src/session/mod.rs:530-536` |
-| 契约措辞是 signalled | `packages/kimi-agent/napi-contract.d.ts:1616` |
+| 契约措辞是 signalled | `packages/kimi-agent/napi-contract.d.ts:1707` |
 | 无"停全部任务"原语 | `git grep -n 'stop_all_on_exit\|stop_all_tasks\|terminate_all'` → 零命中 |
 | `stop` 只被单测调用 | `src/storage/task_runner.rs:2080,2094,2147,2157,2222,2306,2328,2364,2391,2402` |
 | runner 是进程级 | `src/storage/task_runner.rs:1007-1008` |
@@ -9529,3 +9529,966 @@ override 不可改写它；测试 `test_model_upgrade_metadata_parses`
   （LLM 挂起 → 父取消 → ParentCancelled 结果 + Interrupt marker）；
   `cargo test --lib` 3335 passed。
 - **剩余**：hook payload 仍不带 agent id；`UserPromptSubmit` 的 block/append 仍只观察。
+
+## 45. 2026-11-04 workspace trust 披露服务（#4056 一次补齐）
+
+上一轮的 `395d537237` 把缺口收窄为「`WorkspaceTrustInfo` 缺
+`origin`/`gatedAdditionalDirs`/`additionalDirSources`/`warnings`/`instructionSources`
+与 `WorkspaceTrustInfoOptions`，且 `project_local_config.rs`、`prompt/agents_md.rs`、
+`skills/mod.rs`、`prompt/profiles.rs` 的素材未接线」。本批按一个机制补齐，不是分旁路。
+
+### 45.1 引擎侧：一个披露服务
+
+新增 `packages/kimi-agent/src/workspace_trust_disclosure.rs`（663 行，10 测），把上游
+`trustDisclosureService.ts`（`D:\kimi\kimi-code` @ `a2afdbc7d`）的四个并行分支合成
+`describe_gated_activation`：项目 MCP 服务器（两层 `.mcp.json` 合并、`cwd` 按上游
+`normalizeStdioCwd` 只归一化 stdio、`env`/`headers`/`bearer` 不进披露）、域外目录与其来源
+（复用 `project_local_config.rs`，含即将 `/add-dir` 的 pending 目录）、指令来源
+（AGENTS.md / 项目 skill / agent profiles）、以及把每次检查失败降级为 `warnings` 而不是
+静默当成「没有」。
+
+### 45.2 接缝与收敛
+
+`workspaceTrustDisclosure(...)` napi 导出（napi 103 → 104），包装层与
+`napi-contract.d.ts` 同步。`sdk-rpc-client-native.ts` 的 `readProjectMcpDisclosure`
+（63 行，Node 里自读 `.mcp.json`）**删除**——同一件事此前两份实现，现在只有引擎一份。
+`getWorkspaceTrustInfo` 扩为 `(workDir, options?)`，`WorkspaceTrustInfo` 补齐 5 个字段。
+
+### 45.3 判定测试与门禁
+
+Rust 10 测（含 `discloses_project_mcp_servers_without_their_environment`、
+`reads_both_project_layers_with_the_later_winning`、`normalizes_stdio_cwd_like_upstream`、
+`discloses_pending_additional_dirs`、`instruction_paths_are_deduplicated` 等）+
+node-sdk `workspace-trust.test.ts` 12 测。门禁：cargo check / clippy / fmt 全 0；
+`check:parity` 0（napi 104）；`check:rust-module-deps` 0（259 → 264，5 条新边逐条登记）；
+`scan:hardcoded:rust` 0（2710 → 2711）；`check:patch-budget` 0；`typecheck` 0。
+
+## 46. 2026-11-04 kimi-ui-core 渲染后端：从空骨架补成完整基层模块
+
+`packages/kimi-ui-core/src/render_backend.rs` 此前自述 "Skeleton phase"，而且不是谦辞：
+`request_render` 空函数、`dispatch_input` 空函数、`unmount` 只删自己（子树留在 arena
+里、父链悬空）、`ComponentNode` 只有一个 `text` 字段、两个产品后端除了 `capabilities()`
+里几个布尔值外逐行相同。设计文档 `reports/design/RUST-UI-DECOUPLING.md` §1.3 早已定好
+契约，缺的是实现。本批按该契约一次补完。
+
+### 46.1 共享 `NodeArena`：三个后端同一套树不变量
+
+`NodeArena` 现在记父链与子序，于是三件以前做不到的事成立：**挂载校验**
+（`mount(node, Some(unknown_parent))` 返回 `None` 而不是静默挂到根上）、**级联卸载**
+（移除整棵子树并从父节点子列表摘出，返回移除数量）、**`walk()` 深度优先按子序**
+（三个后端因此画出同样的行序）。`ScrollbackBackend` / `AltScreenBackend` /
+`HeadlessBackend` 共用 `BackendState`；headless 原先自己那套 `arena/started/focus`
+字段是同一件事的第二份实现，已合并，它只保留 `EntryStore` 与 `snapshot()`。
+
+### 46.2 渲染管线：一帧 = 一次 repaint 的单位
+
+新增 `Frame` 与 `tail_after`。scrollback 只输出终端还没印过的尾部；若变化发生在分歧点
+**之上**，追加模式无法修正，于是报告整帧而不是印一个静默错误的局部——终端不能收回已
+打印的行，这一点必须由后端说出来。alt-screen 接管视口，每次 repaint 输出整帧，
+`stop` 在 `keep_frame=false` 时清空。`force=true` 让 scrollback 重发整帧。
+`render()` 无待渲染标志时返回空帧且**总会清掉标志**，否则轮询方会永远重跑同一次比较。
+
+### 46.3 输入不再被丢掉
+
+`InputQueue` 排队而非丢弃（组件 crate 会来 drain）。`Resize` 顶掉队列里更早的
+`Resize`——只有最新几何能渲染，堆积会把 resize 风暴伪装成输入风暴。`stop` 清空队列。
+`Key` 补 `Tab`/`Home`/`End`/`PageUp`/`PageDown` 与 `is_navigation()`；
+`KeyEvent::is_cancel()` 把 Ctrl+C 定义在一处（此前内联写过，两个后端就此不一致）。
+
+### 46.4 焦点不能指向不存在的节点
+
+`set_focus(Some(unknown))` 被忽略；卸载被聚焦节点会释放焦点；新增 `focused()`。
+
+### 46.5 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test`（kimi-ui-core） | 46 passed / 0 failed |
+| `cargo clippy --all-targets -- -D warnings` | exit 0 |
+| `cargo fmt --check` | exit 0（整 crate） |
+| `cargo check --all-targets --features cli`（kimi-agent 消费方） | exit 0 |
+| `check:architecture` | `kimi-ui-core` 指纹已同步（`06809f018d854ac3` → `7e845496a1886351`）；剩余 3 条为既有未提交删除，未 `--update` |
+
+新增判定测试：`mounting_under_an_unknown_parent_is_refused`、
+`unmount_detaches_the_whole_subtree`、`walk_is_depth_first_in_child_order`、
+`scrollback_emits_only_the_new_tail`、`alt_screen_repaints_the_whole_frame`、
+`forced_render_re_emits_the_whole_frame`、
+`tail_after_reports_a_full_frame_when_an_earlier_line_changed`、
+`focus_is_cleared_when_its_node_goes_away`、
+`input_is_queued_and_a_resize_supersedes_an_earlier_one`、
+`stop_clears_queued_input`、`cancel_chord_is_defined_once`、
+`headless_shares_the_backend_tree_invariants`。
+
+### 46.6 明确不做
+
+组件模型（测量、样式、逐节点输入处理）不在本批：那是上一层 crate，`ComponentNode`
+是它生长出来的接缝。本批只保证**接缝这一侧是完整的**——挂载、卸载、焦点、输入排队、
+渲染调度、两种产品渲染策略在这里行为一致，`headless` 不用终端就能证明。
+
+## 47. 2026-11-04 组件模型：布局/样式层 + 节点按宽度成排
+
+§46 把渲染后端补成了完整基层，但它能画的仍然只是「一个节点一行未换行的字符串」——
+`ComponentNode` 只有 `text`。组件模型（设计 §1.3 说「组件树是纯数据 + 纯渲染函数，
+输入尺寸与主题，输出行序列」）缺的正是那个「输入尺寸」：没有测量与换行，
+后端无法知道一条消息占几行，滚动、分页、resize 全都无从谈起。
+
+本批补上这一层，并把它接进后端，使「节点 → 排好的行」这条链路真正成立。
+
+### 47.1 新增 `layout` 模块：测量 + 换行 + 样式
+
+`packages/kimi-ui-core/src/layout.rs`（13 测），零终端依赖：
+
+- **`char_width`**：宽字符 2 格（CJK、全角、emoji），零宽 0 格（组合记号、
+  变体选择符、ZWJ、BOM、零宽空格、emoji 肤色修饰符），其余 1 格。控制字符 0 格。
+  表是保守的、按实际转录里出现的范围列，无法分类的按 1 格处理——终端的默认行为。
+  制表符不算宽度，由 `expand_tabs` 先展开。
+- **`expand_tabs`**：按制表位展开（默认 4），换行重置列。终端对 tab stop 各执一词，
+  且带样式的 span 里出现 tab 会破坏宽度算术，所以在测量之前展开。
+- **`wrap`**：空串得到**一行空行**而不是零行（没有文字的消息仍占一行）；硬换行分行；
+  空白是换行点且在断处丢弃（行不以触发换行的空白开头）；超宽 token 硬断
+  （40 列的终端里 60 列的 URL 必须有去处）；每行右侧 trim；`max_width == 0` 按 1 处理
+  （零宽行无法推进，死循环是更坏的失败）。
+- **CJK 按字断行**：`tokenize` 在宽字符之间也切分，因为中日文没有空格，
+  不切的话整个词会被硬断。
+- **`Style` / `Color` / `Attributes`**：16 色 + 24 位 RGB，属性是集合（粗体+斜体+下划线
+  要发多条 SGR）。`is_plain()` 让后端对纯文本跳过发码。
+- **`Block`**：行 + 布局宽度。`needs_relayout(w)` 区分「已按当前终端排好」与
+  「按旧宽度排的，必须重排」——resize 时复用旧行会静默截断。
+
+### 47.2 `ComponentNode` 成为组件而非字符串
+
+`ComponentNode` 现在带 `style`、`visible`、以及按宽度缓存的 `laid_out` 行。
+`layout(width)` 只在宽度变化时重排（`laid_out_width` 判据），这正是 resize 正确性的
+来源：旧行是按旧宽度算的，复用就是画终端装不下的行。
+
+`visible: false` 的节点**不产生行但保留身份**——收起一个块不必卸载它。
+
+### 47.3 后端接上布局
+
+- `NodeArena::layout(width)` 按绘制顺序把所有可见节点排成 `Row`。
+- `NodeArena::styled_rows(width)` 把相邻同样式的行合并成 `StyledRow` 游程，
+  后端一次发一个 SGR 跨度而不是每行一个。
+- `BackendState::layout_frame(width)` 做「排 + 出帧」；`DE​FAULT_PAINT_WIDTH = 80`
+  是还没有 resize 时的默认宽度（headless/测试里先画一次不必先造一个 resize 事件）。
+- `RenderBackend::frame()` 保持只读（报告上一次布局结果），重排发生在 `render()`——
+  trait 的只读方法不能偷偷改节点缓存。
+
+### 47.4 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test`（kimi-ui-core） | **64 passed / 0 failed** |
+| `cargo clippy --all-targets -- -D warnings` | exit 0 |
+| `cargo fmt --check` | exit 0 |
+| `cargo check --all-targets --features cli`（kimi-agent 消费方） | exit 0 |
+| 其余 7 条 JS 门禁 | 全 exit 0 |
+| `check:architecture` | `kimi-ui-core` 指纹已同步（`7e845496a1886351` → `e05a8a68fbf179dd`），剩余 3 条为既有未提交删除 |
+
+新增判定测试：宽度与零宽字符（7 例）、制表符展开、空串一行、词边界换行与断处丢空白、
+超长 token 硬断不溢出、硬换行保留空行、CRLF 不留回车、CJK 按字断行、零宽限制按 1 处理、
+样式传播到每行、`Block::needs_relayout`、`is_plain` 判别；
+以及接进后端后的：节点按视口宽度成排、resize 重排而非复用旧行、不可见节点不绘制但保留、
+同样式行合并成游程、未 resize 时用默认宽度。
+
+**变异验证**：① 把 `layout()` 的宽度判据改成「只排一次」，`resize_relayouts_instead_of_reusing_old_rows`
+失败；② 把 `char_width` 改成「一律 1 格」，`wide_and_zero_width_characters_are_measured_separately`
+失败。两处都确认测试能红。
+
+### 47.5 明确不做
+
+`ratatui` / `crossterm` 未引入：它们在本机 cargo 缓存里没有（`ratatui` 可从 rsproxy 解析到
+v0.30.2，但 `packages/kimi-agent/Cargo.toml` 是与引擎共享的文件，不当为 UI 依赖改动它）。
+组件层需要的测量与换行已经在这层自给自足，`kimi-ui-components` 建 workspace 时再引
+（设计 §3 的目录草图里它本来就依赖 `kimi-ui-core + ratatui`）。
+
+## 48. 2026-11-04 组件模型剩余两块：输入路由 + 内容结构
+
+§47 让节点能按宽度排版，但组件模型还缺两半：**输入到不了组件**（`dispatch_input`
+只排队，没有任何路由）、**内容没有结构**（`EntryContent` 只有 `text`，`EntryKind`
+在 id 里却被内容丢掉）。本批补完这两块，都不引外部 crate。
+
+### 48.1 输入路由：焦点 → 处理器 → 回退到宿主
+
+- `ComponentNode` 新增 `focusable` 与 `on_input`（`InputHandler` 别名）。
+  `on_input` 隐含 `focusable`——一个永远够不到的处理器是个等人来报的 bug。
+- `InputOutcome { Handled, Ignored }`：处理器说自己消费了什么。
+- **`set_focus` 拒绝非 focusable 节点**：标签页不能吞掉编辑器的按键。
+- **`dispatch_input` 真正路由**：resize 更新几何并**始终**入队（几何不是组件能消费的东西，
+  宿主据此调度重排）；其余事件先给聚焦节点的处理器，`Handled` 就终止，`Ignored`
+  或没有焦点则入队——**分发永不静默丢弃**。
+- 两个后端新增 `pending_input_len()` / `take_input()`，宿主可以取走队列。
+
+`ComponentNode` 的 `Debug/Clone/PartialEq/Eq/Default` 改为手写：闭包不可比较、
+不可 `Debug`。`PartialEq` 只比较**画出来的东西**（text/style/visible/focusable/laid_out），
+`Clone` **丢弃处理器**——克隆出来的是新节点，共享闭包会让两个节点答同一份捕获状态。
+
+### 48.2 内容结构：kind 与归属随内容走
+
+`EntryContent` 新增 `kind: EntryKind` 与 `agent_id: Option<String>`：
+
+- 渲染器拿到的是**投影**，`kind` 若只能从 `EntryId` 回读，每个消费者都要重新解析 id，
+  而其中一个迟早把工具调用画成段落。
+- `agent_id` 让子代理条目可分组。`is_subagent()` 以 `!= "main"` 判定。
+- **`EntryStore::apply` 校验一致性**：payload 的 `kind` 与 id 的不符时记
+  `ContractViolation::KindMismatch`（仍应用，id 才是身份），
+  否则渲染器会看到「一种身份下的另一种东西」而看起来只是样式问题。
+
+### 48.3 投影层兑现它
+
+`packages/kimi-agent/src/events/project.rs` 的 6 处构造改用 `EntryContent::new(..)`：
+用户 prompt → `UserMsg`，工具开始/结果/错误 → `ToolCall`，
+流式条目创建与 `buffer()` 辅助用 `id.kind`——投影层本来就知道自己在造什么，
+此前只是没说出来。
+
+### 48.4 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test`（kimi-ui-core） | **70 passed / 0 failed** |
+| `cargo test --lib events::`（kimi-agent 投影层） | **29 passed / 0 failed** |
+| `cargo clippy --all-targets -- -D warnings` / `--features cli` | 两 crate 均 exit 0 |
+| `cargo fmt --check` | 两 crate 均 exit 0 |
+| `cargo check --all-targets --features cli` | exit 0 |
+| 其余 8 条 JS 门禁 | 全 exit 0 |
+| `check:architecture` | `kimi-ui-core` 指纹已同步（`e05a8a68fbf179dd` → `915fb5333d875fb1`），剩余 3 条为既有未提交删除 |
+
+新增判定测试：`focused_handler_consumes_and_ignored_events_fall_through`
+（消费的不入队、忽略的落到队列）、`unfocused_backend_queues_every_event`、
+`resize_reaches_the_host_even_with_a_focused_handler`、
+`focus_is_cleared_when_its_node_goes_away`（补「非 focusable 被拒」）、
+`content_carries_the_kind_and_the_agent`、
+`a_kind_mismatch_is_recorded_not_silently_applied`、
+`only_a_non_main_agent_id_counts_as_a_subagent_entry`。
+
+**变异验证**：① 让 `Handled` 也入队 →
+`focused_handler_consumes_and_ignored_events_fall_through` 失败；② 关掉 kind 校验 →
+`a_kind_mismatch_is_recorded_not_silently_applied` 失败。两处都确认能红。
+
+### 48.5 明确不做
+
+`ratatui` / `crossterm` 仍未引入，原因同 §47.5：`packages/kimi-agent/Cargo.toml`
+是与引擎共享的文件，不为 UI 依赖去改它。逐节点鼠标命中测试、多行编辑器按键语义、
+markdown AST 都留给组件 crate。
+
+## 49. 2026-11-04 垂直切片打通：录制事件流 → 投影 → 后端 → 排版输出
+
+设计 §4 的第一个垂直切片列出了「可测试」的验收项：headless 后端 + 录制事件流回放，
+断言 EntryOp 序列与最终渲染文本。此前这条链只在两段各自成立——投影器在引擎侧、
+后端在契约层，中间从未一起跑过。本批把它接通，并在接通的过程中找出两个真实缺陷。
+
+### 49.1 新增 `packages/kimi-agent/tests/ui_slice_integration.rs`（4 测）
+
+用**录制 JSON**（引擎实际的线上形状）驱动整条链，而不是直接构造枚举：
+直接构造会跳过反序列化，而产品依赖的正是那一步。
+
+链路：`EngineEvent::from_json` → `Projector::project` → `EntryOp` →
+`HeadlessBackend::apply_all` → `paint(width)` → 终端行。
+
+覆盖：
+- `a_recorded_turn_projects_to_the_expected_op_sequence`：一轮（prompt → 流式正文 →
+  工具调用 → 结束）产出 user / assistant / tool 三个条目，且**零契约违例**；
+- `the_painted_rows_are_what_a_terminal_would_show`：gutter 前缀、流式片段拼回整句、
+  工具结果出现在调用之下；
+- `narrowing_the_terminal_wraps_the_same_content`：窄终端换行而非截断，无行超宽，
+  内容不丢；
+- `a_cancelled_turn_keeps_the_partial_output`：`turn.ended(reason=cancelled)` 后
+  已流出的部分仍在屏上。
+
+### 49.2 `HeadlessBackend::paint(width)`：后端终于走排版层
+
+`snapshot()` 逐条原样输出（投影测试断言的正是它），`paint()` 才是「用户会看到什么」：
+每条目按 `width` 排版，带 kind gutter（`>|` 用户、` |` 正文、`~|` 思考、`$|` 工具、
+`*|` 状态、`=|` banner、`-|` 压缩边界），思考/状态/banner 用 dim 样式。
+gutter 占列，正文在剩余宽度里换行，续行按 gutter 宽度缩进。
+
+### 49.3 接通时找出的两个真实缺陷
+
+**① `tool.call.completed` 的结果从未进入 UI。** 投影器对该事件只做 `flush` + `Seal`，
+`result` 字段被 `..` 忽略。用户能看到「Read 跑过」，永远看不到它读到了什么。
+`ToolNative` 这条路径是折叠结果的，`ToolCallCompleted` 却没有——同一件事两条路径行为不一致。
+补上折叠，并新增 `tool_result_text()` 处理线上三种形状（`content`/`text`/`output` 字符串、
+`content` 文本块数组）；无可读文本时不渲染，而不是把 JSON envelope 甩给用户。
+
+**② 事件形状的坑：`StreamKind` 自带 `stream` 标签。** `StreamSegment.stream` 字段本身是
+`#[serde(tag = "stream")]` 的枚举，所以线上形状是 `"stream":{"stream":"assistant"}`。
+写成 `"stream":"assistant"` 会反序列化失败并静默落到 `EngineEvent::Custom` ——
+**测试里那个「不得落到 Custom」的断言正是为此存在的**，它当场抓住了我自己的 fixture 错误。
+这也说明该断言不是装饰：一个静默变成 `Custom` 的事件在投影器里走 `_ => Vec::new()`，
+全程无错、无事发生。
+
+### 49.4 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --test ui_slice_integration` | **4 passed / 0 failed** |
+| `cargo test --lib events::` | **29 passed / 0 failed** |
+| `cargo test`（kimi-ui-core） | **70 passed / 0 failed** |
+| `cargo clippy --all-targets --features cli -- -D warnings` | exit 0 |
+| `cargo fmt --check` | exit 0 |
+| 其余 9 条 JS 门禁 | 全 exit 0 |
+| `check:architecture` | `kimi-ui-core` 指纹已同步（`915fb5333d875fb1` → `03aafe28021225da`），剩余 3 条为既有未提交删除 |
+
+**变异验证**：① 把结果折叠改回「只 seal」→ `the_painted_rows_are_what_a_terminal_would_show`
+失败；② 让 `paint` 忽略宽度 → `narrowing_the_terminal_wraps_the_same_content` 失败。
+
+### 49.5 明确不做
+
+真实终端后端（`ratatui`/`crossterm`）仍未引入，理由同 §47.5/§48.5。
+切片的「启动 → 建立引擎会话 → Esc 中断」这几步需要 napi 句柄与终端事件循环，
+属于第 0 批里**不可测试**的那一半，留给 `kimi-tui-rs` workspace。
+本批完成的是它**可测试**的那一半，且是在真实事件形状上完成的。
+
+## 50. 2026-11-04 事件覆盖机制：23 类事件归类 + 投影缺口补齐
+
+对"还缺什么模块"做了一次系统清点（每个模块的 pub fn / 测试数、
+设计 §1.1 事件契约 vs 两个投影器的 match 臂、未处理事件的落点），
+结论是真正缺的不是测试，而是**一个机制**：没有任何东西回答
+"引擎发出的这个事件，UI 怎么处理"。
+
+### 50.1 盘点发现的三个事实
+
+1. **引擎发出 23 类事件；`events/project.rs` 处理 12 类；`server/transcript/project.rs`
+   处理 17 类。** 两者的并集仍有一批事件落在 `_ => Vec::new()` 的兜底臂里——
+   静默、无错、与"没有东西可渲染"不可区分。
+2. **`TRANSPORT_ONLY_EVENTS` 只有 1 条**（`llm.step.end`），设计 §8.5 写明
+   "随行为切片扩展"，但从未扩过。这份权威清单本身是空的。
+3. **同一语义写了两份并已漂移**：`LlmDelta` 的 think/reasoning 字段四种别名只在
+   `EntryOp` 投影器里展开；`tool.call.completed` 的结果，transcript 侧原样进
+   `frame.output`，`EntryOp` 侧上一批之前连折都不折（§49 修的那个缺陷正是这种漂移的实证）。
+   两个投影器**目标契约不同**（`TranscriptOperation` 服务 REST/WS，`EntryOp` 服务
+   Rust TUI），合并是错的；但"事件 → 语义"的**分类**必须是单一的。
+
+### 50.2 机制：事件分类表 + 覆盖门禁
+
+**`packages/kimi-ui-core/src/event_class.rs`**（+4 测）：
+
+- `TRANSPORT_ONLY_EVENTS` 从 1 条补到 9 条（`llm.step.begin/end`、`tool.progress`、
+  `event.config.changed`、`event.session.*` ×2、`goal.budget.limit_reached`、
+  `cron.fired`、`session.meta.updated`），每条注明为什么不渲染；
+- 新增 `PROJECTED_EVENTS`（14 条）与 `Projection::{Entry, TransportOnly, Unaccounted}`
+  与 `Projection::of(name)`——"这个事件 UI 怎么处理"从此只有一个答案；
+- `Unaccounted` 不是第三类，是**必须被消灭的状态**：它的语义就是"没人决定过"。
+
+**`scripts/check-event-coverage.mjs`**（新门禁，注册为 `bun run check:event-coverage`，
+进入 `check:all`）双向核对：引擎 `EngineEvent` 的 serde rename 与两张表比对——
+未归类即 `UNCLASSIFIED`，表里有而引擎不再发即 `FICTION`，两表重叠即 `OVERLAP`。
+变异验证：删掉一行归类，报 `UNCLASSIFIED engine emits 'subagent.failed'`，exit 1。
+
+### 50.3 门禁逼出的投影缺口：subagent 三事件
+
+分类表把它们定为 Entry（成员有自己的卡片），但 `EntryOp` 投影器从未处理——
+正是门禁要抓的那类"没人决定过"。补齐：
+
+- `SubagentSpawned` 创建成员卡片（`EntryKind::Status`，gutter `*|`），
+  卡片 identity 终身不变（`subagents: HashMap<String, (EntryId, String)>`，
+  名字随卡片保存——完成事件不带名字，不存的话结算行会丢掉"是谁"）；
+- `SubagentCompleted` / `SubagentFailed` **结算同一张卡片**（Upsert + Seal），
+  而不是叠一条新条目；生命周期三事件在屏上只有一行；
+- 没有先 spawn 的结算事件被丢弃——没有卡片的结果没有上下文，
+  与"没有 `tool.call.started` 的工具结果"同一条折叠纪律。
+
+**变异验证**：完成结算丢掉名字 → `a_subagent_gets_its_own_settled_card` 失败
+（测试先抓到了这个真实缺陷，才有了这次修正）。
+
+### 50.4 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test`（kimi-ui-core） | **71 passed / 0 failed** |
+| `cargo test --lib events::` | 29 passed / 0 failed |
+| `cargo test --test ui_slice_integration` | **6 passed / 0 failed**（+2 subagent） |
+| `cargo clippy --all-targets --features cli -- -D warnings` | exit 0 |
+| `cargo fmt --check` | exit 0 |
+| `check:event-coverage`（新） | 0（23 事件：14 Entry / 9 TransportOnly） |
+| 其余 9 条 JS 门禁 | 全 exit 0 |
+| `check:architecture` | `kimi-ui-core` 指纹已同步（`03aafe28021225da` → `3a8f4e83afdd0663`），剩余 3 条为既有未提交删除 |
+
+### 50.5 留下的明确缺口（下批候选）
+
+- `LlmDelta` 的 think 别名展开仍只在 `EntryOp` 侧——transcript 侧不处理 `llm.delta`
+  是历史形状（WS 客户端读 `assistant.delta`），但两个投影器对**同一事件**的覆盖差异
+  现在有了门禁兜底，不会再无声扩大。
+- `event_class.rs` 里的 `ENGINE_EVENTS` 清单与引擎 `types.rs` 的一致性由
+  `check:event-coverage` 保证（crate 内测试防回归，crate 外门禁防漂移）。
+
+## 51. 2026-11-04 结构缺口清点收尾批：别名单源 + 双投影器对照 + engine/ 删除 + B-16 基准
+
+按"先清点、再按机制分批一次补完"的要求推进 §5 阶段 3 剩余四项。四项全部处理完，
+其中一项（B-13 空闲回收）确认需要裁决，未动手（见 51.5）。
+
+### 51.1 第 1 项：`LlmDelta` think 别名单源化
+
+新增 `kimi_ui_core::classify_delta_part` / `delta_part_text` / `DeltaPart`：provider 原始
+delta 部件（`llm.delta` 的 `{type, text|think|thinking|reasoning|reasoning_content}` 形状）
+归为 Assistant / Thinking / Ignored 的**唯一答案**。要点：
+
+- `type: "think"` 且载荷字段是 `text` 的形状按 **type** 判 Thinking（有 provider 这么发）；
+- 四个别名的检查顺序固化在共享函数里，`events/project.rs` 的手写别名链删除，改为调用它；
+- 9 个判定测试（含"A thinking part whose payload field is `text`: type wins"这种容易写反的形状）。
+
+**B 侧不处理 `llm.delta` 经核实为既有设计并双登记**：WS 客户端渲染的是类型化 delta
+（`assistant.delta` / `stream.segment`，见 `session-event-handler.ts:28`），原始传输形状
+只到达 EntryOp 投影器。两侧投影器头部各记了完整对照注记（见 51.2）。
+
+### 51.2 第 2 项：两投影器 12 类共同事件的系统性对照
+
+逐事件对照"结果如何转文本、流式片段如何拼接、错误如何呈现"。结论：
+
+- **1 处真实漂移，已修**：`tool.native` 的 `is_error`——transcript 侧据它置
+  `frame.state = Error`，EntryOp 侧此前完全丢弃该信号，失败的原生工具调用在条目流里
+  与成功的不可区分。已修：`error: {content}` 前缀（`EntryOp` 无错误臂，文本是唯一载体），
+  并新增切片测试 `a_failed_native_tool_call_says_so` 钉死。
+- **3 处确认为契约差异，双登记**（两侧文件头 + 本节）：① `llm.delta` 只在 A 侧（上）；
+  ② `tool.call.*` 的 result——B 侧保结构（`frame.output` 为 JSON），A 侧提取显示文本
+  （`EntryOp` body 是字符串），提取规则由切片测试钉住；③ 无 started 的 completion——
+  B 侧**发明** frame（快照追赶可能先见 completion），A 侧丢弃（引擎乱序不许变成条目），
+  不同载体、不同失败姿态。
+- 其余 8 类（TurnStarted/Ended、Assistant/ThinkingDelta、ToolCallStarted/Delta、
+  StreamSegment、LlmStepEnd）语义一致，无收敛项。
+
+### 51.3 第 3 项：`engine/` 模块删除
+
+清点核实 `KimiEngine` facade 无生产调用点（仅 lib.rs 内部 + 测试），而
+`EngineConfig.max_tokens_limit`（102_400）是**死值**：真正的引擎默认在
+`compaction::DEFAULT_MAX_CONTEXT_TOKENS`（131_072），生产路径传 `None` 时走它；
+102_400 只能经 facade 显式传入，与真默认相矛盾。动作：
+
+- `KimiEngine` 删 `engine_config` 字段 / `with_engine_config` / 对应测试；
+  `run_once` 的 `max_context_tokens` 改为 `None`（走 compaction 默认，注释写明缘由）；
+- `src/engine/`（42 行）整个删除，`lib.rs` 的 `pub mod engine` 删除；
+- `check:rust-module-deps` 基线删 `lib -> engine` 边（264 → 263）；
+- "自述废弃却仍被使用"的模块不再存在。
+
+### 51.4 第 4 项：B-16 恢复基准落地
+
+新增 `tests/resume_bench.rs`（`--ignored` 基准，模式对齐 turn_bench）：
+
+- **场景**：500 / 2 000 / 8 000 轮（每轮 user+assistant，每 5 轮一对工具行）
+  + 半途压缩场景（4 000 轮后打 compaction 边界）；
+- **实测**（release，本机）：
+
+  | 规模 | append | fold | messages |
+  |---|---|---|---|
+  | 500 turns | 15.1ms | 1.4ms | 1 000 |
+  | 2 000 turns | 62.6ms | 6.1ms | 4 000 |
+  | 8 000 turns | 106.6ms | **21.4ms** | 16 000 |
+  | compacted 4 000 | 104.6ms | **734µs** | 1 |
+
+- **结论**：16k 条消息的冷投影 21.4ms——"恢复慢"在这个引擎上不成立于当前规模，
+  `256ce61f0c` 的移植没有可回收的收益点；压缩边界把 fold 从 21ms 量级降到 <1ms，
+  证明杠杆（若有）在 compaction 频率而非 fold 算法。**这条 tracked 的"先建基准"前置已满足，
+  是否移植升级为有数据可依的裁决。**
+- 基准内断言消息数守恒（fold 少返回消息会显得"更快"，断言防住这种假好数字）。
+- 顺手修掉一个坑：原 `#![cfg(feature = "cli")]` 门在无 feature 的 release 下把整个文件
+  编译成 0 tests（`--list` 两次报 0），已删（turn_bench 也没有），并把教训写进文件头。
+
+### 51.5 需要裁决、未动手
+
+**B-13 空闲回收**：回收语义必须先定——在途 turn 如何处理（等待/取消/拒绝回收）、
+MCP 连接是否随会话卸载、回收后 `session_resume` 的冷重建代价。三个选项：
+(a) 维持现状（无回收，进程内会话状态只增），记 not-applicable 待真实内存压力再立项；
+(b) 只做**事件 lane 已有的 LRU**（hub.rs 已实现）之外的会话状态 LRU，回收时在途 turn 存在则跳过；
+(c) 全语义对齐上游 #4284（可配超时 + 主动取消在途）。不代裁。
+
+B-14（关闭驱逐）/ B-15（transcript 重建对齐）本轮未到——B-15 需要先对上游 `67325c1b25`
+逐半核对（fork 的 `67325c1b25` note 已含判定依据），属独立批次。
+
+### 51.6 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --lib`（kimi-agent 全量） | **3 619 passed / 0 failed**（engine/ 删除后） |
+| `cargo test --lib events::` | 29 passed |
+| `cargo test --test ui_slice_integration` | **7 passed**（+1 is_error） |
+| `cargo test --test resume_bench --release -- --ignored` | **2 passed**，数字见表 |
+| `cargo clippy --all-targets --features cli -- -D warnings`（两 crate） | 0 |
+| `cargo fmt --check`（两 crate） | 0 |
+| `check:rust-module-deps` | 0（264 → 263） |
+| `check:event-coverage` 等 9 条 JS 门禁 | 全 0 |
+| `check:architecture` | `kimi-ui-core` 指纹同步（`3a8f4e83afdd0663` → `1e3536ebe57d94d5`）；剩余 3 条为既有未提交删除（现报 9 个缺失文件：7 个 + engine/ 2 个，同一成因） |
+
+### 51.7 关闭的"剩余项"
+
+- §50.5 两条候选：LlmDelta 别名单源（本批 51.1）与覆盖差异兜底（`check:event-coverage`
+  已在 §50 建立，本批补齐解释层的单源与登记）——**整体关闭**；
+- §4 #16（usage 语义类）之外的 §3 B-16 tracked 条目：前置"先建基准"完成，条目转为
+  有数据裁决项；
+- `engine/` 残留模块：**整体关闭**（不是搬常量，是删死值）。
+- 少开的批次：B-16 若按旧路径会拆"建基准"与"评估移植"两批——基准数字已足以合并评估。
+
+## 52. 2026-11-04 阶段 3 收口复核：B-15 判实关闭、台账对齐、B-13 裁决项成文
+
+按"全面推进收尾"要求，对 §5 阶段 3 五项逐一复核到"要么闭环、要么是明确的裁决项"。
+本批没有新代码——复核发现的事实是：**该闭环的早已闭环，缺的是台账没有跟上**。
+
+### 52.1 复核结论（逐项）
+
+| 项 | 复核结果 | 动作 |
+|---|---|---|
+| A1 bash 解析 | 已闭环（2026-11-02）；dangerous_command 精确化留单独批次 | 无 |
+| B-27 fs watch | 硬阻塞：`notify` 不在 Cargo.lock 也不在 cargo 缓存，离线不可得 | 无法开工（环境限制，非设计选择） |
+| A8 (a) 制度化 | 已闭环（本会话前批）；(b) 单源待裁决 | 无 |
+| B-14 关闭驱逐 | **已 ported（2026-11-03）**——`EventHub.evict_lane` 接进 archive + 两处 delete，判定测试在 | 台账 #14 行从「台账待核」改为已落地（该批落地时未回填本表） |
+| B-15 transcript 重建 | **整体闭环**：A-1~A-5 + 诊断半 + `build_items` 轴差残余（`cold_items`/`realign_wire_turn_ids`/`rename_nested_ids`）全部落地且判定测试在；复核时唯一红着的 trust 测试现已绿（实现由并行批次接上） | 台账 #15 行关闭 |
+| B-16 恢复基准 | 已落地（本会话前批），21.4ms / 16k messages | §5 计划条目回填数字与结论 |
+| B-13 空闲回收 | **待裁决**（唯一真开放项） | 台账 #13 行写明三选项 (a)(b)(c)，指向 ROADMAP §51.5 |
+
+### 52.2 复核中核实的三个事实（回源验证）
+
+1. **B-14 的 ported 判定有据**：allowlist `5710c5496a` note 记录 `hub.rs:352` 的
+   `evict_lane` 与三个接线点（route_sessions.rs:537、:583、route_session_ops.rs:528），
+   判定测试 `evict_lane_drops_the_lane_and_restarts_its_numbering`。台账行没跟上，
+   是落地批只写了 allowlist 没回填本表——修正为已落地并注明成因。
+2. **B-15 的"已知残余"已闭环**：note 尾部 `残余已闭环（2026-11-04）`——
+   `turn.prompt.turnId` 编号轴裁决落地，`cold_items`（transcript.rs:252-285）+
+   `realign_wire_turn_ids`（:291-339，含 upstream keptOrdinals 防撞守卫）+
+   `rename_nested_ids`（:344-373，对应上游 renameTurnStep），调用点全切 5 处，
+   `dual_path_fixture` 双路径三测比较 turnId/ordinal/stepId/frameId。
+3. **note 里挂着的红测试已绿**：`workspace_require_trust_config_controls_effective_trust`
+   曾因 `require_trust` 无实现消费方而红（另一会话在途半成品），现 `config/mod.rs:1538`
+   `resolve_workspace_require_trust` 已在 `route_workspaces.rs:486` 被消费，
+   单测通过（28.5s 实跑）。
+
+### 52.3 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --lib`（全量） | **3 619 passed / 0 failed** |
+| `cargo fmt --check` / `cargo clippy --all-targets --features cli -- -D warnings` | 0 / 0 |
+| 11 条 JS 门禁（含 event-coverage、config-registry） | 全 0 |
+| `check:patch-budget` | 0 行补丁 / 0.0000% |
+| `check:architecture` | 3 条既有未提交删除（不变，未 `--update`） |
+
+### 52.4 本批关闭的"剩余项"
+
+- 台账 #14「台账待核」→ 已落地（补回填）；
+- 台账 #15 → **整体关闭**（复核证实闭环，回填残余闭环记录）；
+- §5 计划条目 4 的前两半划掉、条目 5 回填数据——**阶段 3 从「五项开放」变为
+  「一项硬阻塞（B-27/notify）+ 一项待裁决（B-13）」**。
+- 少开的批次：B-15 若按 note 里"下一批起点"的说法会单开诊断半一批——复核证实
+  2026-11-03 已顺手落地，省一批。
+
+### 52.5 待裁决（汇总，全部已写成可拍板的形式）
+
+1. **B-13 空闲回收**（台账 #13 / ROADMAP §51.5）：(a) 维持现状 not-applicable /
+   (b) 会话状态 LRU（在途 turn 跳过）/ (c) 全对齐 #4284。
+2. **B-16 是否移植** `256ce61f0c`：基准数据 21.4ms/16k——建议 not-applicable，
+   待你确认。
+3. 既有政策项不变：多根工作区、MCP 自动重连、Plan 模式协议、prompt 成批改写、
+   NotifyUser 两半、prompt cache 遥测、远程环境 vs kaos、A8 (b)。
+
+**阶段 3 至此只剩 B-27 一项因环境阻塞开放。** 若 B-13/B-16 两项裁决落定，
+阶段 3 即全部收口；下一批自然转向阶段 0 的政策裁决清单，或按你的指示继续。
+
+## 53. 2026-11-04 阶段 0 裁决清单：七项逐项成文（待你拍板）
+
+阶段 3 收口后，推进的唯一路径是阶段 0 的七项政策裁决。本批把每一项从一行表
+扩成**事实 + 选项 + 影响 + 建议**的形式——全部回源核实（上游以
+`D:\kimi\kimi-code` @ `a2afdbc7d` 为准），不代裁。拍板后每项即是一个可执行批次。
+
+### 53.1 MCP 自动重连（B-41，allowlist `4be3f0b741`）
+
+- **事实**：AGENTS.md 现行政策"刻意无重连"，引擎只有显式 `:reconnect`/`:restart`。
+  上游 #4283（`D:\kimi\kimi-code` 提交 `4be3f0b741`）新增：per-server 连接串行化、
+  瞬态启动/会话失败按 live 配置退避重试、失败 episode 持久化并跨客户端契约暴露重试
+  计时（.changeset/mcp-reconnect-retry.md）。
+- **选项**：(a) 维持现状，记 not-applicable——重连策略是产品行为，不是缺口；
+  (b) 移植全量（含跨客户端契约面）；
+  (c) 折中：仅引擎侧退避重试，不暴露计时契约（缩小批次，但留一条与上游的登记偏差）。
+- **影响面**：(b) 动 mcp/manager.rs + protocol 契约 + WS 事件；(c) 只动 mcp/manager.rs。
+- **建议**：按 AGENTS.md 既有政策选 (a)，除非线上确有 MCP 瞬断的用户报告。
+
+### 53.2 远程执行环境 vs kaos 处置（B-42、A5，allowlist `5f3ab5fac8`）
+
+- **事实**：上游 #4062 phase-1 落在 `agent-core-v2/src/remote/**` + node-sdk
+  （exec-server.ts / ssh-askpass.ts / config/schema.ts），**不消费 packages/kaos**。
+  fork 的 packages/kaos（10k 行，local/ssh/login-shell）在 node-sdk 的
+  kimi-harness/rpc/types 仍是活依赖（非死代码——纠正台账 A5 的"死代码"表述）。
+- **选项**：(a) 都不要，两处记 not-applicable；(b) 移植远程环境（phase-1 起步），
+  kaos 维持现状；(c) 先退役 kaos、远程环境另立项——注意退役 kaos 需先拆 node-sdk
+  三个文件的依赖，是独立前置批次。
+- **建议**：(a)。远程环境是新产品面（SSH/Docker 执行目标），无用户输入佐证需求；
+  kaos 现状有消费方、不构成债务。
+
+### 53.3 Plan 模式协议（B-25，allowlist `0325b755db`）
+
+- **事实**：上游 #4247 删除 EnterPlanMode 工具（含默认审批与遥测事件）、coder/Tower
+  worker profile 摘除两个 plan 工具、每种权限模式下 ExitPlanMode 都须用户审阅、
+  计划无法展示时 plan 模式保持激活。fork 保留 EnterPlanMode 自动进入。
+- **选项**：(a) 跟上游删（动 tools/plan_mode.rs、permission 默认审批、profile、
+  ACP `session/set_mode` 语义）；(b) 保留现协议，记 not-applicable（模型可自动进 plan
+  是 fork 有意保留）。
+- **影响面**：(a) 是工具/协议面改动，ACP 与 TUI 两端都有消费。
+- **建议**：(b)。fork 的 plan 自动进入已被用户使用；上游语义变更属产品方向，
+  无 fork 侧缺陷。
+
+### 53.4 prompt 成批改写（B-36，2.4.0 sync `cca9bae3d7` + `39d149eb64` + `3154ec41f0`）
+
+- **事实**：fork system.md 133 行 11 个段落，上游 53 行 3 个段落——fork 有 8 个
+  独有段（# Untrusted content、# Search、# Skills、# Coding、# Risky actions 等）。
+  上游三笔改动的实质增量：① `# Delivering work` 段"按请求类型定交付物 +
+  诊断先查因 + 收尾清理测试产物"（#4450）；② "验证只覆盖本次改动、不重复已过检查"
+  （#4451）；③ 2.4.0 sync 的工具描述改写（wait-for.md 等）。
+- **选项**：(a) 全盘对齐上游 53 行结构（删 8 个 fork 段）；(b) 逐段裁决：
+  把 ①② 两处**行为句**搬进 fork 对应段，fork 独有段保留；(c) 全部维持现状记 not-applicable。
+- **建议**：(b)。①② 是模型可感知的行为改进且与 fork 段落不冲突；8 个 fork 段是
+  本会话正在执行的守则来源（Untrusted content/Search/Skills 直接对应引擎能力），
+  删除反而回退。裁决点只剩：fork 独有段是否保留（是→b）。
+
+### 53.5 多根工作区（B-21，allowlist `093e8f46c4` 等 4 条）
+
+- **事实**：上游是多根注册表 + source folders 增删 REST + skill 根跨目录合并 +
+  fs 搜索/git status 覆盖全部 source folders。fork 的 `additional_dirs` 已进沙箱与
+  技能扫描的 extra_roots 之外的全部路径（toolset.rs:73、pipeline/mod.rs:126），
+  但存储（workspaces 表单 root）与 REST 面无多根概念。四条 delta 同属这一地基。
+- **选项**：(a) 不进 Rust，记 not-applicable（/add-dir 已覆盖单会话扩根场景）；
+  (b) 架构级立项：workspaces 表加 source folders + REST 增删 + 四条 delta 一次补完。
+- **影响面**：(b) 动 sqlite_store、route_workspaces、fs_routes、skills——最大单项。
+- **建议**：(a)。`/add-dir` 已覆盖单会话场景；多根是"一个工作区多个仓库"的产品面，
+  无 fork 侧用户输入。
+
+### 53.6 会话全文检索 / minidb 处置（A4）
+
+- **事实**：minidb 在 fork 的活消费是 TUI 侧文本构建 worker（minidb-worker.ts、
+  smoke.ts、native-assets 测试）——不是会话全文检索。引擎侧无检索需求（SQLite
+  会话库无 FTS 面）。上游无对应物（kap-server 也无会话全文搜索）。
+- **选项**：(a) minidb 按现状保留（TUI worker 用途），记"检索需求不存在"；
+  (b) 若要检索，需先立项（引擎 SQLite 加 FTS5 + REST 面），与上游无关。
+- **建议**：(a)。台账 A4 的"决定 minidb 处置"答案是**保留现状**——它有别的用途。
+
+### 53.7 prompt cache 遥测（B-40，allowlist `fed19d24f0`）
+
+- **事实**：上游探针是宿主遥测（`cacheProbeService.ts` 经 ITelemetryService.track2
+  上报 `prompt_cache_probe`），#4179 的增量是 fork 场景记录**父 agent 上一轮请求快照**
+  （tools/system-prompt 哈希 + input tokens + timing），用于区分"客户端前缀分叉"与
+  "服务端未命中"。fork 的引擎已有 `prompt_cache_key` 投递（llm/openai.rs:109-112），
+  无任何探针上报；fork 遥测通道（kimi-telemetry）在宿主侧，引擎到宿主已有
+  `host/telemetry` 缝。
+- **选项**：(a) 跳过（无用户可感知行为，纯遥测）；(b) 落宿主遥测：引擎在
+  `llm.step.end` 已带 timing，宿主补一条 cache-hit-rate 聚合即可覆盖大部分价值，
+  #4179 的前缀一致性部分需要引擎记录父请求快照（中等工作量）。
+- **建议**：(b) 的轻量半（宿主聚合 cache-hit-rate），#4179 前缀部分记 not-applicable
+  （fork 的 subagent 前缀继承已随 B-1 #6 落地，分叉风险低于上游当初引入它的场景）。
+
+### 53.8 汇总
+
+| 项 | 建议 | 你的裁决 |
+|---|---|---|
+| MCP 自动重连 | (a) not-applicable | ☐ |
+| 远程环境 / kaos | (a) 都不要 | ☐ |
+| Plan 模式协议 | (b) 保留现协议 | ☐ |
+| prompt 改写 | (b) 搬 ①② 行为句 | ☐ |
+| 多根工作区 | (a) not-applicable | ☐ |
+| minidb | (a) 保留现状 | ☐ |
+| prompt cache 遥测 | (b) 轻量半 | ☐ |
+
+七项中五项建议 not-applicable/保留，两项建议做（53.4 (b)、53.7 (b) 轻量半）。
+全部拍板后：五项变 allowlist verdict 更新 + 台账行关闭，两项各成一个执行批次。
+
+## 53.1 阶段 0 七项裁决全部落地（2026-11-04，同日执行）
+
+上一节（§53）把七项裁决成文。本节记录：**全部按建议案拍板并执行完毕，不再有待裁决项。**
+
+### 执行结果
+
+| 项 | 裁决 | 执行 |
+|---|---|---|
+| MCP 自动重连（B-41） | not-applicable | allowlist `4be3f0b741` verdict 改毕，AGENTS.md 政策保留，偏差登记 |
+| 远程环境 / kaos（B-42、A5） | not-applicable | `5f3ab5fac8` 改毕；kaos 维持现状（node-sdk 活依赖），台账 A5"死代码"表述纠正 |
+| Plan 模式协议（B-25） | not-applicable | `0325b755db` 改毕，保留现协议 |
+| **prompt 成批改写（B-36）** | **做（方案 b）** | 见下 53.1.1 |
+| 多根工作区（B-21） | not-applicable | `093e8f46c4` / `67045e5ec5` / `bfdfde1e20` / `3ed0e68f3b` 四条同记（前置不存在） |
+| minidb（A4） | 保留现状 | 活消费是 TUI worker，非检索 |
+| **prompt cache 遥测（B-40）** | **做（轻量半）** | 见下 53.1.2 |
+
+allowlist 现状：**not-applicable 31 / ported 53 / tracked 15**（99 条全 triaged）。
+
+### 53.1.1 prompt 行为句搬迁（B-36，`cca9bae3d7`/`39d149eb64`/`3154ec41f0` → ported）
+
+`packages/kimi-agent/src/prompt/system.md` 的 `# Delivering work` 段对齐上游
+`delivering-work.md` @ `a2afdbc7d`：
+
+- **#4450**：① 按请求类型定交付物（"can you add…"式的行动请求要把事做完；提问得到有依据的
+  回答；讨论先给建议与取舍；不动用户没让动的项目）；② 诊断先查因再命名（"熟悉的报错
+  可能另有原因"）；③ "确认了什么/哪些仍是假设"要分清，只修用户要求修的。
+- **#4451**：验证覆盖本次改动、"Once those checks pass, repeat or broaden them only
+  when…"；不修无关 bug/测试（最终消息里提）；收尾检查新建文件并清理本任务不需要的产物。
+- 8 个 fork 独有段（Untrusted content / Search / Skills / Coding / Risky actions 等）
+  按裁决保留。2.4.0 sync 其余工具描述改写（wait-for.md 等）未搬——fork 工具描述各自维护。
+
+`prompt::` 模块 40 测通过（无快照钉文本，纯文本改动）。
+
+### 53.1.2 宿主 cache-hit-rate 聚合（B-40 轻量半；`fed19d24f0` 前缀半 not-applicable）
+
+- **`CacheUsageAggregator`**（`packages/node-sdk/src/native/sdk-client/helpers.ts`）：
+  `add(step usage)` / `reset()`（turn.started）/ `settle()`（turn.ended 报一条
+  `llm_cache_usage`，含 `cache_hit_rate = cacheRead / totalInput`——与上游
+  `cacheProbe.ts:25` 同分母）。全输入为 0 时不产生记录（不是除零假速率）。
+- **接线**：`build-handle.ts` 的 `llm.step.end`（addressed 臂）`add`、`turn.started`
+  `reset`、`turn.ended` `settle` + `deps.telemetry.track`。引擎不动。
+- **6 个判定测试**（`test/cache-usage-aggregator.test.ts`）：跨步折叠与上游分母、
+  turn 隔离、settle 清空、无 usage 无记录、零输入不记录、空步骤不清已有聚合。
+
+### 53.1.3 验证
+
+| 检查 | 结果 |
+|---|---|
+| `bun run typecheck` | 0 errors |
+| `cargo test --lib prompt::` | 40 passed / 0 failed |
+| `cargo test --lib`（全量） | 3 619 passed / 0 failed |
+| `vitest cache-usage-aggregator` | 6 passed / 0 failed |
+| `check:upstream-v2-delta` | 0（31 / 53 / 15） |
+| `cargo fmt --check`、`check:parity`、`check:patch-budget`、`check:engine-i18n`、`check:roadmap-refs` | 全 0 |
+| `oxlint`（两改动文件） | 0 errors |
+
+### 53.1.4 关闭的"剩余项"
+
+**阶段 0 七项全部关闭**（五项 not-applicable、两项执行完）；`tracked` 从 27 → 15。
+剩余 15 条 tracked 全部是先前逐条核实的长尾（IdleSession 回收待 B-13 裁决、fs watch 族
+阻塞于 notify 依赖、TUI 产品面在"不在本计划内"清单），无一可用本会话机制推进。
+
+**阶段 0 收口。下一步只剩两类工作：B-13/B-16 两项小裁决（或按我的建议直接 not-applicable
+一批扫掉），以及 `packages/kimi-tui-rs/` 前端 workspace（FRONTEND-RUST-ASSESSMENT 路线）。**
+
+## 54. 2026-11-04 默认工作区落地（B-21 族两 tracked 一次补完：`47002256a0` + `e5e56bc5fe`）
+
+七项裁决里六项已收口（§53.1）。B-21 族四条里与多根无关的一条产品面——**默认工作区**——
+事实核对后发现它不依赖多根地基：上游是"请求不带 workspace/cwd 时会话落在
+`~/KimiCode/Default`"，一个独立的解析 + ensure + REST 臂。本批一次补完，两条 tracked
+（`47002256a0` + `e5e56bc5fe`）同时关闭。
+
+### 54.1 引擎侧：`default_workspace.rs`（7 测）
+
+- **解析**（上游 `defaultWorkspacePaths.ts` @ `e5e56bc5fe` 的后 #4277 形状——XDG/PowerShell
+  查找已被上游删除，fork 直接对齐最终态）：`[default_workspace] path` 绝对路径（或 `~/…`）
+  优先；否则 `<home>/KimiCode/Default`。相对值**拒绝而非猜测**——猜测会在另一台机器上
+  静默造出第二个默认工作区。
+- **`ensure`**：mkdir on first use + reuse；失败分类为上游 schema 的 reason 枚举
+  （blocked_by_file / permission_denied / missing_parent / no_space / read_only /
+  invalid_path）。**永不静默搬迁**（#4277 明文规则）。blocked_by_file 的判据扫
+  `create_dir_all` 失败点的祖先——文件常在链的**中间**（一个叫 `KimiCode` 的文件挡住
+  整条链），只查叶节点会漏（判定测试 `a_blocking_file_is_reported_not_relocated` 钉住）。
+- **`is_default`**：经 `workspace_root_key` 比较（与 workspaces 表同键），大小写/分隔符
+  拼写不会把一个目录拆成两个工作区。拆出 `is_default_root_resolved` 变体——wire 路径
+  九个调用点不重解析 config。
+
+### 54.2 REST 面：`POST /api/v1/sessions` 的 `default_workspace` 臂
+
+- `default_workspace: true` 与 `workspace_id` / `metadata` **互斥**（校验保留上游原文）。
+- 默认臂：resolve → ensure → `create_workspace`（fork 的实现已带上游 `createOrTouch`
+  语义：幂等 upsert + last_opened_at）→ `set_session_workspace`。
+- 失败答 409 + `{code, error, path, reason}`，分类自 54.1。
+- **载荷**：`sessionSchema` 增 `is_default`（protocol 包，optional），由
+  `format_wire_session` 统一注入（九个调用点全覆盖，REST + WS 事件同走此函数）。
+- **一处有意偏离，双登记**：上游还要求"无 workspace 必须有 metadata.cwd"；fork 的
+  create 路由一直接受裸 `{title}` 并落在进程 cwd（7 个 server 测试与 TUI 自身调用
+  依赖它）。互斥半保留，requirement 半**不引入**——引入即回退 fork 既有契约。
+  代码注释（route_prompts.rs）与本节为登记处。
+
+### 54.3 配置与登记
+
+- `[default_workspace]` 配置节（`config/mod.rs` `DefaultWorkspaceConfig`，
+  snake_case 文件拼写 + camelCase alias）——**engine-only**（TS schema 不声明），
+  已登记进 `config-registry.json`（35 段，engine 18）。
+- `check:rust-module-deps` 0 新边；`check:parity` 0（config 32 keys 不变——TS 侧无此键）。
+
+### 54.4 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --lib`（全量） | **3 626 passed / 0 failed** |
+| `default_workspace` 模块测试 | 7 passed（含 blocked_by_file 祖先扫描、root-key 比较、ensure 幂等） |
+| `server::tests::workspaces_models` | 4 passed（含曾红的 trust 测试） |
+| `cargo fmt --check` / `cargo clippy --all-targets --features cli -- -D warnings` | 0 / 0 |
+| `check:parity` / `check:config-registry` / `check:architecture` | 0 / 0（35 段）/ 见下 |
+
+过程中抓到并修复两个真实缺陷：① `default_workspace_root()` 的 `blocking_lock` 在
+async runtime 内调用直接 panic（7 个 server 测试红），改 `try_lock`——注释写明为何
+永不阻塞；② blocked_by_file 只查叶节点漏掉祖先链文件（见 54.1）。
+
+`check:architecture`：protocol / node-sdk 指纹已同步（本批动了 protocol schema）；
+kimi-agent 剩 9 个缺失文件（7 个 native/goal + 2 个 engine/，同一未提交删除成因），
+未 `--update`。
+
+### 54.5 关闭的"剩余项"
+
+- `47002256a0` + `e5e56bc5fe` 两条 tracked **整体关闭**（§53.5 的裁决只关多根，
+  默认工作区独立成立——复核时发现它不依赖多根地基，从"同记 not-applicable"改为落地）。
+- tracked 现 **13 条**（not-applicable 31 / ported 55 / tracked 13）。
+
+## 55. 2026-11-04 tracked 归零：NotifyUser 两半落地 + 全台账收口
+
+**本批后 `check:upstream-v2-delta` 的 tracked = 0**（not-applicable 40 / ported 59，
+99 条全 triaged）——本会话从 tracked 29 起步，全部逐条回源核实后归零。
+
+### 55.1 NotifyUser 两半落地（`7091138f5e` + `4fbe065442` → ported）
+
+**门半（#4054）**：照 `tower_enabled` 的既有管线加 `notify_user_enabled`——
+napi `JsRunTurnParams`（`None` = `true`：TUI 有 Updates 面板）→ stdio `RunTurnParams`
+→ `PipelineSpec` → `NativeToolCallbacks` → `native_tool_defs_with_notify`：`false` 时
+`NotifyUser` 不进 advertised 表。这就是 `notifyUserAvailable` 双输入（flag AND
+host update panel）的 resolved 答案：`KIMI_CODE_EXPERIMENTAL_NOTIFY_USER` env
+是 flag 半，`update panel` 半在本 fork 的 TUI 恒真；`false` 时更新无处落地，
+不注册工具正是上游 #4054 的可观测行为。
+
+**nudge 半（#4153）**：`injection/notify_user_nudge.rs`（7 测）——纯函数三件：
+`notify_streak`（从 live history 往回扫 silent tool-call rounds，`startsNewTurn`
+九臂含 **stop_hook 特例**——stop-hook 触发不重置审计、其他 system_trigger 重置）、
+`should_nudge_notify_user`（threshold=8 + cooldown）、`render_notify_user_nudge`
+（上游文案逐字）。可用性门由 `notify_user_enabled` 承担：工具不在表内则 streak
+无法启动、provider 不注册——**没有死分支**（ledger 里警告过的那种）。
+
+**prompt 半**：system.md 进度句对齐（"Keep progress notes between tool calls to a
+sentence or two — … don't narrate every tool call"，@ `a2afdbc7d` profile-shared.ts）。
+
+**遥测半不移植，登记**：注入管线已被 turn telemetry 计数，独立
+`NotifyUserNudgeShownEvent` 会双报。
+
+判定测试：nudge 7 测（含 stop_hook 两臂、cooldown 边界 7/8/16、nudge 计数）+
+`swarm_mode_off_rejects_without_starting_subagents` 增两断言（/swarm 指引 +
+do-not-mention 句，上游 #4497 文案）+ NotifyUser 随门进/出表（tool_policy 路径）。
+
+### 55.2 其余 tracked 逐条收口（全部回源核实）
+
+| 条 | 处置 | 依据 |
+|---|---|---|
+| `d37f9ccc25`（tool disclosure） | **ported** | 三剩余项逐项核对：schema 再公告已在（`disclosure_readvertises_the_loaded_tool_schema`）；会话级 `loaded_tools` 与上游 per-session snapshot 行为等价（无 turn 边界重载场景）；snapshot 持久化 not-applicable（fork 无 session 级 tool 注册表可持久化，引入即第二份实现） |
+| `256ce61f0c`（恢复优化） | **not-applicable** | B-16 基准 21.4ms/16k，无可回收收益 |
+| `0c63065fbd` / `d18a7bcd31`（sync 载体） | **ported**（d18）/ n-a（0c6） | 逐条核对夹带：d18 的 swarm-off 文案增量是真缺口已搬（+两断言）；TUI 对话流不在计划内；clientConfigs 无对应物 |
+| `ce0834a8f3`（评分规则） | **not-applicable** | 新增产品面无用户佐证 |
+| `e7f1a99fc5`（会话锁接管） | **not-applicable** | 引擎+SDK 链完整（判定测试在）；剩 TUI 对话流走前端路线 |
+| `366fafbf92`（空闲回收） | **not-applicable** | §51.5 选项 (a)：无真实内存压力报告，回收语义未定前不引入半截机制 |
+| `18c6d64272` / `c7dd84124a`（fs watch 族） | **not-applicable** | WatchService 不移植（notify 依赖不可得 + 分层未裁），显式 /reload 保留 |
+| `0327e8e9a8`（模型迁移 TUI 流） | **not-applicable** | 数据面 upgrade 已在；提示流属 apps/kimi-code |
+| `0a3a2fbafa`（NotifyUser 显示层） | **not-applicable** | 显示层改动全在 TUI（上游 7 文件清单） |
+
+### 55.3 验证
+
+| 检查 | 结果 |
+|---|---|
+| `check:upstream-v2-delta` | **0（tracked = 0）** |
+| `cargo test --lib`（全量） | **3 633 passed / 0 failed** |
+| `injection::` 模块 | 84 passed（+7 nudge） |
+| `cargo fmt --check` / `clippy --all-targets --features cli -- -D warnings` | 0 / 0 |
+| 其余 10 条 JS 门禁 | 全 0（rust-module-deps 267 边） |
+| `check:architecture` | 2 errors——kimi-agent 指纹无法刷新（6 个未提交删除仍在索引，`--update` 拒绝写入）+ node-sdk 既有；成因与本会话历批相同 |
+
+### 55.4 迁移台账终态
+
+- **tracked = 0**：99 条上游 delta 全部「ported（含等价性论证）」或「not-applicable（含理由）」。
+- 剩余缺口只有三类，均已在台账登记：**环境阻塞**（B-27/notify）、**TUI 产品面**
+  （apps/kimi-code「不在本计划内」清单，走 FRONTEND-RUST-ASSESSMENT 路线）、
+  **A8 (b) Rust 单源**（DECISION-POINTS §1，待 Rust 原生入口裁撤）。
+- 本会话累计：tracked 29 → 0；新增机制 6 个（事件覆盖门、配置登记门、trust 披露、
+  UI 渲染后端/组件模型、恢复基准、NotifyUser 管线）；删除死代码/双源 3 处
+  （native/goal 888 行、readProjectMcpDisclosure、engine/ 残留）。
+
+## 56. 2026-11-06 全量测试归绿：进程 cwd 唯一锁（拆分残留缺陷）
+
+全量 `cargo test --lib` 在本机是红的，且红在**与代码无关的地方**：默认线程
+3528 passed / 105 failed，`--test-threads=8` 3579 / 54；四个失败最多的模块单独跑
+198 全绿（`tools::external_hooks` 37、`tools::tower::store` 56、
+`tools::tests::mode_mutex_dispatch` 10、`turn_loop::run_turn::tests` 95）。
+
+### 56.1 根因：两把互不排斥的进程 cwd 锁
+
+失败形状全是「spawn 子进程被拒」：`Permission hook failed to spawn: 拒绝访问
+(os error 5)`、`fs_routes` 的 git 组同一条 `PermissionDenied`、
+`Failed to open pty … HRESULT -2147024891`、`bash_spawn` 的 exit 事件缺失。
+
+原因：两个测试文件各自改**进程级** cwd，却各持一把锁——
+
+- `packages/kimi-agent/src/turn_loop/run_turn/tests/bash_operands.rs` 用
+  `BASH_TARGET_CWD_LOCK`（tokio Mutex）串行 5 个改 cwd 的用例；
+- `packages/kimi-agent/src/tools/agent_tool/tests/resume.rs` 的
+  `tower_resume_denial_uses_passed_root_not_process_cwd` 也 `set_current_dir`，
+  但只有本地 `Restore`，不拿任何锁（原文注释还写着「另一个 chdir 用例自带更短的窗口」，
+  把「不互斥」当成了安全）。
+
+交错后 A 恢复自己保存的原值、B 再把自己的 prev（A 的临时目录，可能已被 `TempDir`
+删掉）恢复回去，进程 cwd 落到一个失效目录；此后任何继承 cwd 的 `CreateProcess`
+都返回 access denied，失败点因此落在几十个调用方身上，离肇事者很远。
+这正是 `SPLIT-PLAN-kimi-agent.md` §6.3 预警的「拆到不同文件各自定义锁」。
+
+### 56.2 修复：一把锁、一个作用域
+
+新增 `packages/kimi-agent/src/test_support.rs`（`#[cfg(test)]`，`lib.rs` 声明）：
+
+- `CWD_LOCK: tokio::sync::Mutex<()>` 是**唯一**的进程 cwd 锁；
+- `CwdScope::enter(path).await` 一次拿锁 + 记录旧目录 + 切换，`Drop` 恢复；
+  恢复失败只打印（析构里 panic 会在 unwind 中 abort 整个 run，掩盖真正的失败断言）。
+
+两个文件都改为用它：`bash_operands.rs` 删掉本地 `CwdGuard` 与
+`BASH_TARGET_CWD_LOCK`（5 处调用点收敛成 1 行），`resume.rs` 删掉本地 `Restore`。
+
+### 56.3 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --lib`（默认线程，修复后） | **3630 passed / 3 failed**（修复前 3528 / 105） |
+| 用时 | 156s → 77s（不再有大量 spawn 失败与其重试） |
+| `cargo test --lib turn_loop::run_turn::tests::bash_operands` | 5 passed |
+| `cargo test --lib …tower_resume_denial_uses_passed_root_not_process_cwd` | 1 passed |
+| `cargo fmt --check` | 0 |
+| `cargo clippy --all-targets --features cli -- -D warnings` | 0 |
+
+剩余 3 条红是并行负载下的时序用例，**单独跑都过**：
+`native::bash_spawn::tests::test_spawn_timeout_kills_tree`（0.98s）、
+`native::bash_spawn::tests::test_kill_managed_process`（0.67s）、
+`mcp::manager::tests::test_unexpected_close_marks_failed_and_emits`（3.15s）。
+不改它们的等待预算——那是把噪声藏起来，不是修好。
+
+### 56.4 残留（未修，已登记）
+
+这把锁只串行「改 cwd 的人」，不保护「读 cwd 的人」：窗口期内并发用例读到的是
+另一个用例的临时目录（`run_turn.rs` 的 bash operand 提醒、`workspace_trust_disclosure`
+的 `current_dir` 解析都读它）。同类问题还有 HOME/USERPROFILE（
+`config/tests.rs` 36 处 `set_var`，另一会话的 `debug-env-test-race.md` 记录同一形状）。
+根治要把「进程环境」做成可注入的值而不是读全局，属独立批次，不在本条内。
+
+### 56.5 顺带修掉的第二个缺陷：i18n 门禁把产品代码当测试代码
+
+新增 `#[cfg(test)] mod test_support;` 后 `check:engine-i18n` 报 3 条 ORPHAN
+（`engine.permission.operationDeniedByEngine` / `operationRequiresConfirmation` /
+`executionDeniedByEngine`）。三个键都在 `lib.rs:151/154/335` 用着——它们没有消失，
+是门禁把它们划进了测试区。
+
+根因在 `scripts/check-engine-i18n-parity.mjs` 的 `testModuleRanges`：它从
+`#[cfg(test)]` 起**向前搜第一个 `mod X {`** 当范围起点。碰到无花括号的
+`#[cfg(test)] mod fixtures;`（声明的是文件，不是内联模块）时，起点落在该行、
+终点落在文件后面真正的内联 `mod tests { … }` 收尾处，中间的产品代码被整段跳过。
+`acp/mod.rs` 的 `mod events_map_golden;` 一直没触发，是因为它后面没有再出现内联
+测试模块。
+
+修法：正则只接受「属性后直接跟内联 `mod X {`」的形式，无花括号声明自然不产生范围
+（这是**收窄豁免**，不是放宽）。修后同一门禁仍报 173 键 / 189 参数化、0 error，
+说明这层豁免此前没有掩盖别的缺口。
+
+`test_support.rs` 自己的三条断言串被 `scan:hardcoded:rust` 记为 3 条
+`UNRECORDED`，按 `diagnostic`（测试夹具失败信息，永不呈现给用户）入账；
+`check:rust-module-deps` 新增 `tools → test_support`、`turn_loop → test_support`
+两条边，按官方通道记录（269 边）。
+
+### 56.6 仍未关闭：`swarm-resume-e2e` 确定性红（不属本批改动）
+
+`packages/node-sdk/test/swarm-resume-e2e.test.ts`（文件头自述 "TEMPORARY end-to-end
+probe"）单独跑也红：`recovers every swarm member when the session is resumed` 期望
+3 个成员、拿到 0；`resumeSession({includeSubagents:true})` 只重建出 `main`。
+
+已排除的方向（都是实测）：
+
+- 引擎侧 swarm / subagent 单测全绿（`cargo test --lib swarm::` 32、
+  `subagent::` 66）；
+- 结果契约两边一致：引擎仍产出 `<agent_swarm_result>` + `<subagent agent_id="…">`
+  （`tools/swarm_tool.rs:196`/`:254`），SDK 仍按同形解析
+  （`native/sdk-client/helpers.ts:1253` 的 `discoverSubagentsFromToolResult`）；
+- `AgentSwarm` 仍无条件进工具表（`tools/tool_policy.rs:417` 的 `subagent_defs`）；
+- mock 服务端只被请求 2 次（主回合 1 次 + 工具结果后的收尾 1 次），而三个成员若真
+  跑起来应各自再请求——即 `AgentSwarm` 调用在产出结果之前就结束了。
+
+未定位：那次调用是被权限拒绝、被门禁否决，还是在 napi 侧 fail。需要一次带
+`tool.call.completed` / `subagent.*` 事件流的会话级跟踪（本批尝试的独立探针卡在
+`turn.ended` 未到达，已中止）。这条红在本批改动之前就存在，不由 §56.1 引起。
+
+
+

@@ -74,6 +74,24 @@ fn test_parse_sample_config() {
 }
 
 #[test]
+fn task_max_running_tasks_prefers_task_then_background() {
+    let both = KimiConfig::from_str(
+        "[task]\nmax_running_tasks = 5\n[background]\nmax_running_tasks = 2\n",
+    )
+    .unwrap();
+    assert_eq!(both.configured_max_running_tasks(), Some(5));
+
+    let legacy = KimiConfig::from_str("[background]\nmax_running_tasks = 3\n").unwrap();
+    assert_eq!(legacy.configured_max_running_tasks(), Some(3));
+
+    let unset = KimiConfig::from_str("").unwrap();
+    assert_eq!(unset.configured_max_running_tasks(), None);
+
+    let non_positive = KimiConfig::from_str("[task]\nmax_running_tasks = 0\n").unwrap();
+    assert_eq!(non_positive.configured_max_running_tasks(), None);
+}
+
+#[test]
 fn test_extract_anthropic_llm() {
     let config = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
     let native_llm = config.extract_native_llm(Some("anthropic")).unwrap();
@@ -1515,6 +1533,41 @@ effort = "high"
     let bare = KimiConfig::from_str("default_model = \"m\"\n").unwrap();
     assert!(bare.build_policy_snapshot(None).tools_filter.is_none());
     assert_eq!(bare.resolve_effort(None), None);
+}
+
+/// `[permission] dangerous_command_guard` parses under both the documented
+/// file spelling (snake_case, config-files.md) and the camelCase alias the
+/// `POST /config` JSON body (`patchConfigRequestSchema`) carries.
+#[test]
+fn permission_dangerous_command_guard_accepts_both_spellings() {
+    let snake = KimiConfig::from_str("[permission]\ndangerous_command_guard = false\n").unwrap();
+    assert_eq!(
+        snake.permission.and_then(|p| p.dangerous_command_guard),
+        Some(false),
+    );
+    let camel = KimiConfig::from_str("[permission]\ndangerousCommandGuard = false\n").unwrap();
+    assert_eq!(
+        camel.permission.and_then(|p| p.dangerous_command_guard),
+        Some(false),
+    );
+}
+
+/// `[workspace] require_trust` (upstream #4517): absent and explicit `true`
+/// both keep the trust gate on; only `false` short-circuits it. Both the
+/// documented file spelling and the upstream schema's camelCase alias parse.
+#[test]
+fn workspace_require_trust_defaults_on_and_accepts_both_spellings() {
+    let bare = KimiConfig::from_str("default_model = \"m\"\n").unwrap();
+    assert!(bare.resolve_workspace_require_trust());
+
+    let on = KimiConfig::from_str("[workspace]\nrequire_trust = true\n").unwrap();
+    assert!(on.resolve_workspace_require_trust());
+
+    let off = KimiConfig::from_str("[workspace]\nrequire_trust = false\n").unwrap();
+    assert!(!off.resolve_workspace_require_trust());
+
+    let camel = KimiConfig::from_str("[workspace]\nrequireTrust = false\n").unwrap();
+    assert!(!camel.resolve_workspace_require_trust());
 }
 
 #[test]

@@ -142,7 +142,7 @@ pub fn estimate_message_tokens(message: &LLMMessage) -> u32 {
     let mut tokens = estimate_tokens(&message.content);
     for block in &message.blocks {
         tokens += match block {
-            ContentBlock::Text { text } => estimate_tokens(text),
+            ContentBlock::Text { text, .. } => estimate_tokens(text),
             ContentBlock::Image { .. }
             | ContentBlock::MediaRef { .. }
             | ContentBlock::ImageUrl { .. }

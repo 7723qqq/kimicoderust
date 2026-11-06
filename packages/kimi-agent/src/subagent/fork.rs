@@ -44,7 +44,43 @@ pub const SUBAGENT_FORK_FLAG_ENV: &str = "KIMI_CODE_EXPERIMENTAL_SUBAGENT_FORK";
 /// the current behaviour as the default while turning the previously dead
 /// declaration into a real kill switch. Registered in ROADMAP.
 pub fn subagent_fork_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(scoped) = test_override::fork_flag() {
+        return scoped;
+    }
     crate::env::env_switch_default_on(SUBAGENT_FORK_FLAG_ENV)
+}
+
+/// Test-only thread-scoped override: `KIMI_CODE_EXPERIMENTAL_SUBAGENT_FORK`
+/// is process-global and this flag gates the Agent / Swarm control flow, so a
+/// test writing it would flip the path every concurrently running test takes.
+#[cfg(test)]
+mod test_override {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SLOT: RefCell<Option<bool>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn fork_flag() -> Option<bool> {
+        SLOT.with(|slot| *slot.borrow())
+    }
+
+    /// Scoped override: clears itself on drop, even on panic.
+    pub(super) struct Scoped;
+
+    impl Scoped {
+        pub(super) fn set(value: bool) -> Self {
+            SLOT.with(|slot| *slot.borrow_mut() = Some(value));
+            Self
+        }
+    }
+
+    impl Drop for Scoped {
+        fn drop(&mut self) {
+            SLOT.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
 }
 
 /// Injected as a `<system-reminder>` message ahead of the task prompt in a
@@ -327,31 +363,38 @@ mod tests {
 
 /// The flag is on by default (a deliberate divergence from v2's `default:
 /// false`) so existing users keep fork; an explicit falsy value is the
-/// opt-out. The env is process-wide, so these run in one test to avoid
-/// cross-test interference.
+/// opt-out. `KIMI_CODE_EXPERIMENTAL_SUBAGENT_FORK` is process-wide and gates
+/// the Agent / Swarm path, so the test drives the resolved value through the
+/// thread-scoped override instead of writing the env — a write would change
+/// the control flow of every test running concurrently.
 #[test]
 fn the_fork_flag_defaults_on_and_honours_an_explicit_opt_out() {
-    // Safety: single-threaded within this test; the switch is read at spawn
-    // time, and no other test in this module touches the env var.
-    unsafe {
-        std::env::remove_var(SUBAGENT_FORK_FLAG_ENV);
+    // The rule the switch is built on (v2 `parseBooleanEnv`): only an
+    // explicit falsy value turns it off.
+    for raw in [
+        None,
+        Some(""),
+        Some("1"),
+        Some("true"),
+        Some("yes"),
+        Some("on"),
+    ] {
         assert!(
-            crate::subagent::fork::subagent_fork_enabled(),
-            "on unless disabled"
+            crate::env::parse_bool_env(raw) != Some(false),
+            "{raw:?} keeps fork on"
         );
+    }
+    for raw in ["0", "false", "no", "off"] {
+        assert_eq!(crate::env::parse_bool_env(Some(raw)), Some(false), "{raw}");
+    }
 
-        std::env::set_var(SUBAGENT_FORK_FLAG_ENV, "0");
-        assert!(
-            !crate::subagent::fork::subagent_fork_enabled(),
-            "an explicit off disables it"
-        );
-
-        std::env::set_var(SUBAGENT_FORK_FLAG_ENV, "false");
+    // The gate honors both resolutions.
+    {
+        let _off = test_override::Scoped::set(false);
         assert!(!crate::subagent::fork::subagent_fork_enabled());
-
-        std::env::set_var(SUBAGENT_FORK_FLAG_ENV, "1");
+    }
+    {
+        let _on = test_override::Scoped::set(true);
         assert!(crate::subagent::fork::subagent_fork_enabled());
-
-        std::env::remove_var(SUBAGENT_FORK_FLAG_ENV);
     }
 }

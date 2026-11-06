@@ -5,8 +5,10 @@
       "name": "Kimi Agent (Rust engine)",
       "source": "packages/kimi-agent/src",
       "layer": "engine",
-      "deps": [],
-      "_depsNote": "Empty on purpose. This module used to declare kosong, minidb and protocol, but all three are TypeScript packages the Rust crate cannot import — Cargo.toml and src/**/*.rs reference none of them. The fiction also produced a phantom kimi-agent <-> kosong cycle once kosong's real (manifest-declared) edge on the engine was recorded. The engine's workspace relationships are all inbound: node-sdk, kimi-code and kosong depend on it.",
+      "deps": [
+        "kimi-ui-core"
+      ],
+      "_depsNote": "Sole declared edge is kimi-ui-core: a pure-data shared crate (EntryOp/EntryKind/SeqSpan/CoalescingPolicy render vocabulary, design reports/design/RUST-UI-DECOUPLING.md) pulled in by path dependency (packages/kimi-agent/Cargo.toml:82) for the src/events/project.rs projection layer. This module used to declare kosong, minidb and protocol, but all three are TypeScript packages the Rust crate cannot import — Cargo.toml and src/**/*.rs reference none of them. The fiction also produced a phantom kimi-agent <-> kosong cycle once kosong's real (manifest-declared) edge on the engine was recorded. Every other workspace relationship of this module is inbound: node-sdk, kimi-code and kosong depend on it.",
       "apis": [
         {
           "protocol": "rpc",
@@ -24,7 +26,7 @@
           "description": "ACP stdio protocol server"
         }
       ],
-      "fingerprint": "f5f0eaa62c255550"
+      "fingerprint": "da25ff7edac3f511"
     },
     {
       "id": "node-sdk",
@@ -47,7 +49,7 @@
           "description": "Public SDK package"
         }
       ],
-      "fingerprint": "f3eec8a778ecc575"
+      "fingerprint": "279b4138b3e6c415"
     },
     {
       "id": "kimi-code",
@@ -89,7 +91,7 @@
         "i18n-runtime",
         "kimi-agent"
       ],
-      "fingerprint": "e63139d6edb8b15f"
+      "fingerprint": "77d33ebf5d1d3497"
     },
     {
       "id": "minidb",
@@ -107,7 +109,7 @@
       "deps": [
         "transcript"
       ],
-      "fingerprint": "6b8a466ea048a64c"
+      "fingerprint": "598f3edc1451c5e1"
     },
     {
       "id": "transcript",
@@ -115,7 +117,7 @@
       "source": "packages/transcript/src",
       "layer": "engine",
       "deps": [],
-      "fingerprint": "409cdc68189eeb2c"
+      "fingerprint": "f9636545ac3a3dcd"
     },
     {
       "id": "kaos",
@@ -185,6 +187,14 @@
       "layer": "shared",
       "deps": [],
       "fingerprint": "6da650cb23ad6afa"
+    },
+    {
+      "id": "kimi-ui-core",
+      "name": "Kimi UI Core (shared Rust UI vocabulary)",
+      "source": "packages/kimi-ui-core/src",
+      "layer": "shared",
+      "deps": [],
+      "fingerprint": "1e3536ebe57d94d5"
     },
     {
       "id": "vis-server",

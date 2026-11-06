@@ -254,6 +254,9 @@ pub struct ServerEngine {
     /// default), wired through [`Self::with_compaction_max_attempts`].
     compaction_max_attempts: Option<u32>,
     active_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Expected-turn guard for automatic wake interruption: a late cancel must
+    /// not hit the user turn that replaced the wake.
+    active_turn_numbers: Mutex<HashMap<String, u32>>,
     mcp_manager: Mutex<Option<Arc<McpManager>>>,
     interaction_manager: Mutex<Option<Arc<InteractionManager>>>,
     subagent_manager: Arc<SubagentManager>,
@@ -324,6 +327,12 @@ pub struct ServerEngine {
     /// a provider-forced degrade/strip re-applies to the session's later
     /// turns; [`Self::record_context_truncation`] advances its revision.
     media_recovery: Mutex<HashMap<String, crate::llm::media_budget::SharedMediaRecovery>>,
+    /// Installed once by the standalone composition root. Per-turn toolsets
+    /// share the driver but receive session-specific runtimes.
+    tower_wake_driver: Mutex<Option<Arc<dyn crate::session::wake::TowerWakeDriver>>>,
+    /// One wake batching/replay owner per session, shared by every toolset the
+    /// session builds across turns.
+    tower_wake_runtimes: Mutex<HashMap<String, Arc<crate::tools::tower::wake::TowerWakeRuntime>>>,
 }
 
 /// Builds the host callbacks for one session.
@@ -359,6 +368,7 @@ impl ServerEngine {
             max_attempts: None,
             compaction_max_attempts: None,
             active_turns: Mutex::new(HashMap::new()),
+            active_turn_numbers: Mutex::new(HashMap::new()),
             mcp_manager: Mutex::new(None),
             interaction_manager: Mutex::new(None),
             subagent_manager: Arc::new(SubagentManager::with_store(store.clone())),
@@ -375,7 +385,53 @@ impl ServerEngine {
             media_dropped: Mutex::new(HashMap::new()),
             media_recovery: Mutex::new(HashMap::new()),
             session_mcp: Mutex::new(HashMap::new()),
+            tower_wake_driver: Mutex::new(None),
+            tower_wake_runtimes: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Install the standalone wake driver once. Repeated composition-root
+    /// calls keep the original driver and every runtime created from it.
+    pub fn install_tower_wake_driver(
+        &self,
+        driver: Arc<dyn crate::session::wake::TowerWakeDriver>,
+    ) {
+        let mut installed = self
+            .tower_wake_driver
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if installed.is_none() {
+            *installed = Some(driver);
+        }
+    }
+
+    /// Bind one session's long-lived runtime into this turn's fresh toolset.
+    /// The existing toolset API also returns the replay handler, which is
+    /// re-registered through the same driver shape used by stdio/NAPI/REPL.
+    fn bind_tower_wake(
+        &self,
+        toolset: &crate::tools::NativeToolset,
+        session_id: &str,
+    ) -> Option<()> {
+        let driver = self
+            .tower_wake_driver
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let runtime = self
+            .tower_wake_runtimes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(session_id.to_string())
+            .or_insert_with(|| crate::tools::tower::wake::TowerWakeRuntime::new(driver.clone()))
+            .clone();
+        let handler = toolset.bind_tower_wake_runtime(runtime);
+        driver.set_replay_handler(
+            session_id,
+            crate::tools::tower::wake::TOWER_INBOX_WAKE_VARIANT,
+            handler,
+        );
+        Some(())
     }
 
     /// Install the MCP manager one session's turns run with. ACP
@@ -987,6 +1043,22 @@ impl ServerEngine {
         }
     }
 
+    /// Cancel only if `turn_number` is still the active turn. Returns `false`
+    /// when the expected wake already ended or a newer turn owns the slot.
+    pub(crate) fn cancel_turn_at(&self, session_id: &str, turn_number: u32) -> bool {
+        let active_numbers = self
+            .active_turn_numbers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active_numbers.get(session_id) != Some(&turn_number) {
+            return false;
+        }
+        // Hold the number guard through the flag store: turn installation and
+        // removal also take it, so the expected wake cannot be replaced between
+        // the identity check and cancellation.
+        self.cancel_turn(session_id)
+    }
+
     /// Publish the `event.session.work_changed` fact the Web client folds
     /// into its live session state (kap-server `SessionWorkChangedEvent`):
     /// the busy flip a turn start/end produces plus the interaction, if any,
@@ -1206,10 +1278,9 @@ impl ServerEngine {
             // The prompt's skills section scans the declared extra roots and the
             // plugin roots, in that order: v2 ranks `extra` (10) above `plugin`
             // (5), so a plugin skill never shadows a declared one.
-            let mut prompt_skill_dirs = self.spec.skill_dirs.clone();
-            prompt_skill_dirs.extend(plugin_skill_dirs.iter().map(|entry| entry.dir.clone()));
             session_system_prompt = crate::prompt::SystemPromptBuilder::new(ws)
-                .with_skill_dirs(prompt_skill_dirs)
+                .with_skill_dirs(self.spec.skill_dirs.clone())
+                .with_plugin_skill_dirs(plugin_skill_dirs.clone())
                 .with_merge_all_available_skills(self.spec.merge_all_available_skills)
                 .with_additional_dirs(extra_roots.iter().map(std::path::PathBuf::from).collect())
                 .with_memory(true)
@@ -1871,6 +1942,13 @@ impl ServerEngine {
         .await
         .map_err(|error| EngineError::NoModel(error.message))?;
 
+        // Every turn builds a fresh toolset; the runtime it receives is the
+        // session's single long-lived instance, so wake batching survives the
+        // turn boundary instead of restarting with each toolset.
+        if let Some(toolset) = pipeline.toolset.as_ref() {
+            let _ = self.bind_tower_wake(toolset, session_id);
+        }
+
         // Arm native file-history capture for this turn. `write` / `edit` only
         // record a `session_file_history` row when a recorder is installed, and
         // this is the only production installation point: without it the table
@@ -2035,6 +2113,10 @@ impl ServerEngine {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             turns.insert(session_id.to_string(), Arc::clone(&cancel));
         }
+        self.active_turn_numbers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session_id.to_string(), turn_number);
         self.publish_work_changed(session_id, true, None);
         self.publish_status_updated(session_id).await;
         // #3697: a fresh steer signal for this turn, so a signal fired by an
@@ -2101,6 +2183,11 @@ impl ServerEngine {
                     .unwrap_or_else(|e| e.into_inner());
                 turns.remove(&self.session_id);
                 drop(turns);
+                self.engine
+                    .active_turn_numbers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&self.session_id);
                 self.engine.release_turn_steer_state(&self.session_id);
             }
         }
@@ -2466,6 +2553,7 @@ fn apply_session_overrides(spec: &mut PipelineSpec, profile: &serde_json::Value)
 /// fields, cheap to rebuild field by field at the one call site that needs it.
 fn clone_spec(spec: &PipelineSpec) -> PipelineSpec {
     PipelineSpec {
+        notify_user_enabled: true,
         system_prompt: spec.system_prompt.clone(),
         model_name: spec.model_name.clone(),
         providers: spec

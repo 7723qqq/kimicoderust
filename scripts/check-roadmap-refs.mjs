@@ -564,6 +564,10 @@ function corpus() {
       '--',
       'packages/kimi-agent/src',
       'packages/kimi-agent/tests',
+      // The shared Rust contract crate: its tests are cited by name in the
+      // ledger the same way the engine's are, so it has to be in the corpus or
+      // every citation into it reports as missing.
+      'packages/kimi-ui-core/src',
     );
   } catch {
     rustCorpus = '';
@@ -582,6 +586,7 @@ function corpus() {
       '--',
       'packages/kimi-agent',
       'packages/node-sdk',
+      'packages/kimi-ui-core',
     );
     for (const m of ts.matchAll(/(?:it|test)\s*\(\s*['"`]([^'"`]+)['"`]/g)) testNames.add(m[1]);
   } catch {

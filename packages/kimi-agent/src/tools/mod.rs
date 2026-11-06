@@ -598,6 +598,10 @@ pub struct NativeToolset {
     permission_mode: Option<crate::permission::PermissionMode>,
     session_id: Option<String>,
     task_runner: Option<std::sync::Arc<crate::storage::TaskRunner>>,
+    /// Shared rich-wake driver and per-session buffers. Interior mutability
+    /// lets the session composition root inject it after the pipeline has
+    /// already put this toolset behind an `Arc`.
+    tower_wake_runtime: Arc<std::sync::Mutex<Option<Arc<tower::wake::TowerWakeRuntime>>>>,
     /// Native file-history capture (v2 `fileHistoryService`): when set,
     /// mutating file tools (`write` / `edit`) record a row into
     /// `session_file_history` for each successful change. Shared so the host
@@ -630,6 +634,10 @@ pub struct NativeToolset {
     /// per-name failed-selection counts and the consecutive-failure streak
     /// for `select_tools`, session-scoped like [`Self::loaded_tools`].
     selection_failures: Arc<std::sync::Mutex<crate::tools::select_tools::SelectionFailureTracker>>,
+    /// Upstream #4061 `TurnWaitTally`: the per-turn WaitFor repeat tally
+    /// behind the `[wait_warning]` block, session-scoped like
+    /// [`Self::selection_failures`].
+    wait_tally: Arc<std::sync::Mutex<crate::tools::task_tools::WaitTally>>,
     /// The user's global `[tools]` enable/disable lists (v2 tool policy):
     /// applied to the advertised table and enforced again before execution.
     tools_filter: Option<tool_policy::ToolsFilter>,
@@ -661,6 +669,9 @@ pub struct NativeToolset {
     /// background on timeout). `None` keeps the built-in 600s; `Some(0)`
     /// means "no timeout".
     bash_task_timeout_s: Option<u64>,
+    /// Resolved `[task].max_running_tasks` (with `[background]` fallback)
+    /// used only as the Tower spawn budget's configured ceiling.
+    tower_max_running_tasks: Option<u32>,
     /// Bound provider type (e.g. "kimi").
     provider: Option<String>,
     /// Translates the POSIX path dialect the shell speaks into native win32

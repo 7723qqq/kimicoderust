@@ -797,9 +797,14 @@ mod tests {
         let dir = std::env::temp_dir();
         let (cmd, args, script) = if cfg!(windows) {
             let path = dir.join(format!("kimi_mcp_slow_{}.bat", std::process::id()));
+            // `%SystemRoot%`-pinned: cmd's PATH lookup silently fails when
+            // the inherited PATH grows past ~8k chars, so a bare `ping` may
+            // not resolve and the child would exit instead of staying slow.
             std::fs::write(
                 &path,
-                format!("@echo {reply}\r\n@ping -n 3 127.0.0.1 >nul\r\n"),
+                format!(
+                    "@echo {reply}\r\n@%SystemRoot%\\System32\\ping.exe -n 3 127.0.0.1 >nul\r\n"
+                ),
             )
             .expect("write slow server script");
             (

@@ -182,6 +182,9 @@ async fn main() -> anyhow::Result<()> {
                 todo_tool_veto: None,
                 tower_worktree_root: None,
                 tool_select: false,
+                notify_user_enabled: !kimi_agent::env::env_switch_default_off(
+                    "KIMI_CODE_EXPERIMENTAL_NOTIFY_USER",
+                ),
                 tower_enabled: kimi_agent::tools::tower::paths::tower_enabled(
                     kimi_agent::tools::tower::paths::tower_env_switch(),
                     kimi_agent::tools::tower::paths::tower_config_flag(&config),
@@ -484,6 +487,16 @@ async fn main() -> anyhow::Result<()> {
                     telemetry: None,
                 })
                 .await;
+                if let Some(toolset) = pipeline.toolset.as_ref() {
+                    let driver = Arc::new(kimi_agent::session::wake::EngineSessionWakeDriver::new(
+                        session.clone(),
+                    ));
+                    let handler = toolset.bind_tower_wake_driver(driver);
+                    session.set_wake_replay_handler(
+                        kimi_agent::tools::tower::wake::TOWER_INBOX_WAKE_VARIANT,
+                        handler,
+                    );
+                }
 
                 let session_id =
                     format!("session-{}", SESSION_NEXT_ID.fetch_add(1, Ordering::SeqCst));
@@ -1105,6 +1118,7 @@ async fn build_engine_pipeline(
         todo_tool_veto: params.todo_tool_veto.clone(),
         tower_worktree_root: params.tower_worktree_root.clone(),
         tool_select: false,
+        notify_user_enabled: params.notify_user_enabled.unwrap_or(true),
         tower_enabled: params.tower_enabled.unwrap_or_else(|| {
             kimi_agent::tools::tower::paths::tower_enabled(
                 kimi_agent::tools::tower::paths::tower_env_switch(),
@@ -1361,6 +1375,9 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
         todo_tool_veto: None,
         tower_worktree_root: None,
         tool_select: false,
+        notify_user_enabled: !kimi_agent::env::env_switch_default_off(
+            "KIMI_CODE_EXPERIMENTAL_NOTIFY_USER",
+        ),
         tower_enabled: kimi_agent::tools::tower::paths::tower_enabled(
             kimi_agent::tools::tower::paths::tower_env_switch(),
             kimi_agent::tools::tower::paths::tower_config_flag(&config),

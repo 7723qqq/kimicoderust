@@ -1,3 +1,14 @@
+/**
+ * GUI key-value store (mirrors the browser localStorage API for the Web UI /
+ * Desktop hosts):
+ *
+ *   GET  /v1/gui/store/getItem        query: { key }      data: GuiStoreGetItemResponse
+ *   POST /v1/gui/store/setItem        body: guiStoreSetItemBodySchema   data: {}
+ *   POST /v1/gui/store/removeItem     body: guiStoreRemoveItemBodySchema data: {}
+ *   POST /v1/gui/store/clear          -                     data: {}
+ *   GET  /v1/gui/store/length         -                     data: GuiStoreLengthResponse
+ */
+
 import { z } from 'zod';
 
 const keySchema = z.string().min(1).max(256);

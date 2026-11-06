@@ -2,9 +2,23 @@ import type { Tool } from './tool';
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
+/**
+ * Provenance tags on a text part (v2 `TextPartMeta`, #4081): the UserPromptSubmit
+ * hook fold uses `{ source: 'user prompt submit hook', contentType: 'text/xml' }`,
+ * bundled skill blocks use `{ source: 'skill activation', activationId }`. Open-ended
+ * for future producers; consumers filter by `meta.source`.
+ */
+export type TextPartMeta = {
+  source?: string;
+  contentType?: string;
+  activationId?: string;
+  [key: string]: unknown;
+};
+
 export interface TextPart {
   type: 'text';
   text: string;
+  meta?: TextPartMeta;
 }
 
 export interface ThinkPart {

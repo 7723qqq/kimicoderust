@@ -3,7 +3,7 @@
 //! Groups discovered skills by scope (Project, User, Built-in) and formats
 //! them into Markdown following product conventions.
 
-use crate::skills::{SkillDescriptor, scan_all_skills_with_extra_and_merge};
+use crate::skills::{SkillDescriptor, scan_all_skills_with_extra_merge_and_plugins};
 use std::path::Path;
 
 pub const SKILLS_SECTION_PROSE: &str = "Skills are reusable, composable capabilities that enhance your abilities. Each skill is either a self-contained directory with a `SKILL.md` file or a standalone `.md` file that contains instructions, examples, and/or reference material.\n\n\
@@ -76,20 +76,24 @@ pub fn generate_skills_section_with_extra(
     workspace_root: Option<&Path>,
     extra_dirs: &[std::path::PathBuf],
 ) -> String {
-    generate_skills_section_with_options(workspace_root, extra_dirs, true)
+    generate_skills_section_with_options(workspace_root, extra_dirs, &[], true)
 }
 
 /// [`generate_skills_section_with_extra`] with `merge_all_available_skills`
 /// (schema): the prompt must list exactly the directories the scan actually
-/// reads, or it advertises skills the `Skill` tool cannot load.
+/// reads, or it advertises skills the `Skill` tool cannot load. Plugin roots
+/// are registered under qualified `<plugin_id>:<skill>` names (v2
+/// `registerPluginSkill`), matching the `Skill` tool's resolution.
 pub fn generate_skills_section_with_options(
     workspace_root: Option<&Path>,
     extra_dirs: &[std::path::PathBuf],
+    plugin_dirs: &[crate::skills::PluginSkillDir],
     merge_all_available_skills: bool,
 ) -> String {
-    let skills = scan_all_skills_with_extra_and_merge(
+    let skills = scan_all_skills_with_extra_merge_and_plugins(
         workspace_root,
         extra_dirs,
+        plugin_dirs,
         merge_all_available_skills,
     );
     render_skills_markdown(&skills)
@@ -98,6 +102,35 @@ pub fn generate_skills_section_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualified_plugin_skill_names_reach_the_prompt_listing() {
+        // v2's model listing shows qualified plugin skill names
+        // (`- plugin-a:lark-doc: from plugin a`, registry.test.ts #4188).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plugin_root = temp_dir.path().join("plugin");
+        std::fs::create_dir_all(plugin_root.join("lark-doc")).unwrap();
+        std::fs::write(
+            plugin_root.join("lark-doc").join("SKILL.md"),
+            "---\nname: lark-doc\ndescription: from plugin a\n---\n",
+        )
+        .unwrap();
+
+        let section = generate_skills_section_with_options(
+            None,
+            &[],
+            &[crate::skills::PluginSkillDir {
+                dir: plugin_root,
+                plugin_id: "plugin-a".into(),
+                instructions: None,
+            }],
+            true,
+        );
+        assert!(
+            section.contains("- plugin-a:lark-doc: from plugin a"),
+            "the prompt listing carries the qualified name: {section}"
+        );
+    }
 
     #[test]
     fn test_render_skills_empty_or_all_disabled() {

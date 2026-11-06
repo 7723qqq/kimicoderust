@@ -4,7 +4,13 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { parseConfigString, readConfigFile, writeConfigFile } from '#/config-local';
+import {
+  configToTomlData,
+  KimiConfigPatchSchema,
+  parseConfigString,
+  readConfigFile,
+  writeConfigFile,
+} from '#/config-local';
 import { createKimiConfigRpc, createKimiHarness, KimiError } from '#/index';
 import {
   buildPolicySnapshot,
@@ -16,6 +22,7 @@ import {
   resolveMaxStepsPerTurn,
   resolveNativeLlmForAlias,
   resolveMultiLlmProviders,
+  resolveBackgroundLimits,
   resolvePrintBackground,
   resolveSecondaryModelPool,
   resolveThinkingKeep,
@@ -299,6 +306,31 @@ disabled = ["Bash"]
     });
   });
 
+  it('round-trips [permission] dangerous_command_guard into the policy snapshot', async () => {
+    const config = parseConfigString(
+      `
+[permission]
+dangerous_command_guard = false
+`,
+      'permission-guard.toml',
+    );
+    expect(config.permission?.dangerousCommandGuard).toBe(false);
+
+    // The engine receives the switch through the policy snapshot.
+    expect(buildPolicySnapshot(config, '.').dangerous_command_guard).toBe(false);
+    expect(
+      buildPolicySnapshot(parseConfigString('', 'empty.toml'), '.').dangerous_command_guard,
+    ).toBeUndefined();
+
+    const dir = await makeTempDir();
+    const configPath = join(dir, 'config.toml');
+    await writeConfigFile(configPath, config);
+
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('dangerous_command_guard = false');
+    expect(readConfigFile(configPath).permission?.dangerousCommandGuard).toBe(false);
+  });
+
   const POOL_TOML = `
 default_model = "kimi-code/k3"
 
@@ -346,13 +378,14 @@ multi_llm = ["kimi-code/k3", "kimi-code/fast"]
 
     const racers = resolveMultiLlmProviders(config);
     expect(racers).toHaveLength(2);
-    // Every racer carries its own native transport. That is what makes the
-    // race runnable: a proxy-only racer needs `host/llm_chat`, which no
-    // config-reading entry point serves.
+    // Every racer carries its own native transport in the typed napi object's
+    // camelCase spelling (`JsLlmProviderDef.native`: the napi boundary rejects
+    // snake_case keys). That is what makes the race runnable: a proxy-only
+    // racer needs `host/llm_chat`, which no config-reading entry point serves.
     for (const racer of racers ?? []) {
-      expect(racer.native['protocol']).toBe('openai');
-      expect(racer.native['base_url']).toBe('https://example.test/v1');
-      expect(racer.native['api_key']).toBe('YOUR_API_KEY');
+      expect(racer.native.protocol).toBe('openai');
+      expect(racer.native.baseUrl).toBe('https://example.test/v1');
+      expect(racer.native.apiKey).toBe('YOUR_API_KEY');
     }
     expect(racers?.[0]?.name).toBe('kimi-code/k3');
     expect(racers?.[0]?.model).toBe('k3');
@@ -651,6 +684,28 @@ max_steps_per_turn = 0
     vi.stubEnv('KIMI_LOOP_MAX_STEPS_PER_TURN', '0');
     expect(resolveMaxStepsPerTurn(config)).toBeUndefined();
     vi.unstubAllEnvs();
+  });
+
+  it('resolves task maxRunningTasks before background with env taking highest precedence', () => {
+    const both = parseConfigString(
+      '[task]\nmax_running_tasks = 5\n[background]\nmax_running_tasks = 2\n',
+      'task-and-background.toml',
+    );
+    expect(both.task?.maxRunningTasks).toBe(5);
+    expect(resolveBackgroundLimits(both)?.maxRunningTasks).toBe(5);
+    expect(KimiConfigPatchSchema.safeParse({ task: { maxRunningTasks: 6 } }).success).toBe(true);
+    expect(
+      configToTomlData({ providers: {}, task: { maxRunningTasks: 5 }, raw: {} })['task'],
+    ).toEqual({ max_running_tasks: 5 });
+
+    const legacy = parseConfigString(
+      '[background]\nmax_running_tasks = 3\n',
+      'background-only.toml',
+    );
+    expect(resolveBackgroundLimits(legacy)?.maxRunningTasks).toBe(3);
+
+    vi.stubEnv('KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS', '7');
+    expect(resolveBackgroundLimits(both)?.maxRunningTasks).toBe(7);
   });
 
   it('resolves the print background knobs it hands to the engine', () => {

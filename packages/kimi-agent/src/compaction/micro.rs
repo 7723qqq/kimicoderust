@@ -267,7 +267,7 @@ fn message_content_tokens(msg: &LLMMessage) -> usize {
 
 fn block_tokens(block: &ContentBlock) -> usize {
     match block {
-        ContentBlock::Text { text } => estimate_tokens(text),
+        ContentBlock::Text { text, .. } => estimate_tokens(text),
         ContentBlock::Think { think, .. } => estimate_tokens(think),
         _ => 0,
     }
@@ -461,6 +461,7 @@ mod tests {
         let mut msg = LLMMessage::tool_result("f", "");
         msg.blocks = vec![ContentBlock::Text {
             text: "本".repeat(100),
+            meta: None,
         }];
         let out = apply_micro_compaction(&[msg], &config_truncate_all());
         assert!(out.changed, "CJK-heavy blocks must be truncated");

@@ -1,13 +1,47 @@
-use std::path::Path;
+use std::path::{Component, Path};
 use tokio::process::Command;
 
 pub async fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    git_impl(cwd, args, None).await
+}
+
+pub async fn git_with_input(cwd: &Path, args: &[&str], input: &str) -> Result<String, String> {
+    git_impl(cwd, args, Some(input)).await
+}
+
+async fn git_impl(cwd: &Path, args: &[&str], input: Option<&str>) -> Result<String, String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
-        .output()
-        .await
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
         .map_err(|e| format!("failed to spawn git: {e}"))?;
+    if let Some(input) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "failed to open git stdin".to_string())?;
+        if let Err(error) = stdin.write_all(input.as_bytes()).await {
+            let _ = child.kill().await;
+            return Err(format!("failed to write git stdin: {error}"));
+        }
+        drop(stdin);
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("failed to wait for git: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -120,13 +154,104 @@ pub async fn worktree_remove(cwd: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub async fn is_registered_worktree(repo_root: &Path, path: &Path) -> bool {
+    let Some(git_dir) = try_git(path, &["rev-parse", "--git-dir"]).await else {
+        return false;
+    };
+    let Some(common_dir) = try_git(repo_root, &["rev-parse", "--git-common-dir"]).await else {
+        return false;
+    };
+    let Ok(repo_real) = tokio::fs::canonicalize(repo_root).await else {
+        return false;
+    };
+    let Ok(path_real) = tokio::fs::canonicalize(path).await else {
+        return false;
+    };
+    let common = repo_real.join(common_dir.trim());
+    let Ok(common_real) = tokio::fs::canonicalize(common).await else {
+        return false;
+    };
+    let admin_root = common_real.join("worktrees");
+    let resolved = path_real.join(git_dir.trim());
+    let Ok(resolved) = tokio::fs::canonicalize(resolved).await else {
+        return false;
+    };
+    let Ok(relative) = resolved.strip_prefix(&admin_root) else {
+        return false;
+    };
+    !relative.as_os_str().is_empty()
+        && relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+}
+
 pub async fn is_worktree_dirty(path: &Path) -> bool {
     let status = try_git(path, &["status", "--porcelain"]).await;
     status.is_some_and(|s| !s.trim().is_empty())
 }
 
+pub async fn dirty_files(cwd: &Path) -> Result<Vec<String>, String> {
+    let status = git(cwd, &["status", "--porcelain", "-uall"]).await?;
+    Ok(status
+        .lines()
+        .filter_map(|line| {
+            let path = line.get(3..)?.trim();
+            let path = path.rsplit_once(" -> ").map_or(path, |(_, new)| new);
+            Some(path.trim_matches('"').to_string())
+        })
+        .collect())
+}
+
+async fn has_merge_head(cwd: &Path) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
+        .current_dir(cwd)
+        .output()
+        .await
+        .map_err(|error| format!("failed to inspect MERGE_HEAD: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(format!(
+            "could not inspect MERGE_HEAD (status {code:?}): {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
 pub async fn merge_no_ff(cwd: &Path, branch: &str) -> Result<String, String> {
-    git(cwd, &["merge", "--no-ff", branch]).await?;
+    if has_merge_head(cwd).await? {
+        return Err(
+            "cannot start a tower merge while MERGE_HEAD already exists; finish or abort the existing merge first"
+                .into(),
+        );
+    }
+    let head_before = branch_tip(cwd, "HEAD").await?;
+    let status_before = git(cwd, &["status", "--porcelain"]).await?;
+    if let Err(original) = git(cwd, &["merge", "--no-ff", branch]).await {
+        if has_merge_head(cwd).await? {
+            git(cwd, &["merge", "--abort"])
+                .await
+                .map_err(|error| format!("recovery-required: merge abort failed: {error}"))?;
+            let mut problems = Vec::new();
+            if has_merge_head(cwd).await? {
+                problems.push("MERGE_HEAD still exists");
+            }
+            if branch_tip(cwd, "HEAD").await? != head_before {
+                problems.push("HEAD was not restored to the pre-merge commit");
+            }
+            if git(cwd, &["status", "--porcelain"]).await? != status_before {
+                problems.push("the index or worktree differs from its pre-merge state");
+            }
+            if !problems.is_empty() {
+                return Err(format!(
+                    "recovery-required: merge abort did not restore the checkout ({})",
+                    problems.join("; ")
+                ));
+            }
+        }
+        return Err(original);
+    }
     branch_tip(cwd, "HEAD").await
 }
 
@@ -144,6 +269,15 @@ pub async fn diff_name_only(cwd: &Path, base: &str, ref_name: &str) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn git_with_input_writes_stdin_for_hash_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let digest = git_with_input(dir.path(), &["hash-object", "--stdin"], "hello world\n")
+            .await
+            .unwrap();
+        assert_eq!(digest, "3b18e512dba79e4c8300dd08aeb37f8e728b8dad");
+    }
 
     /// The three outcomes of `merge-base --is-ancestor` are three different
     /// answers. Exit 1 is a real "no"; anything else is a git failure the
@@ -223,5 +357,58 @@ mod tests {
         // A live, clean worktree removes fine.
         worktree_remove(root, &wt).await.unwrap();
         assert!(!wt.exists());
+    }
+
+    async fn conflicting_repo(root: &Path) {
+        git(root, &["init", "-q"]).await.unwrap();
+        let _ = git(root, &["config", "user.email", "t@e.test"]).await;
+        let _ = git(root, &["config", "user.name", "t"]).await;
+        std::fs::write(root.join("f.txt"), "base").unwrap();
+        git(root, &["add", "."]).await.unwrap();
+        git(root, &["commit", "-qm", "base"]).await.unwrap();
+        let base = current_branch(root).await.unwrap();
+        git(root, &["checkout", "-qb", "feat/conflict"])
+            .await
+            .unwrap();
+        std::fs::write(root.join("f.txt"), "branch").unwrap();
+        git(root, &["commit", "-qam", "branch change"])
+            .await
+            .unwrap();
+        git(root, &["checkout", "-q", &base]).await.unwrap();
+        std::fs::write(root.join("f.txt"), "main").unwrap();
+        git(root, &["commit", "-qam", "main change"]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn merge_no_ff_refuses_an_existing_merge_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        conflicting_repo(root).await;
+        assert!(
+            git(root, &["merge", "--no-ff", "feat/conflict"])
+                .await
+                .is_err()
+        );
+        let error = merge_no_ff(root, "feat/conflict").await.unwrap_err();
+        assert!(
+            error.contains("cannot start a tower merge while MERGE_HEAD already exists"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_no_ff_aborts_a_conflict_and_restores_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        conflicting_repo(root).await;
+        let head = branch_tip(root, "HEAD").await.unwrap();
+        assert!(merge_no_ff(root, "feat/conflict").await.is_err());
+        assert_eq!(branch_tip(root, "HEAD").await.unwrap(), head);
+        assert!(
+            git(root, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
+                .await
+                .is_err()
+        );
+        assert_eq!(git(root, &["status", "--porcelain"]).await.unwrap(), "");
     }
 }

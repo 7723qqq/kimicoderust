@@ -303,6 +303,7 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
     let mut m_text = msg("user", "");
     m_text.blocks.push(ContentBlock::Text {
         text: "123456789012".into(), // 12 chars -> 3 tokens
+        meta: None,
     });
     assert_eq!(estimate_message_tokens(&m_text), 3);
 
@@ -354,6 +355,7 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
     let mut m_combo = msg("user", "abcd"); // 1 token
     m_combo.blocks.push(ContentBlock::Text {
         text: "efgh".into(),
+        meta: None,
     }); // 1 token
     m_combo.blocks.push(ContentBlock::Think {
         think: "ijkl".into(), // 1 token

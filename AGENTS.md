@@ -18,6 +18,22 @@ This is a TypeScript monorepo built for agent-assisted development. This file is
 > (This pointer sits near the top on purpose — tooling truncates this file when it is injected as
 > project context, so it would otherwise not reach an agent that only reads the injected copy.)
 
+## 开发行为规范（强制）
+
+以下条款人与模型均须遵守；事故依据、操作步骤和验收方法见对应细则。
+
+- 累积型台账与配置禁止整文件回滚或覆盖，只能逐行编辑，或先备份再做可审计的增量修改。（[细则](reports/runbooks/dev-workflow.md#ledger-no-rollback)）
+- 所有 `--update` 与指纹刷新必须由单一会话在并行写入停止后执行，并留存前后快照与差异核对。（[细则](reports/runbooks/dev-workflow.md#single-writer-updates)）
+- 并行窗口开工前必须核对文件占用，接手半截改动必须先判定可继承状态，未明确交接不得修改或默认回滚。（[细则](reports/runbooks/dev-workflow.md#file-ownership)）
+- 验证按最窄静态门禁与定向测试分层，全量回归只在交付前验收，失败必须先做基线对照和窄化复现。（[细则](reports/runbooks/dev-workflow.md#verification-tiers)）
+- 批次只有完成源码核实、真实出口码、台账同步、无半截状态且未经授权不提交 commit 才算收口。（[细则](reports/runbooks/dev-workflow.md#batch-closure)）
+- 上游 delta 必须回到 `upstream/main` 源码逐 sha 核实并同步对应台账，禁止用 note 代替证据或全量刷新覆盖判定。（[细则](reports/runbooks/dev-workflow.md#upstream-delta)）
+- 大文件拆分只能纯搬运，项级与测试名对账必须无缺失无多余，适配仅限模块层级和最小可见性。（[细则](reports/runbooks/dev-workflow.md#pure-moves)）
+- 补丁代码必须按 `packages/**/src/**/patches/**` 路径界定，代码行占第一方源码行不得超过 0.05%（当前基线约 104 行）；补丁仅限例外而非常规手段，禁止用注释标记或调整统计口径规避。（[细则](reports/runbooks/dev-workflow.md#patch-budget)）
+- 门禁绿灯只代表其实际覆盖面，发现截断、跳过或漏收必须另立盲区条目，禁止扩大豁免换绿。（[细则](reports/runbooks/dev-workflow.md#gate-blindspots)）
+- 文档中的当前统计数字必须现读权威文件或命令输出并注明口径，禁止手写不可复核的快照。（[细则](reports/runbooks/dev-workflow.md#live-counts)）
+- PowerShell 门禁必须直跑并读取 `$LASTEXITCODE`，不得用管道或后台 shell 状态替代真实出口码。（[细则](reports/runbooks/dev-workflow.md#exit-codes)）
+
 ## Project Overview
 
 **Kimi Code CLI** is an AI coding agent that runs in the terminal — it can read and edit code, run shell commands, search files, fetch web pages, and choose the next step based on the feedback it receives. It works out of the box with Moonshot AI's Kimi models and can also be configured to use other compatible providers.

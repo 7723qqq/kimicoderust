@@ -150,6 +150,13 @@ pub struct PipelineSpec {
     /// `[experimental].tower`). Gates the advertised Tower* tool table; the
     /// worker write-scope guard above is a separate, per-worker concern.
     pub tower_enabled: bool,
+    /// Whether NotifyUser is available (`KIMI_CODE_EXPERIMENTAL_NOTIFY_USER`
+    /// flag AND a host that can show an update — upstream #4054's
+    /// `notifyUserAvailable` two-input gate). Gates the advertised NotifyUser
+    /// tool; `false` keeps the tool out of the table instead of registering
+    /// updates that land nowhere. Default `true`: the TUI host has an updates
+    /// panel.
+    pub notify_user_enabled: bool,
     /// Whether progressive tool disclosure is on (`[experimental].
     /// tool_select`, v2 `TOOL_SELECT_FLAG_ID`). Together with the model's
     /// `dynamically_loaded_tools` capability it gates the `select_tools`
@@ -287,6 +294,7 @@ pub async fn build_engine_pipeline(
     } = host;
 
     let turn_event_count = Arc::new(AtomicU32::new(0));
+    let subagent_task_runner_slot = Arc::new(std::sync::Mutex::new(None));
     // An embedder that must observe engine events (the standalone server, which
     // fans them out to WebSocket clients) passes its own bus; otherwise this
     // pipeline gets a private one nobody listens on, as before.
@@ -296,7 +304,8 @@ pub async fn build_engine_pipeline(
     // wrapper and the native LLM event sink so all paths are counted.
     let base_callbacks: Arc<dyn HostCallbacks> = Arc::new(
         CountingCallbacks::new(base_callbacks, turn_event_count.clone())
-            .with_bus(event_bus.clone()),
+            .with_bus(event_bus.clone())
+            .with_subagent_task_runner_slot(subagent_task_runner_slot.clone()),
     );
 
     // Native tool execution: wrap the callbacks so the in-process toolset runs
@@ -324,8 +333,9 @@ pub async fn build_engine_pipeline(
         ))
     });
     // Turn-lifecycle hooks (v2 `agentExternalHooksService`, G-6 #6):
-    // user-configured commands observe the turn (`UserPromptSubmit` /
-    // `PreCompact`) and can veto a clean text stop (`Stop`). Built once
+    // user-configured commands can block or prepend context
+    // (`UserPromptSubmit`), observe compaction (`PreCompact`), and veto a
+    // clean text stop (`Stop`). Built once
     // per pipeline; turn drivers clone it per turn, and subagent turns read
     // it from the callbacks they already run with (per session, not from the
     // process-wide subagent manager).
@@ -403,6 +413,12 @@ pub async fn build_engine_pipeline(
                                 .ok()
                                 .map(Arc::new)
                             });
+                            if let Some(runner) = runner.as_ref() {
+                                *subagent_task_runner_slot
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner()) =
+                                    Some(runner.clone());
+                            }
                             // The runner is per-pipeline, so its lifecycle
                             // events only exist if the entry wired a sink.
                             if let (Some(runner), Some(sink)) =
@@ -465,6 +481,7 @@ pub async fn build_engine_pipeline(
                         .with_tool_select_enabled(spec.tool_select)
                         .with_bash_auto_background(spec.background.bash_auto_background_on_timeout)
                         .with_bash_task_timeout(spec.background.bash_task_timeout_s)
+                        .with_tower_max_running_tasks(spec.background.max_running_tasks)
                         .with_callbacks(base_callbacks.clone())
                         .with_tools_filter(
                             spec.policy_snapshot
@@ -608,6 +625,7 @@ pub async fn build_engine_pipeline(
                         todo_tool_veto: spec.todo_tool_veto.clone(),
                         tower_worktree_root: spec.tower_worktree_root.clone(),
                         tower_enabled: spec.tower_enabled,
+                        notify_user_enabled: spec.notify_user_enabled,
                         sandbox_policy,
                     })
                 }
@@ -919,6 +937,7 @@ mod tests {
             todo_tool_veto: None,
             tower_worktree_root: None,
             tower_enabled: false,
+            notify_user_enabled: true,
             tool_select: false,
             sandbox_mode: None,
             sandbox_policy: None,
@@ -1147,5 +1166,232 @@ X"
             calls.lock().unwrap().is_empty(),
             "refusing the fallback must not reach the host"
         );
+    }
+
+    async fn native_pipeline(root: &std::path::Path) -> EnginePipeline {
+        let (inner, _calls) = InProcessHost::new();
+        build_engine_pipeline(
+            &PipelineSpec {
+                workspace_root: Some(root.display().to_string()),
+                native_tools: true,
+                ..spec()
+            },
+            Arc::new(inner),
+            host(Arc::new(SubagentManager::new())),
+        )
+        .await
+        .expect("native pipeline builds")
+    }
+
+    fn subagent_task_meta(agent_id: &str) -> crate::storage::TaskSpawnMeta<'_> {
+        crate::storage::TaskSpawnMeta {
+            session_id: Some("sess-parent"),
+            kind: "subagent",
+            subagent_type: Some("explore"),
+            agent_id: Some(agent_id),
+        }
+    }
+
+    fn public_step(
+        pipeline: &EnginePipeline,
+        agent_id: &str,
+        turn_id: &str,
+        step: u32,
+        text: &str,
+    ) {
+        pipeline.callbacks.emit_event(serde_json::json!({
+            "type": "llm.step.begin",
+            "agent_id": agent_id,
+            "turn_id": turn_id,
+            "step": step,
+        }));
+        pipeline.callbacks.emit_event(serde_json::json!({
+            "type": "llm.delta",
+            "agent_id": agent_id,
+            "turn_id": turn_id,
+            "step": step,
+            "part": { "type": "text", "text": text },
+        }));
+    }
+
+    #[tokio::test]
+    async fn bg_partial_output_killed_excludes_retried_attempts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipeline = native_pipeline(tmp.path()).await;
+        let runner = pipeline.task_runner.clone().unwrap();
+        runner
+            .spawn_task_with_meta(
+                subagent_task_meta("agent-child"),
+                "task-child".into(),
+                "trace the parser".into(),
+                std::future::pending::<crate::storage::TaskOutcome>(),
+            )
+            .unwrap();
+
+        public_step(&pipeline, "agent-child", "turn-child", 1, "first finding");
+        public_step(
+            &pipeline,
+            "agent-child",
+            "turn-child",
+            2,
+            "failed attempt draft",
+        );
+        pipeline.callbacks.telemetry(serde_json::json!({
+            "event": "TurnStepRetrying",
+            "turn_id": "turn-child",
+            "step": 2,
+        }));
+        public_step(&pipeline, "agent-child", "turn-child", 3, "latest draft");
+        pipeline.callbacks.emit_event(serde_json::json!({
+            "type": "llm.delta",
+            "agent_id": "agent-child",
+            "turn_id": "turn-child",
+            "step": 3,
+            "part": { "type": "think", "think": "hidden reasoning" },
+        }));
+
+        let stopped = runner.stop("task-child", None).await.unwrap();
+        assert_eq!(stopped["status"], "killed");
+        let output = runner
+            .get_output("task-child")
+            .expect("the killed subagent must return its partial output");
+        assert!(output.contains("[partial output]"), "{output}");
+        assert!(output.contains("incomplete and unverified"), "{output}");
+        assert!(output.contains("first finding\n\nlatest draft"), "{output}");
+        assert!(!output.contains("failed attempt draft"), "{output}");
+        assert!(!output.contains("hidden reasoning"), "{output}");
+
+        let stopped_again = runner.stop("task-child", None).await.unwrap();
+        assert!(stopped_again.get("output").is_none());
+        assert_eq!(
+            runner.get_output("task-child").as_deref(),
+            Some(output.as_str())
+        );
+        let store = crate::storage::StateStore::for_workspace(tmp.path()).unwrap();
+        let persisted = store.read_task_output("task-child", 64 * 1024).unwrap();
+        assert!(
+            persisted["preview"]
+                .as_str()
+                .unwrap()
+                .contains("latest draft")
+        );
+    }
+
+    #[tokio::test]
+    async fn bg_partial_output_failed_includes_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipeline = native_pipeline(tmp.path()).await;
+        let runner = pipeline.task_runner.clone().unwrap();
+        let (settle_tx, settle_rx) = tokio::sync::oneshot::channel();
+        runner
+            .spawn_task_with_meta(
+                subagent_task_meta("agent-child"),
+                "task-child".into(),
+                "trace the parser".into(),
+                async move { settle_rx.await.unwrap() },
+            )
+            .unwrap();
+        public_step(
+            &pipeline,
+            "agent-child",
+            "turn-child",
+            1,
+            "unverified finding",
+        );
+
+        settle_tx
+            .send(crate::storage::TaskOutcome::Failed(
+                "Error: provider down".into(),
+            ))
+            .unwrap();
+        let settled = runner.wait("task-child", 2_000).await;
+        let crate::storage::TaskWaitResult::Completed(wire) = settled else {
+            panic!("subagent must settle as failed: {settled:?}");
+        };
+        assert_eq!(wire["status"], "failed");
+        let output = runner.get_output("task-child").unwrap();
+        assert!(output.contains("Error: provider down"), "{output}");
+        assert!(output.contains("[partial output]"), "{output}");
+        assert!(output.contains("unverified finding"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn bg_partial_output_completed_is_not_repeated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipeline = native_pipeline(tmp.path()).await;
+        let runner = pipeline.task_runner.clone().unwrap();
+        let (settle_tx, settle_rx) = tokio::sync::oneshot::channel();
+        runner
+            .spawn_task_with_meta(
+                subagent_task_meta("agent-child"),
+                "task-child".into(),
+                "trace the parser".into(),
+                async move { settle_rx.await.unwrap() },
+            )
+            .unwrap();
+        public_step(&pipeline, "agent-child", "turn-child", 1, "working draft");
+
+        settle_tx
+            .send(crate::storage::TaskOutcome::Completed(
+                "final verified report".into(),
+            ))
+            .unwrap();
+        let settled = runner.wait("task-child", 2_000).await;
+        let crate::storage::TaskWaitResult::Completed(wire) = settled else {
+            panic!("subagent must complete: {settled:?}");
+        };
+        assert_eq!(wire["output"], "final verified report");
+        assert!(!wire["output"].as_str().unwrap().contains("working draft"));
+        assert!(
+            !wire["output"]
+                .as_str()
+                .unwrap()
+                .contains("[partial output]")
+        );
+    }
+
+    #[tokio::test]
+    async fn bg_partial_output_caps_recent_32k_on_char_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipeline = native_pipeline(tmp.path()).await;
+        let runner = pipeline.task_runner.clone().unwrap();
+        runner
+            .spawn_task_with_meta(
+                subagent_task_meta("agent-child"),
+                "task-child".into(),
+                "trace the parser".into(),
+                std::future::pending::<crate::storage::TaskOutcome>(),
+            )
+            .unwrap();
+        pipeline.callbacks.emit_event(serde_json::json!({
+            "type": "llm.step.begin",
+            "agent_id": "agent-child",
+            "turn_id": "turn-child",
+            "step": 1,
+        }));
+        for (agent_id, text) in [
+            ("agent-child", "oldest finding "),
+            ("agent-child", &"中文🔁".repeat(20_000)),
+            ("agent-child", " newest finding"),
+        ] {
+            pipeline.callbacks.emit_event(serde_json::json!({
+                "type": "llm.delta",
+                "agent_id": agent_id,
+                "turn_id": "turn-child",
+                "step": 1,
+                "part": { "type": "text", "text": text },
+            }));
+        }
+
+        runner.stop("task-child", None).await.unwrap();
+        let output = runner.get_output("task-child").unwrap();
+        assert!(
+            output.contains("[earlier text truncated]"),
+            "output was not capped"
+        );
+        assert!(output.ends_with(" newest finding"), "the tail was lost");
+        assert!(!output.contains("oldest finding"), "the head was retained");
+        let kept = output.rsplit_once("[earlier text truncated]\n").unwrap().1;
+        assert!(kept.chars().count() <= 32 * 1024);
     }
 }

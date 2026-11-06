@@ -118,6 +118,10 @@ pub struct JsRunTurnParams {
     /// `[experimental].tower`). `None` falls back to the engine's own env
     /// probe.
     pub tower_enabled: Option<bool>,
+    /// Host-resolved NotifyUser availability (`KIMI_CODE_EXPERIMENTAL_NOTIFY_USER`
+    /// flag AND a host update panel — upstream #4054's two-input gate).
+    /// `None` = `true`: the TUI host has an updates panel.
+    pub notify_user_enabled: Option<bool>,
     /// Main-agent profile name (`--agent`, or the name a `--agent-file`
     /// defines). Selects the role overlay built into the session prompt;
     /// `None` keeps the default `agent` profile. Unlike `subagent_profiles`
@@ -272,6 +276,8 @@ pub struct JsMcpDefaults {
 pub struct JsSubagentProfile {
     pub name: String,
     pub description: Option<String>,
+    /// Optional usage guidance from the agent file's `whenToUse` frontmatter.
+    pub when_to_use: Option<String>,
     pub system_prompt: Option<String>,
     /// Explicit tool allowlist; empty means every tool minus
     /// `disallowed_tools`.

@@ -1,0 +1,275 @@
+{
+  "note": "配置面登记表（A8 方案 a）。`packages/node-sdk/src/config-local/schema.ts` 的每个顶层配置段，必须在这里登记四件事：谁是解析方（哪一侧真正解释这个段）、它是否跨 napi 接缝（若跨，列出 JsRunTurnParams 字段）、引擎侧消费点在哪个模块。门禁 scripts/check-config-registry.mjs 会：① 任一 TS 顶层键未登记即失败；② 登记表里出现 TS 已删除的键即失败；③ napi 字段名不在 JsRunTurnParams 里即失败。这样「加一个配置面要改几层」从口头约束变成可执行的清单，而不是再靠 scan-parity 的 32 键存在性检查。 `engineOnly: true` 标记引擎自有、TS schema 不声明的段（cron / workspace）：它们不进两向核对，只作为「这一层只存在于引擎侧」的显式记录。",
+  "generatedAt": "2026-11-04",
+  "sources": {
+    "tsSchema": "packages/node-sdk/src/config-local/schema.ts",
+    "napiParams": "packages/kimi-agent/src/napi_bindings/params.rs",
+    "rustConfig": "packages/kimi-agent/src/config/mod.rs"
+  },
+  "sections": {
+    "providers": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (providers)",
+      "napiFields": [
+        "native_llm",
+        "providers"
+      ],
+      "why": "宿主写入配置文件并解析 OAuth 引用；引擎侧还要把同一条目转成 NativeLlmConfig 才能直连 provider。"
+    },
+    "defaultProvider": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (default_provider)",
+      "napiFields": [],
+      "why": "两侧各自解析别名（snake_case 文件拼写 + camelCase alias）。"
+    },
+    "defaultModel": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (default_model)",
+      "napiFields": [],
+      "why": "同上。"
+    },
+    "models": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (models)",
+      "napiFields": [],
+      "why": "模型目录与别名表两侧都要读。"
+    },
+    "modelCatalog": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (model_catalog)",
+      "napiFields": [],
+      "why": "目录来源（内置 / 自定义 registry）由宿主与引擎共同查询。"
+    },
+    "thinking": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (thinking) → llm/anthropic.rs, llm/openai.rs",
+      "napiFields": [],
+      "why": "思考开关与 effort 会被折进 NativeLlmConfig 的 reasoning 字段。"
+    },
+    "planMode": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (plan_mode) → tools/plan_mode.rs",
+      "napiFields": [],
+      "why": "两侧都要判断默认是否进入 plan 模式。"
+    },
+    "yolo": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (yolo) → permission/mod.rs",
+      "napiFields": [],
+      "why": "权限模式的默认值两侧各读一次。"
+    },
+    "defaultPermissionMode": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (default_permission_mode)",
+      "napiFields": [
+        "policy_snapshot_json"
+      ],
+      "why": "宿主决定初值，引擎按 snapshot 里的 mode 执行。"
+    },
+    "defaultPlanMode": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (default_plan_mode)",
+      "napiFields": [],
+      "why": "与 planMode 同源，保留独立键是上游 schema 的历史形状。"
+    },
+    "permission": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (permission) → permission/mod.rs",
+      "napiFields": [
+        "policy_snapshot_json"
+      ],
+      "why": "规则表由宿主解析后序列化成 snapshot 过缝；引擎自己也会读文件（stdio/REPL 路径）。"
+    },
+    "hooks": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (hooks) → tools/external_hooks.rs",
+      "napiFields": [],
+      "why": "hook 的 spawn 与判定全在引擎侧，宿主只透传配置。"
+    },
+    "services": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (services)",
+      "napiFields": [],
+      "why": "服务端路由的载荷上限/超时等由引擎读取。"
+    },
+    "github": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (github) → tools/github.rs",
+      "napiFields": [
+        "github_token",
+        "github_base_url"
+      ],
+      "why": "凭据与 base URL 过 napi，工具实现只在引擎侧。"
+    },
+    "mergeAllAvailableSkills": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (merge_all_available_skills) → skills/mod.rs",
+      "napiFields": [],
+      "why": "扫描策略由引擎的 skill catalog 执行。"
+    },
+    "extraSkillDirs": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (extra_skill_dirs) → skills/mod.rs",
+      "napiFields": [],
+      "why": "额外 skill 根只影响引擎的扫描。"
+    },
+    "extraAgentDirs": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (extra_agent_dirs) → prompt/profiles.rs",
+      "napiFields": [
+        "subagent_profiles"
+      ],
+      "why": "profile 目录两侧都读：宿主列出可用 profile，引擎按 profile 起子代理。"
+    },
+    "loopControl": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (loop_control) → turn_loop/run_turn.rs",
+      "napiFields": [
+        "max_steps",
+        "max_attempts",
+        "compaction_max_attempts"
+      ],
+      "why": "步数/重试/压缩预算由引擎的执行循环消费，宿主只把值带过接缝。"
+    },
+    "background": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (background) → tools/mod.rs, storage/task_runner.rs",
+      "napiFields": [
+        "max_running_tasks",
+        "bash_auto_background_on_timeout",
+        "bash_task_timeout_s"
+      ],
+      "why": "后台任务上限与超时是引擎的调度参数。"
+    },
+    "task": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (task) → tools/tower/mod.rs (tower budget)",
+      "napiFields": [
+        "max_running_tasks"
+      ],
+      "why": "任务并发上限同时是 tower spawn 预算的天花板。"
+    },
+    "tools": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (tools) → tools/tool_policy.rs",
+      "napiFields": [
+        "tools_veto",
+        "agent_tool_veto",
+        "todo_tool_veto"
+      ],
+      "why": "enable/disable 名单在引擎侧过滤工具表并在执行前复查。"
+    },
+    "subagent": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (subagent) → subagent/manager.rs",
+      "napiFields": [
+        "subagent_timeout_ms",
+        "agent_profile"
+      ],
+      "why": "子代理超时与默认 profile 由引擎决定。"
+    },
+    "swarm": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (swarm) → swarm/mode.rs",
+      "napiFields": [
+        "swarm_timeout_ms",
+        "swarm_mode",
+        "swarm_mode_trigger"
+      ],
+      "why": "批次编排与模式状态机只在引擎侧。"
+    },
+    "agent": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (agent) → pipeline/mod.rs",
+      "napiFields": [
+        "native_tools",
+        "rust_self_contained",
+        "tool_select",
+        "sandbox_mode"
+      ],
+      "why": "引擎选择 native/host 工具路径与自足模式的开关。"
+    },
+    "shell": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (shell) → native/shell.rs",
+      "napiFields": [
+        "shell_path"
+      ],
+      "why": "宿主探测一次 shell 路径带过缝，引擎另有自己的候选链（parity 门禁比对两者顺序）。"
+    },
+    "secondaryModel": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (secondary_model) → subagent/secondary.rs",
+      "napiFields": [
+        "secondary_model_json"
+      ],
+      "why": "secondary 模型用于 tower/子代理选型，只在引擎侧解析。"
+    },
+    "mcp": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (mcp) → mcp/manager.rs",
+      "napiFields": [
+        "mcp_servers",
+        "mcp_oauth_dir",
+        "mcp_defaults"
+      ],
+      "why": "宿主解析分层 .mcp.json 并做 OAuth 交互；引擎持有连接、工具目录与加密凭据。"
+    },
+    "image": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (image) → tools/read_media.rs",
+      "napiFields": [
+        "image_read_byte_budget",
+        "image_max_edge_px"
+      ],
+      "why": "图片读取预算与缩放上限由引擎的媒体层执行。"
+    },
+    "experimental": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (experimental) → env.rs",
+      "napiFields": [],
+      "why": "两侧各自解析开关（宿主 UI 与引擎行为可能读同一个 flag）。"
+    },
+    "telemetry": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (telemetry) → server/engine.rs",
+      "napiFields": [
+        "telemetry"
+      ],
+      "why": "宿主上报遥测；引擎在自己的 turn settle 处也发同一通道的事件。"
+    },
+    "autoSessionTitle": {
+      "parsedBy": "both",
+      "rustConsumer": "config/mod.rs (auto_session_title) → session/title.rs",
+      "napiFields": [],
+      "why": "标题生成策略两侧各读一次，引擎负责实际生成。"
+    },
+    "workspace": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (workspace) → workspace_trust.rs",
+      "napiFields": [],
+      "why": "`[workspace] require_trust` 只被引擎的信任判定消费。",
+      "engineOnly": true
+    },
+    "cron": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (cron) → cron/scheduler.rs",
+      "napiFields": [],
+      "why": "调度器与停机窗口逻辑只在引擎侧。",
+      "engineOnly": true
+    },
+    "raw": {
+      "parsedBy": "host",
+      "rustConsumer": "—",
+      "napiFields": [],
+      "why": "TS 侧保留原始 TOML 文本用于写回（保留注释与格式），不从 napi 过。"
+    },
+    "default_workspace": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (default_workspace) → default_workspace.rs",
+      "napiFields": [],
+      "engineOnly": true,
+      "why": "上游 #4224 的 [defaultWorkspace] 段；fork 的 TS schema 不声明（宿主不经此段建会话），解析与 ensure 只在引擎的 REST 路径。"
+    }
+  }
+}

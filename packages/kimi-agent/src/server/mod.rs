@@ -141,6 +141,11 @@ pub struct HttpServer {
     /// read whichever of the two is live.
     remote_control_runtime:
         Arc<tokio::sync::Mutex<Option<crate::server::remote_control::RemoteControlHandle>>>,
+    /// Cloud-session client behind the remote-control device management routes.
+    remote_control_devices: Arc<remote_control::RemoteControlDeviceClient>,
+    /// In-process stand-in for upstream's start gate: held while a managed
+    /// Kimi logout wipes the credential and the tunnel tears down.
+    remote_control_logout_gate: Arc<remote_control::RemoteControlLogoutGate>,
     /// Cancelled by `POST /api/v1/shutdown`; the `http::serve` accept loop
     /// selects on it so the request actually stops the server.
     shutdown: tokio_util::sync::CancellationToken,
@@ -166,6 +171,17 @@ pub struct HttpServer {
     telemetry_sink: Option<crate::tools::external_hooks::TelemetrySink>,
 }
 
+/// The holder of the local start slot, mirrored onto the status wire while a
+/// logout holds the gate (upstream `RemoteControlStatusResponse.conflict`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteControlConflictWire {
+    pub pid: u32,
+    pub local_origin: String,
+    pub device_id: String,
+    pub url: String,
+    pub started_at: u64,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RemoteControlStatusWire {
     pub enabled: bool,
@@ -178,6 +194,8 @@ pub struct RemoteControlStatusWire {
     pub device_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<RemoteControlConflictWire>,
 }
 
 impl RemoteControlStatusWire {
@@ -189,11 +207,14 @@ impl RemoteControlStatusWire {
             device_id: None,
             device_name: None,
             error: None,
+            conflict: None,
         }
     }
 }
 
 mod builder;
+
+pub use builder::{HttpServerWakeDriver, WakeEnqueueError};
 mod catalog_routes;
 mod dispatch;
 
@@ -338,6 +359,7 @@ fn file_ref_from_store(
                     "[Attached file: {} ({media_type}, {} bytes)]",
                     meta.name, meta.size
                 ),
+                meta: None,
             });
         }
     };
@@ -656,7 +678,10 @@ fn prompt_content_to_blocks(
                                 name.as_deref(),
                             );
                             if let Some(caption) = caption {
-                                blocks.push(ContentBlock::Text { text: caption });
+                                blocks.push(ContentBlock::Text {
+                                    text: caption,
+                                    meta: None,
+                                });
                             }
                             blocks.push(block);
                         } else {
@@ -722,6 +747,7 @@ fn prompt_content_to_blocks(
                             if let Some(name) = name {
                                 blocks.push(ContentBlock::Text {
                                     text: format!("[Attached file: {name} ({media_type})]"),
+                                    meta: None,
                                 });
                             } else {
                                 return Err(error);
@@ -756,6 +782,7 @@ fn prompt_content_to_blocks(
                                 "[Attached file: {file_name} ({resolved_type}, {} bytes)]",
                                 bytes.len()
                             ),
+                            meta: None,
                         }),
                     }
                 }

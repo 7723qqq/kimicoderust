@@ -769,12 +769,42 @@ export interface WorkspaceTrustMcpServerInfo {
   readonly args?: readonly string[];
   readonly cwd?: string;
   readonly url?: string;
+  /** The config file that declared this server. */
+  readonly origin?: string;
+}
+
+/**
+ * The instruction files a trusted session would load (v2
+ * `TrustGatedInstructionSources`).
+ */
+export interface WorkspaceTrustInstructionSources {
+  readonly agentsMdPaths: readonly string[];
+  readonly skills: readonly string[];
+  readonly agentProfiles: readonly string[];
+  /** Every instruction path, deduplicated — what the prompt lists. */
+  readonly paths: readonly string[];
 }
 
 export interface WorkspaceTrustInfo {
   readonly trusted: boolean;
   /** Safe descriptions of project-level MCP servers that trusting would enable. */
   readonly gatedMcpServers: readonly WorkspaceTrustMcpServerInfo[];
+  /** Directories outside the project that would become reachable. */
+  readonly gatedAdditionalDirs?: readonly string[];
+  /** The configuration files that contributed those directories. */
+  readonly additionalDirSources?: readonly string[];
+  /** Inspections that could not complete, rendered as-is. */
+  readonly warnings?: readonly string[];
+  readonly instructionSources?: WorkspaceTrustInstructionSources;
+}
+
+/** Options for {@link SDKRpcClientBase.getWorkspaceTrustInfo}. */
+export interface WorkspaceTrustInfoOptions {
+  /**
+   * Directories the user is about to add (`/add-dir`), so the prompt can
+   * disclose what they would widen the sandbox to before the decision.
+   */
+  readonly additionalDirs?: readonly string[];
 }
 
 /**

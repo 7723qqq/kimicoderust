@@ -260,6 +260,10 @@ export const BackgroundConfigSchema = z.object({
 
 export type BackgroundConfig = z.infer<typeof BackgroundConfigSchema>;
 
+/** Current task section; values override their legacy `[background]` counterparts. */
+export const TaskConfigSchema = BackgroundConfigSchema;
+export type TaskConfig = z.infer<typeof TaskConfigSchema>;
+
 /**
  * The global `[tools]` switch: applied to every agent in all sessions and
  * intersected with each agent's own tool policy. Built-in tools match by
@@ -532,6 +536,7 @@ export const KimiConfigSchema = z.object({
   extraAgentDirs: z.array(z.string()).optional(),
   loopControl: LoopControlSchema.optional(),
   background: BackgroundConfigSchema.optional(),
+  task: TaskConfigSchema.optional(),
   tools: ToolsConfigSchema.optional(),
   subagent: SubagentConfigSchema.optional(),
   swarm: SwarmConfigSchema.optional(),
@@ -555,6 +560,7 @@ const ThinkingConfigPatchSchema = ThinkingConfigSchema.partial();
 const PermissionConfigPatchSchema = PermissionConfigSchema.partial();
 const LoopControlPatchSchema = LoopControlSchema.partial();
 const BackgroundConfigPatchSchema = BackgroundConfigSchema.partial();
+const TaskConfigPatchSchema = TaskConfigSchema.partial();
 const ToolsConfigPatchSchema = ToolsConfigSchema.partial();
 const SubagentConfigPatchSchema = SubagentConfigSchema.partial();
 const SwarmConfigPatchSchema = SwarmConfigSchema.partial();
@@ -592,6 +598,7 @@ export const KimiConfigPatchSchema = z
     extraAgentDirs: z.array(z.string()).optional(),
     loopControl: LoopControlPatchSchema.optional(),
     background: BackgroundConfigPatchSchema.optional(),
+    task: TaskConfigPatchSchema.optional(),
     tools: ToolsConfigPatchSchema.optional(),
     subagent: SubagentConfigPatchSchema.optional(),
     swarm: SwarmConfigPatchSchema.optional(),

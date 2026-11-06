@@ -49,12 +49,14 @@ impl NativeToolset {
             permission_mode: None,
             session_id: None,
             task_runner: None,
+            tower_wake_runtime: Arc::new(std::sync::Mutex::new(None)),
             file_history: Arc::new(std::sync::Mutex::new(None)),
             turn_id: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             loaded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             announced_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             empty_disclosure_announced: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             selection_failures: Arc::new(std::sync::Mutex::new(Default::default())),
+            wait_tally: Arc::new(std::sync::Mutex::new(Default::default())),
             tools_filter: None,
             secondary_model: None,
             image_read_byte_budget: None,
@@ -63,6 +65,7 @@ impl NativeToolset {
             tool_select_enabled: false,
             bash_auto_background: true,
             bash_task_timeout_s: None,
+            tower_max_running_tasks: None,
             provider: None,
         })
     }
@@ -112,6 +115,12 @@ impl NativeToolset {
     /// gate's map key and the writer's target must be the same file.
     pub fn shell_bridge(&self) -> Arc<ShellPathBridge> {
         self.shell_bridge.clone()
+    }
+
+    /// The execution root used to locate the tower protocol state for the
+    /// native Bash guard. Worktree callers re-anchor it to the main checkout.
+    pub fn tower_root(&self) -> &std::path::Path {
+        &self.root
     }
 
     /// Apply the host-resolved `[image]` limits for model-initiated reads
@@ -253,6 +262,14 @@ impl NativeToolset {
         self
     }
 
+    /// Set the configured Tower spawn budget ceiling. The adaptive governor
+    /// may lower it further after provider 429 responses.
+    #[must_use]
+    pub fn with_tower_max_running_tasks(mut self, max_running_tasks: Option<u32>) -> Self {
+        self.tower_max_running_tasks = max_running_tasks.filter(|value| *value > 0);
+        self
+    }
+
     /// The effective bound for a background Bash task: the call's own
     /// `timeout` wins over `[background].bash_task_timeout_s`, which wins over
     /// the built-in 600s. `disable_timeout` and a resolved `0` mean "no
@@ -301,6 +318,40 @@ impl NativeToolset {
     pub fn with_task_runner(mut self, runner: std::sync::Arc<crate::storage::TaskRunner>) -> Self {
         self.task_runner = Some(runner);
         self
+    }
+
+    /// Inject the shared runtime and return the handler the concrete session
+    /// or server must register for `tower_inbox` replay.
+    pub fn bind_tower_wake_runtime(
+        &self,
+        runtime: Arc<crate::tools::tower::wake::TowerWakeRuntime>,
+    ) -> crate::session::wake::WakeReplayHandler {
+        *self
+            .tower_wake_runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(runtime.clone());
+        runtime.replay_handler(
+            self.session_id.as_deref().unwrap_or("session-main"),
+            &self.root,
+            self.task_runner.as_ref(),
+        )
+    }
+
+    /// Convenience for a composition root that has a concrete wake driver.
+    pub fn bind_tower_wake_driver(
+        &self,
+        driver: Arc<dyn crate::session::wake::TowerWakeDriver>,
+    ) -> crate::session::wake::WakeReplayHandler {
+        self.bind_tower_wake_runtime(crate::tools::tower::wake::TowerWakeRuntime::new(driver))
+    }
+
+    pub(crate) fn tower_wake_runtime(
+        &self,
+    ) -> Option<Arc<crate::tools::tower::wake::TowerWakeRuntime>> {
+        self.tower_wake_runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The previous-session reminder for tasks the last process left behind,
@@ -408,15 +459,6 @@ impl NativeToolset {
             })
     }
 
-    /// The calling agent's cumulative token total for tower records (v2
-    /// `callerTokens`, upstream #3847). `None` when no manager is attached
-    /// or the caller has no recorded usage (the main agent's session total
-    /// lives in the host's SQLite turn records, unreachable from here).
-    pub(super) async fn caller_tokens(&self, caller_agent_id: &str) -> Option<i64> {
-        let manager = self.subagent_manager.as_ref()?;
-        manager.caller_tokens(caller_agent_id).await
-    }
-
     /// Attach a SubagentManager for in-process multi-agent collaboration.
     pub fn with_subagents(
         mut self,
@@ -443,6 +485,12 @@ impl NativeToolset {
     /// come out of the table and the `select_tools` loader is advertised in
     /// their place; when it is off, the table passes through unchanged
     /// (`select_tools` stays unadvertised — the model cannot see or call it).
+    ///
+    /// A deferred tool that the session already loaded goes back in. v2 hands
+    /// the loaded schema to the model as a system message carrying `tools`
+    /// (`selectToolsTool.ts` `ctx.remind`); this engine's equivalent channel
+    /// is the per-step table, so the definition — not only the
+    /// `<tools_added>` text — must reach the next request.
     pub fn shape_tool_table(
         &self,
         mut tools: Vec<crate::turn_loop::types::ToolInfo>,
@@ -462,9 +510,14 @@ impl NativeToolset {
             tools.retain(|tool| tool.name != crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME);
             return tools;
         }
+        let loaded = self
+            .loaded_tools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         tools.retain(|tool| {
             tool.name == crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME
                 || !deferred.contains(&tool.name)
+                || loaded.contains(&tool.name)
         });
         if tools
             .iter()

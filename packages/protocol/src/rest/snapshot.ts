@@ -1,5 +1,6 @@
 /**
- * `GET /v1/sessions/{session_id}/snapshot` — IM-style "initial sync".
+ *   GET /v1/sessions/{session_id}/snapshot
+ *     Reply: SessionSnapshotResponse — IM-style "initial sync".
  *
  * Returns an atomic-at-a-watermark view of everything a client needs to
  * rebuild a session's UI state, so the standard multi-device rebuild flow is:

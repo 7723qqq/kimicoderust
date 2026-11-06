@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 const FENCE: &str = "---";
+const FRONTMATTER_CHUNK_BYTES: usize = 16 * 1024;
 
 pub fn render_frontmatter(fields: &[(&str, &str)]) -> Result<String, String> {
     let mut lines = vec![FENCE.to_string()];
@@ -72,6 +74,34 @@ pub fn parse_frontmatter(text: &str) -> (BTreeMap<String, String>, String) {
     (fields, parsed.body.trim().to_string())
 }
 
+pub async fn read_frontmatter_prefix(path: impl AsRef<Path>) -> std::io::Result<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; FRONTMATTER_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            return String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if frontmatter_terminated(&String::from_utf8_lossy(&bytes)) {
+            return String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+        }
+    }
+}
+
+fn frontmatter_terminated(text: &str) -> bool {
+    let mut lines = text.split('\n');
+    if lines.next().is_none_or(|line| line.trim() != FENCE) {
+        return text.contains('\n');
+    }
+    lines.any(|line| line.trim() == FENCE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +164,36 @@ mod tests {
                 "value {value:?} did not round trip (rendered={rendered:?})"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn prefix_reader_stops_after_the_closing_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("message.md");
+        let rendered = render_frontmatter(&[("type", "inbox"), ("seq", "7")]).unwrap();
+        let content = format!("{rendered}\n\n{}", "body".repeat(20_000));
+        tokio::fs::write(&path, &content).await.unwrap();
+
+        let prefix = read_frontmatter_prefix(&path).await.unwrap();
+
+        assert!(prefix.len() < content.len());
+        let (fields, _) = parse_frontmatter(&prefix);
+        assert_eq!(fields.get("seq").map(String::as_str), Some("7"));
+    }
+
+    #[tokio::test]
+    async fn prefix_reader_keeps_frontmatter_that_crosses_a_chunk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("review.md");
+        let long_value = "x".repeat(FRONTMATTER_CHUNK_BYTES + 2_000);
+        let rendered = render_frontmatter(&[("seq", "42"), ("subject", &long_value)]).unwrap();
+        let content = format!("{rendered}\n\nbody");
+        tokio::fs::write(&path, &content).await.unwrap();
+
+        let prefix = read_frontmatter_prefix(&path).await.unwrap();
+
+        let (fields, _) = parse_frontmatter(&prefix);
+        assert_eq!(fields.get("seq").map(String::as_str), Some("42"));
+        assert_eq!(fields.get("subject"), Some(&long_value));
     }
 }

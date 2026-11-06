@@ -29,7 +29,7 @@ MCP server 配置写在 `mcp.json` 中，分两层：
 
 从配置中删除某个 server 不会打断进行中的会话：该 server 在 `/mcp` 中仍显示为 `removed`，其工具在这些会话中保持可见，但调用会失败并返回移除提示；新会话则完全不会注册这些工具。反过来，编辑 `mcp.json` 或安装 plugin 新增的 server 也不会注册到已打开的会话，只会加入之后创建的会话。
 
-当 Kimi Code 在不受信任的文件夹中发现项目级 MCP server 时，工作区信任提示会显示每个 server 的传输方式和启动目标。提示默认选中 `Trust this folder`；核对列出的命令与参数或远程 URL 后确认即可，选择 `Don't trust` 则该工作区的项目级 MCP server 不会启用。
+当 Kimi Code 在不受信任的文件夹中发现项目级 MCP server 时，工作区信任提示会显示每个 server 的传输方式和启动目标。提示默认选中 `Trust this folder`；核对列出的命令与参数或远程 URL 后确认即可，选择 `Don't trust` 则该工作区的项目级 MCP server 不会启用。如需全局关闭工作区信任机制并不经确认加载项目级 MCP server，可在 `config.toml` 中设置 [`[workspace] require_trust = false`](../configuration/config-files.md#workspace-trust)；仅应在所有工作区均已可信时使用该配置。
 
 `mcp.json` 的结构：
 

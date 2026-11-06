@@ -26,6 +26,9 @@ before code changes are made.";
 pub struct AgentProfile {
     pub name: String,
     pub description: String,
+    /// v2 `AgentProfile.whenToUse`, rendered only in the Agent tool's type
+    /// listing (never appended to the profile's system prompt).
+    pub when_to_use: Option<String>,
     pub role_additional: String,
     pub tools: Vec<String>,
     /// The subagent types this profile may itself spawn (v2
@@ -52,6 +55,7 @@ impl ProfileCatalog {
         let agent = AgentProfile {
             name: "agent".into(),
             description: "Default interactive agent".into(),
+            when_to_use: None,
             role_additional: String::new(),
             tools: vec![
                 "Read".into(),
@@ -91,6 +95,10 @@ impl ProfileCatalog {
             name: "coder".into(),
             description: "General software engineering agent — modifying code with verification"
                 .into(),
+            when_to_use: Some(
+                "Use this agent for non-trivial software engineering work that may require reading files, editing code, running commands, and returning a compact but technically complete summary to the parent agent."
+                    .into(),
+            ),
             role_additional: format!("{}\n\n{}", TASK_AGENT_ROLE_PREFIX, CODER_ROLE_SUFFIX),
             tools: vec![
                 "Bash".into(),
@@ -120,6 +128,14 @@ impl ProfileCatalog {
         let explore = AgentProfile {
             name: "explore".into(),
             description: "Fast codebase exploration with prompt-enforced read-only behavior".into(),
+            when_to_use: Some(
+                concat!(
+                    "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (e.g. \"src/**/*.yaml\"), search code for keywords (e.g. \"database connection\"), or answer questions about the codebase (e.g. \"how does the auth module work?\"). ",
+                    "When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"thorough\" for comprehensive analysis across multiple locations and naming conventions. ",
+                    "Use this agent for any read-only exploration that will clearly require more than 3 search queries. Prefer launching multiple explore agents concurrently when investigating independent questions."
+                )
+                .into(),
+            ),
             role_additional: format!("{}\n\n{}", TASK_AGENT_ROLE_PREFIX, EXPLORE_ROLE_SUFFIX),
             tools: vec![
                 "Bash".into(),
@@ -135,6 +151,10 @@ impl ProfileCatalog {
         let plan = AgentProfile {
             name: "plan".into(),
             description: "Read-only implementation planning and architecture design".into(),
+            when_to_use: Some(
+                "Use this agent when the parent agent needs a step-by-step implementation plan, key file identification, and architectural trade-off analysis before code changes are made."
+                    .into(),
+            ),
             role_additional: format!("{}\n\n{}", TASK_AGENT_ROLE_PREFIX, PLAN_ROLE_SUFFIX),
             tools: vec![
                 "Read".into(),

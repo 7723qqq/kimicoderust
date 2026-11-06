@@ -256,7 +256,26 @@ impl NativeToolset {
                 let callbacks = self.callbacks.as_deref()?;
                 let runner = self.task_runner.as_deref();
                 let steer = self.effective_steer();
-                Some(task_tools::execute_task_wait(callbacks, runner, steer.as_ref(), args).await)
+                // The advertised names are `WaitFor` (product table) and
+                // `TaskWait` (REPL-only alias); warning/timeout prose names
+                // the one the model actually called.
+                let display_name = if tool_name.eq_ignore_ascii_case("waitfor")
+                    || tool_name.eq_ignore_ascii_case("wait_for")
+                {
+                    "WaitFor"
+                } else {
+                    "TaskWait"
+                };
+                let wait = task_tools::WaitContext {
+                    tally: &self.wait_tally,
+                    turn_id: self.effective_turn_id(),
+                    caller_agent_id: caller.as_str(),
+                    display_name,
+                };
+                Some(
+                    task_tools::execute_task_wait(callbacks, runner, steer.as_ref(), &wait, args)
+                        .await,
+                )
             }
             "exitplanmode" | "exit_plan_mode" => {
                 let callbacks = self.callbacks.as_deref()?;
@@ -525,22 +544,50 @@ impl NativeToolset {
                     &self.root,
                     caller,
                     session,
-                    self.subagent_manager.as_ref(),
+                    self.subagent_manager.as_ref().map(|manager| {
+                        (
+                            manager,
+                            self.secondary_model.as_deref(),
+                            self.tower_max_running_tasks,
+                        )
+                    }),
                     tool_call_id,
                     self.effective_parent_cancel().as_ref(),
                     &args.to_string(),
                 )
                 .await
             }
+            "towerrebase" | "tower_rebase" => {
+                let caller = self.effective_caller_agent_id();
+                let caller = caller.as_str();
+                Some(
+                    tower::execute_tower_rebase(
+                        &self.root,
+                        caller,
+                        &args.to_string(),
+                        self.task_runner.as_deref(),
+                    )
+                    .await,
+                )
+            }
             "towermerge" | "tower_merge" => {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
-                Some(tower::execute_tower_merge(&self.root, caller, &args.to_string()).await)
+                Some(
+                    tower::execute_tower_merge(
+                        &self.root,
+                        caller,
+                        &args.to_string(),
+                        self.task_runner.as_deref(),
+                    )
+                    .await,
+                )
             }
             "towerteardown" | "tower_teardown" => {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
                 let session = self.session_id.as_deref().unwrap_or("session-main");
+                let wake_runtime = self.tower_wake_runtime();
                 Some(
                     tower::execute_tower_teardown(
                         &self.root,
@@ -548,6 +595,7 @@ impl NativeToolset {
                         session,
                         &args.to_string(),
                         self.task_runner.as_deref(),
+                        wake_runtime.as_ref(),
                     )
                     .await,
                 )
@@ -555,16 +603,29 @@ impl NativeToolset {
             "towersend" | "tower_send" => {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
-                // Upstream #3847: the sender's cumulative token total rides
-                // the record (v2 `callerTokens`).
-                let tokens = self.caller_tokens(caller).await;
+                let wake_runtime = self.tower_wake_runtime();
                 Some(
                     tower::execute_tower_send(
                         &self.root,
                         caller,
                         &args.to_string(),
-                        self.task_runner.as_deref(),
-                        tokens,
+                        self.task_runner.as_ref(),
+                        wake_runtime.as_ref(),
+                    )
+                    .await,
+                )
+            }
+            "towercomplete" | "tower_complete" => {
+                let caller = self.effective_caller_agent_id();
+                let caller = caller.as_str();
+                let wake_runtime = self.tower_wake_runtime();
+                Some(
+                    tower::execute_tower_complete(
+                        &self.root,
+                        caller,
+                        &args.to_string(),
+                        self.task_runner.as_ref(),
+                        wake_runtime.as_ref(),
                     )
                     .await,
                 )
@@ -577,23 +638,21 @@ impl NativeToolset {
             "towerfinding" | "tower_finding" => {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
-                // Upstream #3847: the filer's cumulative token total rides
-                // the record (v2 `callerTokens`).
-                let tokens = self.caller_tokens(caller).await;
-                Some(
-                    tower::execute_tower_finding(&self.root, caller, &args.to_string(), tokens)
-                        .await,
-                )
+                Some(tower::execute_tower_finding(&self.root, caller, &args.to_string()).await)
             }
             "towerreview" | "tower_review" => {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
-                // Upstream #3847: the reviewer's cumulative token total rides
-                // the record (v2 `callerTokens`).
-                let tokens = self.caller_tokens(caller).await;
+                let wake_runtime = self.tower_wake_runtime();
                 Some(
-                    tower::execute_tower_review(&self.root, caller, &args.to_string(), tokens)
-                        .await,
+                    tower::execute_tower_review(
+                        &self.root,
+                        caller,
+                        &args.to_string(),
+                        self.task_runner.as_ref(),
+                        wake_runtime.as_ref(),
+                    )
+                    .await,
                 )
             }
             "towermission" | "tower_mission" => {
@@ -604,7 +663,15 @@ impl NativeToolset {
             "towerstatus" | "tower_status" => {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
-                Some(tower::execute_tower_status(&self.root, caller).await)
+                Some(
+                    tower::execute_tower_status(
+                        &self.root,
+                        caller,
+                        self.task_runner.as_deref(),
+                        self.tower_max_running_tasks,
+                    )
+                    .await,
+                )
             }
             "write" => {
                 self.run_mutating_file_tool_on_blocking_pool(args, Self::write)

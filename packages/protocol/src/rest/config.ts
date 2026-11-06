@@ -1,3 +1,9 @@
+/**
+ *   GET  /v1/config                   -                       data: ConfigResponse
+ *   POST /v1/config                   body: PatchConfigRequest
+ *                                     data: ConfigResponse (the patched view)
+ */
+
 import { z } from 'zod';
 
 export const providerConfigResponseSchema = z.object({

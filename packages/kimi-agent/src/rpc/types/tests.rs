@@ -83,6 +83,31 @@ fn test_message_wire_contract_roundtrip() {
         serde_json::json!({"role": "assistant", "content": "hi"})
     );
 
+    // `ContentBlock::Text.meta` (v2 #4081): present on the wire only when
+    // set, and read back unchanged.
+    let tagged: ContentBlock = serde_json::from_value(serde_json::json!({
+        "type": "text",
+        "text": "<system>hook</system>",
+        "meta": { "contentType": "text/xml", "source": "user prompt submit hook" }
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&tagged).unwrap(),
+        serde_json::json!({
+            "type": "text",
+            "text": "<system>hook</system>",
+            "meta": { "contentType": "text/xml", "source": "user prompt submit hook" }
+        }),
+        "meta round-trips through the wire shape"
+    );
+    let untagged: ContentBlock =
+        serde_json::from_value(serde_json::json!({"type": "text", "text": "hi"})).unwrap();
+    assert_eq!(
+        serde_json::to_value(&untagged).unwrap(),
+        serde_json::json!({"type": "text", "text": "hi"}),
+        "meta is omitted when unset"
+    );
+
     // TokenUsage wire field names (drifted from kosong's camelCase on
     // purpose — the mapping lives in rust-loop.ts).
     let usage: TokenUsage = serde_json::from_value(serde_json::json!({

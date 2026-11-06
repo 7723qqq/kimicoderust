@@ -17,6 +17,7 @@ export type {
   Role,
   StreamedMessagePart,
   TextPart,
+  TextPartMeta,
   ThinkPart,
   ToolCall,
   ToolCallPart,

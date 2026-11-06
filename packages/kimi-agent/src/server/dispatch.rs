@@ -106,7 +106,12 @@ impl HttpServer {
             Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
         };
 
-        let mut current_wire = format_wire_session(&session, &self.store, self.engine.as_ref());
+        let mut current_wire = format_wire_session(
+            &session,
+            &self.store,
+            self.engine.as_ref(),
+            self.default_workspace_root().as_deref(),
+        );
 
         let patch_set = if let Ok(ps) =
             serde_json::from_value::<crate::session::patch::JsonPatchSet>(body.clone())
@@ -305,7 +310,12 @@ impl HttpServer {
                 }
             };
 
-        let mut current_wire = format_wire_session(&session, &self.store, self.engine.as_ref());
+        let mut current_wire = format_wire_session(
+            &session,
+            &self.store,
+            self.engine.as_ref(),
+            self.default_workspace_root().as_deref(),
+        );
         let redo_patch = match crate::session::patch::apply_patch(&mut current_wire, &inverse_set) {
             Ok(p) => p,
             Err(e) => return HttpResponse::bad_request(format!("Failed to revert patch: {e}")),

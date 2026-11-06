@@ -77,6 +77,9 @@ portable-pty = "0.9"
 # downloaded and extracted into the managed plugin root.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 serde_yaml = { version = "0.9", default-features = false }
+# Shared UI contract vocabulary (EntryId / EntryOp / stream-segment types;
+# design reports/design/RUST-UI-DECOUPLING.md). engine → shared direction.
+kimi-ui-core = { path = "../kimi-ui-core" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

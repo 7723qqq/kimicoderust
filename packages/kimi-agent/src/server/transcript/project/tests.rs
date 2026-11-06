@@ -1474,3 +1474,190 @@ fn agent_status_usage_merges_the_per_model_buckets() {
     assert_eq!(usage.total.expect("total").output, 5);
     assert_eq!(usage.current_turn.expect("current turn").output, 4);
 }
+
+// ── upstream #4280: wedged turns, restored startedAt, ordinal fallback ────
+
+/// Live fold: a new `TurnStarted` closes the previous running turn as wedged
+/// (upstream `ops/apply.ts`) — its loop never wrote a terminal event, so it
+/// renders `failed` with the additive flag, before the new turn's own upsert.
+#[test]
+fn a_new_turn_started_closes_the_previous_running_turn_as_wedged() {
+    let mut projector = TranscriptProjector::new();
+    projector.apply_event(&EngineEvent::TurnStarted {
+        agent_id: "main".into(),
+        turn_id: "turn-1".into(),
+        prompt: Some("first".into()),
+    });
+
+    let ops = projector.apply_event(&EngineEvent::TurnStarted {
+        agent_id: "main".into(),
+        turn_id: "turn-2".into(),
+        prompt: Some("second".into()),
+    });
+    assert_eq!(ops.len(), 2, "wedged close plus the new turn: {ops:?}");
+    let TranscriptOperation::TurnUpsert { turn: closed } = &ops[0] else {
+        panic!("expected the wedged close first, got {:?}", ops[0]);
+    };
+    assert_eq!(closed.turn_id, "t1");
+    assert_eq!(closed.state, TurnState::Failed);
+    assert_eq!(closed.wedged, Some(true));
+    assert!(closed.ended_at.is_some());
+    let TranscriptOperation::TurnUpsert { turn: opened } = &ops[1] else {
+        panic!("expected the new turn's upsert, got {:?}", ops[1]);
+    };
+    assert_eq!(opened.turn_id, "t2");
+    assert_eq!(opened.state, TurnState::Running);
+    assert_eq!(opened.wedged, None);
+
+    let snapshot = projector.snapshot();
+    let first = &snapshot.items[0];
+    let TranscriptItem::Turn(first) = first else {
+        panic!("expected a turn item");
+    };
+    assert_eq!(first.state, TurnState::Failed);
+    assert_eq!(first.wedged, Some(true));
+}
+
+/// Cold replay: a turn's `startedAt` is restored from the journal record's
+/// `created_at` (upstream `recordTimeIso`), not stamped with the rebuild time.
+#[test]
+fn a_cold_replay_restores_started_at_from_the_journal_record() {
+    let mut projector = TranscriptProjector::new();
+    let epoch_ms = 1_700_000_000_000i64; // 2023-11-14T22:13:20Z
+    projector.apply_event_at(
+        &EngineEvent::TurnStarted {
+            agent_id: "main".into(),
+            turn_id: "turn-3".into(),
+            prompt: Some("cold".into()),
+        },
+        Some(epoch_ms),
+    );
+
+    let snapshot = projector.snapshot();
+    let TranscriptItem::Turn(turn) = &snapshot.items[0] else {
+        panic!("expected a turn item");
+    };
+    assert_eq!(
+        turn.started_at.as_deref(),
+        Some("2023-11-14T22:13:20+00:00"),
+        "startedAt comes from the journal record, got {:?}",
+        turn.started_at
+    );
+}
+
+/// Cold finalization (upstream `foldWireRecordFacts` wedged pass): with
+/// nothing live (`None`), the unclosed tail turn is wedged; when it is the
+/// engine's live active turn, the tail exemption keeps it `running`.
+#[test]
+fn a_cold_rebuild_marks_the_unclosed_tail_wedged_only_when_it_is_not_live() {
+    let replay = |active: Option<i64>| {
+        let mut projector = TranscriptProjector::new();
+        projector.apply_event_at(
+            &EngineEvent::TurnStarted {
+                agent_id: "main".into(),
+                turn_id: "turn-1".into(),
+                prompt: Some("first".into()),
+            },
+            Some(1_000),
+        );
+        projector.apply_event_at(
+            &EngineEvent::TurnStarted {
+                agent_id: "main".into(),
+                turn_id: "turn-2".into(),
+                prompt: Some("second".into()),
+            },
+            Some(2_000),
+        );
+        projector.mark_wedged_turns(active);
+        projector.snapshot()
+    };
+
+    // Restart case: every loop is dead, so the unclosed tail is wedged too.
+    let snapshot = replay(None);
+    for item in &snapshot.items {
+        let TranscriptItem::Turn(turn) = item else {
+            panic!("expected a turn item");
+        };
+        assert_eq!(turn.state, TurnState::Failed, "{}: {turn:?}", turn.turn_id);
+        assert_eq!(turn.wedged, Some(true), "{}: {turn:?}", turn.turn_id);
+    }
+
+    // Live case: the tail is the engine's active turn and stays running.
+    let snapshot = replay(Some(2));
+    let TranscriptItem::Turn(first) = &snapshot.items[0] else {
+        panic!("expected a turn item");
+    };
+    assert_eq!(first.state, TurnState::Failed);
+    assert_eq!(first.wedged, Some(true));
+    let TranscriptItem::Turn(tail) = &snapshot.items[1] else {
+        panic!("expected a turn item");
+    };
+    assert_eq!(tail.turn_id, "t2");
+    assert_eq!(tail.state, TurnState::Running);
+    assert_eq!(tail.wedged, None);
+}
+
+/// The `ensure_turn` ordinal fallback for an unparseable key claims
+/// `max(ordinals in use) + 1` rather than the positional slot: deterministic
+/// within a replay, and two unparseable keys cannot collide.
+#[test]
+fn unparseable_turn_keys_claim_monotonic_fallback_ordinals() {
+    let mut projector = TranscriptProjector::new();
+    projector.apply_event(&EngineEvent::TurnStarted {
+        agent_id: "main".into(),
+        turn_id: "turn-5".into(),
+        prompt: None,
+    });
+    projector.apply_event(&EngineEvent::TurnStarted {
+        agent_id: "main".into(),
+        turn_id: "foreign".into(),
+        prompt: None,
+    });
+    projector.apply_event(&EngineEvent::TurnStarted {
+        agent_id: "main".into(),
+        turn_id: "another-foreign".into(),
+        prompt: None,
+    });
+
+    let snapshot = projector.snapshot();
+    let ordinals: Vec<i64> = snapshot
+        .items
+        .iter()
+        .map(|item| match item {
+            TranscriptItem::Turn(turn) => turn.ordinal,
+            other => panic!("expected a turn item, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        ordinals,
+        vec![5, 6, 7],
+        "fallbacks claim max+1 monotonically"
+    );
+    let foreign_ids: Vec<&str> = snapshot
+        .items
+        .iter()
+        .map(|item| match item {
+            TranscriptItem::Turn(turn) => turn.turn_id.as_str(),
+            other => panic!("expected a turn item, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(foreign_ids, vec!["t5", "foreign", "another-foreign"]);
+}
+
+#[test]
+fn an_unclosed_model_started_swarm_stays_out_of_cold_and_live_modes() {
+    let event = EngineEvent::Custom(json!({
+        "type": "swarm_mode.enter",
+        "agentId": "main",
+        "trigger": "tool",
+    }));
+    let mut live = TranscriptProjector::new();
+    live.apply_event(&event);
+    let mut cold = TranscriptProjector::new();
+    cold.apply_event_at(&event, Some(1_000));
+
+    let live_modes = live.snapshot().meta.modes;
+    let cold_modes = cold.snapshot().meta.modes;
+    assert_eq!(cold_modes, live_modes);
+    assert_eq!(live_modes.and_then(|modes| modes.swarm), None);
+}

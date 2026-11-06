@@ -31,12 +31,14 @@ pub const LLM_HEADERS_TIMEOUT_ENV: &str = "KIMI_CODE_LLM_HEADERS_TIMEOUT_MS";
 /// v2 `MAX_HEADERS_TIMEOUT_MS` (2**31-1, the undici ceiling).
 const MAX_HEADERS_TIMEOUT_MS: u64 = 2_147_483_647;
 
-/// v2 `resolveLlmHeadersTimeoutMs`: unset or blank means no cap; anything
-/// else must be a positive integer within range, and a bad value fails the
-/// request the way v2 fails client construction. The `config.invalid` class
-/// keeps the retry layer from treating a deterministic mistake as transient.
-fn resolve_llm_headers_timeout_ms() -> Result<Option<std::time::Duration>, String> {
-    let Ok(raw) = std::env::var(LLM_HEADERS_TIMEOUT_ENV) else {
+/// The pure half of [`resolve_llm_headers_timeout_ms`]: unset or blank means
+/// no cap; anything else must be a positive integer within range, and a bad
+/// value fails the request the way v2 fails client construction. Testable
+/// without touching the process environment — the async transport test must
+/// not write `LLM_HEADERS_TIMEOUT_ENV` while other tests read the same
+/// process-global map.
+fn parse_llm_headers_timeout_ms(raw: Option<&str>) -> Result<Option<std::time::Duration>, String> {
+    let Some(raw) = raw else {
         return Ok(None);
     };
     let trimmed = raw.trim();
@@ -52,6 +54,52 @@ fn resolve_llm_headers_timeout_ms() -> Result<Option<std::time::Duration>, Strin
         None => Err(format!(
             "config.invalid: {LLM_HEADERS_TIMEOUT_ENV} must be a positive integer no greater than {MAX_HEADERS_TIMEOUT_MS}, got {raw:?}."
         )),
+    }
+}
+
+/// v2 `resolveLlmHeadersTimeoutMs`: the env value, unless a test has scoped
+/// an override for its own thread (see [`headers_timeout_override`]).
+fn resolve_llm_headers_timeout_ms() -> Result<Option<std::time::Duration>, String> {
+    #[cfg(test)]
+    if let Some(scoped) = headers_timeout_override::current() {
+        return scoped;
+    }
+    parse_llm_headers_timeout_ms(std::env::var(LLM_HEADERS_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// Test-only hook for the headers-timeout value. `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS`
+/// is process-global, so an env-writing test would poison every other test
+/// that calls `chat` concurrently (they resolve it inside `send_request`).
+/// Scoping the value to the test's own thread removes that window entirely;
+/// the production path above is unchanged when no override is set.
+#[cfg(test)]
+mod headers_timeout_override {
+    use std::cell::RefCell;
+
+    type Resolved = Result<Option<std::time::Duration>, String>;
+
+    thread_local! {
+        static SLOT: RefCell<Option<Resolved>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn current() -> Option<Resolved> {
+        SLOT.with(|slot| slot.borrow().clone())
+    }
+
+    /// Scoped override: clears itself on drop, even on panic.
+    pub(super) struct Scoped;
+
+    impl Scoped {
+        pub(super) fn set(value: Resolved) -> Self {
+            SLOT.with(|slot| *slot.borrow_mut() = Some(value));
+            Self
+        }
+    }
+
+    impl Drop for Scoped {
+        fn drop(&mut self) {
+            SLOT.with(|slot| *slot.borrow_mut() = None);
+        }
     }
 }
 
@@ -179,6 +227,11 @@ pub struct NativeHttpLlm {
     /// deltas carry it so the host attributes a subagent's stream to the
     /// subagent instead of the main transcript. `None` between turns.
     stream_agent_id: std::sync::Mutex<Option<String>>,
+    /// The running turn's watchdog state (v2 `armTurnWatch`), installed by
+    /// the turn through [`LLM::set_turn_watch`]. Every streamed fragment
+    /// ticks it, so a turn that keeps receiving model output is never
+    /// reported as stalled. Replaced per turn like `stream_agent_id`.
+    turn_watch: std::sync::Mutex<Option<Arc<crate::turn_loop::watch::TurnWatchState>>>,
     /// The session's stable prompt-cache key (v2 `cacheKey`: the session id).
     /// OpenAI-compatible wires send it as `prompt_cache_key`, anthropic as
     /// `metadata.user_id`. `None` for a transport with no session.
@@ -269,6 +322,7 @@ impl NativeHttpLlm {
             fetch_gate: tokio::sync::Mutex::new(()),
             tool_call_ids: std::sync::Mutex::new(None),
             stream_agent_id: std::sync::Mutex::new(None),
+            turn_watch: std::sync::Mutex::new(None),
             cache_key: None,
         }
     }
@@ -303,32 +357,50 @@ impl NativeHttpLlm {
     }
 
     /// The per-request completion cap (v2 `completionBudgetParams` +
-    /// `resolveMaxCompletionCap`): the model output cap when declared, else
-    /// the context window, else v2's 32000 fallback; the remaining context
-    /// (`window - used`) can only lower it, never raise it.
-    fn completion_cap(&self, params: &LLMChatParams) -> u32 {
-        const DEFAULT_FALLBACK: u32 = 32_000;
-        // The declared output cap (host-resolved `maxOutputSize` /
-        // `provider.maxTokens`) is the hard cap; an Anthropic model whose
-        // profile declares none still has its generation ceiling, which is the
-        // same value the request's `max_tokens` already uses.
+    /// `resolveMaxCompletionCap`, `21406fb4c8`): only an explicitly configured
+    /// output cap becomes a request budget, and the remaining context
+    /// (`window - used`) can only lower it. With no declared cap the field is
+    /// omitted entirely, except for Kimi's OpenAI / Responses traits, whose
+    /// `completionTokensWhenUnset` fills it with `window - used`.
+    fn completion_cap(&self, params: &LLMChatParams) -> Option<u32> {
         let is_kimi = self
             .config
             .provider_type
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
-        let hard_cap = self.config.max_tokens.or_else(|| {
-            (self.config.protocol == "anthropic" && !is_kimi)
-                .then(|| anthropic::default_max_tokens_for_model(&self.config.model))
-        });
-        let base = hard_cap
-            .or(params.max_context_tokens)
-            .unwrap_or(DEFAULT_FALLBACK);
-        let cap = match (params.max_context_tokens, params.used_context_tokens) {
-            (Some(window), Some(used)) => base.min(window.saturating_sub(used)),
-            _ => base,
+        let Some(requested) = self.config.max_tokens else {
+            // `kimiOpenAITrait` / `kimiResponsesTrait` are the only traits with
+            // `completionTokensWhenUnset`. `kimiAnthropicTrait` has none: the
+            // Anthropic wire fills its required `max_tokens` from the model
+            // ceiling instead (see `default_max_tokens_for_model`).
+            let kimi_unset_budget = is_kimi
+                && matches!(
+                    self.config.protocol.as_str(),
+                    "openai" | "openai_responses" | "openai-responses"
+                );
+            if !kimi_unset_budget {
+                return None;
+            }
+            let (Some(window), Some(used)) =
+                (params.max_context_tokens, params.used_context_tokens)
+            else {
+                return None;
+            };
+            if window == 0 {
+                return None;
+            }
+            return Some(window.saturating_sub(used).max(1));
         };
-        cap.max(1)
+        // v2 `resolveMaxCompletionCap`: a non-positive cap is the opt-out
+        // spelling and resolves to `undefined`, so nothing goes on the wire.
+        if requested == 0 {
+            return None;
+        }
+        let cap = match (params.max_context_tokens, params.used_context_tokens) {
+            (Some(window), Some(used)) if window > 0 => requested.min(window.saturating_sub(used)),
+            _ => requested,
+        };
+        Some(cap.max(1))
     }
 
     /// Moonshot preserved-thinking keep is active (`[thinking] keep` /
@@ -381,6 +453,17 @@ impl NativeHttpLlm {
         delta: StreamDelta,
         ids: Option<&crate::turn_loop::tool_call_id::ToolCallIdResponseNormalizer>,
     ) {
+        // Every streamed fragment is observable progress for the turn's
+        // watchdog (v2's `partials.length` arm) — including the fragments
+        // withheld below, which still prove the provider stream is alive.
+        if let Some(watch) = self
+            .turn_watch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            watch.note_partial();
+        }
         // A streamed fragment carries the id the finalized call will carry, so
         // the host addresses one tool-call entity for both. A fragment whose
         // provider sent no id yet is withheld rather than forwarded with an
@@ -490,7 +573,7 @@ impl NativeHttpLlm {
                 self.config.reasoning_effort.as_deref(),
                 self.config.provider_type.as_deref(),
                 self.cache_key.as_deref(),
-                Some(completion_cap),
+                completion_cap,
                 self.config.adaptive_thinking.unwrap_or(false),
             )
         } else if is_responses {
@@ -501,7 +584,7 @@ impl NativeHttpLlm {
                 true,
                 self.config.reasoning_effort.as_deref(),
                 self.cache_key.as_deref(),
-                Some(completion_cap),
+                completion_cap,
             )
         } else if is_google {
             // The host expresses "thinking on" as an *effort* for every
@@ -526,7 +609,7 @@ impl NativeHttpLlm {
                 include_thoughts,
                 &self.config.model,
                 self.config.reasoning_effort.as_deref(),
-                Some(completion_cap),
+                completion_cap,
             )
         } else {
             openai::build_request_for_provider(
@@ -539,7 +622,7 @@ impl NativeHttpLlm {
                 self.config.reasoning_key.as_deref(),
                 self.config.provider_type.as_deref(),
                 self.cache_key.as_deref(),
-                Some(completion_cap),
+                completion_cap,
                 detected_reasoning_key_for(&self.config.base_url, &self.config.model).as_deref(),
             )
         };
@@ -1269,6 +1352,10 @@ impl LLM for NativeHttpLlm {
             .unwrap_or_else(|e| e.into_inner()) = Some(agent_id.to_string());
     }
 
+    fn set_turn_watch(&self, watch: Option<Arc<crate::turn_loop::watch::TurnWatchState>>) {
+        *self.turn_watch.lock().unwrap_or_else(|e| e.into_inner()) = watch;
+    }
+
     fn model_name(&self) -> &str {
         &self.config.model
     }
@@ -1917,25 +2004,19 @@ mod tests {
     /// v2 #4092 `resolveLlmHeadersTimeoutMs`: unset and blank mean no cap,
     /// a positive integer within the undici range is the cap, and anything
     /// else is a `config.invalid` failure.
+    ///
+    /// These legs are pure, so the process-global
+    /// `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS` is never written here: every other
+    /// test in this module calls `chat`, which resolves that variable inside
+    /// `send_request`, and a write window flaked those readers (observed as
+    /// `chat_fails_cleanly_on_unreachable_endpoint` reading `"abc"`).
     #[test]
     fn headers_timeout_env_parses_like_v2() {
-        struct EnvGuard;
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                unsafe { std::env::remove_var(LLM_HEADERS_TIMEOUT_ENV) };
-            }
-        }
-        let _guard = EnvGuard;
-
-        // One fn holds every leg so the shared process env is never raced.
-        unsafe { std::env::remove_var(LLM_HEADERS_TIMEOUT_ENV) };
-        assert_eq!(resolve_llm_headers_timeout_ms().unwrap(), None);
-        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "  ") };
-        assert_eq!(resolve_llm_headers_timeout_ms().unwrap(), None);
+        assert_eq!(parse_llm_headers_timeout_ms(None).unwrap(), None);
+        assert_eq!(parse_llm_headers_timeout_ms(Some("  ")).unwrap(), None);
         for (raw, expect_ms) in [("45000", 45_000), ("2147483647", 2_147_483_647), ("+5", 5)] {
-            unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, raw) };
             assert_eq!(
-                resolve_llm_headers_timeout_ms()
+                parse_llm_headers_timeout_ms(Some(raw))
                     .unwrap()
                     .map(|d| d.as_millis() as u64),
                 Some(expect_ms),
@@ -1943,8 +2024,7 @@ mod tests {
             );
         }
         for raw in ["0", "-5", "abc", "1.5", "2147483648"] {
-            unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, raw) };
-            let error = resolve_llm_headers_timeout_ms().unwrap_err();
+            let error = parse_llm_headers_timeout_ms(Some(raw)).unwrap_err();
             assert!(
                 error.starts_with(
                     "config.invalid: KIMI_CODE_LLM_HEADERS_TIMEOUT_MS must be a positive integer no greater than 2147483647,"
@@ -1954,18 +2034,46 @@ mod tests {
         }
     }
 
-    /// v2 #4092: the env cap fires on a gateway that never answers, while an
-    /// ordinary exchange is unaffected — and a bad value fails the request
-    /// as a deterministic config error, never a retryable one.
-    #[tokio::test]
-    async fn headers_timeout_env_caps_the_header_wait() {
-        struct EnvGuard;
+    /// The env is the source of the cap, so an armed value must reach the
+    /// resolver. Only a benign value (`45000`) is ever written: a concurrent
+    /// `chat` that reads it mid-window is unaffected, and the poison values
+    /// are covered pure by `headers_timeout_env_parses_like_v2`.
+    #[test]
+    fn headers_timeout_reads_the_env_var() {
+        struct EnvGuard(Option<std::ffi::OsString>);
         impl Drop for EnvGuard {
             fn drop(&mut self) {
-                unsafe { std::env::remove_var(LLM_HEADERS_TIMEOUT_ENV) };
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, value),
+                        None => std::env::remove_var(LLM_HEADERS_TIMEOUT_ENV),
+                    }
+                }
             }
         }
-        let _guard = EnvGuard;
+        let _guard = EnvGuard(std::env::var_os(LLM_HEADERS_TIMEOUT_ENV));
+        // Serialize with any other test that arms this name (crate-wide
+        // facility); the value itself is harmless to concurrent readers.
+        let _env_lock = crate::env::ENV_TEST_LOCK.blocking_lock();
+        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "45000") };
+        assert_eq!(
+            resolve_llm_headers_timeout_ms()
+                .unwrap()
+                .map(|d| d.as_millis() as u64),
+            Some(45_000)
+        );
+    }
+
+    /// v2 #4092: the cap fires on a gateway that never answers, while an
+    /// ordinary exchange is unaffected — and a bad value fails the request
+    /// as a deterministic config error, never a retryable one.
+    ///
+    /// The value is scoped to this test's thread via
+    /// [`headers_timeout_override`] instead of the process env; the default
+    /// `#[tokio::test]` runtime is current-thread, so every `chat` poll that
+    /// resolves the cap runs on this thread.
+    #[tokio::test]
+    async fn headers_timeout_cap_and_bad_value_gate_the_wait() {
         let chat_params = || LLMChatParams {
             messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
             tools: Arc::from(Vec::new()),
@@ -1974,13 +2082,17 @@ mod tests {
 
         // Armed and generous: an ordinary exchange is unaffected.
         let (addr, server, body) = spawn_capturing_server().await;
-        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "45000") };
-        let llm = NativeHttpLlm::new(
-            config("openai", &format!("http://{addr}/v1")),
-            String::new(),
-        );
-        let ok = llm.chat(chat_params()).await;
-        assert!(ok.is_ok(), "{:?}", ok.err());
+        {
+            let _cap = headers_timeout_override::Scoped::set(Ok(Some(
+                std::time::Duration::from_millis(45_000),
+            )));
+            let llm = NativeHttpLlm::new(
+                config("openai", &format!("http://{addr}/v1")),
+                String::new(),
+            );
+            let ok = llm.chat(chat_params()).await;
+            assert!(ok.is_ok(), "{:?}", ok.err());
+        }
         let _ = body.await;
         server.abort();
 
@@ -1994,34 +2106,40 @@ mod tests {
                 held.push(sock);
             }
         });
-        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "2000") };
-        let llm = NativeHttpLlm::new(
-            config("openai", &format!("http://{hang_addr}/v1")),
-            String::new(),
-        );
-        let started = std::time::Instant::now();
-        let error = llm
-            .chat(chat_params())
-            .await
-            .expect_err("a silent gateway trips the headers cap")
-            .to_string();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(30),
-            "the 2s cap must beat the 600s request budget"
-        );
-        assert!(
-            error.starts_with("llm transport error headers_timeout"),
-            "{error}"
-        );
-        assert!(
-            llm.is_retryable_error(&error),
-            "a headers timeout is transient: {error}"
-        );
+        {
+            let _cap = headers_timeout_override::Scoped::set(Ok(Some(
+                std::time::Duration::from_millis(2_000),
+            )));
+            let llm = NativeHttpLlm::new(
+                config("openai", &format!("http://{hang_addr}/v1")),
+                String::new(),
+            );
+            let started = std::time::Instant::now();
+            let error = llm
+                .chat(chat_params())
+                .await
+                .expect_err("a silent gateway trips the headers cap")
+                .to_string();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "the 2s cap must beat the 600s request budget"
+            );
+            assert!(
+                error.starts_with("llm transport error headers_timeout"),
+                "{error}"
+            );
+            assert!(
+                llm.is_retryable_error(&error),
+                "a headers timeout is transient: {error}"
+            );
+        }
 
         // A bad value fails before any connection attempt and is never
         // retryable — the env name carries "timeout", so the keyword list
-        // alone would get this wrong.
-        unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "abc") };
+        // alone would get this wrong. The error string comes from the
+        // product parser, so this also pins the classification handoff.
+        let _bad_value =
+            headers_timeout_override::Scoped::set(parse_llm_headers_timeout_ms(Some("abc")));
         let llm = NativeHttpLlm::new(
             config("openai", &format!("http://{hang_addr}/v1")),
             String::new(),
@@ -2154,13 +2272,32 @@ mod tests {
         server.abort();
     }
 
+    /// Upstream #4091 (`21406fb4c8`): the completion budget is `undefined`
+    /// unless it was explicitly configured. Only the Kimi OpenAI / Responses
+    /// traits fill an unset budget with `window - used`
+    /// (`completionTokensWhenUnset`); the Anthropic trait has no such hook.
     #[test]
-    fn completion_cap_follows_v2_budget_resolution() {
+    fn completion_cap_is_absent_unless_explicitly_configured() {
         let params = |used: Option<u32>, window: Option<u32>| LLMChatParams {
             used_context_tokens: used,
             max_context_tokens: window,
             ..Default::default()
         };
+
+        // No declared cap: no budget at all — the window is never a fallback.
+        let llm = NativeHttpLlm::new(
+            config("openai", "https://api.example.com/v1"),
+            String::new(),
+        );
+        assert_eq!(
+            llm.completion_cap(&params(Some(90_000), Some(100_000))),
+            None
+        );
+        assert_eq!(llm.completion_cap(&params(None, None)), None);
+        assert_eq!(
+            llm.completion_cap(&params(Some(200_000), Some(100_000))),
+            None
+        );
 
         // Declared output cap wins over the window, and the remaining context
         // can only lower it.
@@ -2169,32 +2306,134 @@ mod tests {
         let llm = NativeHttpLlm::new(cfg, String::new());
         assert_eq!(
             llm.completion_cap(&params(Some(10_000), Some(200_000))),
-            64_000
+            Some(64_000)
         );
         assert_eq!(
             llm.completion_cap(&params(Some(60_000), Some(64_000))),
-            4_000
-        );
-
-        // No declared cap: the window is the cap, minus what the request uses.
-        let llm = NativeHttpLlm::new(
-            config("openai", "https://api.example.com/v1"),
-            String::new(),
+            Some(4_000)
         );
         assert_eq!(
-            llm.completion_cap(&params(Some(90_000), Some(100_000))),
-            10_000
+            llm.completion_cap(&params(Some(200_000), Some(100_000))),
+            Some(1)
         );
-        // v2's unknown-window fallback, never zero.
-        assert_eq!(llm.completion_cap(&params(None, None)), 32_000);
-        assert_eq!(llm.completion_cap(&params(Some(200_000), Some(100_000))), 1);
 
-        // An Anthropic model without a declared output cap keeps its
-        // generation ceiling as the hard cap, not the 32000 fallback.
+        // A non-positive explicit cap is upstream's opt-out spelling:
+        // `resolveMaxCompletionCap` returns `undefined`, so no field is sent.
+        let mut opted_out = config("openai", "https://api.example.com/v1");
+        opted_out.max_tokens = Some(0);
+        let llm = NativeHttpLlm::new(opted_out, String::new());
+        assert_eq!(
+            llm.completion_cap(&params(Some(10_000), Some(100_000))),
+            None
+        );
+
+        // Kimi's OpenAI traits are the one unset-budget source.
+        let mut kimi = config("openai", "https://api.example.com/v1");
+        kimi.provider_type = Some("kimi".into());
+        let kimi = NativeHttpLlm::new(kimi, String::new());
+        assert_eq!(
+            kimi.completion_cap(&params(Some(90_000), Some(100_000))),
+            Some(10_000)
+        );
+        assert_eq!(kimi.completion_cap(&params(None, Some(100_000))), None);
+        assert_eq!(kimi.completion_cap(&params(None, None)), None);
+
+        // `kimiAnthropicTrait` has no `completionTokensWhenUnset`: the
+        // Anthropic wire keeps its required model ceiling instead.
+        let mut kimi_anthropic = config("anthropic", "https://api.anthropic.com/v1");
+        kimi_anthropic.model = "k3".into();
+        kimi_anthropic.provider_type = Some("kimi".into());
+        let kimi_anthropic = NativeHttpLlm::new(kimi_anthropic, String::new());
+        assert_eq!(
+            kimi_anthropic.completion_cap(&params(Some(90_000), Some(100_000))),
+            None
+        );
+
+        // Anthropic's `max_tokens` is a required request field filled from the
+        // model ceiling by the builder, not a completion budget.
         let mut claude = config("anthropic", "https://api.anthropic.com/v1");
         claude.model = "claude-sonnet-4-5".into();
         let claude = NativeHttpLlm::new(claude, String::new());
-        assert_eq!(claude.completion_cap(&params(None, None)), 64_000);
+        assert_eq!(claude.completion_cap(&params(None, None)), None);
+    }
+
+    /// Upstream #4091 on the wire: an unconfigured budget sends no field for
+    /// OpenAI Chat Completions, Responses, or Google; Anthropic still carries
+    /// its required `max_tokens`; Kimi's OpenAI trait sends `window - used`.
+    #[tokio::test]
+    async fn unconfigured_completion_budget_stays_off_the_wire() {
+        for (protocol, field) in [
+            ("openai", "max_tokens"),
+            ("openai_responses", "max_output_tokens"),
+            ("google", "maxOutputTokens"),
+        ] {
+            let (addr, server, body) = spawn_capturing_server().await;
+            let llm = NativeHttpLlm::new(
+                config(protocol, &format!("http://{addr}/v1")),
+                String::new(),
+            );
+            let _ = llm
+                .chat(LLMChatParams {
+                    messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                    tools: Arc::from(Vec::new()),
+                    used_context_tokens: Some(90_000),
+                    max_context_tokens: Some(100_000),
+                    ..Default::default()
+                })
+                .await;
+            let body = body.await.unwrap();
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let sent = match field {
+                "max_tokens" => json.get(field).is_some(),
+                "max_output_tokens" => json.get(field).is_some(),
+                _ => json
+                    .get("generationConfig")
+                    .and_then(|config| config.get(field))
+                    .is_some(),
+            };
+            assert!(!sent, "{protocol} sent {field}: {json}");
+            server.abort();
+        }
+
+        // Anthropic requires `max_tokens`; without a budget it is the model
+        // ceiling (`resolveDefaultMaxTokens`).
+        let (addr, server, body) = spawn_capturing_server().await;
+        let mut cfg = config("anthropic", &format!("http://{addr}/v1"));
+        cfg.model = "claude-sonnet-4-5".into();
+        let llm = NativeHttpLlm::new(cfg, String::new());
+        let _ = llm
+            .chat(LLMChatParams {
+                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                tools: Arc::from(Vec::new()),
+                used_context_tokens: Some(90_000),
+                max_context_tokens: Some(100_000),
+                ..Default::default()
+            })
+            .await;
+        let body = body.await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["max_tokens"], 64_000, "{json}");
+        server.abort();
+
+        // The Kimi OpenAI trait fills the unset budget with the remaining
+        // context window (v2 `kimiUnsetCompletionTokens`).
+        let (addr, server, body) = spawn_capturing_server().await;
+        let mut cfg = config("openai", &format!("http://{addr}/v1"));
+        cfg.provider_type = Some("kimi".into());
+        let llm = NativeHttpLlm::new(cfg, String::new());
+        let _ = llm
+            .chat(LLMChatParams {
+                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                tools: Arc::from(Vec::new()),
+                used_context_tokens: Some(90_000),
+                max_context_tokens: Some(100_000),
+                ..Default::default()
+            })
+            .await;
+        let body = body.await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["max_completion_tokens"], 10_000, "{json}");
+        server.abort();
     }
 
     #[test]

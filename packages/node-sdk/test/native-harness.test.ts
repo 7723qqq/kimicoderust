@@ -94,6 +94,50 @@ describe.skipIf(!hasNativeAddon)(
       expect(session.isClosed).toBe(true);
     });
 
+    it('reads tower status through the structured native snapshot', async () => {
+      const session = await harness.createSession({ workDir: homeDir });
+
+      await expect(session.getTowerStatus()).resolves.toBe('Tower mode: OFF');
+      await session.setTowerMode(true);
+      await expect(session.getTowerStatus()).resolves.toBe(
+        'Tower mode: ON\nTower is not initialized.',
+      );
+    });
+
+    it('creates a session with [agent].multi_llm racers across the napi boundary', async () => {
+      // The race's transports cross as typed napi objects
+      // (`JsLlmProviderDef.native`): the boundary reads camelCase field names
+      // and refuses the snake_case `nativeLlmWire` record the
+      // `secondaryModelJson` string path uses. Session creation is where that
+      // deserialization happens, so a drifted racer shape fails here.
+      writeFileSync(
+        join(homeDir, 'config.toml'),
+        `
+default_model = "local/a"
+
+[providers.local]
+type = "openai"
+base_url = "http://127.0.0.1:1/v1"
+api_key = "sk-test"
+
+[models."local/a"]
+provider = "local"
+model = "a"
+
+[models."local/b"]
+provider = "local"
+model = "b"
+
+[agent]
+multi_llm = ["local/a", "local/b"]
+`,
+      );
+
+      const session = await harness.createSession({ workDir: homeDir });
+      expect(session.id).toBeDefined();
+      await session.close();
+    });
+
     it('fails loud on a prompt when no provider is configured (no fake reply)', async () => {
       const session = await harness.createSession({
         workDir: homeDir,

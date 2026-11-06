@@ -179,7 +179,7 @@ pub fn build_request_full(
                     let mut parts = Vec::new();
                     for b in &m.blocks {
                         match b {
-                            ContentBlock::Text { text } => {
+                            ContentBlock::Text { text, .. } => {
                                 parts.push(json!({ "type": "input_text", "text": text }));
                             }
                             ContentBlock::Image {

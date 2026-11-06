@@ -31,6 +31,9 @@ pub struct SummaryPolicy {
 pub struct SubagentDefinition {
     pub name: String,
     pub description: String,
+    /// v2 `AgentProfile.whenToUse`, rendered only in the Agent tool's listing.
+    #[serde(default)]
+    pub when_to_use: Option<String>,
     pub system_prompt: String,
     pub tools: Vec<String>,
     /// Tool names the profile forbids (v2 `disallowedTools`). Applied when

@@ -1966,16 +1966,6 @@ impl PluginManager {
         out
     }
 
-    /// [`Self::plugin_skill_dirs`] as bare paths, for the callers that only
-    /// merge the roots into a flat scan (the REST skill lists, the prompt's
-    /// skills section) and never ask which plugin contributed a skill.
-    pub fn plugin_skill_dir_paths(&self) -> Vec<PathBuf> {
-        self.plugin_skill_dirs()
-            .into_iter()
-            .map(|entry| entry.dir)
-            .collect()
-    }
-
     /// The MCP servers the enabled plugins declare, ready for the engine's MCP
     /// manager. A server the user disabled for that plugin is skipped, and the
     /// name is namespaced so two plugins can declare the same server name.

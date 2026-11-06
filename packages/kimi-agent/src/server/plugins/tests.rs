@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn the_safe_plugin_id_accepts_everything_upstream_relaxed_regex_accepts() {
+    // Upstream #4188 relaxed `PLUGIN_NAME_REGEX` from lowercase-only to
+    // `[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*(@[A-Za-z0-9_-]+)?`. The fork's
+    // container-safety check already accepts every shape that regex admits
+    // (uppercase, dotted segments, one `@` suffix), so no tightening lands
+    // here — tightening would newly reject third-party plugins, which is a
+    // policy call, not a port.
+    for accepted in ["MyPlugin", "plugin.v2", "name@variant", "a-b_c.d"] {
+        assert!(
+            is_safe_plugin_id(accepted),
+            "upstream's relaxed regex accepts {accepted:?}, so the fork must too"
+        );
+    }
+    // Container safety is unchanged: separators, drive prefixes, `..` and
+    // empty names stay refused.
+    for refused in ["", ".", "..", "a/b", "a\\b", "a:b", "../x"] {
+        assert!(!is_safe_plugin_id(refused), "still refused: {refused:?}");
+    }
+}
+
+#[test]
 fn test_load_marketplace_has_official_entries() {
     let list = load_marketplace(None);
     assert_eq!(list.len(), 3);

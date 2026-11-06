@@ -10,11 +10,23 @@ description:
   en: >
       The turn state machine: run_turn, step scheduler, retry, tool-call id ledger and wall-time budget.
       
-revision: b2c89a8fe8d80ce9b97a5f08206c20f28072e4b0
-updated_at: "2026-11-02T01:57:28.865Z"
-fingerprint: 14cf6fe9f2cb5cfdc447970232255de7c4f60582d76823bd9a711139fb9a3a37
+revision: 28f4b101d79bba811d53e53662341c0bb0fe93c0
+updated_at: "2026-11-06T05:19:43.864Z"
+fingerprint: c4c8cc547b610ddab52b7c39f79a0603f06935b3ddaa19f6a9b38c233660a822
 source:
   - path: "packages/kimi-agent/src/turn_loop/run_turn.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/mod.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/common.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/bash_operands.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/basic_loop.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/dedup_retry.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/display_lifecycle.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/finish_goal_binding.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/finish_history.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/goal_cancel.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/injection_telemetry_tools.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/overflow_compaction.rs"
+  - path: "packages/kimi-agent/src/turn_loop/run_turn/tests/steering_compaction.rs"
   - path: "packages/kimi-agent/src/turn_loop/turn_step.rs"
   - path: "packages/kimi-agent/src/turn_loop/retry.rs"
 apis: []

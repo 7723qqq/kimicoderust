@@ -91,3 +91,65 @@ pub fn set_search_engine(engine: String) -> napi::Result<String> {
         Ok(engine.name().to_string())
     })
 }
+
+/// The effective workspace trust state (upstream #4517): the engine combines
+/// `[workspace] require_trust` from `<homeDir>/config.toml`, the
+/// `KIMI_CODE_TRUST_WORKSPACE` process override and the persisted
+/// `trusted-workspaces.json` record, re-reading all three on every call (v2
+/// `WorkspaceTrustEntry.refresh`, which the MCP registry consults on every
+/// cwd-scoped listing). The host's trust prompt and the project-config gates
+/// (`.mcp.json`, `workspace.additional_dir`) key off this answer.
+#[napi]
+pub fn workspace_trust_state(home_dir: String, work_dir: String) -> napi::Result<bool> {
+    guard_sync_panic(|| {
+        Ok(crate::workspace_trust::effective_trust(
+            std::path::Path::new(&home_dir),
+            &work_dir,
+        ))
+    })
+}
+
+/// Persist a workspace trust decision (v2 `WorkspaceTrustEntry.trust`):
+/// append the root to `trusted-workspaces.json` unless a matching key is
+/// already recorded. The write happens even while `[workspace] require_trust`
+/// is `false`, so a re-enabled gate finds the records intact.
+#[napi]
+pub fn workspace_trust_record(home_dir: String, work_dir: String) -> napi::Result<()> {
+    guard_sync_panic(|| {
+        crate::workspace_trust::record_trust(std::path::Path::new(&home_dir), &work_dir)
+            .map_err(napi::Error::from_reason)
+    })
+}
+
+/// What trusting `work_dir` would switch on (v2 `trustDisclosureService`,
+/// upstream #4056): project MCP servers, the extra directories those would
+/// widen the sandbox to, the instruction files the session would start
+/// reading, and one warning line per inspection that could not complete.
+///
+/// JSON rather than a napi object: the shape is nested and optional-heavy,
+/// and the host already parses JSON from this boundary. `explicitSkillDirs`
+/// mirrors `--skill-dirs` / `KIMI_CODE_SKILL_DIRS` — when the user named the
+/// roots, the project scan is not what a trust decision activates.
+#[napi]
+pub fn workspace_trust_disclosure(
+    work_dir: String,
+    explicit_skill_dirs: Option<bool>,
+    merge_all_available_skills: Option<bool>,
+    pending_additional_dirs: Option<Vec<String>>,
+) -> napi::Result<String> {
+    guard_sync_panic(|| {
+        let activation = crate::workspace_trust_disclosure::describe_gated_activation(
+            &crate::workspace_trust_disclosure::DisclosureInput {
+                work_dir: std::path::Path::new(&work_dir),
+                explicit_skill_dirs: explicit_skill_dirs.unwrap_or(false),
+                merge_all_available_skills: merge_all_available_skills.unwrap_or(true),
+                pending_additional_dirs: pending_additional_dirs
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect(),
+            },
+        );
+        serde_json::to_string(&activation).map_err(|e| napi::Error::from_reason(e.to_string()))
+    })
+}

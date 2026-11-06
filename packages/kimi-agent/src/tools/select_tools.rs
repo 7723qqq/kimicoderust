@@ -15,6 +15,12 @@
 //!   `execute_select_tools` and delivered to the model as a follow-up `user`
 //!   message via [`ExecutableToolResult::delivery`], so the
 //!   `<tools_added>` block the tool description refers to actually arrives.
+//! - The loaded schema itself reaches the model through
+//!   [`crate::tools::NativeToolset::shape_tool_table`]: a deferred tool the
+//!   session loaded is advertised again on the next step, with the
+//!   catalogue's definition. v2 sends it as a system message carrying `tools`
+//!   (`selectToolsTool.ts` `ctx.remind`); the advertised table is this
+//!   engine's equivalent channel.
 //!
 //! Deliberately unreachable:
 //! - `not_loaded_tool_output` has no call site **by design**. v2 deferred MCP
@@ -446,7 +452,7 @@ announcements, use tools already available, or tell the user what capability is 
     // `render_loadable_tools_announcement` had no caller at all.
     let delivery = render_loadable_tools_announcement(&result.to_load, &[], true).map(|text| {
         crate::turn_loop::types::ToolDelivery {
-            blocks: vec![crate::rpc::types::ContentBlock::Text { text }],
+            blocks: vec![crate::rpc::types::ContentBlock::Text { text, meta: None }],
             origin: None,
         }
     });

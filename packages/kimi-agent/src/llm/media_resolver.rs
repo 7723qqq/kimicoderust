@@ -509,6 +509,7 @@ impl MediaResolver {
         let Ok((meta, path)) = self.store.get(file_id) else {
             return Ok(ContentBlock::Text {
                 text: unavailable_text(kind).to_string(),
+                meta: None,
             });
         };
         let path = path.to_string_lossy().into_owned();
@@ -517,11 +518,13 @@ impl MediaResolver {
         if target.is_some_and(|t| !t.accepts(kind)) {
             return Ok(ContentBlock::Text {
                 text: build_media_path_tag(kind, &path),
+                meta: None,
             });
         }
         let Ok(bytes) = std::fs::read(&path) else {
             return Ok(ContentBlock::Text {
                 text: unavailable_text(kind).to_string(),
+                meta: None,
             });
         };
         let media_type = if meta.media_type.is_empty() {
@@ -725,7 +728,7 @@ mod tests {
             .await
             .unwrap();
 
-        let ContentBlock::Text { text } = &out.messages[0].blocks[0] else {
+        let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
             panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
         };
         assert!(text.starts_with("<image path=\""), "{text}");
@@ -748,7 +751,8 @@ mod tests {
         assert_eq!(
             out.messages[0].blocks[0],
             ContentBlock::Text {
-                text: VIDEO_UNAVAILABLE_TEXT.into()
+                text: VIDEO_UNAVAILABLE_TEXT.into(),
+                meta: None,
             }
         );
         assert_eq!(out.entries[0].bytes, 0);

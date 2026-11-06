@@ -32,7 +32,15 @@ impl HttpServer {
                     Some(d) => d,
                     None => return HttpResponse::not_found(),
                 };
-                let target = match fs_routes::resolve_safe_path(&work_dir, rel_path) {
+                // v2 `fsDownloadQuerySchema`: `allow_external_symlinks=true`
+                // downloads through symlinks pointing outside the workspace.
+                let allow_external =
+                    req.query_param("allow_external_symlinks").as_deref() == Some("true");
+                let target = match fs_routes::resolve_safe_path_with_symlinks(
+                    &work_dir,
+                    rel_path,
+                    allow_external,
+                ) {
                     Ok(t) => t,
                     Err(resp) => return resp,
                 };
@@ -47,6 +55,36 @@ impl HttpServer {
                     Err(e) => HttpResponse::internal_error(format!("Failed to read file: {e}")),
                 }
             }
+            ("POST", p)
+                if p == "/api/v1/workspace/fs::list"
+                    || p == "/workspace/fs::list"
+                    // Single-colon spelling matches the official Web bundle
+                    // (see the search/suggest arm below).
+                    || p == "/api/v1/workspace/fs:list"
+                    || p == "/workspace/fs:list" =>
+            {
+                // v2 `POST /workspace/fs::list`: the session-less fs:list; the
+                // workspace reference travels in the body and
+                // `include_git_status` is omitted upstream (inert here).
+                let body: Value = match serde_json::from_slice(&req.body) {
+                    Ok(v) => v,
+                    Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
+                };
+                let Some(ws) = body.get("workspace").and_then(|v| v.as_str()) else {
+                    return HttpResponse::bad_request("Field 'workspace' is required");
+                };
+                let work_dir = if let Ok(Some(ws_entry)) = self.store.get_workspace(ws) {
+                    PathBuf::from(ws_entry.root)
+                } else {
+                    PathBuf::from(ws)
+                };
+                let mut list_body = body.clone();
+                if let Some(obj) = list_body.as_object_mut() {
+                    obj.remove("workspace");
+                }
+                fs_routes::handle_list(&work_dir, &list_body)
+            }
+
             ("POST", p)
                 if p == "/api/v1/workspace/fs::search"
                     || p == "/workspace/fs::search"
@@ -471,8 +509,12 @@ impl HttpServer {
                         // in the standard envelope — messages live on their own
                         // `/messages` route. Serving the document bare is what
                         // lets a client map the response directly.
-                        let wire_session =
-                            format_wire_session(&session, &self.store, self.engine.as_ref());
+                        let wire_session = format_wire_session(
+                            &session,
+                            &self.store,
+                            self.engine.as_ref(),
+                            self.default_workspace_root().as_deref(),
+                        );
                         HttpResponse::ok(&wire_session)
                     }
                     Ok(None) => HttpResponse::not_found(),

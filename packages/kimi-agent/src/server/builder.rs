@@ -14,6 +14,74 @@ fn plugin_manager_with_env(store: Arc<SqliteSessionStore>) -> plugins::PluginMan
     plugins::PluginManager::new(store).with_node_runner(plugin_node_runner())
 }
 
+/// Why a rich wake could not be admitted. Callers can handle a missing session
+/// differently from a server without a turn engine without parsing prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeEnqueueError {
+    SessionNotFound,
+    EngineUnavailable,
+}
+
+/// Tool-facing wake driver backed by the standalone server's prompt queue.
+/// A weak reference lets the engine retain per-session runtimes without forming
+/// an HttpServer → ServerEngine → runtime → HttpServer ownership cycle.
+#[derive(Clone)]
+pub struct HttpServerWakeDriver {
+    server: std::sync::Weak<HttpServer>,
+}
+
+impl HttpServerWakeDriver {
+    #[must_use]
+    pub fn new(server: Arc<HttpServer>) -> Self {
+        Self {
+            server: Arc::downgrade(&server),
+        }
+    }
+}
+
+impl crate::session::wake::TowerWakeDriver for HttpServerWakeDriver {
+    fn enqueue(
+        &self,
+        session_id: &str,
+        payload: crate::session::wake::WakePayload,
+    ) -> Result<(), String> {
+        let Some(server) = self.server.upgrade() else {
+            return Err(format!("{:?}", WakeEnqueueError::EngineUnavailable));
+        };
+        server
+            .enqueue_wake(session_id, payload)
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    fn drop_wakes(&self, session_id: &str, variant: &str) -> bool {
+        self.server
+            .upgrade()
+            .is_some_and(|server| server.drop_wakes(session_id, variant))
+    }
+
+    fn set_replay_handler(
+        &self,
+        session_id: &str,
+        variant: &str,
+        handler: crate::session::wake::WakeReplayHandler,
+    ) {
+        if let Some(server) = self.server.upgrade() {
+            server.set_wake_replay_handler(session_id, variant, handler);
+        }
+    }
+
+    fn wake_replay_status(
+        &self,
+        session_id: &str,
+        variant: &str,
+    ) -> Option<crate::session::wake::WakeReplayStatus> {
+        self.server
+            .upgrade()
+            .and_then(|server| server.wake_replay_status(session_id, variant))
+    }
+}
+
 impl HttpServer {
     /// A server over its own event hub.
     pub fn new(store: Arc<SqliteSessionStore>) -> Self {
@@ -71,7 +139,7 @@ impl HttpServer {
             },
         ));
 
-        Self {
+        let server = Self {
             store: store.clone(),
             hub: hub.clone(),
             engine: None,
@@ -109,13 +177,17 @@ impl HttpServer {
             ),
             remote_control_state: Arc::new(Mutex::new(RemoteControlStatusWire::off())),
             remote_control_runtime: Arc::new(tokio::sync::Mutex::new(None)),
+            remote_control_devices: Arc::new(remote_control::RemoteControlDeviceClient::new()),
+            remote_control_logout_gate: Arc::new(remote_control::RemoteControlLogoutGate::new()),
             shutdown: tokio_util::sync::CancellationToken::new(),
             loopback_bind: true,
             debug_endpoints: false,
             allow_remote_shutdown: false,
             host_guard: None,
             telemetry_sink: None,
-        }
+        };
+        server.install_remote_control_logout_hook();
+        server
     }
 
     /// Record the address the listener is bound to. It decides whether the
@@ -252,7 +324,22 @@ impl HttpServer {
     #[must_use]
     pub fn with_oauth_manager(mut self, manager: Arc<oauth::OAuthManager>) -> Self {
         self.oauth_manager = manager;
+        self.install_remote_control_logout_hook();
         self
+    }
+
+    /// Wire the managed Kimi logout to the remote-control cleanup. The hook
+    /// wraps the credential wipe with the relay session-cache clears and the
+    /// delayed tunnel teardown (upstream `registerOAuthRoutes` logout branch).
+    fn install_remote_control_logout_hook(&self) {
+        self.oauth_manager.set_remote_control_logout_hook(Arc::new(
+            remote_control::RemoteControlLogoutCleanup::new(
+                self.remote_control_runtime.clone(),
+                self.remote_control_state.clone(),
+                self.remote_control_devices.clone(),
+                self.remote_control_logout_gate.clone(),
+            ),
+        ));
     }
 
     /// Use a specific upload store (tests point it at a temp directory).
@@ -650,6 +737,9 @@ impl HttpServer {
         let (item, run) = self
             .prompt_queue
             .admit(session_id, item, prompt, blocks, origin.clone());
+        if let Some(turn_number) = self.prompt_queue.interrupted_wake_turn(session_id) {
+            engine.cancel_turn_at(session_id, turn_number);
+        }
         crate::server::prompt_queue::publish_prompt_event(
             &self.hub,
             session_id,
@@ -684,6 +774,41 @@ impl HttpServer {
             });
         }
         HttpResponse::ok(&item)
+    }
+
+    /// The resolved default-workspace root for the `is_default` wire flag
+    /// (upstream #4224). Sync on purpose: `format_wire_session` is sync and
+    /// nine call sites reach it from async contexts that should not each
+    /// re-discover config. Uses the override when one is set, else discovers
+    /// once and caches for the process lifetime — the default workspace root
+    /// is not something a running server needs to re-resolve per request.
+    pub fn default_workspace_root(&self) -> Option<std::path::PathBuf> {
+        static CACHED: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+        // `try_lock`, never `blocking_lock`: every call site runs inside the
+        // async runtime, and blocking it there panics ("Cannot block the
+        // current thread from within a runtime" — measured). The override
+        // lock is held only for a clone, so a contended try simply falls
+        // through to the cached discovery, which resolves the same root.
+        if let Ok(Some(config)) = self.config_override.try_lock().map(|guard| guard.clone()) {
+            return crate::default_workspace::resolve_root(
+                &config,
+                &crate::default_workspace::user_home_dir()?,
+            )
+            .ok();
+        }
+        CACHED
+            .get_or_init(|| {
+                crate::config::KimiConfig::discover()
+                    .ok()
+                    .and_then(|(config, _)| {
+                        crate::default_workspace::resolve_root(
+                            &config,
+                            &crate::default_workspace::user_home_dir()?,
+                        )
+                        .ok()
+                    })
+            })
+            .clone()
     }
 
     pub async fn config(&self) -> crate::config::KimiConfig {
@@ -800,6 +925,100 @@ impl HttpServer {
         self.hub.clone()
     }
 
+    /// Enqueue a caller-rendered rich wake and drive it when the session is
+    /// idle. The returned id can be passed to [`Self::drop_wake`]. A later user
+    /// prompt interrupts and automatically replays the wake after its queue.
+    pub fn enqueue_wake(
+        &self,
+        session_id: &str,
+        payload: crate::session::wake::WakePayload,
+    ) -> Result<String, WakeEnqueueError> {
+        if self.store.get_session(session_id).ok().flatten().is_none() {
+            return Err(WakeEnqueueError::SessionNotFound);
+        }
+        let engine = self
+            .engine
+            .clone()
+            .ok_or(WakeEnqueueError::EngineUnavailable)?;
+        let (wake_id, run) = self
+            .prompt_queue
+            .admit_rich_wake_with_id(session_id, payload);
+        if let Some(run) = run {
+            let queue = self.prompt_queue.clone();
+            let store = self.store_arc();
+            let hub = self.hub.clone();
+            let session_id = session_id.to_string();
+            tokio::spawn(crate::server::prompt_queue::run_prompt_loop(
+                Some(engine),
+                store,
+                queue,
+                hub,
+                session_id,
+                run,
+            ));
+        }
+        Ok(wake_id)
+    }
+
+    /// Explicitly discard a rich wake. This is the teardown/drop operation, not
+    /// the automatic user-prompt interruption path, so no replay is scheduled.
+    pub fn drop_wake(&self, session_id: &str, wake_id: &str) -> bool {
+        let Some(engine) = self.engine.clone() else {
+            return false;
+        };
+        let turn_number = self.prompt_queue.active_turn_number(session_id);
+        match self.prompt_queue.cancel(session_id, wake_id) {
+            Some(crate::server::prompt_queue::CancelOutcome::Active) => {
+                if let Some(turn_number) = turn_number {
+                    engine.cancel_turn_at(session_id, turn_number);
+                }
+                true
+            }
+            Some(crate::server::prompt_queue::CancelOutcome::Queued) => true,
+            None => false,
+        }
+    }
+
+    /// Discard a producer's whole wake channel, including a replay whose turn
+    /// id changed after user interruption.
+    pub fn drop_wakes(&self, session_id: &str, variant: &str) -> bool {
+        let (found, active_turn) = self.prompt_queue.drop_rich_wakes(session_id, variant);
+        if let (Some(engine), Some(turn_number)) = (self.engine.clone(), active_turn) {
+            engine.cancel_turn_at(session_id, turn_number);
+        }
+        found
+    }
+
+    /// Install this standalone server's wake driver into the turn engine. The
+    /// engine owns per-session runtimes; `Arc<HttpServer>` stays only at the
+    /// composition root, so no server/engine reference cycle is introduced.
+    pub fn install_tower_wake_driver(self: &Arc<Self>) {
+        if let Some(engine) = self.engine.clone() {
+            engine.install_tower_wake_driver(Arc::new(HttpServerWakeDriver::new(self.clone())));
+        }
+    }
+
+    /// Delegate replay of one session + variant to an async owner. Unregistered
+    /// variants retain the queue's original direct replay behavior.
+    pub fn set_wake_replay_handler(
+        &self,
+        session_id: &str,
+        variant: &str,
+        handler: crate::session::wake::WakeReplayHandler,
+    ) {
+        self.prompt_queue
+            .set_wake_replay_handler(session_id, variant, handler);
+    }
+
+    /// Read the retained payload/error state for a delegated server replay.
+    pub fn wake_replay_status(
+        &self,
+        session_id: &str,
+        variant: &str,
+    ) -> Option<crate::session::wake::WakeReplayStatus> {
+        self.prompt_queue.wake_replay_status(session_id, variant)
+    }
+
     /// Admit a prompt and, when it becomes active, drive its turn in the
     /// background. Used by the steer path to run prompts that could not attach
     /// to a running turn instead of dropping them.
@@ -815,6 +1034,9 @@ impl HttpServer {
         let (_item, run) = self
             .prompt_queue
             .admit(session_id, item, prompt, blocks, origin);
+        if let Some(turn_number) = self.prompt_queue.interrupted_wake_turn(session_id) {
+            engine.cancel_turn_at(session_id, turn_number);
+        }
         let Some(run) = run else {
             return;
         };

@@ -714,54 +714,6 @@ function nativeQualifyMcpToolName(serverName, toolName) {
 }
 
 // ============================================================================
-// Goal — state machine, accounting, steering
-// ============================================================================
-
-/** Validate a goal objective. Returns error message or empty string. */
-function nativeGoalValidateObjective(objective) {
-  return binding.nativeGoalValidateObjective(objective);
-}
-
-/** Apply a goal state update (JSON in, JSON out). */
-function nativeGoalApplyUpdate(goalJson, updateJson) {
-  return binding.nativeGoalApplyUpdate(goalJson, updateJson);
-}
-
-/** Compute chargeable token delta between two usage snapshots. */
-function nativeGoalComputeTokenDelta(
-  prevInput,
-  prevCached,
-  prevOutput,
-  currInput,
-  currCached,
-  currOutput,
-) {
-  return binding.nativeGoalComputeTokenDelta(
-    prevInput,
-    prevCached,
-    prevOutput,
-    currInput,
-    currCached,
-    currOutput,
-  );
-}
-
-/** Render the continuation steering prompt. */
-function nativeGoalRenderContinuation(objective, tokensUsed, tokenBudget) {
-  return binding.nativeGoalRenderContinuation(objective, tokensUsed, tokenBudget);
-}
-
-/** Render the budget-limit wrap-up prompt. */
-function nativeGoalRenderBudgetLimit(objective, tokensUsed, tokenBudget, timeUsedSeconds) {
-  return binding.nativeGoalRenderBudgetLimit(objective, tokensUsed, tokenBudget, timeUsedSeconds);
-}
-
-/** Render the objective-updated prompt. */
-function nativeGoalRenderObjectiveUpdated(objective, tokensUsed, tokenBudget) {
-  return binding.nativeGoalRenderObjectiveUpdated(objective, tokensUsed, tokenBudget);
-}
-
-// ============================================================================
 // Path access
 // ============================================================================
 
@@ -840,10 +792,6 @@ function nativeRollbackEngineState(workspaceRoot, sessionId, count) {
 function nativeCronNextFire(entryJson, fromMs) {
   return binding.nativeCronNextFire(entryJson, fromMs);
 }
-
-// ============================================================================
-// GoalEngine — decision core (stateless, JSON-in/JSON-out)
-// ============================================================================
 
 // ============================================================================
 // Plugins — the install registry and the content installed plugins contribute
@@ -970,6 +918,60 @@ function pluginCommands() {
  */
 function fsSuggest(workDir, query, limit) {
   return binding.fsSuggest(workDir, query, limit);
+}
+
+// ============================================================================
+// Workspace trust — engine-owned decision (upstream #4517)
+// ============================================================================
+
+/**
+ * The effective workspace trust state: `[workspace] require_trust` from
+ * `<homeDir>/config.toml`, the `KIMI_CODE_TRUST_WORKSPACE` process override
+ * and the persisted `trusted-workspaces.json` record, all re-read on every
+ * call (v2 `WorkspaceTrustEntry.refresh`).
+ * @param {string} homeDir - Kimi home directory.
+ * @param {string} workDir - Workspace root to judge.
+ * @returns {boolean}
+ */
+function workspaceTrustState(homeDir, workDir) {
+  return binding.workspaceTrustState(homeDir, workDir);
+}
+
+/**
+ * Persist a workspace trust decision: append the root to
+ * `trusted-workspaces.json` unless a matching key is already recorded.
+ * @param {string} homeDir - Kimi home directory.
+ * @param {string} workDir - Workspace root to record.
+ * @returns {void}
+ */
+function workspaceTrustRecord(homeDir, workDir) {
+  return binding.workspaceTrustRecord(homeDir, workDir);
+}
+
+/**
+ * What trusting `workDir` would switch on (v2 `trustDisclosureService`,
+ * upstream #4056): project MCP servers, the extra directories those would
+ * widen the sandbox to, the instruction files the session would start reading,
+ * and one warning line per inspection that could not complete. JSON, because
+ * the shape is nested and optional-heavy.
+ * @param {string} workDir - Workspace root to describe.
+ * @param {boolean | null} [explicitSkillDirs] - `--skill-dirs` / `KIMI_CODE_SKILL_DIRS` was set.
+ * @param {boolean | null} [mergeAllAvailableSkills] - `merge_all_available_skills` switch.
+ * @param {string[] | null} [pendingAdditionalDirs] - Directories the user is about to add.
+ * @returns {string}
+ */
+function workspaceTrustDisclosure(
+  workDir,
+  explicitSkillDirs,
+  mergeAllAvailableSkills,
+  pendingAdditionalDirs,
+) {
+  return binding.workspaceTrustDisclosure(
+    workDir,
+    explicitSkillDirs,
+    mergeAllAvailableSkills,
+    pendingAdditionalDirs,
+  );
 }
 
 // ============================================================================
@@ -1111,16 +1113,6 @@ module.exports = {
   BASH_DEFAULT_TIMEOUT,
   BASH_MAX_TIMEOUT,
 
-  // Goal
-  nativeGoalValidateObjective,
-  nativeGoalApplyUpdate,
-  nativeGoalComputeTokenDelta,
-  nativeGoalRenderContinuation,
-  nativeGoalRenderBudgetLimit,
-  nativeGoalRenderObjectiveUpdated,
-
-  // GoalEngine
-
   // Path access
   nativePathNormalizeUserPath,
   nativePathExpandUserPath,
@@ -1180,6 +1172,11 @@ module.exports = {
   backgroundTaskList,
   backgroundTaskOutput,
   backgroundTaskStop,
+
+  // Workspace trust
+  workspaceTrustState,
+  workspaceTrustRecord,
+  workspaceTrustDisclosure,
 };
 
 // Non-enumerable handle to the raw binding, for the surface-contract test to

@@ -2230,6 +2230,468 @@ async fn test_interactive_session_wakes_on_a_background_task_completion() {
         .expect("the notification turn settles the session again");
 }
 
+#[tokio::test]
+async fn notification_seeded_turn_settles_waiter_and_preserves_wake_origin() {
+    let (callbacks, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
+    let llm = Arc::new(ScriptedLlm::simple(vec![text_response("seeded answer")]));
+    let session = make_session(llm, Arc::new(callbacks)).await;
+    let payload =
+        crate::session::wake::WakePayload::new("tower_inbox", msg("user", "caller-rendered wake"));
+
+    let mut receipt = session.enqueue_wake(payload).unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), receipt.outcome())
+        .await
+        .expect("the notification-seeded waiter must settle")
+        .expect("the wake turn runs");
+    assert!(matches!(outcome, TurnOutcome::Ran(_)));
+
+    let seen = recorded(&events);
+    assert!(seen.iter().any(|event| matches!(
+        event,
+        TurnEvent::Started { origin, .. }
+            if origin["kind"] == "injection" && origin["variant"] == "tower_inbox"
+    )));
+    assert!(seen.iter().any(|event| matches!(
+        event,
+        TurnEvent::Ended {
+            reason: TurnEndReason::Completed,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn user_prompt_cancels_active_wake_and_requeues_it_after_the_user_turn() {
+    let (llm, mut gates) = ScriptedLlm::with_gate(vec![
+        text_response("wake answer"),
+        text_response("user answer"),
+        text_response("requeued wake answer"),
+    ]);
+    let requests = llm.requests.clone();
+    let (callbacks, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
+    let session = make_session(Arc::new(llm), Arc::new(callbacks)).await;
+    let mut wake = session
+        .enqueue_wake(crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            msg("user", "wake payload"),
+        ))
+        .unwrap();
+    wait_until(|| requests.lock().unwrap().len() == 1).await;
+
+    let mut user = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "user prompt"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    let wake_outcome = tokio::time::timeout(std::time::Duration::from_secs(5), wake.outcome())
+        .await
+        .expect("the interrupted wake waiter settles")
+        .expect("the interrupted wake has a turn outcome");
+    assert!(matches!(
+        wake_outcome,
+        TurnOutcome::Ran(ref result)
+            if result.stop_reason == crate::turn_loop::types::LoopTurnStopReason::Aborted
+    ));
+
+    wait_until(|| requests.lock().unwrap().len() == 2).await;
+    gates.remove(1).send(()).unwrap();
+    assert!(matches!(user.outcome().await.unwrap(), TurnOutcome::Ran(_)));
+    wait_until(|| requests.lock().unwrap().len() == 3).await;
+    gates.remove(0).send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
+        .await
+        .expect("the requeued wake settles");
+
+    let requests = requests.lock().unwrap();
+    assert!(
+        requests[1]
+            .iter()
+            .any(|message| message.content == "user prompt")
+    );
+    assert!(
+        requests[2]
+            .iter()
+            .any(|message| message.content == "wake payload")
+    );
+    assert_eq!(
+        recorded(&events)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                TurnEvent::Started { origin, .. } if origin["kind"] == "injection"
+            ))
+            .count(),
+        2,
+        "the interrupted wake and its replay have distinct turns"
+    );
+}
+
+#[tokio::test]
+async fn user_prompt_cancels_queued_wake_and_requeues_it_after_the_user_turns() {
+    let (llm, mut gates) = ScriptedLlm::with_gate(vec![
+        text_response("first user answer"),
+        text_response("second user answer"),
+        text_response("requeued wake answer"),
+    ]);
+    let requests = llm.requests.clone();
+    let server = Arc::new(RpcServer::new());
+    let session = make_session(Arc::new(llm), rpc_callbacks(server)).await;
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "first user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    wait_until(|| requests.lock().unwrap().len() == 1).await;
+    let mut wake = session
+        .enqueue_wake(crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            msg("user", "queued wake"),
+        ))
+        .unwrap();
+
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "second user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    assert!(matches!(
+        wake.outcome().await.unwrap(),
+        TurnOutcome::CancelledBeforeStart
+    ));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    gates.remove(2).send(()).unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| requests.lock().unwrap().len() == 2).await;
+    gates.remove(1).send(()).unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| requests.lock().unwrap().len() == 3).await;
+    gates.remove(0).send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
+        .await
+        .expect("the requeued wake settles");
+
+    let requests = requests.lock().unwrap();
+    assert!(
+        requests[1]
+            .iter()
+            .any(|message| message.content == "second user")
+    );
+    assert!(
+        requests[2]
+            .iter()
+            .any(|message| message.content == "queued wake")
+    );
+}
+
+#[tokio::test]
+async fn drop_wakes_discards_a_deferred_replay_by_variant() {
+    let (llm, mut gates) = ScriptedLlm::with_gate(vec![
+        text_response("first user answer"),
+        text_response("second user answer"),
+    ]);
+    let requests = llm.requests.clone();
+    let server = Arc::new(RpcServer::new());
+    let session = make_session(Arc::new(llm), rpc_callbacks(server)).await;
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "first user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    wait_until(|| requests.lock().unwrap().len() == 1).await;
+    let mut wake = session
+        .enqueue_wake(crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            msg("user", "wake that must be discarded"),
+        ))
+        .unwrap();
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "second user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    assert!(matches!(
+        wake.outcome().await.unwrap(),
+        TurnOutcome::CancelledBeforeStart
+    ));
+
+    assert!(session.drop_wakes("tower_inbox"));
+    assert!(!session.drop_wakes("tower_inbox"));
+    gates.remove(1).send(()).unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| requests.lock().unwrap().len() == 2).await;
+    gates.remove(0).send(()).unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
+        .await
+        .expect("no deferred wake remains after the variant is dropped");
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn replay_handler_receives_original_payload_without_engine_replay() {
+    let (llm, mut gates) = ScriptedLlm::with_gate(vec![
+        text_response("first user answer"),
+        text_response("second user answer"),
+    ]);
+    let requests = llm.requests.clone();
+    let server = Arc::new(RpcServer::new());
+    let session = make_session(Arc::new(llm), rpc_callbacks(server)).await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let handler_seen = seen.clone();
+    session.set_wake_replay_handler(
+        "tower_inbox",
+        Arc::new(move |payload| {
+            let handler_seen = handler_seen.clone();
+            Box::pin(async move {
+                handler_seen.lock().unwrap().push(payload);
+                Ok(())
+            })
+        }),
+    );
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "first user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    wait_until(|| requests.lock().unwrap().len() == 1).await;
+    let mut payload =
+        crate::session::wake::WakePayload::new("tower_inbox", msg("user", "original wake payload"));
+    payload.items.push(crate::session::wake::WakeItem {
+        key: "id:message-1".into(),
+        source: "worker-a".into(),
+        subject: "original subject".into(),
+        message_id: Some("message-1".into()),
+        file: Some("inbox/message-1.md".into()),
+        sent_at: Some("2026-11-04T00:00:00Z".into()),
+        mission_id: Some("mission-1".into()),
+    });
+    payload
+        .gate_digests
+        .push(crate::session::wake::WakeGateDigest {
+            mission_id: "mission-1".into(),
+            status: "blocked".into(),
+            reasons: vec!["review-pending".into()],
+            binding: None,
+        });
+    let expected = payload.clone();
+    let mut wake = session.enqueue_wake(payload).unwrap();
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "second user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    assert!(matches!(
+        wake.outcome().await.unwrap(),
+        TurnOutcome::CancelledBeforeStart
+    ));
+
+    gates.remove(1).send(()).unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| requests.lock().unwrap().len() == 2).await;
+    gates.remove(0).send(()).unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| seen.lock().unwrap().len() == 1).await;
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0].message.content, expected.message.content);
+    assert_eq!(seen[0].items, expected.items);
+    assert_eq!(seen[0].gate_digests, expected.gate_digests);
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        2,
+        "the engine must not replay a second copy"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
+        .await
+        .expect("a delegated replay is complete when its handler returns Ok");
+}
+
+#[tokio::test]
+async fn replay_handler_error_retains_payload_and_exposes_status() {
+    let (llm, mut gates) = ScriptedLlm::with_gate(vec![
+        text_response("first user answer"),
+        text_response("second user answer"),
+    ]);
+    let requests = llm.requests.clone();
+    let server = Arc::new(RpcServer::new());
+    let session = make_session(Arc::new(llm), rpc_callbacks(server)).await;
+    session.set_wake_replay_handler(
+        "tower_inbox",
+        Arc::new(|_payload| Box::pin(async { Err("replay failed".to_string()) })),
+    );
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "first user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    wait_until(|| requests.lock().unwrap().len() == 1).await;
+    let mut wake = session
+        .enqueue_wake(crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            msg("user", "wake retained after failure"),
+        ))
+        .unwrap();
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "second user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    assert!(matches!(
+        wake.outcome().await.unwrap(),
+        TurnOutcome::CancelledBeforeStart
+    ));
+
+    gates.remove(1).send(()).unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| requests.lock().unwrap().len() == 2).await;
+    gates.remove(0).send(()).unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| {
+        session
+            .wake_replay_status("tower_inbox")
+            .is_some_and(|status| status.error.is_some())
+    })
+    .await;
+
+    let status = session
+        .wake_replay_status("tower_inbox")
+        .expect("the failed replay remains observable");
+    assert!(status.pending, "the original payload must not be lost");
+    assert_eq!(status.error.as_deref(), Some("replay failed"));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    session.shutdown();
+}
+
+#[tokio::test]
+async fn engine_session_driver_holds_receipts_and_delegates_drop_result() {
+    use crate::session::wake::TowerWakeDriver as _;
+
+    let (llm, gates) = ScriptedLlm::with_gate(vec![text_response("wake answer")]);
+    let requests = llm.requests.clone();
+    let server = Arc::new(RpcServer::new());
+    let session = make_session(Arc::new(llm), rpc_callbacks(server)).await;
+    let driver = crate::session::wake::EngineSessionWakeDriver::new(session.clone());
+    driver
+        .enqueue(
+            "sess-driver",
+            crate::session::wake::WakePayload::new("tower_inbox", msg("user", "driver-held wake")),
+        )
+        .unwrap();
+    wait_until(|| requests.lock().unwrap().len() == 1).await;
+    assert_eq!(driver.pending_receipt_count(), 1);
+
+    assert!(driver.drop_wakes("sess-driver", "tower_inbox"));
+    for gate in gates {
+        let _ = gate.send(());
+    }
+    wait_until(|| driver.pending_receipt_count() == 0).await;
+    assert!(!driver.drop_wakes("sess-driver", "tower_inbox"));
+    tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
+        .await
+        .expect("the cancelled wake releases the driver-owned receipt");
+}
+
+#[tokio::test]
+async fn engine_session_driver_forwards_replay_handler_and_status() {
+    use crate::session::wake::TowerWakeDriver as _;
+
+    let (llm, mut gates) = ScriptedLlm::with_gate(vec![
+        text_response("first user answer"),
+        text_response("second user answer"),
+    ]);
+    let requests = llm.requests.clone();
+    let server = Arc::new(RpcServer::new());
+    let session = make_session(Arc::new(llm), rpc_callbacks(server)).await;
+    let driver = crate::session::wake::EngineSessionWakeDriver::new(session.clone());
+    driver.set_replay_handler(
+        "ignored-by-bound-driver",
+        "tower_inbox",
+        Arc::new(|_payload| Box::pin(async { Err("driver replay failed".to_string()) })),
+    );
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "first user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    wait_until(|| requests.lock().unwrap().len() == 1).await;
+    let mut wake = session
+        .enqueue_wake(crate::session::wake::WakePayload::new(
+            "tower_inbox",
+            msg("user", "driver replay retained after failure"),
+        ))
+        .unwrap();
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "second user"),
+            Admission::NewTurn,
+        ))
+        .unwrap();
+    assert!(matches!(
+        wake.outcome().await.unwrap(),
+        TurnOutcome::CancelledBeforeStart
+    ));
+
+    gates.remove(1).send(()).unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| requests.lock().unwrap().len() == 2).await;
+    gates.remove(0).send(()).unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    wait_until(|| {
+        driver
+            .wake_replay_status("ignored-by-bound-driver", "tower_inbox")
+            .is_some_and(|status| status.error.is_some())
+    })
+    .await;
+
+    let status = driver
+        .wake_replay_status("ignored-by-bound-driver", "tower_inbox")
+        .expect("the bound driver forwards replay status");
+    assert!(status.pending);
+    assert_eq!(status.error.as_deref(), Some("driver replay failed"));
+    session.shutdown();
+}
+
 /// RPC callbacks plus a live host goal and captured engine events — the native
 /// host's shape: the goal lifecycle is host-owned, and the engine reports its
 /// folds back through `goal.updated` events.

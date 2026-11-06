@@ -460,37 +460,6 @@ export const BASH_DEFAULT_TIMEOUT: number;
 export const BASH_MAX_TIMEOUT: number;
 
 // ============================================================================
-// Goal — state machine, accounting, steering
-// ============================================================================
-
-export function nativeGoalValidateObjective(objective: string): string;
-export function nativeGoalApplyUpdate(goalJson: string, updateJson: string): string;
-export function nativeGoalComputeTokenDelta(
-  prevInput: number,
-  prevCached: number,
-  prevOutput: number,
-  currInput: number,
-  currCached: number,
-  currOutput: number,
-): number;
-export function nativeGoalRenderContinuation(
-  objective: string,
-  tokensUsed: number,
-  tokenBudget: number,
-): string;
-export function nativeGoalRenderBudgetLimit(
-  objective: string,
-  tokensUsed: number,
-  tokenBudget: number,
-  timeUsedSeconds: number,
-): string;
-export function nativeGoalRenderObjectiveUpdated(
-  objective: string,
-  tokensUsed: number,
-  tokenBudget: number,
-): string;
-
-// ============================================================================
 // i18n — the engine's embedded catalog
 // ============================================================================
 
@@ -694,6 +663,31 @@ export function pluginCommands(): string;
  * Each item carries `match_positions` (UTF-16 offsets into `path`).
  */
 export function fsSuggest(workDir: string, query: string, limit?: number): string;
+
+// ============================================================================
+// Workspace trust — engine-owned decision (upstream #4517)
+// ============================================================================
+
+/**
+ * The effective workspace trust state: `[workspace] require_trust` from
+ * `<homeDir>/config.toml`, the `KIMI_CODE_TRUST_WORKSPACE` process override
+ * and the persisted `trusted-workspaces.json` record, all re-read on every
+ * call (v2 `WorkspaceTrustEntry.refresh`).
+ */
+export function workspaceTrustState(homeDir: string, workDir: string): boolean;
+
+/**
+ * Persist a workspace trust decision: append the root to
+ * `trusted-workspaces.json` unless a matching key is already recorded.
+ */
+export function workspaceTrustRecord(homeDir: string, workDir: string): void;
+
+export function workspaceTrustDisclosure(
+  workDir: string,
+  explicitSkillDirs?: boolean,
+  mergeAllAvailableSkills?: boolean,
+  pendingAdditionalDirs?: string[],
+): string;
 
 // ============================================================================
 // MCP OAuth — engine-owned encrypted storage, host-owned browser flow

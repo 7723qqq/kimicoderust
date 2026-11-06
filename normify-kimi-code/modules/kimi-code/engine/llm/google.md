@@ -12,7 +12,7 @@ description:
       
 revision: 932e017600564470d7e43d7b25bb49896c06cca1
 updated_at: "2026-11-01T08:11:47.977Z"
-fingerprint: f31d7065f623112c01145e9256bb13f87eb5994e55c64d4a937603ce7f028404
+fingerprint: 7d689209356a480dbf754e5fb65bc915430410ffc3cdce5747e868d9e2613799
 source:
   - path: "packages/kimi-agent/src/llm/google_genai.rs"
 apis: []

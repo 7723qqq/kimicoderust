@@ -240,19 +240,156 @@ pub fn build_items(history: &[LLMMessage]) -> Vec<Value> {
     turns.iter().map(TurnDraft::to_value).collect()
 }
 
+/// The cold baseline's turn items on the live wire id axis (upstream
+/// `foldFacts.ts`'s realign pass). `build_items` numbers turns positionally
+/// from 0, but the journal's `turn.prompt` records carry the engine's own
+/// turn ids — the numbering axis the WS live projection already keys off.
+/// Each history turn is matched to its record (in order, by prompt text; the
+/// fork's history carries no `triggerPromptId`), then re-keyed to
+/// `t<wireId>` with `ordinal = wireId`, and the nested step/frame id prefixes
+/// are renamed with it (upstream `renameTurnStep`) — so the REST cold
+/// baseline and the WS live projection agree on every id of the same turn.
+pub fn cold_items(
+    store: &SqliteSessionStore,
+    session_id: &str,
+    history: &[LLMMessage],
+) -> Vec<Value> {
+    let mut items = build_items(history);
+    let Ok(records) = store.turn_prompt_wire_events(session_id) else {
+        return items;
+    };
+    // The journal's numbering axis: (wire turn id, prompt text) in seq order.
+    let axis: Vec<(i64, String)> = records
+        .iter()
+        .filter_map(|record| {
+            let wire_id = record.payload.get("turnId")?.as_i64()?;
+            let text = record
+                .payload
+                .get("input")
+                .and_then(Value::as_array)
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            Some((wire_id, text))
+        })
+        .collect();
+    if axis.is_empty() {
+        return items;
+    }
+    realign_wire_turn_ids(&mut items, &axis);
+    items
+}
+
+/// Re-key each turn to its journal record's wire id (upstream's claim
+/// chain): turns are matched in order by prompt text, each record claimed at
+/// most once. A turn that matches nothing keeps its positional id and pins
+/// that ordinal against renumbering collisions (upstream `keptOrdinals`).
+fn realign_wire_turn_ids(items: &mut [Value], axis: &[(i64, String)]) {
+    let mut claimed = vec![false; axis.len()];
+    let mut matched: Vec<Option<i64>> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let prompt = item.get("prompt").and_then(Value::as_str).unwrap_or("");
+        let claim = if prompt.is_empty() {
+            None
+        } else {
+            axis.iter()
+                .enumerate()
+                .find(|(idx, (_, text))| !claimed[*idx] && text == prompt)
+                .map(|(idx, _)| idx)
+        };
+        if let Some(idx) = claim {
+            claimed[idx] = true;
+        }
+        matched.push(claim.map(|idx| axis[idx].0));
+    }
+    let kept: std::collections::HashSet<i64> = items
+        .iter()
+        .zip(&matched)
+        .filter(|(_, wire)| wire.is_none())
+        .filter_map(|(item, _)| item.get("ordinal").and_then(Value::as_i64))
+        .collect();
+    for (item, wire) in items.iter_mut().zip(&matched) {
+        let Some(wire_id) = wire else {
+            continue;
+        };
+        let ordinal = item.get("ordinal").and_then(Value::as_i64).unwrap_or(-1);
+        if ordinal == *wire_id || kept.contains(wire_id) {
+            continue;
+        }
+        let from = item
+            .get("turnId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let to = format!("t{wire_id}");
+        item["turnId"] = json!(to);
+        item["ordinal"] = json!(wire_id);
+        rename_nested_ids(item, &from, &to);
+    }
+}
+
+/// Rename a re-keyed turn's nested ids (upstream `renameTurnStep`): step ids
+/// move from `{from}.{n}` to `{to}.{n}`, and frame ids follow their step's
+/// prefix.
+fn rename_nested_ids(turn: &mut Value, from: &str, to: &str) {
+    let Some(steps) = turn.get_mut("steps").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for step in steps {
+        let old_step_id = step
+            .get("stepId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let new_step_id = old_step_id
+            .strip_prefix(&format!("{from}."))
+            .map_or(old_step_id.clone(), |rest| format!("{to}.{rest}"));
+        step["stepId"] = json!(new_step_id);
+        step["turnId"] = json!(to);
+        let Some(frames) = step.get_mut("frames").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for frame in frames {
+            let frame_id = frame
+                .get("frameId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if let Some(rest) = frame_id.strip_prefix(&format!("{old_step_id}.")) {
+                frame["frameId"] = json!(format!("{new_step_id}.{rest}"));
+            }
+        }
+    }
+}
+
 /// The cold baseline's prompt entities: fold the persisted prompt-lifecycle
 /// journal (`prompt.submitted` / `completed` / `aborted` / `steered`) through
 /// a fresh projector — the same fold the live path runs — so a reconnecting
 /// client sees settled prompts instead of an empty array. `turn.steer` is not
 /// a fold arm: the steer's user frame rides `build_items` above.
-pub fn cold_prompts(store: &SqliteSessionStore, session_id: &str) -> Value {
+/// `active_wire_turn_id` is the engine's live wire turn number, threaded to
+/// the projector's wedged finalization (upstream #4280): the replay's tail
+/// turn is only wedged when it is not that live one.
+pub fn cold_prompts(
+    store: &SqliteSessionStore,
+    session_id: &str,
+    active_wire_turn_id: Option<i64>,
+) -> Value {
     let Ok(records) = store.prompt_wire_events(session_id) else {
         return Value::Array(Vec::new());
     };
     let mut projector = project::TranscriptProjector::new();
     for record in records {
-        projector.apply_event(&EngineEvent::from_json(record.payload));
+        projector.apply_event_at(
+            &EngineEvent::from_json(record.payload),
+            Some(record.created_at),
+        );
     }
+    projector.mark_wedged_turns(active_wire_turn_id);
     let prompts = projector.snapshot().prompts;
     serde_json::to_value(&prompts).unwrap_or(Value::Array(Vec::new()))
 }
@@ -262,14 +399,24 @@ pub fn cold_prompts(store: &SqliteSessionStore, session_id: &str) -> Value {
 /// session restores its task list (upstream #3970). The cold snapshot settles
 /// members whose spawning turn is no longer running to `lost` (every loop is
 /// dead after a restart); live members keep their recorded state.
-pub fn cold_tasks(store: &SqliteSessionStore, session_id: &str) -> Value {
+/// `active_wire_turn_id` threads to the same wedged finalization as
+/// [`cold_prompts`].
+pub fn cold_tasks(
+    store: &SqliteSessionStore,
+    session_id: &str,
+    active_wire_turn_id: Option<i64>,
+) -> Value {
     let Ok(records) = store.task_wire_events(session_id) else {
         return Value::Array(Vec::new());
     };
     let mut projector = project::TranscriptProjector::new();
     for record in records {
-        projector.apply_event(&EngineEvent::from_json(cold_fold_payload(record.payload)));
+        projector.apply_event_at(
+            &EngineEvent::from_json(cold_fold_payload(record.payload)),
+            Some(record.created_at),
+        );
     }
+    projector.mark_wedged_turns(active_wire_turn_id);
     let tasks = projector.cold_snapshot_tasks();
     serde_json::to_value(&tasks).unwrap_or(Value::Array(Vec::new()))
 }
@@ -688,7 +835,7 @@ mod tests {
             json!({ "type": "turn.steer", "origin": { "kind": "user" } }),
         );
 
-        let prompts = cold_prompts(&store, "sess-cold-prompts");
+        let prompts = cold_prompts(&store, "sess-cold-prompts", None);
         let prompts = prompts.as_array().expect("prompts serialize to an array");
         assert_eq!(prompts.len(), 1, "only the prompt lifecycle folds");
         assert_eq!(prompts[0]["promptId"], "prompt-1");
@@ -698,7 +845,7 @@ mod tests {
 
         // A session with no journal yields an empty array, not null.
         store.create_session("sess-cold-empty", None).unwrap();
-        assert_eq!(cold_prompts(&store, "sess-cold-empty"), json!([]));
+        assert_eq!(cold_prompts(&store, "sess-cold-empty", None), json!([]));
     }
 
     /// `cold_tasks` restores the task list from the persisted journal
@@ -774,7 +921,7 @@ mod tests {
             json!({ "type": "turn.ended", "turnId": 1, "reason": "completed" }),
         );
 
-        let tasks = cold_tasks(&store, "sess-cold-tasks");
+        let tasks = cold_tasks(&store, "sess-cold-tasks", None);
         let tasks = tasks.as_array().expect("tasks serialize to an array");
         assert_eq!(tasks.len(), 2, "adoption keeps a single task per member");
 
@@ -789,8 +936,9 @@ mod tests {
         let lost = tasks.iter().find(|t| t["taskId"] == "agent-8").unwrap();
         assert_eq!(lost["state"], "lost");
 
-        // A member whose spawning turn is still running keeps its recorded
-        // state — that is what makes the Lost rule a *cold* one.
+        // A member whose spawning turn is the LIVE active one keeps its
+        // recorded state: the route threads `active_wire_turn_id` through
+        // (upstream #4280's tail exception), so turn 2 is not wedged here.
         store
             .create_session("sess-cold-running", Some("Running"))
             .unwrap();
@@ -817,17 +965,26 @@ mod tests {
             "subagent.spawned",
             json!({ "type": "subagent.spawned", "subagent_id": "agent-9" }),
         );
-        let running = cold_tasks(&store, "sess-cold-running");
+        let running = cold_tasks(&store, "sess-cold-running", Some(2));
         let running = running.as_array().expect("tasks serialize to an array");
         assert_eq!(running.len(), 1);
         assert_eq!(
             running[0]["state"], "running",
             "a member of a still-running turn is not lost"
         );
+        // With nothing live (`None`, the restart case) the same unclosed turn
+        // is wedged instead — its loop is provably dead — and the member
+        // settles to `lost` (upstream #4280).
+        let wedged = cold_tasks(&store, "sess-cold-running", None);
+        let wedged = wedged.as_array().expect("tasks serialize to an array");
+        assert_eq!(
+            wedged[0]["state"], "lost",
+            "a member of a wedged (dead, unclosed) turn settles to lost"
+        );
 
         // A session with no journal yields an empty array.
         store.create_session("sess-cold-tasks-empty", None).unwrap();
-        assert_eq!(cold_tasks(&store, "sess-cold-tasks-empty"), json!([]));
+        assert_eq!(cold_tasks(&store, "sess-cold-tasks-empty", None), json!([]));
     }
 
     #[test]
@@ -939,5 +1096,147 @@ mod tests {
         assert!(plans[0]["plan"].as_str().unwrap().contains("do the thing"));
 
         assert!(project_plans(&items, Some("missing")).is_empty());
+    }
+
+    fn dual_path_fixture(turns: &[(u32, bool)]) -> (Vec<Value>, Vec<Value>) {
+        use crate::native::event_store::RawWireEvent;
+        use crate::session::sqlite_store::SqliteSessionStore;
+
+        let session_id = "sess-cold-live-wire-axis";
+        let store = SqliteSessionStore::in_memory().unwrap();
+        store.create_session(session_id, Some("Wire axis")).unwrap();
+        for (wire_id, closed) in turns {
+            let prompt = format!("prompt {wire_id}");
+            let answer = format!("answer {wire_id}");
+            store
+                .save_turn(
+                    session_id,
+                    &format!("turn-{wire_id}"),
+                    *wire_id,
+                    &[user(&prompt), assistant(&answer, Vec::new())],
+                    None,
+                    Some(&json!({ "kind": "user" })),
+                )
+                .unwrap();
+            let append = |event_type: &str, payload: Value, suffix: &str| {
+                store
+                    .append_wire_event(&RawWireEvent {
+                        id: format!("evt-{wire_id}-{suffix}"),
+                        session_id: session_id.into(),
+                        event_type: event_type.into(),
+                        payload,
+                        is_checkpoint: false,
+                        is_compaction: false,
+                        created_at: i64::from(*wire_id) * 1_000,
+                    })
+                    .unwrap();
+            };
+            append(
+                "turn.prompt",
+                json!({
+                    "type": "turn.prompt",
+                    "turnId": wire_id,
+                    "input": [{ "type": "text", "text": prompt }],
+                    "origin": { "kind": "user" },
+                }),
+                "prompt",
+            );
+            append(
+                "llm.step.begin",
+                json!({
+                    "type": "llm.step.begin",
+                    "agent_id": "main",
+                    "turn_id": format!("turn-{wire_id}"),
+                    "step": 1,
+                }),
+                "step",
+            );
+            append(
+                "assistant.delta",
+                json!({
+                    "type": "assistant.delta",
+                    "agent_id": "main",
+                    "turn_id": format!("turn-{wire_id}"),
+                    "delta": answer,
+                }),
+                "delta",
+            );
+            if *closed {
+                append(
+                    "turn.ended",
+                    json!({
+                        "type": "turn.ended",
+                        "agent_id": "main",
+                        "turn_id": format!("turn-{wire_id}"),
+                        "reason": "completed",
+                    }),
+                    "ended",
+                );
+            }
+        }
+
+        let history = store.load_session_history(session_id).unwrap();
+        let cold = cold_items(&store, session_id, &history);
+        let record_count = store.count_wire_events(session_id).unwrap();
+        let records = store.get_wire_events(session_id, 0, record_count).unwrap();
+        let mut projector = project::TranscriptProjector::new();
+        for record in records {
+            projector.apply_event_at(
+                &EngineEvent::from_json(record.payload),
+                Some(record.created_at),
+            );
+        }
+        let live = serde_json::to_value(projector.snapshot().items)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        (cold, live)
+    }
+
+    fn wire_axis(items: &[Value]) -> Vec<Value> {
+        items
+            .iter()
+            .map(|turn| {
+                let steps = turn["steps"].as_array().unwrap();
+                json!({
+                    "turnId": turn["turnId"],
+                    "ordinal": turn["ordinal"],
+                    "steps": steps.iter().map(|step| {
+                        let frames = step["frames"].as_array().unwrap();
+                        json!({
+                            "stepId": step["stepId"],
+                            "turnId": step["turnId"],
+                            "frameIds": frames.iter().map(|frame| frame["frameId"].clone()).collect::<Vec<_>>(),
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cold_and_live_paths_share_the_first_turn_wire_axis() {
+        let (cold, live) = dual_path_fixture(&[(1, true)]);
+        assert_eq!(live[0]["turnId"], "t1", "the live fixture uses wire id 1");
+        assert_eq!(wire_axis(&cold), wire_axis(&live));
+    }
+
+    #[test]
+    fn cold_and_live_paths_share_wire_axes_across_holes() {
+        let (cold, live) = dual_path_fixture(&[(2, true), (5, true), (9, true)]);
+        let live_ids: Vec<&str> = live
+            .iter()
+            .map(|turn| turn["turnId"].as_str().unwrap())
+            .collect();
+        assert_eq!(live_ids, ["t2", "t5", "t9"]);
+        assert_eq!(wire_axis(&cold), wire_axis(&live));
+    }
+
+    #[test]
+    fn cold_and_live_paths_share_an_unclosed_tail_wire_axis() {
+        let (cold, live) = dual_path_fixture(&[(4, true), (8, false)]);
+        assert_eq!(live.last().unwrap()["state"], "running");
+        assert_eq!(wire_axis(&cold), wire_axis(&live));
     }
 }

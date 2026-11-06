@@ -6,8 +6,8 @@
 //! - [`agent_run_batch`] — the batch scheduler (v2 `session/agentRunBatch.ts`).
 //! - [`service`] — the session-level owner of a run: member lifecycle,
 //!   cancellation, in-flight registry (v2 `session/sessionSwarmService.ts`).
-//! - [`mode`] — swarm as a mode the agent enters/exits, plus the gate that
-//!   vetoes a response mixing `AgentSwarm` with anything else (v2
+//! - [`mode`] — swarm as a mode the agent enters/exits, plus the active-mode
+//!   gate that vetoes a response mixing `AgentSwarm` with anything else (v2
 //!   `agent/swarm.ts`, `agent/swarmService.ts`, `swarmOps.ts`).
 
 pub mod agent_run_batch;

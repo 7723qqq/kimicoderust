@@ -89,6 +89,17 @@ describe('fsEntrySchema', () => {
     expect(fsEntrySchema.parse(dir).child_count).toBe(42);
   });
 
+  it('round-trips a symlink-to-directory marked is_directory (v2 #4457)', () => {
+    const sym: FsEntry = {
+      path: 'linked',
+      name: 'linked',
+      kind: 'symlink',
+      modified_at: '2026-06-04T10:00:00.000Z',
+      is_directory: true,
+    };
+    expect(fsEntrySchema.parse(sym)).toEqual(sym);
+  });
+
   it('round-trips a symlink with is_symlink_to', () => {
     const sym: FsEntry = {
       path: 'link',

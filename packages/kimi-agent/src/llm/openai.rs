@@ -428,7 +428,7 @@ fn string_field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a Str
 /// Project a single content block to the OpenAI content-parts form.
 fn project_block(b: &ContentBlock) -> Value {
     match b {
-        ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+        ContentBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
         ContentBlock::Image {
             media_type, data, ..
         } => json!({
@@ -1137,6 +1137,7 @@ mod tests {
                 },
                 ContentBlock::Text {
                     text: "The answer is 7.".into(),
+                    meta: None,
                 },
             ],
             tool_calls: Vec::new(),
@@ -1298,6 +1299,7 @@ mod tests {
                 },
                 ContentBlock::Text {
                     text: "done".into(),
+                    meta: None,
                 },
             ],
             tool_calls: Vec::new(),
@@ -1597,6 +1599,7 @@ mod tests {
             vec![
                 ContentBlock::Text {
                     text: "what is this?".into(),
+                    meta: None,
                 },
                 ContentBlock::Image {
                     media_type: "image/png".into(),

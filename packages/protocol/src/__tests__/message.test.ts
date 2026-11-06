@@ -29,6 +29,19 @@ describe('messageContentSchema variants', () => {
     expect(parsed.text).toBe('hello');
   });
 
+  it('round-trips text meta and leaves it absent by default (v2 #4081)', () => {
+    const tagged = textContentSchema.parse({
+      type: 'text',
+      text: '<system>x</system>',
+      meta: { contentType: 'text/xml', source: 'user prompt submit hook' },
+    });
+    expect(tagged.meta).toEqual({
+      contentType: 'text/xml',
+      source: 'user prompt submit hook',
+    });
+    expect(textContentSchema.parse({ type: 'text', text: 'a' }).meta).toBeUndefined();
+  });
+
   it('parses tool_use content', () => {
     const parsed = toolUseContentSchema.parse({
       type: 'tool_use',

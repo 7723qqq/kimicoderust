@@ -3,12 +3,19 @@
  *     Body:  PromptSubmission {
  *              content: MessageContent[],
  *              metadata?: ...,
+ *              agent_id?: string,
  *              profile?: string,
  *              model?: string,
- *              thinking?: 'off'|'low'|'medium'|'high'|'xhigh'|'max',
+ *              // Any non-empty, model-declared effort string; the REST layer
+ *              // does not enumerate efforts (see promptThinkingSchema).
+ *              thinking?: string,
  *              permission_mode?: 'manual'|'yolo'|'auto',
  *              plan_mode?: boolean,
+ *              swarm_mode?: boolean,
+ *              goal_objective?: string,
+ *              goal_control?: 'pause'|'resume'|'cancel',
  *              disabled_tools?: string[],
+ *              prompt_id?: string,
  *            }
  *     Reply: PromptSubmitResult { prompt_id, user_message_id, status, content, created_at }
  *            status='running' when sent immediately, status='queued' when

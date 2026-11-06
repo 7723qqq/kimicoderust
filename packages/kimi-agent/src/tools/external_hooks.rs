@@ -7,12 +7,12 @@
 //! command runs through the platform shell with the snake_case payload JSON
 //! on stdin, exit code 2 or a stdout JSON `permissionDecision: "deny"`
 //! blocks the call, and any hook execution failure fails closed),
-//! `PostToolUse` / `PostToolUseFailure`, `UserPromptSubmit` /
-//! `PreCompact` / `PostCompact`, `PermissionRequest` / `PermissionResult`,
-//! `TurnStarted` / `StopFailure` / `Interrupt` / `UserPromptQueued`,
-//! `TaskStarted` / `Notification`, `SubagentStart` / `SubagentStop` and
-//! `SessionHeartbeat` fire observe-only notifications, and `Stop` hooks
-//! can veto a clean text stop once per turn (v2 `runStop`,
+//! `PostToolUse` / `PostToolUseFailure`, `PreCompact` / `PostCompact`,
+//! `PermissionRequest` / `PermissionResult`, `TurnStarted` / `StopFailure` /
+//! `Interrupt` / `UserPromptQueued`, `TaskStarted` / `Notification`,
+//! `SubagentStart` / `SubagentStop` and `SessionHeartbeat` fire observe-only
+//! notifications, `UserPromptSubmit` can block or prepend context to the
+//! prompt, and `Stop` hooks can veto a clean text stop once per turn (v2 `runStop`,
 //! agentExternalHooksService.ts:412). Together with `SessionStart` /
 //! `SessionEnd` and the gating `PreToolUse`, that covers all 20 of v2's
 //! `HOOK_EVENT_TYPES`.
@@ -31,7 +31,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::permission::HookDef;
-use crate::rpc::types::ToolExecuteRequest;
+use crate::rpc::types::{ContentBlock, ToolExecuteRequest};
 
 /// v2 `matchHooks.ts` default timeout.
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
@@ -84,6 +84,15 @@ pub type TelemetrySink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 /// `(hook_event, content, blocked)` — one entry per hook run, so the host can
 /// render what the hook said and whether it vetoed.
 pub type HookResultSink = Arc<dyn Fn(&str, &str, bool) + Send + Sync>;
+
+/// The prompt-launch verdict (v2 `runPromptSubmitHook`). `block` is the
+/// assistant-visible rendered hook result; `append` parts belong at content
+/// position 0 of the same user prompt, ahead of its original parts.
+#[derive(Debug, Default)]
+pub struct UserPromptSubmitOutcome {
+    pub block: Option<String>,
+    pub append: Vec<ContentBlock>,
+}
 
 enum Matcher {
     All,
@@ -301,29 +310,63 @@ impl HookGuard {
         );
     }
 
-    /// Notify user-configured `UserPromptSubmit` hooks (v2
-    /// `agentExternalHooksService.runPromptSubmitHook`). Fire-and-forget
-    /// at the head of a turn; hooks can log / observe but do not block
-    /// the prompt. Hooks match against the submitted prompt text, as in v2.
-    /// Known partial parity: v2 additionally honors block (skips the model
-    /// call) and append (context text) outcomes; the engine currently only
-    /// fires the observe path.
-    pub async fn notify_user_prompt_submit(&self, turn_id: &str, prompt: &str) {
+    /// Run user-configured `UserPromptSubmit` hooks at the turn head (v2
+    /// `agentExternalHooksService.runPromptSubmitHook`). Matching hooks run
+    /// concurrently but their outcomes retain declaration order. The first
+    /// block wins and suppresses every append; otherwise each non-empty
+    /// allow message becomes a meta-marked part of the original user prompt.
+    pub async fn run_user_prompt_submit(
+        &self,
+        turn_id: &str,
+        prompt: &str,
+    ) -> UserPromptSubmitOutcome {
         let matched = self.matched_hooks("UserPromptSubmit", prompt);
         if matched.is_empty() {
-            return;
+            return UserPromptSubmitOutcome::default();
         }
         let payload = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
             "turn_id": turn_id,
             "prompt": prompt,
+            "cwd": self.payload_cwd(),
         });
-        spawn_hooks(
-            "UserPromptSubmit",
-            matched,
-            payload,
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
-        );
+        let results = futures_util::future::join_all(
+            matched
+                .iter()
+                .map(|hook| run_prompt_submit_hook(hook, &payload, self.session_cwd.as_deref())),
+        )
+        .await;
+
+        if let Some(block) = results
+            .iter()
+            .find(|result| result.action == PromptHookAction::Block)
+        {
+            let message = block.block_message();
+            if let Some(sink) = self.hook_result.get() {
+                sink("UserPromptSubmit", &message, true);
+            }
+            return UserPromptSubmitOutcome {
+                block: Some(render_hook_result("UserPromptSubmit", &message)),
+                append: Vec::new(),
+            };
+        }
+
+        let messages: Vec<String> = results
+            .iter()
+            .filter_map(PromptHookResult::append_message)
+            .collect();
+        if let Some(sink) = self.hook_result.get() {
+            for message in &messages {
+                sink("UserPromptSubmit", message, false);
+            }
+        }
+        UserPromptSubmitOutcome {
+            block: None,
+            append: messages
+                .iter()
+                .map(|message| user_prompt_submit_hook_part(message))
+                .collect(),
+        }
     }
 
     /// Notify user-configured `PreCompact` hooks (v2
@@ -830,6 +873,46 @@ async fn run_hook_with_denial(
     event: &str,
     session_cwd: Option<&str>,
 ) -> HookOutcome {
+    let result = run_hook_process(hook, payload, session_cwd).await;
+    match &result.failure {
+        Some(HookProcessFailure::Spawn(error)) => {
+            (Some(format!("{FAILED_TO_SPAWN}{error}")), String::new())
+        }
+        Some(HookProcessFailure::Errored) => (Some(ERRORED.into()), String::new()),
+        Some(HookProcessFailure::TimedOut) => (Some(TIMED_OUT.into()), String::new()),
+        None => {
+            let reason = result
+                .status
+                .as_ref()
+                .and_then(|status| evaluate_hook(event, status, &result.stdout, &result.stderr));
+            (reason, result.stdout)
+        }
+    }
+}
+
+#[derive(Debug)]
+enum HookProcessFailure {
+    Spawn(String),
+    Errored,
+    TimedOut,
+}
+
+#[derive(Debug)]
+struct HookProcessResult {
+    status: Option<ExitStatus>,
+    stdout: String,
+    stderr: String,
+    failure: Option<HookProcessFailure>,
+}
+
+/// Execute one hook without imposing a policy on the result. PreToolUse and
+/// Stop keep their existing fail-closed wrapper above; UserPromptSubmit reads
+/// the same process facts with upstream's fail-open prompt semantics.
+async fn run_hook_process(
+    hook: &HookDef,
+    payload: &Value,
+    session_cwd: Option<&str>,
+) -> HookProcessResult {
     let timeout = Duration::from_secs(
         hook.timeout
             .unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS)
@@ -841,7 +924,14 @@ async fn run_hook_with_denial(
         hook.env.as_ref(),
     ) {
         Ok(child) => child,
-        Err(e) => return (Some(format!("{FAILED_TO_SPAWN}{e}")), String::new()),
+        Err(error) => {
+            return HookProcessResult {
+                status: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                failure: Some(HookProcessFailure::Spawn(error.to_string())),
+            };
+        }
     };
 
     let payload_json = serde_json::to_string(payload).unwrap_or_else(|_| "{}".into());
@@ -850,7 +940,12 @@ async fn run_hook_with_denial(
         None => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            return (Some(ERRORED.into()), String::new());
+            return HookProcessResult {
+                status: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                failure: Some(HookProcessFailure::Errored),
+            };
         }
     };
     // v2 attaches an empty 'error' handler to the hook's stdin and ends the
@@ -861,33 +956,38 @@ async fn run_hook_with_denial(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    // Drain both pipes while the child runs: waiting first and reading
-    // after can deadlock once a pipe buffer fills (the child blocks on
-    // write while we block on wait). Hook output is small, but the
-    // ordering costs nothing.
-    let out_drain = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(mut out) = stdout {
-            use tokio::io::AsyncReadExt;
-            let _ = out.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-    let err_drain = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(mut err) = stderr {
-            use tokio::io::AsyncReadExt;
-            let _ = err.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-    let status = tokio::select! {
+    // Drain both pipes while the child runs: waiting first and reading after
+    // can deadlock once a pipe buffer fills. Shared buffers also preserve the
+    // partial output v2 exposes when timeout/wait settles before EOF.
+    let out_buf = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let err_buf = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let out_drain = {
+        let buf = Arc::clone(&out_buf);
+        tokio::spawn(async move {
+            if let Some(mut out) = stdout {
+                use tokio::io::AsyncReadExt;
+                let mut buf = buf.lock().await;
+                let _ = out.read_to_end(&mut buf).await;
+            }
+        })
+    };
+    let err_drain = {
+        let buf = Arc::clone(&err_buf);
+        tokio::spawn(async move {
+            if let Some(mut err) = stderr {
+                use tokio::io::AsyncReadExt;
+                let mut buf = buf.lock().await;
+                let _ = err.read_to_end(&mut buf).await;
+            }
+        })
+    };
+    let (status, failure) = tokio::select! {
         status = child.wait() => match status {
-            Ok(status) => status,
+            Ok(status) => (Some(status), None),
             Err(_) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                return (Some(ERRORED.into()), String::new());
+                (None, Some(HookProcessFailure::Errored))
             }
         },
         _ = tokio::time::sleep(timeout) => {
@@ -895,18 +995,26 @@ async fn run_hook_with_denial(
             // for children, so the kill is direct.
             let _ = child.kill().await;
             let _ = child.wait().await;
-            return (Some(TIMED_OUT.into()), String::new());
+            (None, Some(HookProcessFailure::TimedOut))
         }
     };
-
-    let out_buf = out_drain.await.unwrap_or_default();
-    let err_buf = err_drain.await.unwrap_or_default();
-    let stdout_text = String::from_utf8_lossy(&out_buf);
-    let stderr_text = String::from_utf8_lossy(&err_buf);
-    (
-        evaluate_hook(event, status, &stdout_text, &stderr_text),
-        stdout_text.to_string(),
-    )
+    if failure.is_some() {
+        // Do not wait for a grandchild that inherited the pipes and outlived
+        // the killed shell. Whatever the drains already captured remains in
+        // the shared buffers, matching v2's early-settled result.
+        out_drain.abort();
+        err_drain.abort();
+    }
+    let _ = out_drain.await;
+    let _ = err_drain.await;
+    let stdout = String::from_utf8_lossy(&out_buf.lock().await).to_string();
+    let stderr = String::from_utf8_lossy(&err_buf.lock().await).to_string();
+    HookProcessResult {
+        status,
+        stdout,
+        stderr,
+        failure,
+    }
 }
 
 /// Spawn the hook command through the platform shell (v2 `spawn(command,
@@ -960,7 +1068,7 @@ fn spawn_hook_command(
 /// blocks with its `permissionDecisionReason`; everything else allows. A
 /// top-level `permissionDecision` does NOT block — v2 reads only the nested
 /// form. Empty reasons fall back to the v2 default for the triggering event.
-fn evaluate_hook(event: &str, status: ExitStatus, stdout: &str, stderr: &str) -> Option<String> {
+fn evaluate_hook(event: &str, status: &ExitStatus, stdout: &str, stderr: &str) -> Option<String> {
     // A signal kill yields no exit code. Node reports the same case as a
     // null exit code, which v2's `resultFromExitCode` allows — mirror that
     // (spawn/timeout/wait failures still fail closed above).
@@ -1001,6 +1109,151 @@ fn fallback_reason(event: &str, reason: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptHookAction {
+    Allow,
+    Block,
+}
+
+#[derive(Debug)]
+struct PromptHookResult {
+    action: PromptHookAction,
+    message: Option<String>,
+    reason: Option<String>,
+    stdout: String,
+    exit_code: Option<i32>,
+    exited: bool,
+    timed_out: bool,
+    structured_output: bool,
+}
+
+impl PromptHookResult {
+    fn from_process(process: HookProcessResult) -> Self {
+        let exit_code = process.status.as_ref().and_then(ExitStatus::code);
+        let mut result = Self {
+            action: PromptHookAction::Allow,
+            message: None,
+            reason: None,
+            stdout: process.stdout,
+            exit_code,
+            exited: process.status.is_some(),
+            timed_out: matches!(&process.failure, Some(HookProcessFailure::TimedOut)),
+            structured_output: false,
+        };
+        if process.failure.is_some() {
+            return result;
+        }
+        if exit_code == Some(2) {
+            let message = process.stderr.trim().to_string();
+            result.action = PromptHookAction::Block;
+            result.message = Some(message.clone());
+            result.reason = Some(message);
+            return result;
+        }
+        if exit_code == Some(0)
+            && let Some(structured) = structured_hook_output(&result.stdout)
+        {
+            result.structured_output = true;
+            result.message = structured.message;
+            if structured.deny {
+                result.action = PromptHookAction::Block;
+                result.reason = structured.reason;
+            }
+        }
+        result
+    }
+
+    fn block_message(&self) -> String {
+        non_empty_trimmed(self.message.as_deref())
+            .or_else(|| non_empty_trimmed(self.reason.as_deref()))
+            .unwrap_or_else(|| "Blocked by UserPromptSubmit hook".into())
+    }
+
+    fn append_message(&self) -> Option<String> {
+        if self.action == PromptHookAction::Block
+            || self.timed_out
+            || self.exit_code.is_some_and(|code| code != 0)
+            || (self.exited && self.exit_code.is_none())
+        {
+            return None;
+        }
+        if let Some(message) = non_empty_trimmed(self.message.as_deref()) {
+            return Some(message);
+        }
+        // Structured JSON without a message (for example {"continue":true})
+        // is a verdict, not context text. Invalid JSON is plain-text stdout.
+        if self.structured_output {
+            return None;
+        }
+        non_empty_trimmed(Some(&self.stdout))
+    }
+}
+
+struct StructuredHookOutput {
+    message: Option<String>,
+    deny: bool,
+    reason: Option<String>,
+}
+
+fn structured_hook_output(stdout: &str) -> Option<StructuredHookOutput> {
+    let value: Value = serde_json::from_str(stdout.trim()).ok()?;
+    let object = value.as_object()?;
+    let specific = object.get("hookSpecificOutput").and_then(Value::as_object);
+    Some(StructuredHookOutput {
+        message: optional_hook_string(object.get("message"))
+            .or_else(|| optional_hook_string(specific.and_then(|output| output.get("message")))),
+        deny: specific
+            .and_then(|output| output.get("permissionDecision"))
+            .and_then(Value::as_str)
+            == Some("deny"),
+        reason: specific
+            .and_then(|output| output.get("permissionDecisionReason"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn optional_hook_string(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Number(number)) => Some(number.to_string()),
+        Some(Value::Bool(flag)) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+async fn run_prompt_submit_hook(
+    hook: &HookDef,
+    payload: &Value,
+    session_cwd: Option<&str>,
+) -> PromptHookResult {
+    PromptHookResult::from_process(run_hook_process(hook, payload, session_cwd).await)
+}
+
+fn render_hook_result(event: &str, message: &str) -> String {
+    format!("<hook_result hook_event=\"{event}\">\n{message}\n</hook_result>")
+}
+
+fn user_prompt_submit_hook_part(message: &str) -> ContentBlock {
+    let mut meta = serde_json::Map::new();
+    meta.insert("contentType".into(), Value::String("text/xml".into()));
+    meta.insert(
+        "source".into(),
+        Value::String("user prompt submit hook".into()),
+    );
+    ContentBlock::Text {
+        text: render_hook_result("UserPromptSubmit", message),
+        meta: Some(meta),
+    }
+}
+
 /// Shared test support for any test that asserts on the payload a hook
 /// received on stdin: a shell-safe temp dir, capture-file hooks, and a wait
 /// for the fire-and-forget write to land.
@@ -1021,10 +1274,16 @@ pub(crate) mod capture {
     }
 
     /// A hook whose command copies its stdin payload to `target` (`more`
-    /// reads the pipe to EOF on cmd, `cat` elsewhere).
+    /// reads the pipe to EOF on cmd, `cat` elsewhere). The tool is pinned
+    /// through `%SystemRoot%`: cmd.exe's PATH lookup silently fails when
+    /// the inherited PATH grows past ~8k chars (long agent shells accrete
+    /// that), so a bare `more` may not resolve on a real machine.
     pub fn hook(event: &str, matcher: &str, target: &std::path::Path) -> HookDef {
         let command = if cfg!(windows) {
-            format!("more > {}", target.to_string_lossy())
+            format!(
+                "%SystemRoot%\\System32\\more.com > {}",
+                target.to_string_lossy()
+            )
         } else {
             format!("cat > {}", target.to_string_lossy())
         };
@@ -1038,18 +1297,37 @@ pub(crate) mod capture {
         }
     }
 
-    /// Wait for the hook's capture file to become non-empty (or the deadline
-    /// to pass), then parse the payload.
+    /// How long a capture test waits for the hook subprocess to finish. The
+    /// product grants a hook up to `DEFAULT_HOOK_TIMEOUT_SECS` (30s), so a
+    /// shorter test budget would assert "faster than the product's own
+    /// allowance" and fail whenever the scheduler starves `cmd.exe` spawn —
+    /// each capture costs two processes (`cmd` plus `more.com`).
+    const CAPTURE_WAIT: std::time::Duration =
+        std::time::Duration::from_secs(super::DEFAULT_HOOK_TIMEOUT_SECS);
+
+    /// Wait for the hook's capture file to hold a complete payload (or the
+    /// deadline to pass), then return it.
+    ///
+    /// A non-empty file is not necessarily complete: the capture command may
+    /// write in more than one chunk (`more.com` echoes the line, then the
+    /// newline), and the fire-and-forget hook publishes while the test polls.
+    /// Parsing every snapshot and retrying removes that partial-read window;
+    /// only the deadline panics, with the raw content for diagnosis.
     pub async fn wait(target: &std::path::Path) -> Value {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let content = loop {
+        let deadline = std::time::Instant::now() + CAPTURE_WAIT;
+        loop {
             let content = std::fs::read_to_string(target).unwrap_or_default();
-            if !content.is_empty() || std::time::Instant::now() >= deadline {
-                break content;
+            if let Ok(value) = serde_json::from_str(&content) {
+                return value;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "no JSON payload captured at {} within {CAPTURE_WAIT:?}: {content:?}",
+                    target.display()
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
-        serde_json::from_str(&content).expect("the hook received a JSON payload")
+        }
     }
 }
 
@@ -1097,7 +1375,10 @@ mod tests {
 
     fn sleeper() -> &'static str {
         if cfg!(windows) {
-            "ping -n 3 127.0.0.1 >nul"
+            // `%SystemRoot%`-pinned like `capture::hook`: cmd's PATH lookup
+            // fails under a very long inherited PATH, so a bare `ping` may
+            // not resolve.
+            "%SystemRoot%\\System32\\ping.exe -n 3 127.0.0.1 >nul"
         } else {
             "sleep 3"
         }
@@ -1451,7 +1732,11 @@ mod tests {
             .notify_post_tool_use("Write", "c1", &serde_json::json!({}), "content", false)
             .await;
         let marker = dir.path().join("hook-ran.txt");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // The product grants a hook up to `DEFAULT_HOOK_TIMEOUT_SECS`; wait
+        // that long instead of a shorter test budget that a starved `cmd.exe`
+        // spawn can miss.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(super::DEFAULT_HOOK_TIMEOUT_SECS);
         let ran = loop {
             if std::fs::read_to_string(&marker)
                 .unwrap_or_default()
@@ -1603,8 +1888,10 @@ mod tests {
             .notify_post_tool_use("Write", "c1", &serde_json::json!({}), "content", false)
             .await;
         // The hook runs fire-and-forget; poll for the marker instead of
-        // sleeping a fixed window so the test stays stable under load.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // sleeping a fixed window so the test stays stable under load. The
+        // bound is the product's own hook allowance.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(super::DEFAULT_HOOK_TIMEOUT_SECS);
         let content = loop {
             let content = std::fs::read_to_string(&marker).unwrap_or_default();
             if content.contains("done") || std::time::Instant::now() >= deadline {
@@ -1617,21 +1904,33 @@ mod tests {
 
     /// A command that copies its stdin payload to a file (`more` reads the
     /// pipe to EOF on cmd; `cat` elsewhere), so the test can assert on the
-    /// exact JSON the hook received.
+    /// exact JSON the hook received. `%SystemRoot%`-pinned like
+    /// `capture::hook`: cmd's PATH lookup fails under a very long PATH.
     fn capture_stdin_command(target: &std::path::Path) -> String {
         if cfg!(windows) {
-            format!("more > {}", target.to_string_lossy())
+            format!(
+                "%SystemRoot%\\System32\\more.com > {}",
+                target.to_string_lossy()
+            )
         } else {
             format!("cat > {}", target.to_string_lossy())
         }
     }
 
-    /// Wait for a fire-and-forget hook to finish writing its capture file.
+    /// Wait for a fire-and-forget hook to finish writing a *complete* capture.
+    /// A non-empty snapshot can be a partial write (`more.com` echoes the line
+    /// and then the newline, both as separate writes), so only a snapshot that
+    /// parses as JSON ends the wait. The bound matches the product's own hook
+    /// allowance (`DEFAULT_HOOK_TIMEOUT_SECS`): this path spawns `cmd` plus
+    /// `more.com`, which can be starved far past a short test-only budget.
     async fn wait_for_capture(path: &std::path::Path) -> String {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let timeout = std::time::Duration::from_secs(super::DEFAULT_HOOK_TIMEOUT_SECS);
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             let content = std::fs::read_to_string(path).unwrap_or_default();
-            if !content.is_empty() || std::time::Instant::now() >= deadline {
+            if serde_json::from_str::<Value>(&content).is_ok()
+                || std::time::Instant::now() >= deadline
+            {
                 return content;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;

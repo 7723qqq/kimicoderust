@@ -428,13 +428,14 @@ pub struct SkillScan<'a> {
 /// skills first, then the embedded builtin skills. `None` when the scan
 /// carries no skill with that name (the caller then asks the host).
 fn scan_skill(name: &str, scan: &SkillScan<'_>) -> Option<ResolvedSkill> {
-    // The plugin roots join the declared extra roots, after them: v2 ranks
-    // `extra` (10) above `plugin` (5), so a plugin skill never shadows one the
-    // user declared.
-    let extra_dirs = crate::skills::roots_in_precedence_order(scan.extra_dirs, scan.plugin_dirs);
-    let found = crate::skills::scan_all_skills_with_extra_and_merge(
+    // v2 ranks `extra` (10) above `plugin` (5), and plugin skills register
+    // under qualified `<plugin_id>:<skill>` names (v2 `registerPluginSkill`),
+    // so a plugin skill never shadows one the user declared — and is resolved
+    // by its qualified name only.
+    let found = crate::skills::scan_all_skills_with_extra_merge_and_plugins(
         scan.root,
-        &extra_dirs,
+        scan.extra_dirs,
+        scan.plugin_dirs,
         scan.merge_all_available_skills,
     )
     .into_iter()
@@ -674,6 +675,7 @@ pub async fn execute_skill_with_depth(
         delivery: Some(ToolDelivery {
             blocks: vec![ContentBlock::Text {
                 text: delivery_text,
+                meta: None,
             }],
             origin: Some(origin),
         }),
@@ -1010,14 +1012,18 @@ mod tests {
             merge_all_available_skills: true,
         };
 
-        let prompt = render_user_slash_skill_prompt(&scanned, "brand", "", "ses_1").unwrap();
+        // v2 `registerPluginSkill` (#4188): a plugin skill is invoked by its
+        // qualified name; the instruction prefix rides the scan's root lookup
+        // unchanged.
+        let prompt =
+            render_user_slash_skill_prompt(&scanned, "brandpack:brand", "", "ses_1").unwrap();
         // A plugin root reaches the wire as `source="extra"` (v2 tags plugin
         // roots the same way, `manager.ts:314`); the plugin's identity is
         // carried by the instruction prefix, not by a tag attribute — v2's
         // `renderSkillAttributes` has exactly these five.
         assert!(
             prompt.text.contains(
-                "<skill-loaded name=\"brand\" trigger=\"user-slash\" source=\"extra\" dir=\""
+                "<skill-loaded name=\"brandpack:brand\" trigger=\"user-slash\" source=\"extra\" dir=\""
             ),
             "{}",
             prompt.text
@@ -1050,7 +1056,7 @@ mod tests {
         let result = execute_skill(
             &callbacks,
             None,
-            &serde_json::json!({ "skill": "brand" }),
+            &serde_json::json!({ "skill": "brandpack:brand" }),
             SkillScan {
                 root: None,
                 extra_dirs: &[],
@@ -1061,7 +1067,7 @@ mod tests {
         .await;
         assert!(!result.is_error, "{}", result.content);
         assert!(read_received.lock().unwrap().is_none(), "the scan answered");
-        let ContentBlock::Text { text } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(
@@ -1088,7 +1094,7 @@ mod tests {
         );
         // The instructions ride a follow-up user delivery, not the tool result.
         let delivery = result.delivery.expect("steer delivery");
-        let ContentBlock::Text { text } = &delivery.blocks[0] else {
+        let ContentBlock::Text { text, .. } = &delivery.blocks[0] else {
             panic!("expected a text block");
         };
         assert_eq!(
@@ -1244,7 +1250,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error);
-        let ContentBlock::Text { text } = &result.delivery.unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(
@@ -1421,7 +1427,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error);
-        let ContentBlock::Text { text } = &result.delivery.unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("<plugin-instructions plugin=\"superpowers\">\nUse AskUserQuestion for clarifying questions.\n</plugin-instructions>\n\nBrainstorm body."));
@@ -1480,7 +1486,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error);
-        let ContentBlock::Text { text } = &result.delivery.unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("session is session-xyz-123"));
@@ -1516,7 +1522,7 @@ mod tests {
             result.content,
             "Skill \"demo\" loaded inline. Follow its instructions."
         );
-        let ContentBlock::Text { text } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("<skill-loaded name=\"demo\""));
@@ -1573,7 +1579,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
-        let ContentBlock::Text { text } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("Review src/app.ts in strict."), "{text}");
@@ -1642,7 +1648,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
-        let ContentBlock::Text { text } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("Brand body."), "{text}");
@@ -1721,7 +1727,7 @@ mod tests {
         .await;
         assert!(!result.is_error, "{}", result.content);
         let delivery = result.delivery.expect("delivery");
-        let ContentBlock::Text { text } = &delivery.blocks[0] else {
+        let ContentBlock::Text { text, .. } = &delivery.blocks[0] else {
             panic!("expected a text block");
         };
         assert!(
@@ -1767,7 +1773,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
-        let ContentBlock::Text { text } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("name=\"q&quot;x\""), "{text}");
@@ -1891,7 +1897,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
-        let ContentBlock::Text { text } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("trigger=\"nested-skill\""), "{text}");

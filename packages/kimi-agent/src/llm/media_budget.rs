@@ -179,6 +179,7 @@ pub(crate) fn replace_with_media_tag(messages: &mut [LLMMessage], entry: &Entry)
             (Some(_), None) => unavailable_text(entry.kind).to_string(),
             _ => budget_omitted_media(entry.kind),
         },
+        meta: None,
     };
 }
 
@@ -457,7 +458,7 @@ mod tests {
 
     fn omitted_text(message: &LLMMessage) -> Option<&str> {
         match message.blocks.first() {
-            Some(ContentBlock::Text { text }) => Some(text.as_str()),
+            Some(ContentBlock::Text { text, .. }) => Some(text.as_str()),
             _ => None,
         }
     }
@@ -812,7 +813,7 @@ mod tests {
         // is untouched and the strip budget is still armed for it.
         assert!(matches!(
             &messages[0].blocks[0],
-            ContentBlock::Text { text } if text.contains("/blobs/files/f-old")
+            ContentBlock::Text { text, .. } if text.contains("/blobs/files/f-old")
         ));
         assert!(matches!(&messages[1].blocks[0], ContentBlock::Image { .. }));
         assert!(degraded);
@@ -876,7 +877,7 @@ mod tests {
 
         assert!(matches!(
             &messages[0].blocks[0],
-            ContentBlock::Text { text } if text.contains("/blobs/files/f-a")
+            ContentBlock::Text { text, .. } if text.contains("/blobs/files/f-a")
         ));
         assert!(matches!(&messages[1].blocks[0], ContentBlock::Image { .. }));
         assert!(matches!(&messages[2].blocks[0], ContentBlock::Image { .. }));

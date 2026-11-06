@@ -10,11 +10,17 @@
  *   POST    /v1/sessions/{id}/children    body: SessionChild    data: Session
  *   GET     /v1/sessions/{id}/status      -                     data: SessionStatusResponse
  *   GET     /v1/sessions/{id}/history     query: HistoryQuery   data: HistoryResponse
+ *   GET     /v1/sessions/{id}/warnings    -                     data: SessionWarningsResponse
+ *   GET     /v1/sessions/{id}/goal        -                     data: GetSessionGoalResponse
  *   POST    /v1/sessions/{id}:compact     body: CompactSession  data: {}
  *   POST    /v1/sessions/{id}:undo        body: UndoSession     data: UndoSession
  *   POST    /v1/sessions/{id}:takeover    -                     data: { taken_over: true }
  *   POST    /v1/sessions/{id}:archive     -                     data: { archived: true }
  *   POST    /v1/sessions/{id}:restore     -                     data: Session
+ *   POST    /v1/sessions/{id}:abort       -                     data: SessionAbortResponse
+ *   POST    /v1/sessions/{id}:export      body: ExportSessionRequest
+ *                                         data: application/zip archive (binary)
+ *   GET     /v1/sessions/{id}:export      -                     data: session export JSON
  */
 
 import { z } from 'zod';

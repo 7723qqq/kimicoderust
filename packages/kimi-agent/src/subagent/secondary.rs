@@ -39,6 +39,14 @@ pub struct SubagentBinding {
     pub source: SubagentModelSource,
 }
 
+/// Tower's post-#4418 binding: unlike Agent / AgentSwarm, Tower still offers
+/// `primary`, and reviewers default to it even when a pool is configured.
+#[derive(Clone)]
+pub struct TowerModelBinding {
+    pub llm: Arc<dyn LLM>,
+    pub model: String,
+}
+
 /// The pool plus its live LLMs. The caller passes the session's own LLM at
 /// resolve time, because `primary` (and the inherited fallback) bind it and
 /// the session LLM is built after the pool.
@@ -99,11 +107,94 @@ impl SecondaryModelRuntime {
         lines.join("\n")
     }
 
+    /// Tower-only model description (v2
+    /// `buildSubagentModelDescriptionsWithPrimary`): every configured pool,
+    /// including a single-entry pool, offers its entries plus `primary`.
+    pub fn tower_description(&self) -> String {
+        let primary_label = self
+            .config
+            .caller_model_alias
+            .as_deref()
+            .map(|alias| format!("{PRIMARY_MODEL_CHOICE} (= {alias})"))
+            .unwrap_or_else(|| PRIMARY_MODEL_CHOICE.to_string());
+        format!(
+            "{}\n- {}: your current model and thinking level\nPool entries don't inherit your thinking level.",
+            self.description(),
+            primary_label
+        )
+    }
+
+    /// Resolve Tower's model choice (v2 `resolveSubagentBindingWithPrimary`).
+    /// The caller's LLM is passed explicitly so `primary` is a real binding,
+    /// not a sentinel that can accidentally fall back to the pool default.
+    pub fn resolve_tower(
+        &self,
+        primary: Arc<dyn LLM>,
+        reviewer: bool,
+        requested: Option<&str>,
+    ) -> Result<TowerModelBinding, String> {
+        if self.llms.contains_key(PRIMARY_MODEL_CHOICE) {
+            return Err(format!(
+                "[secondary_model.models] key \"{PRIMARY_MODEL_CHOICE}\" is reserved. Rename the pool entry."
+            ));
+        }
+        let requested = requested.or(reviewer.then_some(PRIMARY_MODEL_CHOICE));
+        if requested == Some(PRIMARY_MODEL_CHOICE) {
+            return Ok(TowerModelBinding {
+                model: self
+                    .config
+                    .caller_model_alias
+                    .clone()
+                    .unwrap_or_else(|| primary.model_name().to_string()),
+                llm: primary,
+            });
+        }
+        let alias = requested.unwrap_or(self.config.default_model.as_str());
+        let llm = self.llms.get(alias).cloned().ok_or_else(|| {
+            let mut available: Vec<&str> = self
+                .config
+                .models
+                .iter()
+                .map(|entry| entry.alias.as_str())
+                .collect();
+            available.push(PRIMARY_MODEL_CHOICE);
+            format!(
+                "Invalid model \"{alias}\". Available models: {}.",
+                available.join(", ")
+            )
+        })?;
+        Ok(TowerModelBinding {
+            llm,
+            model: alias.to_string(),
+        })
+    }
+
+    /// Tower's no-pool arm: omission and `primary` bind the caller; any other
+    /// explicit alias is rejected before spawn side effects.
+    pub fn resolve_tower_without_pool(
+        primary: Arc<dyn LLM>,
+        reviewer: bool,
+        requested: Option<&str>,
+    ) -> Result<TowerModelBinding, String> {
+        let requested = requested.or(reviewer.then_some(PRIMARY_MODEL_CHOICE));
+        if let Some(requested) = requested
+            && requested != PRIMARY_MODEL_CHOICE
+        {
+            return Err(format!(
+                "Invalid model \"{requested}\": no [secondary_model] pool is configured, so subagents inherit the caller's model (omit the model parameter)."
+            ));
+        }
+        let model = primary.model_name().to_string();
+        Ok(TowerModelBinding {
+            llm: primary,
+            model,
+        })
+    }
+
     /// Resolve a spawn's model binding (v2 `resolveSubagentBinding`, post
     /// #4418): the pool's own entries only — an explicit `model` must name
-    /// one, and `primary` is just an invalid alias here (the tower keeps its
-    /// own `resolveSubagentBindingWithPrimary`; the fork's tower has no pool
-    /// integration, so that variant has no call site).
+    /// one, and `primary` is just an invalid alias here. Tower uses the
+    /// independent [`Self::resolve_tower`] variant above.
     ///
     /// Errors mirror v2's `CONFIG_INVALID` texts so the model sees the same
     /// guidance: they name the offending value and list the available choices.
@@ -241,9 +332,68 @@ mod tests {
         assert_eq!(binding.llm.model_name(), "strong");
     }
 
-    /// v2 #4418: `primary` is no longer an implicit choice — with a pool it
-    /// is just an invalid alias, and the available list names pool entries
-    /// only.
+    #[test]
+    fn tower_resolver_binds_pool_default_alias_and_primary() {
+        let pool = pool_runtime();
+        let primary = llm_llm("main-wire");
+
+        let worker = pool.resolve_tower(primary.clone(), false, None).unwrap();
+        assert_eq!(worker.model, "fast");
+        assert_eq!(worker.llm.model_name(), "fast");
+
+        let explicit = pool
+            .resolve_tower(primary.clone(), false, Some("strong"))
+            .unwrap();
+        assert_eq!(explicit.model, "strong");
+        assert_eq!(explicit.llm.model_name(), "strong");
+
+        let inherited = pool
+            .resolve_tower(primary.clone(), false, Some("primary"))
+            .unwrap();
+        assert_eq!(inherited.model, "main-model");
+        assert_eq!(inherited.llm.model_name(), "main-wire");
+
+        let reviewer = pool.resolve_tower(primary, true, None).unwrap();
+        assert_eq!(reviewer.model, "main-model");
+        assert_eq!(reviewer.llm.model_name(), "main-wire");
+    }
+
+    #[test]
+    fn tower_invalid_alias_lists_pool_entries_and_primary() {
+        let pool = pool_runtime();
+        let Err(error) = pool.resolve_tower(llm_llm("main-wire"), false, Some("other")) else {
+            panic!("an unknown Tower alias must fail");
+        };
+        assert!(error.contains("fast, strong, primary"), "{error}");
+    }
+
+    #[test]
+    fn tower_without_pool_accepts_primary_but_rejects_pool_aliases() {
+        for (reviewer, requested) in [(false, None), (true, None), (false, Some("primary"))] {
+            let binding = SecondaryModelRuntime::resolve_tower_without_pool(
+                llm_llm("main-wire"),
+                reviewer,
+                requested,
+            )
+            .unwrap();
+            assert_eq!(binding.llm.model_name(), "main-wire");
+        }
+        let Err(error) = SecondaryModelRuntime::resolve_tower_without_pool(
+            llm_llm("main-wire"),
+            false,
+            Some("fast"),
+        ) else {
+            panic!("a pool alias without a pool must fail");
+        };
+        assert!(
+            error.contains("no [secondary_model] pool is configured"),
+            "{error}"
+        );
+        assert!(error.contains("omit the model parameter"), "{error}");
+    }
+
+    /// v2 #4418: `primary` is no longer an implicit choice on the generic
+    /// Agent path — with a pool it is just an invalid alias there.
     #[test]
     fn primary_is_an_invalid_alias_now() {
         let pool = pool_runtime();
@@ -310,5 +460,55 @@ mod tests {
             );
             assert!(error.contains("omit the model parameter"), "{error}");
         }
+    }
+
+    #[test]
+    fn tower_spawn_model_schema_tracks_pool_choices() {
+        let pool = pool_runtime();
+        let defs = crate::tools::tower::tower_tool_defs_with_models(Some(&pool));
+        let spawn = defs
+            .iter()
+            .find(|definition| definition.name == "TowerSpawn")
+            .unwrap();
+        assert!(spawn.input_schema["properties"]["model"].is_object());
+        assert!(spawn.description.contains("fast"), "{}", spawn.description);
+        assert!(
+            spawn.description.contains("strong"),
+            "{}",
+            spawn.description
+        );
+        assert!(
+            spawn.description.contains("primary"),
+            "{}",
+            spawn.description
+        );
+
+        assert!(spawn.description.contains("primary (= main-model)"));
+        assert!(
+            spawn
+                .description
+                .contains("your current model and thinking level")
+        );
+        assert!(
+            spawn
+                .description
+                .contains("Pool entries don't inherit your thinking level.")
+        );
+
+        let single = runtime(vec![entry("only", "")]);
+        let defs = crate::tools::tower::tower_tool_defs_with_models(Some(&single));
+        let spawn = defs
+            .iter()
+            .find(|definition| definition.name == "TowerSpawn")
+            .unwrap();
+        assert!(spawn.input_schema["properties"]["model"].is_object());
+        assert!(spawn.description.contains("- only [default]"));
+        assert!(spawn.description.contains("primary (= main-model)"));
+        let defs = crate::tools::tower::tower_tool_defs_with_models(None);
+        let spawn = defs
+            .iter()
+            .find(|definition| definition.name == "TowerSpawn")
+            .unwrap();
+        assert!(!spawn.input_schema["properties"]["model"].is_object());
     }
 }

@@ -375,7 +375,7 @@ pub fn build_request_for_provider(
 /// `MEDIA_STRIPPED_PLACEHOLDERS` semantics) so the request stays valid.
 fn project_block(b: &ContentBlock) -> Value {
     match b {
-        ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+        ContentBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
         ContentBlock::Image {
             media_type, data, ..
         } => json!({
@@ -1083,6 +1083,7 @@ mod tests {
             vec![
                 ContentBlock::Text {
                     text: "look".into(),
+                    meta: None,
                 },
                 ContentBlock::Image {
                     media_type: "image/jpeg".into(),
@@ -1868,6 +1869,7 @@ mod tests {
                     vec![
                         ContentBlock::Text {
                             text: "look".into(),
+                            meta: None,
                         },
                         ContentBlock::Image {
                             media_type: "image/jpeg".into(),
@@ -1942,6 +1944,7 @@ mod tests {
                 vec![
                     ContentBlock::Text {
                         text: "look at this".into(),
+                        meta: None,
                     },
                     ContentBlock::Image {
                         media_type: "image/png".into(),

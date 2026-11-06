@@ -1334,6 +1334,7 @@ mod tests {
                 todo_tool_veto: None,
                 tower_worktree_root: None,
                 tower_enabled: false,
+                notify_user_enabled: true,
                 tool_select: false,
                 sandbox_mode: None,
                 sandbox_policy: None,

@@ -7,6 +7,15 @@ pub enum TowerAgentKind {
     Reviewer,
 }
 
+impl TowerAgentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Reviewer => "reviewer",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TowerRosterEntry {
@@ -164,6 +173,97 @@ pub struct TowerState {
     pub missions: Vec<TowerMission>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TowerMergeStatus {
+    Merged,
+    Advanced,
+    Noop,
+}
+
+impl TowerMergeStatus {
+    pub fn after(evaluated_tip: &str, current_tip: &str, noop: bool) -> Self {
+        if evaluated_tip != current_tip {
+            Self::Advanced
+        } else if noop {
+            Self::Noop
+        } else {
+            Self::Merged
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerMergeResult {
+    pub status: TowerMergeStatus,
+    pub merge_commit: String,
+    pub evaluated_branch_tip: String,
+    pub current_branch_tip: String,
+    pub conflicts_with: Vec<(String, Vec<String>)>,
+    pub noop: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TowerRebaseMissionStatus {
+    UpToDate,
+    Rebased,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerRebaseMissionResult {
+    pub status: TowerRebaseMissionStatus,
+    pub from_commit: Option<String>,
+    pub to_commit: Option<String>,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TowerReanchorRelation {
+    NoBranch,
+    UpToDate,
+    Stale,
+}
+
+impl TowerReanchorRelation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoBranch => "no-branch",
+            Self::UpToDate => "up-to-date",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerReanchorMissionDigest {
+    pub id: String,
+    pub branch: String,
+    pub relation: TowerReanchorRelation,
+    pub branch_tip: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerReanchorDigest {
+    pub from: String,
+    pub to: String,
+    pub base_tip: String,
+    pub missions: Vec<TowerReanchorMissionDigest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerRebaseRecord {
+    pub from_commit: String,
+    pub to_commit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerReviewResult {
+    pub file: String,
+    pub review: TowerReviewInfo,
+    pub notifications: Vec<TowerInboxSent>,
+    pub notification_errors: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TowerFindingType {
@@ -215,10 +315,14 @@ pub struct TowerReviewInfo {
     pub reviewed_commit: String,
     pub date: String,
     pub file: String,
+    pub mission: Option<String>,
+    pub seq: Option<u64>,
+    pub modified_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TowerInboxItem {
+    pub message_id: String,
     pub file: String,
     pub from: String,
     pub to: String,
@@ -227,11 +331,51 @@ pub struct TowerInboxItem {
     pub scope: Option<String>,
     pub action: Option<String>,
     pub consent_ref: Option<String>,
-    /// The sender's cumulative token total when the message was sent (v2
-    /// `callerTokens`, upstream #3847); `None` when unknown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<i64>,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerInboxPage {
+    pub items: Vec<TowerInboxItem>,
+    pub unread: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerInboxDelivery {
+    pub from: String,
+    pub to: String,
+    pub subject: String,
+    pub message_id: String,
+    pub file: String,
+    pub sent_at: String,
+    pub mission_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerInboxSent {
+    pub item: TowerInboxItem,
+    pub delivery: TowerInboxDelivery,
+    pub mission_id: Option<String>,
+    pub created: bool,
+    pub activity_log_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerCompleteResult {
+    pub mission: Option<TowerMission>,
+    pub recovered_at: Option<String>,
+    pub message: Option<TowerInboxSent>,
+    pub notification_created: bool,
+    pub notification_error: Option<String>,
+    pub activity_log_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TowerSendOutcome {
+    pub caller: String,
+    pub session_id: Option<String>,
+    pub recovered_at: Option<String>,
+    pub message: TowerInboxSent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +385,7 @@ pub struct TowerInitResult {
     pub retired_agents: Vec<String>,
     pub checkout: String,
     pub ignored_base: Option<String>,
+    pub rebase_digest: Option<TowerReanchorDigest>,
     pub open_missions: Vec<String>,
 }
 
