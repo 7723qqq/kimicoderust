@@ -861,6 +861,10 @@ export async function buildSessionHandle(
         tokens_used: goal.tokensUsed,
         turns_used: goal.turnsUsed,
         updated_at: goal.updatedAt,
+        // Why the host stopped it, when it did (v2 `GoalSnapshot.terminalReason`):
+        // the engine's synced copy of a host-side pause otherwise has no reason
+        // to show, and the transcript cannot say why the goal ended.
+        terminal_reason: goal.terminalReason ?? null,
       });
     },
     parseBash: async (request: string) => {

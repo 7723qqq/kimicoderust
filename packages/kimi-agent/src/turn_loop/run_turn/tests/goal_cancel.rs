@@ -32,6 +32,7 @@ async fn test_inactive_goal_runs_the_turn_as_ordinary_chat() {
             wall_clock_budget_ms: None,
             wall_clock_ms: 0,
             updated_at: 0,
+            terminal_reason: None,
         };
         let input = RunTurnInput {
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -94,6 +95,7 @@ async fn test_goal_token_budget_exhausted() {
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
 
     let input = RunTurnInput {
@@ -163,6 +165,7 @@ async fn test_goal_turn_budget_exhausted() {
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
 
     let input = RunTurnInput {
@@ -223,6 +226,7 @@ async fn test_goal_active_with_budget_completes() {
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
 
     let input = RunTurnInput {
@@ -324,6 +328,7 @@ async fn test_goal_wall_clock_deadline_triggers_budget_limit() {
         wall_clock_budget_ms: Some(50), // 50ms budget vs 1000ms LLM
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
 
     let input = RunTurnInput {

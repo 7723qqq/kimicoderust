@@ -440,6 +440,10 @@ pub struct JsGoalContext {
     pub tokens_used: i64,
     pub turns_used: i64,
     pub updated_at: i64,
+    /// Why the host stopped the goal, when it stopped one (v2
+    /// `GoalSnapshot.terminalReason`). Without it the engine's synced copy of a
+    /// host-side pause has no reason to show.
+    pub terminal_reason: Option<String>,
 }
 
 #[napi(object)]

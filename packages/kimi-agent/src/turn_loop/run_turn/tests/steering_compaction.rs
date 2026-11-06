@@ -73,6 +73,7 @@ async fn test_goal_steering_injected_into_system_prompt() {
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
 
     let input = RunTurnInput {
@@ -204,6 +205,7 @@ fn test_render_goal_steering_basic() {
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
     let text = render_goal_steering(&goal, 50, 1, 0);
     assert!(text.contains("Write tests"), "should contain objective");
@@ -229,6 +231,7 @@ fn test_render_goal_steering_wall_clock_budget() {
         tokens_used: 0,
         turns_used: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
     let text = render_goal_steering(&goal, 0, 0, 500);
     assert!(
@@ -263,6 +266,7 @@ fn test_render_goal_steering_near_limit() {
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
     // 80 + 10 = 90 / 100 = 0.9 >= 0.75 → should say "nearing"
     let text = render_goal_steering(&goal, 10, 0, 0);
@@ -285,6 +289,7 @@ fn test_render_goal_steering_no_budgets() {
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
     let text = render_goal_steering(&goal, 0, 0, 0);
     assert!(text.contains("Do thing"), "should contain objective");

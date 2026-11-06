@@ -149,8 +149,6 @@ pub struct GoalSnapshot {
     pub budget: GoalBudgetReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocked_streak: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -171,7 +169,6 @@ pub fn to_snapshot(state: &GoalState, wall_clock_ms: u64) -> GoalSnapshot {
         wall_clock_ms,
         budget: compute_budget_report(state, wall_clock_ms),
         terminal_reason: state.terminal_reason.clone(),
-        blocked_streak: None,
         created_at: state.created_at,
         updated_at: state.updated_at,
     }
@@ -221,8 +218,6 @@ pub struct GoalForModel {
     pub budget: GoalBudgetReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocked_streak: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -247,7 +242,6 @@ pub fn goal_for_model(goal: &GoalSnapshot) -> GoalForModel {
         wall_clock_ms: goal.wall_clock_ms,
         budget: goal.budget.clone(),
         terminal_reason: goal.terminal_reason.clone(),
-        blocked_streak: goal.blocked_streak,
         created_at: goal.created_at,
         updated_at: goal.updated_at,
     }

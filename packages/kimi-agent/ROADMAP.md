@@ -363,3 +363,43 @@ turn**。回合内子代理触发的 hook 输出因此只能被读成主代理�
 
 **未做**：`turnId` 在会话级触发上没有值（v2 的类型里它是可选的），因此省略而不是填一个
 假 turn；子代理触发的 hook 走的是同一条 `denial` 路径，已天然带上子代理的 agent id。
+
+## 10. 2026-11-06 补 Rust 之五：goal 的两笔旧账（exit 0）
+
+**落点**：`packages/kimi-agent/src/goal/mod.rs`、
+`packages/kimi-agent/src/rpc/types.rs`、`packages/kimi-agent/src/storage/state_store.rs`、
+`packages/kimi-agent/src/napi_bindings/{params,turn}.rs`、
+`packages/node-sdk/src/native/sdk-client/{build-handle,helpers}.ts`。
+
+### 10.1 事实（回源核实，含推翻一条旧记录）
+
+归档 §41 的「剩余」列了三项。逐项对着 `upstream/main` 核实后：
+
+| 旧记录 | 核实结果 |
+|---|---|
+| `blocked_streak` 未实现（"v2 由 actor 运行时计数"） | **推翻**：`git grep blockedStreak upstream/main` 零命中，v2 的 `GoalState` / `GoalSnapshot` 都没有该字段。本仓的 `blocked_streak` 从未被写入、从未被读取，是 fork 自造的**死字段** |
+| `GoalContext` 不带 `terminal_reason` | **属实**：v2 的 `GoalSnapshot.terminalReason` 是契约字段；本仓的宿主→引擎上下文没有它，于是 `sync_goal_from_context` 在宿主 pause 时把 `terminal_reason` 写成 `None`，宿主侧停机原因丢失 |
+| SDK 无预算设置 RPC | **不是缺口**：v2 也只有模型工具 `SetGoalBudget`，没有宿主侧 RPC。维持现状即对齐 |
+
+### 10.2 改动
+
+- 删除 `blocked_streak`：`GoalSnapshot`、`GoalForModel`、`to_snapshot`/`goal_for_model` 的字段
+  一并去掉（`GoalState` 本就没有）。它不在 v2 契约里，任何"补实现"都等于新增自创行为。
+- `GoalContext` 增加 `terminal_reason`，一路贯通：`rpc/types.rs`（类型）→
+  `napi_bindings/params.rs`（`JsGoalContext`）→ `napi_bindings/turn.rs`（映射）→
+  宿主 `build-handle.ts` 的 `goal` 回调（发 `goal.terminalReason`）与
+  `helpers.ts` 的 `NativeGoalState`（类型）。
+- `sync_goal_from_context`：宿主把目标置为非 active 时，**保留宿主给出的原因**；目标回到
+  active 时清空（运行中的目标没有 terminal reason）。
+
+### 10.3 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib state_store` | 0 | 44 passed（同步用例新增：pause 带原因 → 存储保留；resume → 清空） |
+| `cargo test --lib goal` | 0 | 153 passed（含 `test_snapshot_omits_absent_optionals`：wire 不再有 `blockedStreak`，`terminalReason` 仍在） |
+| **变异验证** | — | 把同步改回 `terminal_reason = None` → 新断言失败；还原即绿 |
+| `cargo test --lib`（全量） | 0 | 3655 passed / 0 failed |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun run typecheck` | 0 | clean |
+| `bun run check:all` | 0 | 19 道全绿（`kimi-agent`/`node-sdk` 指纹、normify 4 模块刷新） |

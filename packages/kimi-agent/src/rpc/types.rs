@@ -1507,6 +1507,11 @@ pub struct GoalContext {
     /// only when this is newer than the store's last write.
     #[serde(default)]
     pub updated_at: i64,
+    /// Why the host stopped the goal, when it stopped one (v2
+    /// `GoalSnapshot.terminalReason`). A host-side pause is otherwise stored
+    /// with no reason at all, so the transcript cannot say why the goal ended.
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
 }
 
 impl GoalContext {

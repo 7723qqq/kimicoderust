@@ -1095,7 +1095,13 @@ impl StateStore {
         }
         settle_wall_clock(&mut state, now);
         state.status = status;
-        state.terminal_reason = None;
+        // A goal that is no longer active carries the reason it stopped; a
+        // host that names none leaves the field empty rather than invented.
+        state.terminal_reason = if status == GoalStatus::Active {
+            None
+        } else {
+            goal.terminal_reason.clone()
+        };
         state.wall_clock_resumed_at = if status == GoalStatus::Active {
             Some(now)
         } else {
@@ -1218,6 +1224,7 @@ impl StateStore {
             tokens_used: state.tokens_used as i64,
             turns_used: state.turns_used as i64,
             updated_at: state.updated_at as i64,
+            terminal_reason: state.terminal_reason.clone(),
         })
     }
 }
@@ -2382,6 +2389,7 @@ mod tests {
             tokens_used: 0,
             turns_used: 0,
             updated_at: 0,
+            terminal_reason: None,
         };
         assert!(store.sync_goal_from_context(&context).unwrap());
         assert!(store.clear_host_goal().unwrap());
@@ -2709,6 +2717,7 @@ mod goal_usage_tests {
             tokens_used: 42,
             turns_used: 2,
             updated_at: now as i64,
+            terminal_reason: None,
         };
         assert!(store.sync_goal_from_context(&context).unwrap());
         let stored = store.goal_context().expect("seeded");
@@ -2728,20 +2737,28 @@ mod goal_usage_tests {
         assert_eq!(stored.status, crate::turn_loop::types::GoalStatus::Active);
         assert_eq!(stored.tokens_used, 42);
 
-        // A newer host transition wins: pause, then resume.
+        // A newer host transition wins: pause, then resume. The reason the
+        // host names rides the pause (v2 `GoalSnapshot.terminalReason`) — the
+        // engine used to blank it, so a host-side pause reached the transcript
+        // with no explanation.
         context.updated_at = now as i64 + 1_000;
+        context.terminal_reason = Some("Paused by the user".into());
         assert!(store.sync_goal_from_context(&context).unwrap());
+        let paused = store.goal_context().unwrap();
+        assert_eq!(paused.status, crate::turn_loop::types::GoalStatus::Paused);
         assert_eq!(
-            store.goal_context().unwrap().status,
-            crate::turn_loop::types::GoalStatus::Paused
+            paused.terminal_reason.as_deref(),
+            Some("Paused by the user")
         );
 
         context.status = crate::rpc::types::GoalStatus::Active;
         context.updated_at = now as i64 + 2_000;
         assert!(store.sync_goal_from_context(&context).unwrap());
+        let resumed = store.goal_context().unwrap();
+        assert_eq!(resumed.status, crate::turn_loop::types::GoalStatus::Active);
         assert_eq!(
-            store.goal_context().unwrap().status,
-            crate::turn_loop::types::GoalStatus::Active
+            resumed.terminal_reason, None,
+            "a goal that is running again has no terminal reason"
         );
 
         // A different goal id is a host replace: the store adopts it wholesale.

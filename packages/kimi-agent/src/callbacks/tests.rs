@@ -1239,6 +1239,7 @@ fn gate_goal(id: &str) -> crate::turn_loop::types::GoalContext {
         turns_used: 0,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     }
 }
 
@@ -2692,6 +2693,7 @@ async fn test_goal_write_seeds_from_the_host_snapshot_and_emits_goal_updated() {
         tokens_used: 0,
         turns_used: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let adapter = StateStoreCallbacks {
@@ -2762,6 +2764,7 @@ async fn test_a_host_that_clears_its_goal_clears_the_engine_store() {
         tokens_used: 0,
         turns_used: 0,
         updated_at: 0,
+        terminal_reason: None,
     })));
     let adapter = StateStoreCallbacks {
         inner: Arc::new(HostOwnedGoalCallbacks {

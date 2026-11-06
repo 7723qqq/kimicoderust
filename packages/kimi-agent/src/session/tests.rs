@@ -635,6 +635,7 @@ async fn test_print_run_continues_active_goal() {
             tokens_used: 100,
             turns_used: 1,
             updated_at: 0,
+            terminal_reason: None,
         },
         events: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
@@ -2067,6 +2068,7 @@ async fn settle_goal_blocks_on_a_spent_budget_before_settling_an_abort() {
             tokens_used: 0,
             turns_used: 0,
             updated_at: 0,
+            terminal_reason: None,
         },
         events: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
@@ -2115,6 +2117,7 @@ async fn settle_goal_after_turn_folds_blocks_and_continues() {
             tokens_used: 0,
             turns_used: 0,
             updated_at: 0,
+            terminal_reason: None,
         },
         events: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
@@ -2782,6 +2785,7 @@ async fn test_interactive_session_continues_an_active_goal() {
             tokens_used: 0,
             turns_used: 0,
             updated_at: 0,
+            terminal_reason: None,
         },
         events: events.clone(),
     });

@@ -1023,6 +1023,7 @@ async fn run_turn_rust_impl(
         wall_clock_ms: g.wall_clock_ms,
         tokens_used: g.tokens_used,
         turns_used: g.turns_used,
+        terminal_reason: g.terminal_reason,
         updated_at: g.updated_at,
     });
 

@@ -69,6 +69,7 @@ async fn test_turn_binds_start_goal_for_stale_check() {
         turns_used: 0,
         wall_clock_ms: 0,
         updated_at: 0,
+        terminal_reason: None,
     };
     let input = RunTurnInput {
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),

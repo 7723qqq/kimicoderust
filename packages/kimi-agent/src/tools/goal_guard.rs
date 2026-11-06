@@ -192,6 +192,7 @@ mod tests {
             turns_used: 0,
             wall_clock_ms: 0,
             updated_at: 0,
+            terminal_reason: None,
         }
     }
 

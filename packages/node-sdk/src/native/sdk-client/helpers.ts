@@ -193,6 +193,11 @@ export interface NativeGoalState {
   wallClockMs?: number;
   /** The goal's hard limits, as the engine reported them. */
   budget?: NativeGoalBudget;
+  /**
+   * Why the goal stopped (v2 `GoalSnapshot.terminalReason`). Carried back to
+   * the engine so its synced copy of a host-side pause keeps the reason.
+   */
+  terminalReason?: string;
 }
 
 /**
