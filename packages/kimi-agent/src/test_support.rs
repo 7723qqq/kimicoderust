@@ -8,9 +8,16 @@
 //! "access denied" for the rest of the run — dozens of tests away from the
 //! culprit.
 //!
-//! [`CwdScope`] is the single lock. Two locks (one per test file) serialize
-//! each file against itself and leave the cross-file window exactly as wide as
-//! it was, which is how the split test files reintroduced this race once.
+//! Environment variables have the same shape (a test that points `HOME` at a
+//! temp directory while another resolves the home directory), and the same
+//! failure mode when a panicking assertion skips the restore. [`CwdScope`] and
+//! [`EnvScope`] are the two guards; [`crate::env::ENV_TEST_LOCK`] is the lock
+//! the suite already shares for the environment, so `EnvScope` holds that one
+//! instead of inventing a fourth.
+//!
+//! Two locks rather than one is deliberate: no test needs both, and a test that
+//! ever does must take the cwd first, then the environment — the order both
+//! guards document.
 
 use std::path::{Path, PathBuf};
 use tokio::sync::{Mutex, MutexGuard};
@@ -55,6 +62,58 @@ impl Drop for CwdScope {
                 "test_support: could not restore the process cwd to {}: {error}",
                 self.previous.display()
             );
+        }
+    }
+}
+
+/// Environment variables, set for the guard's lifetime and put back on drop.
+///
+/// Takes the suite's existing environment lock, so a holder cannot be observed
+/// by another test that also takes it (a reader and a writer both have to hold
+/// it for the window to close — `HOME`/`USERPROFILE` and the provider base URLs
+/// are the ones that matter).
+///
+/// The restore lives in `Drop` because a failed assertion between "point HOME
+/// at a temp dir" and "put it back" would otherwise leave the whole run with a
+/// redirected home — the same class of damage as an unrestored cwd, and the
+/// reason a manual restore is not enough.
+pub(crate) struct EnvScope {
+    /// Declared first so it drops last: the variables are restored before the
+    /// next test is allowed in.
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    previous: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvScope {
+    /// Set (or with `None`, unset) each variable until the guard drops.
+    pub(crate) fn set(vars: Vec<(&'static str, Option<String>)>) -> Self {
+        // `blocking_lock` because every current user is a synchronous `#[test]`;
+        // an async test would need `lock().await` and a different guard.
+        let lock = crate::env::ENV_TEST_LOCK.blocking_lock();
+        let previous = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var(*key).ok()))
+            .collect();
+        for (key, value) in &vars {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for EnvScope {
+    fn drop(&mut self) {
+        for (key, value) in &self.previous {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
     }
 }

@@ -17,7 +17,7 @@
     "includesTestCode": true,
     "files": 373,
     "modules": 42,
-    "sites": 3081
+    "sites": 3082
   },
   "edges": [
     "acp -> callbacks",
@@ -210,8 +210,8 @@
     "session -> tools",
     "session -> turn_events",
     "session -> turn_loop",
-    "skills -> env",
     "skills -> frontmatter",
+    "skills -> test_support",
     "storage -> env",
     "storage -> goal",
     "storage -> injection",
@@ -243,6 +243,7 @@
     "team -> rpc",
     "team -> subagent",
     "team -> turn_loop",
+    "test_support -> env",
     "tools -> callbacks",
     "tools -> config",
     "tools -> cron",

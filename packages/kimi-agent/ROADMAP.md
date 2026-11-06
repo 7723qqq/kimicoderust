@@ -10620,6 +10620,63 @@ kimi-ui-terminal 19 → **22** 测（+3：流式原地重写、新行定格 open
 - 首次取依赖需要 `CARGO_HTTP_CHECK_REVOKE=false`（本机吊销服务器不可达时 cargo 的
   TLS 检查会失败）；`Cargo.lock` 入库后离线可构建。
 
+## 59. 2026-11-06 进程环境竞态收口：EnvScope + 移除调试插桩
+
+§56 修掉了 cwd 的两把锁，留下了同一形状的第二处：进程环境。本批把它收口，并清掉上一
+个调试会话留在源码里的插桩。
+
+### 59.1 事实基线（先量再改）
+
+- 全仓库只有 **`skills/mod.rs`** 一个测试写 `HOME`/`USERPROFILE`
+  （`set_var` 4 处，都在 `test_extra_dirs_rank_below_user_and_report_their_own_source`）；
+- 读它的是 **`storage/paths.rs:test_engine_state_dir_resolution`**（`USERPROFILE` /
+  `HOME` 解析引擎状态目录）与 `skills` 自己的扫描；
+- 两者**已经**都拿 `crate::env::ENV_TEST_LOCK`（`env.rs:36`，tokio Mutex +
+  `blocking_lock()`），所以读写窗口本身是互斥的——`debug-env-test-race.md` 里那条
+  时序是**加锁前**的日志。
+
+真正残留的缺陷有两个，都不是「缺锁」：
+
+1. **恢复不抗 panic**：`HOME` 是「手动 set → 断言 → 手动 restore」，中间任何断言失败
+   都会把整个 run 的 home 留在临时目录里——与 cwd 那次事故同型。
+2. **6 处调试插桩留在源码**：`skills/mod.rs` 4 块、`storage/paths.rs` 2 块
+   `#region debug-point`，每块把一整行 JSON 直接写 stderr，污染测试输出。
+
+### 59.2 改动
+
+- 新增测试支撑模块（test_support）里的 `EnvScope::set`：传入
+  `Vec<(&str, Option<String>)>`（`None` 表示 unset），拿 `ENV_TEST_LOCK` 并记录旧值，
+  `Drop` 里恢复（含 panic 展开路径）。该模块因此新增到 env 的一条模块边，
+  skills 到 env 的边因不再直接引用而消失（台账按官方通道重录 269 → **270** 边）。
+- skills 用例改用 `EnvScope`，作用域**只覆盖**真正读 user scope 的那次 scan，
+  第二次 scan（`extra-only`）仍在真实 HOME 下运行，语义与改动前一致。
+- 删除 6 处插桩块；`debug-env-test-race.md` 置为 CLOSED 并补上结论与落点。
+- 两把锁（cwd / env）保持独立，并在该测试支撑模块的文档里写明取用顺序（先 cwd 后 env），
+  因为当前没有任何测试同时需要两者。
+
+### 59.3 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --lib`（全量） | **3633 passed / 0 failed**（21.4s；上一批同命令为 3630/3、77s） |
+| `cargo test --lib skills::` | 20 passed |
+| `cargo test --lib storage::paths` | 3 passed |
+| `cargo clippy --all-targets --features cli -- -D warnings` | 0 |
+| `cargo fmt --check` | 0 |
+| `bun run check:all` | 0（`kimi-agent` 指纹刷新，module-deps 270 边） |
+
+全量第一次跑到 **0 failed**：§56 的 cwd 锁让 spawn 不再失败、本批的环境作用域让恢复
+不再依赖断言是否通过，两者叠加后那三条「负载敏感」的红本轮也不再出现。
+
+### 59.4 仍未统一（登记）
+
+`config/tests.rs` 的 provider 环境变量（`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` /
+`KIMI_BASE_URL`）、`llm/thinking_guard.rs` 的 `ENV_LOCK`、`server/remote_control.rs` 的
+`RELAY_ENV_LOCK`、`tools/github.rs` 的 `GITHUB_ENV_TEST_LOCK` 仍是各自模块的锁。它们
+只写本模块独有、别处不读的变量，跨文件窗口不成立；真要统一得先证明「谁在读」，属独立
+批次，不在本条内。
+
+
 
 
 

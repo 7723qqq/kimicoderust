@@ -102,23 +102,10 @@ mod tests {
             .map(PathBuf::from)
             .expect("USERPROFILE or HOME must be set in test environment");
 
-        // #region debug-point A:paths-initial-home
-        eprintln!(
-            "{}",
-            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"storage/paths.rs:test_engine_state_dir_resolution:initial","msg":"[DEBUG] paths initial home","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"HOME":std::env::var("HOME").ok(),"USERPROFILE":std::env::var("USERPROFILE").ok(),"expected_home":home.display().to_string(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
-        );
-        // #endregion
-
         let ws1 = Path::new("/test/workspace/one");
         let ws2 = Path::new("/test/workspace/two");
 
         let dir1 = engine_state_dir(ws1).unwrap();
-        // #region debug-point A:paths-resolved-home
-        eprintln!(
-            "{}",
-            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"storage/paths.rs:test_engine_state_dir_resolution:resolved","msg":"[DEBUG] paths resolved home","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"HOME":std::env::var("HOME").ok(),"USERPROFILE":std::env::var("USERPROFILE").ok(),"expected_home":home.display().to_string(),"actual_dir":dir1.display().to_string(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
-        );
-        // #endregion
         let dir2 = engine_state_dir(ws2).unwrap();
 
         // Must be rooted under home directory and ENGINE_STATE_ROOT

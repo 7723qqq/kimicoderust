@@ -895,7 +895,6 @@ This is the first paragraph describing the skill.
     /// is pinned by [`plugin_roots_rank_below_extra_dirs`].
     #[test]
     fn test_extra_dirs_rank_below_user_and_report_their_own_source() {
-        let _env_guard = crate::env::ENV_TEST_LOCK.blocking_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         let proj_root = temp_dir.path();
         let extra_root = temp_dir.path().join("extra-root");
@@ -920,43 +919,17 @@ This is the first paragraph describing the skill.
         )
         .unwrap();
 
-        let restore = |k: &str, v: Option<String>| match v {
-            Some(value) => unsafe { std::env::set_var(k, value) },
-            None => unsafe { std::env::remove_var(k) },
+        // The env scope covers exactly the scan that reads the user scope: it
+        // holds the suite's environment lock and restores `HOME`/`USERPROFILE`
+        // on drop, so a panicking assertion below cannot leave the whole run
+        // with a redirected home.
+        let list = {
+            let _env = crate::test_support::EnvScope::set(vec![
+                ("HOME", Some(home.to_string_lossy().into_owned())),
+                ("USERPROFILE", Some(home.to_string_lossy().into_owned())),
+            ]);
+            scan_all_skills_with_extra(Some(proj_root), &[extra_root])
         };
-        let prev_home = std::env::var("HOME").ok();
-        let prev_profile = std::env::var("USERPROFILE").ok();
-        // #region debug-point A:skills-before-set
-        eprintln!(
-            "{}",
-            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"skills/mod.rs:test_extra_dirs_rank_below_user_and_report_their_own_source:before-set","msg":"[DEBUG] skills before env set","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"old_HOME":prev_home.as_deref(),"old_USERPROFILE":prev_profile.as_deref(),"new_home":home.display().to_string(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
-        );
-        // #endregion
-        restore("HOME", Some(home.to_string_lossy().into_owned()));
-        restore("USERPROFILE", Some(home.to_string_lossy().into_owned()));
-        // #region debug-point A:skills-after-set
-        eprintln!(
-            "{}",
-            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"skills/mod.rs:test_extra_dirs_rank_below_user_and_report_their_own_source:after-set","msg":"[DEBUG] skills after env set","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"HOME":std::env::var("HOME").ok(),"USERPROFILE":std::env::var("USERPROFILE").ok(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
-        );
-        // #endregion
-
-        let list = scan_all_skills_with_extra(Some(proj_root), &[extra_root]);
-
-        // #region debug-point A:skills-before-restore
-        eprintln!(
-            "{}",
-            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"skills/mod.rs:test_extra_dirs_rank_below_user_and_report_their_own_source:before-restore","msg":"[DEBUG] skills before env restore","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"HOME":std::env::var("HOME").ok(),"USERPROFILE":std::env::var("USERPROFILE").ok(),"restore_HOME":prev_home.as_deref(),"restore_USERPROFILE":prev_profile.as_deref(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
-        );
-        // #endregion
-        restore("HOME", prev_home);
-        restore("USERPROFILE", prev_profile);
-        // #region debug-point A:skills-after-restore
-        eprintln!(
-            "{}",
-            serde_json::json!({"sessionId":"env-test-race","runId":"post-fix","hypothesisId":"A","location":"skills/mod.rs:test_extra_dirs_rank_below_user_and_report_their_own_source:after-restore","msg":"[DEBUG] skills after env restore","data":{"thread":std::thread::current().name().unwrap_or("unnamed"),"HOME":std::env::var("HOME").ok(),"USERPROFILE":std::env::var("USERPROFILE").ok(),"ts":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()}})
-        );
-        // #endregion
 
         let shared = list.iter().find(|s| s.name == "shared-skill").unwrap();
         assert_eq!(
