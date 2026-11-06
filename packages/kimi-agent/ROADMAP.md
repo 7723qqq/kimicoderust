@@ -679,3 +679,52 @@ v2 的 `availability()` 是 `stoppedAtCompaction: cut.stoppedAtCompaction || max
 下一步需要一次带插桩的复现：在 worker 内 `harness.close()` 之后逐个尝试删除 `agent/` 下的条目并打印成功/失败，
 以定位到具体文件与打开时机；本轮的探针在"建会话 + close"这一步会挂住，说明那里本身还有一个未闭环的等待，
 需与 EBUSY 一并查。
+
+## 16. 2026-11-06 v2 → Rust 完整移植的分步账（第 1 步：`state` 已对账）
+
+### 16.1 先建账的原因
+
+实测（`.tmp/v2-ref`，排除 `*.test.ts` / `*.d.ts`）：v2 非测试源码 **1021 个文件**、16 个子系统 + 4 个根文件；
+本仓 `packages/kimi-agent/src` 374 个 `.rs`、约 1.05M 字符。
+
+先做了一次符号级扫描（v2 文件的导出名在 Rust 里出现即算命中）：**592 个文件零命中**。但绝大多数是 DI 服务壳
+（`XService` / `IXService`），行为在 Rust 里换了名字实现——例如活动面板 → `server/activity.rs`，上下文记忆 →
+`session/` + `storage/` + `native/event_store/loop_fold.rs`。**符号命中与否都不是证据**，这正是"100% Rust 化"
+一直没人能逐文件核实的原因：能核实的是"行为对位 + 钉住它的测试"，不是名字。
+
+### 16.2 分步法（一个子系统一步）
+
+每步四条验收：
+
+1. 列出该子系统全部 v2 源文件（非测试）；
+2. 每个文件写出 Rust 对位（路径，或"无"）+ 钉住它的**测试名**；
+3. 没有对位的文件 → 立为任务，或按 `not-applicable` 记录并写明理由（DI 装配、immer 基础设施等）；
+4. 该步收尾时子系统内每个文件都有归属，缺口进 §4 清单。
+
+规模（现读，非测试文件数）：`agent` 253、`app` 211、`features` 201、`session` 74、`_base` 67、`kosong` 62、
+`workspace` 54、`os` 17、`mcpCore` 16、`persistence` 13、`wire` 12、`tool` 10、`runtime` 9、`debug` 9、
+`state` 7、`program` 2、根 4。
+
+顺序按"用户可见影响 × 能否独立验证"：**state → tool → wire → session → agent（loop / contextMemory / goal /
+permission）→ mcpCore → kosong → workspace → features → app → 基础设施**。
+
+### 16.3 第 1 步：`state`（7 文件，已对账）
+
+| v2 文件 | Rust 对位 | 结论 |
+|---|---|---|
+| `state.ts` — immer 补丁式状态框架：`replayable`/`undoable` key、fold 注册表、`FoldContext`（checkpoint / clearCheckpoints / undoToCheckpoint） | `storage/state_store.rs`（域快照 + checkpoint 栈）、`native/event_store/loop_fold.rs`（事件→状态折叠） | **等价替换**，机制不同（整域快照 vs 补丁）。两条不变量无 Rust 对应：`state.duplicate_fold`、`state.durability_mismatch`——本仓域集合是固定表（`STATE_DOMAINS`），重复折叠与瞬态/持久错配构造不出来 |
+| `agentModel.ts` — 域资源运行时 + `AgentModelBridge` | `session/mod.rs` 的持久状态 + `storage/state_store.rs` 的会话域 | 等价替换：无桥接层，域由引擎直管 |
+| `agentEffect.ts` — `defineAgentEffect` DI 工厂 | 无 | `not-applicable`：DI 装配，Rust 无容器 |
+| `errors.ts` — `state.*` 三个错误码 | 无 | 两个不可达（见上）；`state.cycle` 是补丁回放的环检测，本仓无补丁回放 → `not-applicable` |
+| `eventDispatcher.ts` — dispatcher 接口、`RestorePhase`、`DurableAgentRuntimeParticipant` | `native/event_store/`（append / fold / replay）；undo 深度见 §12 | 接口层 `not-applicable`；`RestorePhase` **待核**（见 16.4） |
+| `eventDispatcherService.ts`（30 KB：补丁记录、`checkpointDepth`、恢复、flush） | `native/event_store/` + `storage/state_store.rs` + `session/mod.rs` | 行为面已覆盖（checkpoint 深度 §12、undo §6/§7）；补丁级重放以整域快照替代 |
+| `stateContribution.ts` — fold 注册的 contribution 集合 | 无 | `not-applicable`：DI 贡献点 |
+
+### 16.4 第 1 步产出的待核项（第 2 步的第一件事）
+
+- **`RestorePhase`（`new|restoring|ready|failed`）在 Rust 没有对应物**。要核的不是"少个枚举"，而是 v2 用它
+  **挡住恢复未完成时的动作**（会话重放期间不接受新回合/工具调用）。本仓 `resumeSession` 从 SQLite 同步读历史、
+  状态域按需读取，可能根本不存在那个窗口——这与 `state/` 是否等价直接相关，必须读 `session/mod.rs` 的恢复路径
+  判定，不能以"同步所以没问题"结案。
+- `_base/state/stateRegistry`（key 注册与快照排除 `snapshotExcluded`）只以 `StateKey` 类型被 `state/` 引用，
+  归 `_base` 那一步一起对账，本步不重复计。
