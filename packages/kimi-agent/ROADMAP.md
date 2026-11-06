@@ -324,6 +324,42 @@ REPL / 任何没有该回调的宿主第一次真正拿到操作数目录（此�
 时省略"一致）；`compaction_failed` 的 `request_id` 同理。`telemetry` 事件本身不改语义——
 本轮只补属性，不新增事件。
 
+## 9. 2026-11-06 补 Rust 之四：hook.result 的 agent/turn 归属（exit 0）
 
+**落点**：`packages/kimi-agent/src/tools/external_hooks.rs`、
+`packages/kimi-agent/src/pipeline/mod.rs`、`packages/kimi-agent/src/callbacks.rs`、
+`packages/kimi-agent/src/turn_loop/run_turn.rs`。
 
+### 9.1 事实
 
+v2 的 `HookResultPayload`（`features/externalHooks/agent/agentExternalHooksService.ts:47-53`）
+要求 `agentId`，另有可选 `turnId`；其服务是 per-agent 的，因此每个结果天然带执行者身份。
+本仓的 `hook.result` 事件此前只发 `hookEvent` / `content` / `blocked`——**没有 agent、没有
+turn**。回合内子代理触发的 hook 输出因此只能被读成主代理的，与 v2 的行为不一致，也是
+`HANDOFF` 台账里「hook payload 不带 agent id」那条的实处。
+
+### 9.2 改动
+
+- 新增 `HookResultMeta { agent_id, turn_id }`，`HookResultSink` 从
+  `Fn(&str, &str, bool)` 改为 `Fn(&HookResultMeta, &str, &str, bool)`：身份随**每次触发**
+  传递，而不是挂在 guard 上——同一会话的 guard 被主代理与子代理共用，挂在 guard 上正是
+  v2 用 per-agent service 避免的那种串味。
+- 逐条接上触发点：`denial`（PreToolUse，取 `ToolExecuteRequest` 的 agent/turn）、
+  `notify_post_tool_use`（改为 `PostToolUse` 结构体传参，顺带解决 clippy 参数上限）、
+  `run_user_prompt_submit`、`notify_stop` 各增 agent/turn 参数；`spawn_hooks` 接收 meta
+  并随每个 hook 的异步任务克隆。会话级/观察型触发（SessionStart/End、PreCompact、
+  Permission*、Subagent*、Task*）按定义属会话主代理，显式传 `MAIN_AGENT_ID` + 无 turn。
+- `pipeline` 的 `hook.result` 事件新增 `agentId`、`turnId` 两个键。
+
+### 9.3 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib external_hooks` | 0 | 37 passed（`denial_emits_a_hook_result_per_hook` 新增 agent/turn 断言） |
+| **变异验证** | — | 把 `denial` 的 meta 换成空 agent → 该断言失败；还原即通过 |
+| `cargo test --lib`（全量） | 0 | 3655 passed / 0 failed |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun run check:all` | 0 | 19 道全绿（`kimi-agent` 指纹、normify `engine.core`/`core.turn-loop` 刷新） |
+
+**未做**：`turnId` 在会话级触发上没有值（v2 的类型里它是可选的），因此省略而不是填一个
+假 turn；子代理触发的 hook 走的是同一条 `denial` 路径，已天然带上子代理的 agent id。

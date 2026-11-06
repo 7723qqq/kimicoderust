@@ -764,7 +764,7 @@ pub fn run_turn<'a>(
             && let Some(prompt_index) = messages.iter().rposition(|m| m.role == "user")
         {
             let outcome = guard
-                .run_user_prompt_submit(&turn_id, &submitted_prompt)
+                .run_user_prompt_submit(&input.agent_id, &turn_id, &submitted_prompt)
                 .await;
             if let Some(block) = outcome.block {
                 messages.push(LLMMessage {
@@ -1781,7 +1781,9 @@ pub fn run_turn<'a>(
                         // the matcher runs against "" (v2 passes no
                         // matcher value) and only empty-matcher hooks
                         // fire.
-                        guard.notify_stop("", "", "stop").await
+                        guard
+                            .notify_stop(&input.agent_id, &turn_id, "", "", "stop")
+                            .await
                     } else {
                         None
                     };

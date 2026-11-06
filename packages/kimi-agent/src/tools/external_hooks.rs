@@ -83,7 +83,36 @@ pub type TelemetrySink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 
 /// `(hook_event, content, blocked)` — one entry per hook run, so the host can
 /// render what the hook said and whether it vetoed.
-pub type HookResultSink = Arc<dyn Fn(&str, &str, bool) + Send + Sync>;
+/// One finished tool call, as the post-tool hooks see it.
+pub struct PostToolUse<'a> {
+    pub agent_id: &'a str,
+    pub turn_id: &'a str,
+    pub tool_name: &'a str,
+    pub tool_call_id: &'a str,
+    pub args: &'a Value,
+    pub content: &'a str,
+    pub is_error: bool,
+}
+
+/// The run a `hook.result` belongs to (v2 `HookResultPayload.agentId` /
+/// `turnId`). A session's guard is shared by the main agent and its subagents,
+/// so the identity travels with the trigger rather than living on the guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookResultMeta {
+    pub agent_id: String,
+    pub turn_id: Option<String>,
+}
+
+impl HookResultMeta {
+    pub fn new(agent_id: impl Into<String>, turn_id: impl Into<Option<String>>) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            turn_id: turn_id.into(),
+        }
+    }
+}
+
+pub type HookResultSink = Arc<dyn Fn(&HookResultMeta, &str, &str, bool) + Send + Sync>;
 
 /// The prompt-launch verdict (v2 `runPromptSubmitHook`). `block` is the
 /// assistant-visible rendered hook result; `append` parts belong at content
@@ -233,8 +262,12 @@ impl HookGuard {
         // Host-facing `hook.result`: one event per hook run, carrying its
         // stdout and whether it vetoed.
         if let Some(sink) = self.hook_result.get() {
+            let meta = HookResultMeta::new(
+                request.agent_id.clone(),
+                Some(request.turn_id.clone()).filter(|turn| !turn.is_empty()),
+            );
             for (reason, stdout) in &results {
-                sink("PreToolUse", stdout, reason.is_some());
+                sink(&meta, "PreToolUse", stdout, reason.is_some());
             }
         }
         // v2 #3897 `external_hook_resolved`: one usage event per trigger, with
@@ -272,14 +305,16 @@ impl HookGuard {
 
     /// Notify user-configured `PostToolUse` and `PostToolUseFailure` hooks
     /// (v2 `agentExternalHooksService` notifyPostToolUse).
-    pub async fn notify_post_tool_use(
-        &self,
-        tool_name: &str,
-        tool_call_id: &str,
-        args: &Value,
-        content: &str,
-        is_error: bool,
-    ) {
+    pub async fn notify_post_tool_use(&self, trigger: PostToolUse<'_>) {
+        let PostToolUse {
+            agent_id,
+            turn_id,
+            tool_name,
+            tool_call_id,
+            args,
+            content,
+            is_error,
+        } = trigger;
         let event_type = if is_error {
             "PostToolUseFailure"
         } else {
@@ -307,6 +342,10 @@ impl HookGuard {
             payload,
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(
+                agent_id,
+                Some(turn_id.to_string()).filter(|turn| !turn.is_empty()),
+            ),
         );
     }
 
@@ -317,6 +356,7 @@ impl HookGuard {
     /// allow message becomes a meta-marked part of the original user prompt.
     pub async fn run_user_prompt_submit(
         &self,
+        agent_id: &str,
         turn_id: &str,
         prompt: &str,
     ) -> UserPromptSubmitOutcome {
@@ -343,7 +383,12 @@ impl HookGuard {
         {
             let message = block.block_message();
             if let Some(sink) = self.hook_result.get() {
-                sink("UserPromptSubmit", &message, true);
+                sink(
+                    &HookResultMeta::new(agent_id, Some(turn_id.to_string())),
+                    "UserPromptSubmit",
+                    &message,
+                    true,
+                );
             }
             return UserPromptSubmitOutcome {
                 block: Some(render_hook_result("UserPromptSubmit", &message)),
@@ -356,8 +401,9 @@ impl HookGuard {
             .filter_map(PromptHookResult::append_message)
             .collect();
         if let Some(sink) = self.hook_result.get() {
+            let meta = HookResultMeta::new(agent_id, Some(turn_id.to_string()));
             for message in &messages {
-                sink("UserPromptSubmit", message, false);
+                sink(&meta, "UserPromptSubmit", message, false);
             }
         }
         UserPromptSubmitOutcome {
@@ -392,6 +438,7 @@ impl HookGuard {
             payload,
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -412,6 +459,7 @@ impl HookGuard {
             payload,
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -455,6 +503,7 @@ impl HookGuard {
             payload,
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -491,6 +540,7 @@ impl HookGuard {
             payload,
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -520,6 +570,7 @@ impl HookGuard {
             payload,
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -537,6 +588,7 @@ impl HookGuard {
             serde_json::json!({ "turn_id": turn_id, "reason": "cancelled" }),
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -558,6 +610,7 @@ impl HookGuard {
             }),
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -584,6 +637,7 @@ impl HookGuard {
             }),
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -611,6 +665,7 @@ impl HookGuard {
             }),
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -640,6 +695,7 @@ impl HookGuard {
             }),
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -672,6 +728,7 @@ impl HookGuard {
             }),
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -692,6 +749,7 @@ impl HookGuard {
             }),
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -715,6 +773,7 @@ impl HookGuard {
             }),
             self.hook_result.get().cloned(),
             self.session_cwd.as_deref(),
+            HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
@@ -731,6 +790,8 @@ impl HookGuard {
     /// continuation per turn, mirroring v2's `stopHookContinuationUsed`).
     pub async fn notify_stop(
         &self,
+        agent_id: &str,
+        turn_id: &str,
         tool_name: &str,
         tool_call_id: &str,
         reason: &str,
@@ -752,8 +813,9 @@ impl HookGuard {
         )
         .await;
         if let Some(sink) = self.hook_result.get() {
+            let meta = HookResultMeta::new(agent_id, Some(turn_id.to_string()));
             for (reason, stdout) in &results {
-                sink("Stop", stdout, reason.is_some());
+                sink(&meta, "Stop", stdout, reason.is_some());
             }
         }
         // Block reasons never come back empty (`fallback_reason` fills the
@@ -774,6 +836,7 @@ fn spawn_hooks(
     payload: Value,
     sink: Option<HookResultSink>,
     session_cwd: Option<&str>,
+    meta: HookResultMeta,
 ) {
     let payload_cwd = session_cwd.map(str::to_string).unwrap_or_else(|| {
         std::env::current_dir()
@@ -790,12 +853,13 @@ fn spawn_hooks(
         let sink = sink.clone();
         let event = event.to_string();
         let session_cwd = session_cwd.map(str::to_string);
+        let meta = meta.clone();
         tokio::spawn(async move {
             let (reason, stdout) = run_pre_tool_use_hook(&hook, &p, session_cwd.as_deref()).await;
             // Host-facing `hook.result`: the observe-only notifies still report
             // what the hook printed (v2 emits it for every run).
             if let Some(sink) = sink {
-                sink(&event, &stdout, reason.is_some());
+                sink(&meta, &event, &stdout, reason.is_some());
             }
         });
     }
@@ -1475,17 +1539,27 @@ mod tests {
     /// its output was discarded.
     #[tokio::test]
     async fn denial_emits_a_hook_result_per_hook() {
-        let results = Arc::new(std::sync::Mutex::new(Vec::<(String, String, bool)>::new()));
+        let results = Arc::new(std::sync::Mutex::new(Vec::<(
+            String,
+            Option<String>,
+            String,
+            String,
+            bool,
+        )>::new()));
         let log = results.clone();
         let stdout_cmd = "echo hook says hi";
         let guard = Arc::new(HookGuard::new(vec![
             hook("PreToolUse", "", exit_two_with_stderr()),
             hook("PreToolUse", "", stdout_cmd),
         ]));
-        guard.with_hook_result(Arc::new(move |event, content, blocked| {
-            log.lock()
-                .unwrap()
-                .push((event.to_string(), content.to_string(), blocked));
+        guard.with_hook_result(Arc::new(move |meta, event, content, blocked| {
+            log.lock().unwrap().push((
+                meta.agent_id.clone(),
+                meta.turn_id.clone(),
+                event.to_string(),
+                content.to_string(),
+                blocked,
+            ));
         }));
 
         let denial = guard.denial(&request("Write")).await;
@@ -1493,15 +1567,24 @@ mod tests {
 
         let log = results.lock().unwrap();
         assert_eq!(log.len(), 2, "one hook.result per hook run");
-        assert!(log.iter().all(|(event, _, _)| event == "PreToolUse"));
+        assert!(log.iter().all(|(_, _, event, _, _)| event == "PreToolUse"));
         assert!(
             log.iter()
-                .any(|(_, content, _)| content.contains("hook says hi")),
+                .any(|(_, _, _, content, _)| content.contains("hook says hi")),
             "the hook's stdout reaches the host"
         );
         assert!(
-            log.iter().any(|(_, _, blocked)| *blocked),
+            log.iter().any(|(_, _, _, _, blocked)| *blocked),
             "the blocking hook reports blocked"
+        );
+        // v2 `HookResultPayload`: the run's agent and turn ride the event, so a
+        // transcript can attribute a subagent's hook output to the subagent
+        // instead of folding it into the main agent's.
+        assert!(
+            log.iter().all(|(agent, turn, _, _, _)| {
+                agent == &request("Write").agent_id && turn.as_deref() == Some("turn-1")
+            }),
+            "every hook.result carries the triggering agent and turn: {log:?}"
         );
     }
 
@@ -1729,7 +1812,15 @@ mod tests {
         let guard = HookGuard::new(vec![hook("PostToolUse", "Write", "echo 1 >> hook-ran.txt")])
             .with_session_cwd(Some(dir.path().to_string_lossy().to_string()));
         guard
-            .notify_post_tool_use("Write", "c1", &serde_json::json!({}), "content", false)
+            .notify_post_tool_use(PostToolUse {
+                agent_id: "main",
+                turn_id: "t",
+                tool_name: "Write",
+                tool_call_id: "c1",
+                args: &serde_json::json!({}),
+                content: "content",
+                is_error: false,
+            })
             .await;
         let marker = dir.path().join("hook-ran.txt");
         // The product grants a hook up to `DEFAULT_HOOK_TIMEOUT_SECS`; wait
@@ -1885,7 +1976,15 @@ mod tests {
         let command = format!("echo done >> {}", marker.to_string_lossy());
         let guard = HookGuard::new(vec![hook("PostToolUse", "Write", &command)]);
         guard
-            .notify_post_tool_use("Write", "c1", &serde_json::json!({}), "content", false)
+            .notify_post_tool_use(PostToolUse {
+                agent_id: "main",
+                turn_id: "t",
+                tool_name: "Write",
+                tool_call_id: "c1",
+                args: &serde_json::json!({}),
+                content: "content",
+                is_error: false,
+            })
             .await;
         // The hook runs fire-and-forget; poll for the marker instead of
         // sleeping a fixed window so the test stays stable under load. The
@@ -2263,14 +2362,14 @@ mod tests {
             "",
             &exit_two_with_reason("user asked to keep going"),
         )]);
-        let reason = guard.notify_stop("", "", "stop").await;
+        let reason = guard.notify_stop("main", "t1", "", "", "stop").await;
         assert_eq!(reason.as_deref(), Some("user asked to keep going"));
     }
 
     #[tokio::test]
     async fn stop_hook_exit_two_empty_stderr_falls_back_to_default() {
         let guard = HookGuard::new(vec![hook("Stop", "", exit_two_silent())]);
-        let reason = guard.notify_stop("", "", "stop").await;
+        let reason = guard.notify_stop("main", "t1", "", "", "stop").await;
         assert_eq!(reason.as_deref(), Some("Blocked by Stop hook"));
     }
 
@@ -2279,7 +2378,7 @@ mod tests {
         // `echo` exits 0 with unstructured stdout — v2 allows (only exit 2
         // or a stdout JSON deny blocks), so the stop proceeds.
         let guard = HookGuard::new(vec![hook("Stop", "", &echo_reason_command("keep going"))]);
-        let reason = guard.notify_stop("", "", "stop").await;
+        let reason = guard.notify_stop("main", "t1", "", "", "stop").await;
         assert!(reason.is_none());
     }
 
@@ -2290,7 +2389,7 @@ mod tests {
             return;
         }
         let guard = HookGuard::new(vec![hook("Stop", "", &json_deny_command(dir.path()))]);
-        let reason = guard.notify_stop("", "", "stop").await;
+        let reason = guard.notify_stop("main", "t1", "", "", "stop").await;
         assert_eq!(reason.as_deref(), Some("blocked by json"));
     }
 
@@ -2303,10 +2402,18 @@ mod tests {
         ]);
         // At a clean text stop the matcher runs against "": the Bash-scoped
         // hook does not hit.
-        assert!(guard.notify_stop("", "", "stop").await.is_none());
+        assert!(
+            guard
+                .notify_stop("main", "t1", "", "", "stop")
+                .await
+                .is_none()
+        );
         // A matcher hit vetoes with its reason.
         assert_eq!(
-            guard.notify_stop("Bash", "c2", "stop").await.as_deref(),
+            guard
+                .notify_stop("main", "t1", "Bash", "c2", "stop")
+                .await
+                .as_deref(),
             Some("bash-only")
         );
     }

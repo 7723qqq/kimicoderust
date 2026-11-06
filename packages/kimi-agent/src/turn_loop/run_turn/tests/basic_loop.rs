@@ -734,7 +734,7 @@ async fn user_prompt_submit_exit_two_blocks_before_model_and_returns_reason() {
     let guard = prompt_hook_guard(&[&stop_veto_command("no profanity")]);
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let log = events.clone();
-    guard.with_hook_result(Arc::new(move |event, content, blocked| {
+    guard.with_hook_result(Arc::new(move |_meta, event, content, blocked| {
         log.lock()
             .unwrap()
             .push((event.to_string(), content.to_string(), blocked));
@@ -816,7 +816,7 @@ async fn user_prompt_submit_appends_plain_stdout_in_hook_order() {
     let guard = prompt_hook_guard(&["echo first note", "echo second note"]);
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let log = events.clone();
-    guard.with_hook_result(Arc::new(move |event, content, blocked| {
+    guard.with_hook_result(Arc::new(move |_meta, event, content, blocked| {
         log.lock()
             .unwrap()
             .push((event.to_string(), content.to_string(), blocked));

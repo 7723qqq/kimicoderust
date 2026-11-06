@@ -1173,13 +1173,15 @@ impl HostCallbacks for NativeToolCallbacks {
                     this.inner.telemetry(telemetry_event);
                     if let Some(guard) = &this.hook_guard {
                         guard
-                            .notify_post_tool_use(
-                                &request.tool_name,
-                                &request.tool_call_id,
-                                &request.arguments,
-                                &result.content,
-                                result.is_error,
-                            )
+                            .notify_post_tool_use(crate::tools::external_hooks::PostToolUse {
+                                agent_id: &request.agent_id,
+                                turn_id: &request.turn_id,
+                                tool_name: &request.tool_name,
+                                tool_call_id: &request.tool_call_id,
+                                args: &request.arguments,
+                                content: &result.content,
+                                is_error: result.is_error,
+                            })
                             .await;
                     }
                     let raw = ToolExecuteResponse {

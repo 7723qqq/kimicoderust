@@ -663,9 +663,14 @@ pub async fn build_engine_pipeline(
         // so the transcript can show what the hook said. Without this sink the
         // hook ran and its output was discarded.
         let callbacks_for_hook_results = callbacks.clone();
-        guard.with_hook_result(Arc::new(move |event, content, blocked| {
+        guard.with_hook_result(Arc::new(move |meta, event, content, blocked| {
+            // v2 `HookResultPayload`: the run's agent (and turn, when the
+            // trigger belongs to one) rides the event, so a transcript can
+            // attribute a subagent's hook output to the subagent.
             callbacks_for_hook_results.emit_event(serde_json::json!({
                 "type": "hook.result",
+                "agentId": meta.agent_id,
+                "turnId": meta.turn_id,
                 "hookEvent": event,
                 "content": content,
                 "blocked": blocked,
