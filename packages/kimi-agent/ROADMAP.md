@@ -90,9 +90,8 @@
 
 - **应用层缺口**：raw mode 与 `crossterm` 事件循环、宿主侧 `UiTransport` 实现、编辑器语义
   （多行、光标、补全）。这三项是"启动 → 单 turn → token 流 → Esc 中断"切片的剩余部分。
-- **provider 环境变量未进共享锁**：`packages/kimi-agent/src/config/tests.rs` 里
-  `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `KIMI_BASE_URL` 仍是裸 `set_var`；同模块独占这些
-  变量，跨文件窗口不成立，但形状与已修的两处一致。
+- ~~**provider 环境变量未进共享锁**~~ **已关闭（2026-11-06，见 §5）**：`config/tests.rs` 的 10 处
+  环境变量样板已改用 `EnvScope::unset`，持套件共享环境锁并 panic 安全恢复。
 - **三条负载敏感用例**：`test_spawn_timeout_kills_tree`、`test_kill_managed_process`（进程退出
   事件）与 `test_unexpected_close_marks_failed_and_emits`（断连通知）在全量并发下偶发超时，
   单独跑均通过；本基点首轮全量为 0 failed，未按"放松预算"处理。
