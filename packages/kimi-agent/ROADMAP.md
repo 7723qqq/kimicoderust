@@ -633,3 +633,49 @@ v2 的 `availability()` 是 `stoppedAtCompaction: cut.stoppedAtCompaction || max
 
 **参考时效提醒**：`.tmp/v2-ref` 冻结在 2026-09-08 的删除点，晚于它的上游改动（如 #3966）在本地无法逐字核实；
 涉及这类条目要么等 `v2-ref-upstream` 可用，要么以本仓台账里已登记的上游 sha 为准，不能默认"参考里没有就是没有"。
+
+## 15. 2026-11-06 插件注册表所有权重写：不再持有 SQLite 句柄（exit 0，EBUSY 未闭环）
+
+**来源**：`packages/node-sdk/test/native-harness.test.ts` 的「installs a plugin…」在 `afterEach` 报
+`EBUSY: rm`，§11.4 做过差分（回退实现照样复现）确认是既有缺陷。本轮按要求**重写所有权**而不是继续追 `Arc`
+持有者。
+
+### 15.1 事实与重写
+
+`PluginManager` 直接持有 `Arc<SqliteSessionStore>`，即一条活着的连接、钉在 `<data dir>/sessions.db` 上。
+`close_plugin_store()` 只把全局置空，任何克隆到 manager 的地方都会让这条连接活到进程结束；Windows 上就是
+数据目录删不掉。
+
+改法：manager 只存**路径**，每次插件 API 调用开一个 store、用完即 drop。
+
+| 位置 | 改动 |
+|---|---|
+| `session/sqlite_store.rs` | `SqliteSessionStore` 记录 `path: Option<PathBuf>` 并提供 `path()`；`open` 记录、`in_memory` 为 `None` |
+| `server/plugins.rs` | `store: Arc<…>` → `registry: RegistryStore`（`File(PathBuf)` / `Memory(Arc<…>)`）；读写改为 `read_state` / `write_state`，文件型每次开闭 |
+| `server/plugins/tests.rs` | 新增用例：写入后换新连接仍读得到（证明落盘），manager 丢弃后文件可删 |
+
+`Memory` 分支保留句柄是因为内存库没有文件可重开——测试用的就是它。
+
+### 15.2 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib` | 0 | 3661 passed / 0 failed（+1 新用例） |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun run check:all` | 0 | 20 道全绿；`architecture` 指纹与 `core.session` / `core.session.store` / `plugins` / `plugins.registry` 四个 normify 模块经官方通道刷新 |
+| 原生插件 | 0 | 重建（release） |
+
+### 15.3 EBUSY 仍未闭环（如实记录）
+
+重写后**这条用例仍然红**，且残留文件仍是 `agent/sessions.db`。已排除的部分：
+
+- `initPluginStore` + `closePluginStore` 单独调用时，DB 文件立即可删（探针实测），说明注册表这条路已经不再持句柄；
+- 失败后进程表里没有残留 node 子进程，锁在 vitest worker 自身。
+
+仍未知的：napi 路径上还有谁打开 `<data dir>/sessions.db`。全仓 `SqliteSessionStore::open` 的调用点只有
+`main.rs`（CLI / standalone server）与 `init_plugin_store`，而本用例走的是 napi；结合"加入 `createSession`
+才出现"，怀疑点转向会话建立/销毁过程里对同一路径的第二次打开（90 KB 的库里有会话表，不像只有注册表 blob）。
+
+下一步需要一次带插桩的复现：在 worker 内 `harness.close()` 之后逐个尝试删除 `agent/` 下的条目并打印成功/失败，
+以定位到具体文件与打开时机；本轮的探针在"建会话 + close"这一步会挂住，说明那里本身还有一个未闭环的等待，
+需与 EBUSY 一并查。

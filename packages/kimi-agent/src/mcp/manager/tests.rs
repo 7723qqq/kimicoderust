@@ -29,7 +29,11 @@ async fn test_mcp_manager_discovery_and_call() {
         res_qualified.content,
         "Mock execution of github_sample_tool with {\"query\":\"kimi\"}"
     );
-    assert!(res_qualified.note.is_none(), "note = {:?}", res_qualified.note);
+    assert!(
+        res_qualified.note.is_none(),
+        "note = {:?}",
+        res_qualified.note
+    );
 
     // 2. A bare tool name is not routable to an MCP server
     let res_plain = manager

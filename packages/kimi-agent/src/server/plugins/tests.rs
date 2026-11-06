@@ -1500,3 +1500,38 @@ fn plugin_prompt_sections_respect_the_aggregate_budget() {
         "the over-budget contribution is skipped whole, not truncated"
     );
 }
+
+/// The registry must not keep a file handle between calls.
+///
+/// It used to hold the `Arc<SqliteSessionStore>` it was constructed with, so
+/// every clone of the manager pinned an open connection on
+/// `<data dir>/sessions.db`. On Windows that is a file lock: removing the data
+/// directory failed even after the host called its shutdown (`EBUSY` in the
+/// SDK's harness teardown, which is how this was found). A file-backed registry
+/// now reopens the store for each operation and drops it, so the record has to
+/// survive on disk alone — which is what this asserts, plus that the file can be
+/// removed once the manager is gone.
+#[test]
+fn test_file_backed_registry_persists_without_retaining_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.db");
+    let store = Arc::new(SqliteSessionStore::open(&path).unwrap());
+
+    let pm = PluginManager::new(store);
+    let blob = serde_json::json!({ "demo": { "id": "demo" } });
+    pm.write_state("registry", &blob).unwrap();
+    assert_eq!(pm.read_state("registry"), Some(blob.clone()));
+
+    // A fresh connection — the manager's own handle is long gone — still reads
+    // what the write committed.
+    let reopened = SqliteSessionStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.get_state("plugins", "registry").unwrap(),
+        Some(blob)
+    );
+    drop(reopened);
+    drop(pm);
+
+    // Nothing may hold the file now; on Windows an open handle fails here.
+    std::fs::remove_file(&path).expect("the registry must not retain a file handle");
+}

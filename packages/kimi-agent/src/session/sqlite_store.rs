@@ -3,7 +3,7 @@
 //! Provides zero-dependency standalone persistence for sessions, turns,
 //! messages, checkpoints, and arbitrary state domains using embedded SQLite (WAL mode).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -454,6 +454,12 @@ pub struct SqliteSessionStore {
     /// macros). The value is that the next refactor cannot introduce a cascade
     /// by accident.
     conn: Mutex<Connection>,
+    /// The file this store was opened from; `None` for an in-memory store.
+    /// A caller that needs the registry later reopens the file instead of
+    /// holding this handle (see `PluginManager`): a retained connection keeps a
+    /// Windows file lock on `<data dir>/sessions.db`, and the whole data
+    /// directory then cannot be removed.
+    path: Option<PathBuf>,
 }
 
 /// What one compaction did, mirroring the v2 `full_compaction.completed`
@@ -523,17 +529,23 @@ impl CompactionReport {
 impl SqliteSessionStore {
     /// Open or create a SQLite database file at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, rusqlite::Error> {
+        let path = path.as_ref();
         let conn = Connection::open(path)?;
-        Self::init(conn)
+        Self::init(conn, Some(path.to_path_buf()))
+    }
+
+    /// The database file this store was opened from, `None` in memory.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// Create an in-memory SQLite database.
     pub fn in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
-        Self::init(conn)
+        Self::init(conn, None)
     }
 
-    fn init(conn: Connection) -> Result<Self, rusqlite::Error> {
+    fn init(conn: Connection, path: Option<PathBuf>) -> Result<Self, rusqlite::Error> {
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -720,6 +732,7 @@ impl SqliteSessionStore {
 
         Ok(Self {
             conn: Mutex::new(conn),
+            path,
         })
     }
 

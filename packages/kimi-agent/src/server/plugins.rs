@@ -1279,8 +1279,21 @@ fn parse_marketplace(catalog_str: &str) -> Vec<PluginMarketplaceEntry> {
 
 /// Manage installed plugin states in SqliteSessionStore under `plugins/registry`,
 /// and read the content an installed plugin's manifest contributes.
+/// Where the plugin registry lives.
+///
+/// The file variant is reopened per operation rather than held: a retained
+/// `Connection` keeps a Windows file lock on `<data dir>/sessions.db` for the
+/// life of every clone of this manager, so a second harness in the same
+/// process — or a clone that escaped into a pipeline — made the data directory
+/// unremovable. Plugin API calls are rare, so the reopen is the cheaper trade.
+enum RegistryStore {
+    File(std::path::PathBuf),
+    /// An in-memory store has no file to reopen; tests keep their handle.
+    Memory(Arc<SqliteSessionStore>),
+}
+
 pub struct PluginManager {
-    store: Arc<SqliteSessionStore>,
+    registry: RegistryStore,
     /// Directory holding `marketplace.json`, so a relative catalog `source`
     /// resolves to a real plugin root. `None` disables root resolution.
     marketplace_dir: Option<PathBuf>,
@@ -1299,8 +1312,14 @@ pub struct PluginManager {
 
 impl PluginManager {
     pub fn new(store: Arc<SqliteSessionStore>) -> Self {
+        // A file-backed registry is reopened per operation; only an in-memory
+        // store (tests) keeps its handle, because it has no path to reopen.
+        let registry = match store.path().map(std::path::Path::to_path_buf) {
+            Some(path) => RegistryStore::File(path),
+            None => RegistryStore::Memory(store),
+        };
         let manager = Self {
-            store,
+            registry,
             marketplace_dir: default_marketplace_dir(),
             home_dir: None,
             node_runner: None,
@@ -1452,11 +1471,7 @@ impl PluginManager {
 
     /// Load the map of installed plugin records: `id -> InstalledPluginInfo`.
     pub fn load_installed_map(&self) -> HashMap<String, InstalledPluginInfo> {
-        let raw = self
-            .store
-            .get_state("plugins", "registry")
-            .unwrap_or(None)
-            .unwrap_or_else(|| json!({}));
+        let raw = self.read_state("registry").unwrap_or_else(|| json!({}));
 
         let mut map = HashMap::new();
         if let Some(obj) = raw.as_object() {
@@ -1475,7 +1490,32 @@ impl PluginManager {
         map: &HashMap<String, InstalledPluginInfo>,
     ) -> Result<(), rusqlite::Error> {
         let val = serde_json::to_value(map).unwrap_or_else(|_| json!({}));
-        self.store.put_state("plugins", "registry", &val)
+        self.write_state("registry", &val)
+    }
+
+    /// The registry blob, from whichever store this manager was built on.
+    ///
+    /// A file-backed store is opened here and dropped at the end of the call:
+    /// holding the connection is what kept a Windows file lock on the data
+    /// directory after every owner had finished with the registry.
+    fn read_state(&self, key: &str) -> Option<Value> {
+        match &self.registry {
+            RegistryStore::Memory(store) => store.get_state("plugins", key).ok().flatten(),
+            RegistryStore::File(path) => SqliteSessionStore::open(path)
+                .ok()
+                .and_then(|store| store.get_state("plugins", key).ok().flatten()),
+        }
+    }
+
+    /// Write the registry blob, opening a file-backed store for the duration of
+    /// the write (see [`Self::read_registry`]).
+    fn write_state(&self, key: &str, value: &Value) -> Result<(), rusqlite::Error> {
+        match &self.registry {
+            RegistryStore::Memory(store) => store.put_state("plugins", key, value),
+            RegistryStore::File(path) => {
+                SqliteSessionStore::open(path)?.put_state("plugins", key, value)
+            }
+        }
     }
 
     /// List all installed plugin summaries for `/api/v1/plugins`. Projected
@@ -2215,15 +2255,12 @@ impl PluginManager {
         }
         let value =
             serde_json::to_value(disabled.iter().collect::<Vec<_>>()).unwrap_or_else(|_| json!([]));
-        self.store
-            .put_state("plugins", &format!("mcp_disabled:{id}"), &value)?;
+        self.write_state(&format!("mcp_disabled:{id}"), &value)?;
         Ok(true)
     }
 
     fn load_disabled_mcp_servers(&self, id: &str) -> std::collections::BTreeSet<String> {
-        self.store
-            .get_state("plugins", &format!("mcp_disabled:{id}"))
-            .unwrap_or(None)
+        self.read_state(&format!("mcp_disabled:{id}"))
             .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
             .map(|list| list.into_iter().collect())
             .unwrap_or_default()
