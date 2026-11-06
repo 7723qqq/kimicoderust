@@ -616,8 +616,20 @@ v2 的 `availability()` 是 `stoppedAtCompaction: cut.stoppedAtCompaction || max
 | `bun run check:all` | 0 | 20 道全绿；`architecture` 指纹经 `--update` 刷新，`engine.mcp` / `engine.mcp.manager` / `engine.tools.agent` / `engine.tools.team` 四个 normify 模块经 `normify_module_refresh` 刷新 |
 | 原生插件 | 0 | `bun run build`（release）重建，测试跑在新二进制上 |
 
-### 14.5 仍未收口
+### 14.5 复核：卡片"缺状态包装与墙钟头"是误判（已关闭）
 
-- 卡片显示的仍是 `output + note`，不含引擎给模型加的 `<system>…</system>` 状态包装与墙钟头；v2 的卡片显示的是
-  同一次渲染的完整文本。补齐要决定"事件里的 content 该发渲染前还是渲染后"，属下一批（`tool_result_render`
-  与 `run_turn` 的发送点各一处）。
+初稿把"卡片只有 `output + note`、没有 `<system>…</system>` 包装与 `Wall time:` 头"记成缺口，回 `.tmp/v2-ref`
+核实后**推翻**：
+
+| 事实 | 证据 |
+|---|---|
+| v2 的循环事件只带**原始** output 与 note，不带渲染文本、不带墙钟 | `agent-core-v2/src/agent/loop/loopService.ts` 的 `appendLoopEvent({ type: 'tool.result', result: { output, isError, note } })` |
+| 状态包装只发生在**面向模型**的投影里 | `agent/contextProjector/projection.ts` 的 `projectedContent`：`role === 'tool'` 时才调 `renderToolResultForModel({ output, isError, note })` |
+| 宿主侧转换直接透传原始 output（字符串原样、对象 JSON 化） | `acp-server/src/convert.ts` 的 `toolResultToAcpContent` |
+| 墙钟头不在冻结参考里 | `.tmp/v2-ref`（`ecad4136d9^`）全仓 `Wall time` 零命中；本仓 `wall_time.rs` 注明它来自上游 **#3966**，晚于该快照 |
+
+也就是说：宿主看到"原始 output + note"、模型看到"包装 + 墙钟 + note"，两侧都是 v2 的形态，本仓现在与之一致；
+卡片显示 note 恰好对应 v2 转录里那条消息（`loopEventFold` 把 note 存在工具消息上，投影时再拼接）。
+
+**参考时效提醒**：`.tmp/v2-ref` 冻结在 2026-09-08 的删除点，晚于它的上游改动（如 #3966）在本地无法逐字核实；
+涉及这类条目要么等 `v2-ref-upstream` 可用，要么以本仓台账里已登记的上游 sha 为准，不能默认"参考里没有就是没有"。
