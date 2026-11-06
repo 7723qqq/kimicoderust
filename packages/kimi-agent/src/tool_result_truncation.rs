@@ -86,6 +86,48 @@ impl ToolResultTruncator {
     }
 
     /// Apply the truncation policy. See module docs for the rules.
+    /// Whether this call reads back something this service spilled.
+    ///
+    /// v2 marks that result `spillExempt` (`readTool.ts`): the model asked for
+    /// a file this service wrote, so truncating it again would hand back a
+    /// pointer to a pointer and lose the tail it asked for.
+    pub fn is_spill_read(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        if !tool_name.eq_ignore_ascii_case("read") {
+            return false;
+        }
+        let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
+            return false;
+        };
+        let requested = Path::new(path);
+        let resolved = requested
+            .canonicalize()
+            .unwrap_or_else(|_| requested.to_path_buf());
+        let spill = self
+            .spill_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.spill_dir.clone());
+        resolved.starts_with(&spill)
+    }
+
+    /// The result policy for one call: [`Self::truncate`], except that a read
+    /// of a spilled file comes back whole (v2 `truncateForModel` + `spillExempt`).
+    pub fn truncate_call(
+        &self,
+        args: &serde_json::Value,
+        req: TruncationRequest<'_>,
+    ) -> FinalizedToolResult {
+        if self.is_spill_read(req.tool_name, args) {
+            return FinalizedToolResult {
+                content: req.content.to_string(),
+                is_error: req.is_error,
+                note: req.note.map(String::from),
+                spill_path: None,
+                truncated: false,
+            };
+        }
+        self.truncate(req)
+    }
+
     pub fn truncate(&self, req: TruncationRequest<'_>) -> FinalizedToolResult {
         // Empty results are never truncated.
         if req.content.is_empty() {
@@ -570,4 +612,54 @@ mod tests {
         assert!(r.content.contains("could not be saved to a file"));
         fs::remove_file(&blocker).ok();
     }
+}
+
+/// v2 exempts a read of a spilled file from truncation (`readTool.ts` sets
+/// `spillExempt`, `toolResultTruncationService.ts` returns the result
+/// untouched). Without it the model ends up with a pointer to a pointer and
+/// never sees the tail it asked for.
+#[test]
+fn reading_back_a_spilled_file_is_not_truncated_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let spill_dir = dir.path().join(".kimi").join("spill");
+    std::fs::create_dir_all(&spill_dir).unwrap();
+    let spilled = spill_dir.join("Read-toolu_1.txt");
+    let body = "x".repeat(DEFAULT_TOOL_RESULT_MAX_CHARS + 1_000);
+    std::fs::write(&spilled, &body).unwrap();
+
+    let truncator = ToolResultTruncator::new(spill_dir.clone());
+    let args = serde_json::json!({ "path": spilled.to_string_lossy() });
+    assert!(truncator.is_spill_read("Read", &args));
+
+    let result = truncator.truncate_call(
+        &args,
+        TruncationRequest {
+            tool_name: "Read",
+            tool_call_id: "toolu_2",
+            content: &body,
+            is_error: false,
+            note: None,
+        },
+    );
+    assert_eq!(result.content, body);
+    assert!(!result.truncated);
+    assert!(result.spill_path.is_none());
+
+    // A read of an ordinary file keeps the policy.
+    let outside = dir.path().join("ordinary.txt");
+    std::fs::write(&outside, &body).unwrap();
+    let args = serde_json::json!({ "path": outside.to_string_lossy() });
+    assert!(!truncator.is_spill_read("Read", &args));
+    let result = truncator.truncate_call(
+        &args,
+        TruncationRequest {
+            tool_name: "Read",
+            tool_call_id: "toolu_3",
+            content: &body,
+            is_error: false,
+            note: None,
+        },
+    );
+    assert!(result.truncated);
+    assert!(result.spill_path.is_some());
 }

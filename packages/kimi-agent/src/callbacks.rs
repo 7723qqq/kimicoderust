@@ -1197,7 +1197,8 @@ impl HostCallbacks for NativeToolCallbacks {
                     // so its transcript shows what the model saw.
                     let finalized = match this.truncator.as_ref() {
                         Some(truncator) => {
-                            let f = truncator.truncate(
+                            let f = truncator.truncate_call(
+                                &request.arguments,
                                 crate::tool_result_truncation::TruncationRequest {
                                     tool_name: &request.tool_name,
                                     tool_call_id: &request.tool_call_id,

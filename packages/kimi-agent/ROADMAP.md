@@ -728,3 +728,64 @@ permission）→ mcpCore → kosong → workspace → features → app → 基�
   判定，不能以"同步所以没问题"结案。
 - `_base/state/stateRegistry`（key 注册与快照排除 `snapshotExcluded`）只以 `StateKey` 类型被 `state/` 引用，
   归 `_base` 那一步一起对账，本步不重复计。
+
+## 17. 2026-11-06 分步移植第 2 步：`tool`（10 文件）对账 + spill 豁免补齐（exit 0）
+
+### 17.1 先关掉第 1 步的待核项：`RestorePhase` → not-applicable
+
+v2 的 `RestorePhase`（`new|restoring|ready|failed`）并不挡用户动作，它挡的是**构造顺序**：
+
+| v2 用法（`state/eventDispatcherService.ts`） | 语义 |
+|---|---|
+| `restore()` 只允许在 `new` 阶段调用 | 恢复只能做一次 |
+| 恢复开始后 `contribute` 新的 replayable state 直接抛错 | 状态必须在恢复前注册 |
+| 恢复开始后 `attach` durable participant 抛错，`ready` 之后才允许 `attachLate` | 运行期参与者必须在恢复前或恢复后接线，不能卡在中间 |
+
+这三点都是 v2 的 DI / actor 装配不变量；本仓没有"贡献-恢复"生命周期：`resumeSession` 注册 meta → 建句柄 → 挂历史，
+在句柄就绪之前 `prompt` 与 `undoHistory` 都以 `session.not_found` 拒绝（`prompt` 的 `!meta.handle` 分支，
+`sdk-rpc-client-native.ts`），不会出现"半个会话"被使用。**结论：行为面 not-applicable**。
+残留一条小事：那句错误文案对"正在恢复的会话"说成 "unknown or closed"，措辞不准，已记，不单独成批。
+
+### 17.2 `tool/` 逐文件对账（10 文件）
+
+| v2 文件 | Rust 对位 | 结论 |
+|---|---|---|
+| `toolContract.ts`（契约：50k 字符、10M 保留、`note`/`spill`/`truncated`） | `turn_loop/types.rs::ExecutableToolResult`、`tool_result_truncation.rs`（常量同值：`DEFAULT_TOOL_RESULT_MAX_CHARS = 50_000`、`DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS = 10_000_000`） | 等价；`spillExempt` 原本缺（见 17.3，本轮补上） |
+| `result-builder.ts`（50k/2000/`[...truncated]`/``Output is truncated to fit in the message.``） | `native/output_truncate.rs` + `tool_result_truncation.rs` | **等价且更底层**：v2 的这个 builder 本身就把分块逻辑交给 native（`tryNativeWriteToolOutputChunk`），Rust 就是那个 native 实现 |
+| `output-accumulator.ts`（流式累积 + 保留上限 + spill） | `tool_result_truncation.rs`（spill/指针/10M 保留） | 等价 |
+| `native-glob-match.ts`（调 native addon） | `native/glob.rs` | 被取代（本仓就是 addon） |
+| `input-schema.ts`（zod → JSON Schema） | `tools/core_tool_defs.rs` 手写 schema | `not-applicable`：本仓直接以 JSON Schema 定义，无 zod |
+| `args-validator.ts`（Ajv 校验入参） | 无中心校验；各工具自行校验（`arg_error` / `engine.tools.argMustBe*`） | **部分等价**：非法入参两侧都变成错误结果，但 v2 用 schema 拦截、报错文案来自 Ajv，本仓是逐工具手写。记录，不冒充等价 |
+| `tool-args-parse.ts`（`parseToolCallArguments`：坏 JSON → `parseFailed` 并报给模型） | `llm/openai.rs:847` 等传输层：坏参数**丢弃该 tool call**，不报错 | **不等价，见 17.4**（本轮只记录，未改） |
+| `path-access.ts`（路径分类/敏感文件/规范化/盘符桥接） | `permission/`、`native/tool_access.rs`、`native/shell_path*` | 等价（早期批次已逐条对过） |
+| `rule-match.ts`（权限路径规则匹配） | `permission/` 规则匹配、`native/permission` 的 `nativeParsePermissionPattern` | 等价 |
+| `toolInputDisplay.ts`（12 变体显示联合） | `tool_input_display.rs` | 等价（`1879104` 生成 ACP golden 时逐字段移植） |
+
+### 17.3 本轮修：读回 spill 文件不再被二次截断（v2 `spillExempt`）
+
+v2 的 `readTool` 在"读的路径本身就是 spill 文件"时给结果打 `spillExempt`，`toolResultTruncationService`
+见到就直接原样返回。缺了它，模型读回一个被 spill 的大文件会被再次截断+再次 spill——拿到的是"指针的指针"，
+它要的尾部永远读不到。
+
+改法（一处判定 + 一处调用）：
+
+- `ToolResultTruncator::is_spill_read(tool_name, args)`：仅 `Read`，且请求路径规范化后落在 `spill_dir` 内；
+- `ToolResultTruncator::truncate_call(args, request)`：命中豁免则原样返回（`truncated: false`、`spill_path: None`），
+  否则走原有策略；
+- `callbacks.rs` 的截断点改用 `truncate_call`（那里 `request.tool_name` 与 `request.arguments` 都在手边）。
+
+验证：
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib tool_result_truncation` | 0 | 8 passed（新增：读回 spill 文件原样返回；普通文件仍被截断并落盘） |
+| **变异验证** | — | 把 `is_spill_read` 改成恒 false → 新用例红（内容被二次截断）；还原即绿 |
+
+### 17.4 本轮查出、尚未修的一处（`tool/` + `wire` 交界）
+
+坏的工具调用参数两侧处理不同：v2 解析失败会带回 `parseFailed` 并让模型看到一个"参数不是合法 JSON"的错误结果，
+可以自我纠正；本仓传输层直接把该 tool call **丢弃**（`llm/openai.rs` 的 `filter_map` 注释写明"不伪造空参数调用"）。
+丢弃至少不会产生悬空 tool_call id，但模型得不到任何反馈，可能重试或自说自话。
+
+修法需要把"解析失败的调用"保留进 assistant 消息并合成一条错误 tool 结果——跨 turn loop 与传输层，属独立一批；
+本轮只记录，不半做。
