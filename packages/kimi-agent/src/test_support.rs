@@ -105,6 +105,14 @@ impl EnvScope {
             previous,
         }
     }
+
+    /// Unset each variable until the guard drops.
+    ///
+    /// The shape most config tests need: a value inherited from the developer's
+    /// shell would otherwise decide what the test proves.
+    pub(crate) fn unset(keys: &[&'static str]) -> Self {
+        Self::set(keys.iter().map(|key| (*key, None)).collect())
+    }
 }
 
 impl Drop for EnvScope {

@@ -122,3 +122,38 @@
 4. 反引号内以 test_ 开头的标识符会被 `check:roadmap-refs` 当作测试名校验，写之前先确认它
    在源码里真实存在；`file:line` 引用同理。
 5. 提交：Conventional Commit、无 agent 署名、立即推送（SSH）。
+
+## 5. 2026-11-06 配置测试的环境作用域（exit 0）
+
+**落点**：`packages/kimi-agent/src/config/tests.rs`（10 处）、
+`packages/kimi-agent/src/test_support.rs`（新增 `EnvScope::unset`）。
+
+**做了什么**：`config/tests.rs` 里 10 处环境变量样板（`ANTHROPIC_BASE_URL` /
+`OPENAI_BASE_URL` / `KIMI_BASE_URL` / `GOOGLE_GEMINI_BASE_URL` / loop 三个超时与步数 /
+`KIMI_MODEL_THINKING_KEEP` / `KIMI_IMAGE_*`）原先是"快照 → 手动 unset → 手动 restore"，
+现在统一成 `EnvScope::unset(&[..])`：持套件共享的环境锁，并在 `Drop` 里恢复。
+
+**为什么**：两个理由，都与 §3.2 记下的同一处残留有关。
+
+- 窗口是跨用例的：这些变量被别的模块在运行期读（例如子代理超时、图片预算），而
+  "快照 → unset → 断言 → restore" 之间没有任何互斥，别的用例可能在这段窗口里读到被清空的
+  值。
+- 恢复不抗 panic：中途断言失败就把变量留在被清空的状态，污染整轮——与 §3.2 里
+  `HOME`/`USERPROFILE` 那次同型。
+
+**没有统一的部分**：`llm/thinking_guard.rs`、`server/remote_control.rs`、
+`tools/github.rs` 仍用各自模块的锁；它们只写本模块独有、别处不读的变量，跨文件窗口不成立，
+真要统一得先证明"谁在读"，留作独立批次。
+
+**验证**（全部当场执行）：
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib config::` | 0 | 70 passed |
+| `cargo test --lib`（全量） | 0 | 3633 passed / 0 failed（22.3s） |
+| `cargo clippy --all-targets --features cli -- -D warnings` | 0 | clean |
+| `cargo fmt --check` | 0 | clean |
+| `bun run check:all` | 0 | 19 道全绿 |
+| `check:rust-module-deps` | 0 | 270 → **271** 条边（新增 `config -> test_support`，按官方通道记录） |
+| `check:architecture` | 0 | 21 modules（`kimi-agent` 指纹 `b3fbae663d56a9a4` → `9f3815fa8bb4f6e5`） |
+

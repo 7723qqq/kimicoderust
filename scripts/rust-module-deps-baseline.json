@@ -17,7 +17,7 @@
     "includesTestCode": true,
     "files": 373,
     "modules": 42,
-    "sites": 3082
+    "sites": 3092
   },
   "edges": [
     "acp -> callbacks",
@@ -63,6 +63,7 @@
     "config -> skills",
     "config -> storage",
     "config -> subagent",
+    "config -> test_support",
     "config -> tools",
     "default_workspace -> config",
     "default_workspace -> session",

@@ -169,13 +169,7 @@ model = "some-model"
 
 #[test]
 fn anthropic_endpoint_falls_back_to_env_then_default() {
-    let keys = ["ANTHROPIC_BASE_URL"];
-    let saved: Vec<Option<String>> = keys.iter().map(|key| std::env::var(key).ok()).collect();
-    unsafe {
-        for key in keys {
-            std::env::remove_var(key);
-        }
-    }
+    let _env = crate::test_support::EnvScope::unset(&["ANTHROPIC_BASE_URL"]);
 
     // No declared endpoint and no env: the SDK default, carried by the
     // engine because it assembles the URL itself.
@@ -218,26 +212,11 @@ model = "some-model"
     .unwrap();
     let native = declared.extract_native_llm(None).unwrap();
     assert_eq!(native.base_url, "https://declared.example.com/v1");
-
-    unsafe {
-        for (key, value) in keys.iter().zip(saved) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 }
 
 #[test]
 fn openai_endpoint_falls_back_to_env_then_default() {
-    let keys = ["OPENAI_BASE_URL"];
-    let saved: Vec<Option<String>> = keys.iter().map(|key| std::env::var(key).ok()).collect();
-    unsafe {
-        for key in keys {
-            std::env::remove_var(key);
-        }
-    }
+    let _env = crate::test_support::EnvScope::unset(&["OPENAI_BASE_URL"]);
 
     let native = endpoint_less_config("openai")
         .extract_native_llm(None)
@@ -258,26 +237,11 @@ fn openai_endpoint_falls_back_to_env_then_default() {
         .unwrap();
     assert_eq!(native.protocol, "openai_responses");
     assert_eq!(native.base_url, "https://api.openai.com/v1");
-
-    unsafe {
-        for (key, value) in keys.iter().zip(saved) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 }
 
 #[test]
 fn kimi_endpoint_falls_back_to_env_then_default() {
-    let keys = ["KIMI_BASE_URL"];
-    let saved: Vec<Option<String>> = keys.iter().map(|key| std::env::var(key).ok()).collect();
-    unsafe {
-        for key in keys {
-            std::env::remove_var(key);
-        }
-    }
+    let _env = crate::test_support::EnvScope::unset(&["KIMI_BASE_URL"]);
 
     let native = endpoint_less_config("kimi")
         .extract_native_llm(None)
@@ -290,26 +254,11 @@ fn kimi_endpoint_falls_back_to_env_then_default() {
         .extract_native_llm(None)
         .unwrap();
     assert_eq!(native.base_url, "https://kimi-proxy.example.com/v1");
-
-    unsafe {
-        for (key, value) in keys.iter().zip(saved) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 }
 
 #[test]
 fn google_genai_endpoint_prefers_the_env_over_the_host_root() {
-    let keys = ["GOOGLE_GEMINI_BASE_URL"];
-    let saved: Vec<Option<String>> = keys.iter().map(|key| std::env::var(key).ok()).collect();
-    unsafe {
-        for key in keys {
-            std::env::remove_var(key);
-        }
-    }
+    let _env = crate::test_support::EnvScope::unset(&["GOOGLE_GEMINI_BASE_URL"]);
 
     let native = endpoint_less_config("google-genai")
         .extract_native_llm(None)
@@ -325,15 +274,6 @@ fn google_genai_endpoint_prefers_the_env_over_the_host_root() {
         .extract_native_llm(None)
         .unwrap();
     assert_eq!(native.base_url, "https://gem-proxy.example.com/v1beta");
-
-    unsafe {
-        for (key, value) in keys.iter().zip(saved) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 }
 
 #[test]
@@ -747,14 +687,7 @@ fn test_resolve_max_attempts_per_step() {
         "KIMI_LOOP_MAX_ATTEMPTS_PER_STEP",
         "KIMI_LOOP_MAX_RETRIES_PER_STEP",
     ];
-    let saved: Vec<Option<String>> = keys.iter().map(|key| std::env::var(key).ok()).collect();
-    // The env vars outrank the file: clear them first so the config-only
-    // precedence below is not poisoned by the developer's shell.
-    unsafe {
-        for key in keys {
-            std::env::remove_var(key);
-        }
-    }
+    let _env = crate::test_support::EnvScope::unset(&keys);
 
     let explicit = KimiConfig::from_str(
         r#"
@@ -812,15 +745,6 @@ max_retries_per_step = 5
     );
     unsafe { std::env::remove_var(keys[1]) };
     assert_eq!(both.resolve_max_attempts_per_step(), Some(3), "config next");
-
-    unsafe {
-        for (key, value) in keys.iter().zip(saved) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 }
 
 /// v2 #3750: `[loop_control].compaction_max_attempts` caps one compaction
@@ -1059,8 +983,7 @@ max_context_size = 1000
 #[test]
 fn test_resolve_max_steps_per_turn() {
     let key = "KIMI_LOOP_MAX_STEPS_PER_TURN";
-    let saved = std::env::var(key).ok();
-    unsafe { std::env::remove_var(key) };
+    let _env = crate::test_support::EnvScope::unset(&[key]);
 
     let explicit = KimiConfig::from_str(
         r#"
@@ -1112,13 +1035,6 @@ max_steps_per_turn = 0
         None,
         "an env 0 means unlimited and outranks the config"
     );
-
-    unsafe {
-        match saved {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
 }
 
 const SERVICES_CONFIG: &str = r#"
@@ -1210,20 +1126,12 @@ fn test_resolve_bing_api_service() {
 
 #[test]
 fn test_resolve_web_services_env_overlay() {
-    let keys = [
+    let _env = crate::test_support::EnvScope::unset(&[
         "KIMI_WEB_SEARCH_BASE_URL",
         "KIMI_WEB_SEARCH_API_KEY",
         "KIMI_WEB_FETCH_BASE_URL",
         "KIMI_WEB_FETCH_API_KEY",
-    ];
-    let saved: Vec<Option<String>> = keys.iter().map(|key| std::env::var(key).ok()).collect();
-    // The env vars outrank the file: clear them first so the config-only
-    // precedence below is not poisoned by the developer's shell.
-    unsafe {
-        for key in keys {
-            std::env::remove_var(key);
-        }
-    }
+    ]);
 
     let config = KimiConfig::from_str(SERVICES_CONFIG).unwrap();
     let search = config.resolve_web_search_service().unwrap();
@@ -1279,26 +1187,14 @@ api_key = "sk-search"
             .resolve_web_search_service()
             .is_none()
     );
-
-    unsafe {
-        for (key, value) in keys.iter().zip(saved) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 }
 
 #[test]
 fn test_resolve_subagent_and_swarm_timeouts() {
-    let keys = ["KIMI_SUBAGENT_TIMEOUT_MS", "KIMI_CODE_SWARM_TIMEOUT_MS"];
-    let saved: Vec<Option<String>> = keys.iter().map(|key| std::env::var(key).ok()).collect();
-    unsafe {
-        for key in keys {
-            std::env::remove_var(key);
-        }
-    }
+    let _env = crate::test_support::EnvScope::unset(&[
+        "KIMI_SUBAGENT_TIMEOUT_MS",
+        "KIMI_CODE_SWARM_TIMEOUT_MS",
+    ]);
 
     let config = KimiConfig::from_str(
         r#"
@@ -1335,15 +1231,6 @@ timeoutMs = 7000
     let absent = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
     assert_eq!(absent.resolve_subagent_timeout_ms(), None);
     assert_eq!(absent.resolve_swarm_timeout_ms(), None);
-
-    unsafe {
-        for (key, value) in keys.iter().zip(saved) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 }
 
 #[test]
@@ -1834,13 +1721,10 @@ fn merge_flag_reaches_the_prompt_skills_section() {
 
 #[test]
 fn test_resolve_image_limits() {
-    let keys = ["KIMI_IMAGE_READ_BYTE_BUDGET", "KIMI_IMAGE_MAX_EDGE_PX"];
-    let saved: Vec<Option<String>> = keys.iter().map(|key| std::env::var(key).ok()).collect();
-    unsafe {
-        for key in keys {
-            std::env::remove_var(key);
-        }
-    }
+    let _env = crate::test_support::EnvScope::unset(&[
+        "KIMI_IMAGE_READ_BYTE_BUDGET",
+        "KIMI_IMAGE_MAX_EDGE_PX",
+    ]);
 
     let config = KimiConfig::from_str(
         r#"
@@ -1869,15 +1753,6 @@ maxEdgePx = 800
     let absent = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
     assert_eq!(absent.resolve_image_read_byte_budget(), None);
     assert_eq!(absent.resolve_image_max_edge_px(), None);
-
-    unsafe {
-        for (key, value) in keys.iter().zip(saved) {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 }
 
 #[test]
@@ -1912,8 +1787,7 @@ capabilities = ["thinking", "image_in"]
 #[test]
 fn test_resolve_thinking_keep() {
     let key = "KIMI_MODEL_THINKING_KEEP";
-    let saved = std::env::var(key).ok();
-    unsafe { std::env::remove_var(key) };
+    let _env = crate::test_support::EnvScope::unset(&[key]);
 
     let explicit = KimiConfig::from_str(
         r#"
@@ -2003,13 +1877,6 @@ default_model = "fast"
     .unwrap()
     .unwrap();
     assert_eq!(pool.models[0].llm.thinking_keep.as_deref(), Some("all"));
-
-    unsafe {
-        match saved {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
 }
 
 /// A one-provider config with the `[models.alias]` body appended, so each
