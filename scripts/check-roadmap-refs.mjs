@@ -167,35 +167,12 @@ export const UPSTREAM_RELATIVE_ROOTS = ['test/'];
  * longer cited anywhere fails the gate as `stale-exemption`).
  */
 export const EXEMPT_PATHS = [
-  {
-    path: 'packages/kimi-agent/src/server/fs_watch.rs',
-    reason:
-      'deleted in adc794635c (§7.3); §6.1-20 and §6.1-32 cite it to record that the engine has no watcher at all',
-  },
-  {
-    path: 'packages/protocol/src/v3.ts',
-    reason: 'deleted in 86f30ecc2c when the v3 flat-entity protocol was reverted (§8.11)',
-  },
-  {
-    path: 'src/git.rs',
-    reason:
-      'never existed in this repository (no add, delete or touch in any commit); cited by §6.40 and §11 as the phantom path an older record named',
-  },
-  {
-    path: 'packages/kimi-agent/src/git.rs',
-    reason:
-      'the crate-relative src/git.rs written the long way (same never-existed file); §11.10 cites it inside the repro command',
-  },
-  {
-    path: 'src/protocol/rest-terminal.ts',
-    reason:
-      'upstream kap-server file cited in abbreviated form; the package it lives in is deleted, so nothing local can ever resolve',
-  },
-  {
-    path: 'src/napi_bindings.rs',
-    reason:
-      'split into the src/napi_bindings/ directory as a pure move on 2026-11-02; the dated ledger entries citing it were accurate when written and the content now lives under napi_bindings/{params,session,turn,mcp,callbacks,plugins,misc}.rs',
-  },
+  // Empty since the 2026-11-06 re-basing. Every entry here existed because some
+  // historical section cited a path that can never resolve locally (a deleted
+  // package, a split file, a phantom path). That history now lives in
+  // ROADMAP-ARCHIVE-2026-11-06.md, which this gate does not scan, so the ratchet
+  // reports each one as stale. Add an entry back only when a live ledger entry
+  // cites an absent-by-design path, and say why.
 ];
 
 /** Markers the ledger uses to retire a claim in place. */

@@ -1,5 +1,9 @@
 # Rust 移植缺口报告（RUST-PORT-GAP）
 
+> **已归档（2026-11-06）**：本文件是 2026-11-02 的历史快照，不再维护、不再作为裁决依据。
+> 当前判据见 `packages/kimi-agent/ROADMAP.md`（新基点）与 `scripts/upstream-v2-delta-allowlist.json`
+> 的实时内容；上游 delta 现已全部 triaged（ported 59 / not-applicable 40 / tracked 0）。
+>
 > 快照时间：2026-11-02（Asia/Shanghai）。分支 `main`，HEAD `b2c89a8fe`。
 > 工作区含前两批未提交改动（`[mcp]` 全局默认值 napi 通道、`napi_bindings.rs` → 9 文件拆分、
 > subagent/todo 提醒缺陷项、`check:all` 聚合门禁），本报告全部基于**当前工作区**读取，
