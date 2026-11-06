@@ -789,3 +789,42 @@ v2 的 `readTool` 在"读的路径本身就是 spill 文件"时给结果打 `spi
 
 修法需要把"解析失败的调用"保留进 assistant 消息并合成一条错误 tool 结果——跨 turn loop 与传输层，属独立一批；
 本轮只记录，不半做。
+
+## 18. 2026-11-06 分步移植第 3 步：`wire`（5 文件）对账（exit 0，无代码改动）
+
+### 18.1 先纠正一个计数
+
+§16.2 的 `wire` 12 个文件含测试（`*.test.ts`）。**非测试只有 5 个**：`record.ts`、`repair.ts`、`wire.ts`、
+`wireService.ts`、`errors.ts`，共 532 行。其余子系统的数字同样含测试，逐子系统对账时以该步现读的非测试清单为准。
+
+### 18.2 逐文件对账
+
+| v2 文件 | Rust 对位 | 结论 |
+|---|---|---|
+| `record.ts` — 记录形状、`wire.jsonl` 键、parts 变换/脱水 | `wire_events` 行（`id`/`event_type`/`payload`/`is_checkpoint`/`is_compaction`/`protocol_version`）+ `turn_loop/types.rs` 的消息类型 | **底座不同、目的等价**：v2 是逐 agent 的 jsonl 追加日志，本仓是一张 SQLite 表；协议版本列与拒绝更新版本的逻辑见 `bc4b157` |
+| `repair.ts` — 尾巴被撕裂时的修复：备份 `.bak`、重写存活记录、上报丢弃条数 | 无 | `not-applicable`：SQLite 事务写入没有"半行"这种状态，该失败模式在本仓不存在 |
+| `wire.ts` / `wireService.ts` — append / readJournal / flush | `native/event_store/mod.rs`（`append_event`、`read_fold_rows`、`fold_projection`）+ `session/sqlite_store.rs` | 等价：追加、按 seq 折叠、压缩边界（`is_compaction` 之后的 seq 起点）都在 |
+| `errors.ts` — `wire.*` 错误码 | 版本闸门的错误路径（`WireProtocolTooNew`）等 | 仅"可达的错误"需要码；`wire.duplicate_op` 这类对应 v2 的 DI/装配检查，本仓无该结构 → `not-applicable` |
+
+### 18.3 对账查出的两处（诊断面，非行为，未改代码）
+
+| 差异 | v2 | 本仓 | 影响 |
+|---|---|---|---|
+| 未知/损坏记录的上报 | `reportSkippedRecord(..., malformed)` → `onUnexpectedError`，带 `WIRE_UNKNOWN_RECORD` 与条数 | **坏 JSON 的 payload** 会跳过并计数（有用例钉住）；**未知 `event_type`** 走 `match` 的 `_ => {}`，静默丢弃 | 只影响可观测性：历史会少几条消息而无任何诊断。模型看到的是"少了几条"，不是错误 |
+| 被跳过条数的去处 | 上报 | `read_fold_rows` 返回 `(rows, dropped)`，`fold_projection` 用 `.0` 把 `dropped` 丢掉 | 同上 |
+
+两处都属于"日志/上报"层面的等价，不改变模型可见行为；补它们只需要在 `fold_projection` 里对被丢弃计数与未知类型各打一条 `warn`。
+本轮**不写无测试覆盖的日志改动**，登记为下一步的可选项。
+
+### 18.4 把 §17.4 的"坏参数被丢弃"量到可执行
+
+`ToolCall` 是 `turn_loop/types.rs` 的结构体，全仓构造点约 200 处（其中 121 处在 `tool_scheduler` 的测试里）。
+两条候选修法：
+
+| 方案 | 做法 | 代价 / 风险 |
+|---|---|---|
+| A（推荐） | `ToolCall` 增 `args_parse_error: Option<String>`；传输层解析失败时**保留该调用**并带上原因；turn loop 见到它就不再执行工具，直接合成一条错误 tool 结果；assistant 消息保留该 call id | 结构体字段会让 ~200 个字面量需要补一个字段（绝大多数是测试，机械可改）；协议序列化要确保该字段不发给上游 provider |
+| B | 保持丢弃，另发明一条"无对应 call"的 tool 结果 | **不可取**：严格协议（Anthropic 的 `tool_use`/`tool_result` 必须成对）会拒绝；等于用一个新 bug 换旧 bug |
+
+边界条件（写进 A 的验收）：流式参数被截断、参数不是对象、`arguments` 为空串、provider 返回非流式坏 JSON —— 四种都要
+变成"一条可读的错误 tool 结果"，并有用例钉住其中至少三种。属独立一批（跨 `llm/*` 与 `turn_loop`），不在本步半做。
