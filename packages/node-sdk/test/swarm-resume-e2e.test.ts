@@ -1,5 +1,7 @@
 /**
- * TEMPORARY end-to-end probe: a real conversation whose swarm is then resumed.
+ * End-to-end: a real conversation spawns a swarm, and resuming the session
+ * rebuilds every member. The swarm only runs in swarm mode, so the test turns
+ * it on the way a user does before prompting.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -107,6 +109,9 @@ max_context_size = 100000
 
     try {
       const session = await harness.createSession({ workDir: homeDir, model: 'mock' });
+      // `AgentSwarm` only runs in swarm mode, and only the user turns it on
+      // (upstream #4497); without this the tool refuses before spawning anyone.
+      await session.setSwarmMode(true, 'manual');
       const ended = new Promise<void>((resolve) => {
         session.onEvent((event) => {
           if (event.type === 'turn.ended') resolve();
@@ -121,7 +126,6 @@ max_context_size = 100000
       const client = (
         harness as unknown as { rpc?: { resumeSession(i: unknown): Promise<unknown> } }
       ).rpc;
-      console.error('=== has rpc client:', client !== undefined);
       expect(client).toBeDefined();
 
       const result = (await client!.resumeSession({
@@ -129,12 +133,10 @@ max_context_size = 100000
         includeSubagents: true,
       })) as { agents?: Record<string, unknown> };
       const agentIds = Object.keys(result.agents ?? {});
-      console.error('=== RESUMED AGENTS ===');
-      console.error(JSON.stringify(agentIds, null, 2));
-      console.error('model calls:', calls);
 
       const members = agentIds.filter((id) => id !== 'main');
       expect(members).toHaveLength(3);
+      expect(calls).toBeGreaterThanOrEqual(4);
     } finally {
       server.close();
     }

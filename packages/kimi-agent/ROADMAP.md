@@ -10469,26 +10469,35 @@ do-not-mention 句，上游 #4497 文案）+ NotifyUser 随门进/出表（tool_
 `check:rust-module-deps` 新增 `tools → test_support`、`turn_loop → test_support`
 两条边，按官方通道记录（269 边）。
 
-### 56.6 仍未关闭：`swarm-resume-e2e` 确定性红（不属本批改动）
+### 56.6 `swarm-resume-e2e`：过期测试，已修（同日）
 
-`packages/node-sdk/test/swarm-resume-e2e.test.ts`（文件头自述 "TEMPORARY end-to-end
+`packages/node-sdk/test/swarm-resume-e2e.test.ts`（文件头原写 "TEMPORARY end-to-end
 probe"）单独跑也红：`recovers every swarm member when the session is resumed` 期望
 3 个成员、拿到 0；`resumeSession({includeSubagents:true})` 只重建出 `main`。
 
-已排除的方向（都是实测）：
+**根因不是引擎回归**，是测试过期于一道门禁。会话级事件流给出原始证据：
 
-- 引擎侧 swarm / subagent 单测全绿（`cargo test --lib swarm::` 32、
-  `subagent::` 66）；
-- 结果契约两边一致：引擎仍产出 `<agent_swarm_result>` + `<subagent agent_id="…">`
-  （`tools/swarm_tool.rs:196`/`:254`），SDK 仍按同形解析
-  （`native/sdk-client/helpers.ts:1253` 的 `discoverSubagentsFromToolResult`）；
-- `AgentSwarm` 仍无条件进工具表（`tools/tool_policy.rs:417` 的 `subagent_defs`）；
-- mock 服务端只被请求 2 次（主回合 1 次 + 工具结果后的收尾 1 次），而三个成员若真
-  跑起来应各自再请求——即 `AgentSwarm` 调用在产出结果之前就结束了。
+```
+tool.result { name: AgentSwarm, isError: true,
+  output: "Swarm mode is off, so AgentSwarm did not run and no subagents were
+           started. Only the user can turn swarm mode on; do not call AgentSwarm until they do." }
+```
 
-未定位：那次调用是被权限拒绝、被门禁否决，还是在 napi 侧 fail。需要一次带
-`tool.call.completed` / `subagent.*` 事件流的会话级跟踪（本批尝试的独立探针卡在
-`turn.ended` 未到达，已中止）。这条红在本批改动之前就存在，不由 §56.1 引起。
+上游 #4497 的 swarm-mode 门禁（本仓 §55.1 落地）之后，`AgentSwarm` 只在用户开启
+swarm 模式时执行；这个 e2e 写于 2026-10-01，从未开启该模式，于是三个成员一个都没
+生成——工具在产出 `<agent_swarm_result>` 之前就被拒了，所以结果契约、SDK 解析器、
+引擎单测看上去全部正常。
+
+**修法**：建会话后调用 `session.setSwarmMode(true, 'manual')`（SDK 既有入口）；
+删掉三处 `console.error` 调试输出；文件头改成它实际覆盖的内容；新增
+`expect(calls).toBeGreaterThanOrEqual(4)`，让「成员真的跑过」成为断言而不是旁注。
+
+**验证**：单跑通过（resume 恢复 `main` + 3 个 subagent，mock 调用 5 次）；
+`oxlint --type-aware` 0 error；node-sdk 套件随后复跑。
+
+排在「未定位」的原判断（权限拒绝 / 门禁否决 / napi fail 三选一）就地修正为：门禁否决，
+且是**测试**缺了前提，不是产品缺陷。
+
 
 
 
