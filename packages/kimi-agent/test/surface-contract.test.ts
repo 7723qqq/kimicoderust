@@ -50,6 +50,10 @@ try {
  * - the engine-domain exports (turn loop / session handles / tracing):
  *   consumed through `session-handle.ts`, not through the native-tools wrapper
  *   surface.
+ * - the session-domain tower exports: `sessionTakeoverLock` rides
+ *   `SessionNativeModule` in `session-handle.ts`, and `sessionTowerStatus` is
+ *   read by `tower-status.ts` off `findKimiAgentAddon()` directly — both are
+ *   session-scoped, like `sessionSkills` above.
  */
 const UNWRAPPED_BINDINGS = new Set([
   'nativeBuildWorkspaceIndex',
@@ -87,6 +91,8 @@ const UNWRAPPED_BINDINGS = new Set([
   'sessionSkills',
   'sessionRenderSkillPrompt',
   'sessionSetPermissionMode',
+  'sessionTakeoverLock',
+  'sessionTowerStatus',
 ]);
 
 // Under a Node runtime Bun's CJS interop degrades: the load can throw outright
