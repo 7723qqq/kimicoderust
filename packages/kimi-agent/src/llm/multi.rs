@@ -702,12 +702,7 @@ mod tests {
                 &self,
                 _request: PermissionCheckRequest,
             ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-                Box::pin(async {
-                    Ok(PermissionDecision {
-                        decision: "allow".into(),
-                        reason: None,
-                    })
-                })
+                Box::pin(async { Ok(PermissionDecision::allow()) })
             }
         }
 
@@ -762,12 +757,7 @@ mod tests {
                 &self,
                 _request: PermissionCheckRequest,
             ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-                Box::pin(async {
-                    Ok(PermissionDecision {
-                        decision: "allow".into(),
-                        reason: None,
-                    })
-                })
+                Box::pin(async { Ok(PermissionDecision::allow()) })
             }
         }
         let callbacks: Arc<dyn HostCallbacks> = Arc::new(RefusingHost);
@@ -896,12 +886,7 @@ mod tests {
                 &self,
                 _request: PermissionCheckRequest,
             ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-                Box::pin(async {
-                    Ok(PermissionDecision {
-                        decision: "allow".into(),
-                        reason: None,
-                    })
-                })
+                Box::pin(async { Ok(PermissionDecision::allow()) })
             }
             fn emit_event(&self, event: serde_json::Value) {
                 self.events.lock().unwrap().push(event);
@@ -1087,12 +1072,7 @@ mod tests {
                 &self,
                 _request: PermissionCheckRequest,
             ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-                Box::pin(async {
-                    Ok(PermissionDecision {
-                        decision: "allow".into(),
-                        reason: None,
-                    })
-                })
+                Box::pin(async { Ok(PermissionDecision::allow()) })
             }
             fn emit_event(&self, _event: serde_json::Value) {}
             fn cancel_llm_chat(&self, request_id: &str) {

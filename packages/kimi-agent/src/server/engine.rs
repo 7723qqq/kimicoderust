@@ -142,10 +142,9 @@ impl HostCallbacks for ServerHost {
             })
         } else {
             Box::pin(async {
-                Ok(PermissionDecision {
-                    decision: "deny".into(),
-                    reason: Some("no interactive approver in the standalone engine".into()),
-                })
+                Ok(PermissionDecision::deny(
+                    "no interactive approver in the standalone engine",
+                ))
             })
         }
     }

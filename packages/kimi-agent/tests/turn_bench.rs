@@ -120,12 +120,7 @@ impl HostCallbacks for InstantHost {
         'static,
         Result<kimi_agent::rpc::types::PermissionDecision, String>,
     > {
-        Box::pin(async {
-            Ok(kimi_agent::rpc::types::PermissionDecision {
-                decision: "allow".into(),
-                reason: None,
-            })
-        })
+        Box::pin(async { Ok(kimi_agent::rpc::types::PermissionDecision::allow()) })
     }
 
     fn emit_event(&self, _: serde_json::Value) {}

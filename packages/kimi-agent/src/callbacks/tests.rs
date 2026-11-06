@@ -23,12 +23,7 @@ impl HostCallbacks for RecordingCallbacks {
         &self,
         _: PermissionCheckRequest,
     ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-        Box::pin(async {
-            Ok(PermissionDecision {
-                decision: "allow".into(),
-                reason: None,
-            })
-        })
+        Box::pin(async { Ok(PermissionDecision::allow()) })
     }
 
     fn emit_event(&self, event: serde_json::Value) {
@@ -659,11 +654,79 @@ async fn test_native_write_checkpoints_prepare_and_record() {
 }
 
 #[tokio::test]
+async fn a_remembered_session_approval_stops_the_second_ask() {
+    let dir = tempfile::tempdir().unwrap();
+    let toolset = Arc::new(NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap());
+    let permission_calls = Arc::new(AtomicU32::new(0));
+    let executed = Arc::new(AtomicU32::new(0));
+    let engine = Arc::new(crate::permission::PermissionEngine::new(
+        crate::permission::PolicySnapshot {
+            mode: crate::permission::PermissionMode::Manual,
+            ask_rules: vec!["Write(notes.txt)".into()],
+            ..Default::default()
+        },
+    ));
+    let native = NativeToolCallbacks {
+        inner: Arc::new(ScriptedPermissionCallbacks {
+            decision: PermissionDecision {
+                decision: "allow".into(),
+                reason: None,
+                // The host answered "allow, and remember the rule".
+                remember: true,
+            },
+            permission_calls: permission_calls.clone(),
+            executed: executed.clone(),
+        }),
+        toolset,
+        native_count: Arc::new(AtomicU32::new(0)),
+        truncator: None,
+        permission_engine: Some(engine.clone()),
+        plan_guard: None,
+        stale_guard: None,
+        goal_guard: None,
+        hook_guard: None,
+        agent_tool_veto: None,
+        tools_veto: None,
+        todo_tool_veto: None,
+        tower_worktree_root: None,
+        tower_enabled: false,
+        notify_user_enabled: true,
+        sandbox_policy: None,
+    };
+    let request = || ToolExecuteRequest {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        turn_id: "t".into(),
+        tool_call_id: "c1".into(),
+        tool_name: "Write".into(),
+        arguments: serde_json::json!({ "path": "notes.txt", "content": "x" }),
+    };
+
+    let first = native.execute_tool(request()).await.unwrap();
+    assert!(!first.is_error, "the approved write runs");
+    assert_eq!(
+        permission_calls.load(Ordering::Relaxed),
+        1,
+        "the ask rule forced one approval"
+    );
+    assert_eq!(
+        engine.session_approval_rules(),
+        vec!["Write(notes.txt)".to_string()],
+        "the engine recorded the rule the ask named"
+    );
+
+    let second = native.execute_tool(request()).await.unwrap();
+    assert!(!second.is_error);
+    assert_eq!(
+        permission_calls.load(Ordering::Relaxed),
+        1,
+        "a remembered rule is answered from session history, not re-asked"
+    );
+}
+
+#[tokio::test]
 async fn test_native_write_requires_permission_and_runs_on_allow() {
-    let (dir, native, permission_calls, executed, native_count) = gate_setup(PermissionDecision {
-        decision: "allow".into(),
-        reason: None,
-    });
+    let (dir, native, permission_calls, executed, native_count) =
+        gate_setup(PermissionDecision::allow());
     let response = native
         .execute_tool(ToolExecuteRequest {
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -695,10 +758,8 @@ async fn test_native_write_requires_permission_and_runs_on_allow() {
 
 #[tokio::test]
 async fn test_native_write_denial_never_executes() {
-    let (_dir, native, permission_calls, executed, native_count) = gate_setup(PermissionDecision {
-        decision: "deny".into(),
-        reason: Some("user declined".into()),
-    });
+    let (_dir, native, permission_calls, executed, native_count) =
+        gate_setup(PermissionDecision::deny("user declined"));
     let response = native
         .execute_tool(ToolExecuteRequest {
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -730,10 +791,8 @@ async fn test_read_only_tools_are_gated_too() {
     // The host policy chain can require interactive approval even for
     // reads (sensitive-file access) — so read-only native executions are
     // gated exactly like mutating ones.
-    let (_dir, native, permission_calls, executed, native_count) = gate_setup(PermissionDecision {
-        decision: "deny".into(),
-        reason: Some("sensitive file".into()),
-    });
+    let (_dir, native, permission_calls, executed, native_count) =
+        gate_setup(PermissionDecision::deny("sensitive file"));
     std::fs::write(
         _dir.path().join("a.txt"),
         "alpha
@@ -763,10 +822,7 @@ async fn test_sandbox_escape_is_not_reported_as_native_execution() {
     // not inflate native_tool_calls — otherwise the turn result would
     // claim a path that never served the call.
     let (_dir, native, _permission_calls, executed, native_count) =
-        gate_setup(PermissionDecision {
-            decision: "allow".into(),
-            reason: None,
-        });
+        gate_setup(PermissionDecision::allow());
     let response = native
         .execute_tool(ToolExecuteRequest {
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -900,10 +956,7 @@ fn stale_gate_setup(
 #[tokio::test]
 async fn test_stale_guard_denies_unread_native_write() {
     let (dir, native, executed, native_count, events, _state_reads) = stale_gate_setup(
-        PermissionDecision {
-            decision: "allow".into(),
-            reason: None,
-        },
+        PermissionDecision::allow(),
         Some(serde_json::json!({ "active": false })),
     );
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
@@ -951,10 +1004,7 @@ async fn test_stale_guard_denies_unread_native_write() {
 #[tokio::test]
 async fn test_stale_guard_allows_read_then_native_write() {
     let (dir, native, _executed, native_count, _events, _state_reads) = stale_gate_setup(
-        PermissionDecision {
-            decision: "allow".into(),
-            reason: None,
-        },
+        PermissionDecision::allow(),
         Some(serde_json::json!({ "active": false })),
     );
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
@@ -993,10 +1043,7 @@ async fn test_stale_guard_ignores_a_read_that_failed() {
     // fallback — and a failed read must not count as having read the file,
     // so the guard still blocks the write that follows.
     let (dir, native, executed, _native_count, _events, _state_reads) = stale_gate_setup(
-        PermissionDecision {
-            decision: "allow".into(),
-            reason: None,
-        },
+        PermissionDecision::allow(),
         Some(serde_json::json!({ "active": false })),
     );
     std::fs::write(dir.path().join("blob.bin"), b"plain prefix\x00\x01").unwrap();
@@ -1036,10 +1083,7 @@ async fn test_permission_deny_beats_stale_guard() {
     // v2 chain order: permission → plan → staleGuard. A permission deny
     // short-circuits before the stale gate is consulted at all.
     let (dir, native, _executed, _native_count, _events, state_reads) = stale_gate_setup(
-        PermissionDecision {
-            decision: "deny".into(),
-            reason: Some("user declined".into()),
-        },
+        PermissionDecision::deny("user declined"),
         Some(serde_json::json!({ "active": false })),
     );
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
@@ -1141,10 +1185,7 @@ fn goal_gate_setup(
         route_to_host,
     ));
     let fake: Arc<dyn HostCallbacks> = Arc::new(GoalGateHostCallbacks {
-        decision: PermissionDecision {
-            decision: "allow".into(),
-            reason: None,
-        },
+        decision: PermissionDecision::allow(),
         permission_calls: permission_calls.clone(),
         executed: executed.clone(),
         goal_reads: goal_reads.clone(),
@@ -1353,10 +1394,7 @@ fn hook_gate_setup(
     let goal_reads = Arc::new(AtomicU32::new(0));
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let fake: Arc<dyn HostCallbacks> = Arc::new(GoalGateHostCallbacks {
-        decision: PermissionDecision {
-            decision: "allow".into(),
-            reason: None,
-        },
+        decision: PermissionDecision::allow(),
         permission_calls: permission_calls.clone(),
         executed: executed.clone(),
         goal_reads: goal_reads.clone(),
@@ -1987,12 +2025,7 @@ impl HostCallbacks for CheckpointFailingCallbacks {
         &self,
         _: PermissionCheckRequest,
     ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-        Box::pin(async {
-            Ok(PermissionDecision {
-                decision: "allow".into(),
-                reason: None,
-            })
-        })
+        Box::pin(async { Ok(PermissionDecision::allow()) })
     }
     fn checkpoint(&self, _: CheckpointRequest) -> BoxFuture<'static, Result<(), String>> {
         Box::pin(async { Err("pre-image capture failed: disk full".into()) })
@@ -2044,12 +2077,7 @@ impl HostCallbacks for PlanHostCallbacks {
         &self,
         _: PermissionCheckRequest,
     ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-        Box::pin(async {
-            Ok(PermissionDecision {
-                decision: "allow".into(),
-                reason: None,
-            })
-        })
+        Box::pin(async { Ok(PermissionDecision::allow()) })
     }
     fn state_read(
         &self,
@@ -2632,12 +2660,7 @@ impl HostCallbacks for HostOwnedGoalCallbacks {
         &self,
         _: PermissionCheckRequest,
     ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-        Box::pin(async {
-            Ok(PermissionDecision {
-                decision: "allow".into(),
-                reason: None,
-            })
-        })
+        Box::pin(async { Ok(PermissionDecision::allow()) })
     }
 
     fn emit_event(&self, event: serde_json::Value) {

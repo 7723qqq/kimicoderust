@@ -156,3 +156,52 @@
 | `check:rust-module-deps` | 0 | 270 → **271** 条边（新增 `config -> test_support`，按官方通道记录） |
 | `check:architecture` | 0 | 21 modules（`kimi-agent` 指纹 `b3fbae663d56a9a4` → `9f3815fa8bb4f6e5`） |
 
+## 6. 2026-11-06 补 Rust 之一：会话批准的记忆半边（exit 0）
+
+**落点**：`packages/kimi-agent/src/permission/mod.rs`、`src/rpc/types.rs`、
+`src/callbacks.rs`、`packages/node-sdk/src/native/sdk-client/build-handle.ts`。
+
+**事实基线**（逐个对着 TS 实现核出来的）：
+
+- 引擎只会**读**快照里的 `session_approvals`（`permission/mod.rs` 第 5 步
+  `SessionApprovalHistory`，`compiled_session`），Rust 里没有任何写点；
+- 唯一记录方是 TS：`packages/node-sdk/src/native/session-approvals.ts` 的
+  `rememberSessionApproval`，写在 `NativeSessionMeta.sessionApprovals`，靠重建快照
+  回灌；
+- 决策回包 `PermissionDecision` 只有 `decision`/`reason`，宿主无法表达"记住这条规则"。
+
+**改动**：
+
+- `PermissionEngine` 新增自持清单 `session_records`（`RwLock<Vec<CompiledRule>>`）与
+  `remember_session_approval(&self, rule) -> bool`、`session_approval_rules()`；
+  第 5 步先查自持清单、再查快照，两者同权。
+- `PermissionDecision` 新增 `remember: bool`（`serde(default)` + 不序列化 false），
+  宿主在"允许且本会话记住"时置真。
+- `callbacks.rs` 的 Ask 分支在返回允许后，用该次询问携带的
+  `session_approval_rule` 写入引擎清单——现在宿主不保存任何清单，下一次同规则调用也
+  不再询问。
+- TS 侧 `checkPermission` 在 `scope === 'session'` 时回 `{decision:'allow', remember:true}`；
+  原有本地清单保留（重建快照仍可携带）。
+
+**顺带**：`PermissionDecision` 的字面量构造点（`callbacks/tests.rs` 14 处、
+`llm/multi.rs` 4 处、`pipeline`/`server`/三个 guard/`turn_bench` 各 1 处）统一改用
+`::allow()` / `::deny(reason)`，新增字段才不会散落到各 fixture。
+
+**验证**（全部当场执行）：
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib permission::` | 0 | 65 passed（+3：记录后不再问、只覆盖自己的 pattern、重复/空规则不记） |
+| `cargo test --lib callbacks::` | 0 | 49 passed（+1：宿主回 remember 后第二次调用不再询问） |
+| 变异验证 | — | 把 `remember` 改回 `false` → 新用例在"引擎记录了规则"处失败；还原后通过 |
+| `cargo test --lib`（全量） | 0 | 3637 passed / 0 failed（23.0s） |
+| `vitest session-approvals + permission-acceptance` | 0 | 14 passed |
+| `bun run typecheck` | 0 | clean |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun run check:all` | 0 | 19 道全绿（`kimi-agent`、`node-sdk` 指纹刷新；normify `engine.core` 刷新） |
+
+**下一步（同一条线）**：`parseBash`——引擎侧完全没有实现，TS 用
+`bashTargetDirs` + `packages/tree-sitter-bash`（7 文件 / 5,000 行）解析 shell 命令给
+AGENTS.md 操作数提醒用。这是 14 个宿主缝里唯一"Rust 侧为零"的一个。
+
+

@@ -754,6 +754,7 @@ export async function buildSessionHandle(
           // directions that matter (a rejection must never be remembered, a
           // different rule must still ask) are exactly what a plumbing test
           // would miss.
+          const remember = res.scope === 'session' && approvalRule !== undefined;
           if (sessionMeta !== undefined) {
             const remembered = rememberSessionApproval(
               approvalRule,
@@ -762,7 +763,9 @@ export async function buildSessionHandle(
             );
             sessionMeta.sessionApprovals = [...remembered];
           }
-          return JSON.stringify({ decision: 'allow' });
+          // The engine records the rule itself as well, so an approval survives
+          // a host that keeps no list (and a UI with no host to ask at all).
+          return JSON.stringify(remember ? { decision: 'allow', remember } : { decision: 'allow' });
         }
         return JSON.stringify({ decision: 'deny', reason: res.feedback ?? 'User rejected' });
       } catch {

@@ -285,6 +285,15 @@ pub struct PermissionDecision {
     pub decision: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// The host answered "allow, and remember this rule for the session".
+    ///
+    /// The engine records the rule its ask carried ([`PermissionCheckRequest::session_approval_rule`])
+    /// so the next call under the same rule stops asking — without the host
+    /// having to keep a list and fold it back into a rebuilt snapshot. Absent
+    /// on the wire means "this once", which is what a host that predates the
+    /// field already meant.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remember: bool,
 }
 
 impl PermissionDecision {
@@ -292,6 +301,7 @@ impl PermissionDecision {
         Self {
             decision: "allow".into(),
             reason: None,
+            remember: false,
         }
     }
 
@@ -303,6 +313,7 @@ impl PermissionDecision {
         Self {
             decision: "deny".into(),
             reason: Some(reason.into()),
+            remember: false,
         }
     }
 }

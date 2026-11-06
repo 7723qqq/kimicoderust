@@ -382,12 +382,7 @@ mod tests {
             &self,
             _: PermissionCheckRequest,
         ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
-            Box::pin(async {
-                Ok(PermissionDecision {
-                    decision: "allow".into(),
-                    reason: None,
-                })
-            })
+            Box::pin(async { Ok(PermissionDecision::allow()) })
         }
 
         fn emit_event(&self, event: Value) {

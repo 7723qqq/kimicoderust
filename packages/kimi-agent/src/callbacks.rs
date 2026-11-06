@@ -855,7 +855,8 @@ impl HostCallbacks for NativeToolCallbacks {
                                 )
                                 .await;
                         }
-                        this.inner
+                        let decision = this
+                            .inner
                             .check_permission(PermissionCheckRequest {
                                 tool_name: request.tool_name.clone(),
                                 // The rule that matched is what a session approval
@@ -872,7 +873,17 @@ impl HostCallbacks for NativeToolCallbacks {
                                 // naming the tool. Localized on the engine side.
                                 reason: verdict.reason.clone(),
                             })
-                            .await?
+                            .await?;
+                        // "Approve for this session" is recorded here, on the
+                        // engine's own list: a host that keeps no list of its
+                        // own (or a UI with no host at all) still stops asking.
+                        if decision.is_allow()
+                            && decision.remember
+                            && let Some(ref rule) = verdict.session_approval_rule
+                        {
+                            engine.remember_session_approval(rule);
+                        }
+                        decision
                     }
                 }
             } else {

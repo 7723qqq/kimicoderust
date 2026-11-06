@@ -397,6 +397,11 @@ pub struct PermissionEngine {
     compiled_ask: Vec<CompiledRule>,
     compiled_allow: Vec<CompiledRule>,
     compiled_session: Vec<CompiledRule>,
+    /// Rules the user approved "for this session" while this engine was
+    /// running. The snapshot carries the ones a host restored; this list is
+    /// what the engine records itself, so the approval survives a host that
+    /// keeps no copy of its own (and works for a UI that has no host to ask).
+    session_records: RwLock<Vec<CompiledRule>>,
     /// The session workspace root (v2 `ISessionWorkspaceContext.workDir`) and
     /// the host-authorized `additionalDirs` — `GitCwdWriteApprove`'s
     /// containment gate. Empty for an engine built without them; that policy
@@ -449,9 +454,49 @@ impl PermissionEngine {
             compiled_ask,
             compiled_allow,
             compiled_session,
+            session_records: RwLock::new(Vec::new()),
             workspace_root,
             additional_dirs,
         }
+    }
+
+    /// Record `rule` as approved for the rest of this session.
+    ///
+    /// Returns whether the engine learned something: a rule the snapshot
+    /// already carries, one this engine already recorded, or a pattern that
+    /// does not compile changes nothing. The user's own rule is what is
+    /// remembered — approving "Bash" for a session would grant every later
+    /// Bash call, including the dangerous ones the rule was written to catch.
+    pub fn remember_session_approval(&self, rule: &str) -> bool {
+        let rule = rule.trim();
+        if rule.is_empty() {
+            return false;
+        }
+        if self.compiled_session.iter().any(|r| r.raw_rule == rule) {
+            return false;
+        }
+        let Some(compiled) = CompiledRule::compile(rule) else {
+            return false;
+        };
+        let mut records = self
+            .session_records
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if records.iter().any(|r| r.raw_rule == rule) {
+            return false;
+        }
+        records.push(compiled);
+        true
+    }
+
+    /// The rules this engine recorded itself, in approval order.
+    pub fn session_approval_rules(&self) -> Vec<String> {
+        self.session_records
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|r| r.raw_rule.clone())
+            .collect()
     }
 
     /// Evaluate permission for a tool call.
@@ -592,10 +637,20 @@ impl PermissionEngine {
             };
         }
 
-        // 5. SessionApprovalHistory
-        if let Some(rule) =
-            Self::matches_any_rule(&self.compiled_session, &tool_lower, &rule_subjects)
-        {
+        // 5. SessionApprovalHistory — the rules a host restored in the snapshot
+        //    plus the ones this engine recorded while answering approvals. The
+        //    engine-side record is what makes the choice survive a host that
+        //    keeps no list of its own.
+        let session_rule = {
+            let records = self
+                .session_records
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            Self::matches_any_rule(&records, &tool_lower, &rule_subjects).or_else(|| {
+                Self::matches_any_rule(&self.compiled_session, &tool_lower, &rule_subjects)
+            })
+        };
+        if let Some(rule) = session_rule {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Allow,
                 policy_name: "SessionApprovalHistory".into(),
@@ -1636,6 +1691,87 @@ mod tests {
         assert_eq!(verdict.decision, VerdictDecision::Allow);
         assert_eq!(verdict.policy_name, "AutoModeApprove");
         assert_eq!(verdict.reason, None);
+    }
+
+    #[test]
+    fn an_engine_recorded_approval_stops_the_next_ask() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Manual,
+            ..Default::default()
+        });
+        assert_eq!(
+            engine
+                .evaluate("Write", &json!({ "path": "notes.txt" }))
+                .decision,
+            VerdictDecision::Ask
+        );
+
+        assert!(engine.remember_session_approval("Write(notes.txt)"));
+
+        let verdict = engine.evaluate("Write", &json!({ "path": "notes.txt" }));
+        assert_eq!(verdict.decision, VerdictDecision::Allow);
+        assert_eq!(verdict.policy_name, "SessionApprovalHistory");
+        assert_eq!(
+            engine.session_approval_rules(),
+            vec!["Write(notes.txt)".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_recorded_rule_covers_its_own_pattern_and_nothing_else() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Manual,
+            ..Default::default()
+        });
+        assert!(engine.remember_session_approval("Write(src/*.rs)"));
+
+        assert!(
+            engine
+                .evaluate("Write", &json!({ "path": "src/lib.rs" }))
+                .is_allow(),
+            "the approved pattern is allowed"
+        );
+        assert_eq!(
+            engine
+                .evaluate("Write", &json!({ "path": "notes.txt" }))
+                .decision,
+            VerdictDecision::Ask,
+            "approving one path must not approve the tool"
+        );
+        assert_eq!(
+            engine
+                .evaluate("Read", &json!({ "path": "src/lib.rs" }))
+                .decision,
+            VerdictDecision::Allow,
+            "Read is allowed by the default policy, not by the Write rule"
+        );
+    }
+
+    #[test]
+    fn a_rule_is_recorded_once_and_only_when_it_can_mean_something() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Manual,
+            session_approvals: vec!["Bash(cargo test)".into()],
+            ..Default::default()
+        });
+
+        assert!(
+            !engine.remember_session_approval("   "),
+            "an empty rule grants nothing"
+        );
+        assert!(
+            !engine.remember_session_approval("Bash(cargo test)"),
+            "a rule the snapshot already carries is not re-recorded"
+        );
+        assert!(engine.remember_session_approval("Bash(cargo build)"));
+        assert!(
+            !engine.remember_session_approval("Bash(cargo build)"),
+            "recording twice is a no-op"
+        );
+        assert_eq!(
+            engine.session_approval_rules(),
+            vec!["Bash(cargo build)".to_string()]
+        );
     }
 
     #[test]

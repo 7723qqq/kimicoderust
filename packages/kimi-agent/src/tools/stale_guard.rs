@@ -565,12 +565,7 @@ mod tests {
             'static,
             Result<crate::rpc::types::PermissionDecision, String>,
         > {
-            Box::pin(async {
-                Ok(crate::rpc::types::PermissionDecision {
-                    decision: "allow".into(),
-                    reason: None,
-                })
-            })
+            Box::pin(async { Ok(crate::rpc::types::PermissionDecision::allow()) })
         }
 
         fn state_read(
