@@ -2841,3 +2841,144 @@ async fn test_an_engine_created_goal_survives_a_host_reporting_none() {
     assert_eq!(response.value["goal"]["turnsUsed"], 1);
     assert!(store.goal_context().is_some());
 }
+
+/// A host that answers the goal seam, or reports it has none.
+struct GoalHostCallbacks {
+    goal: Option<crate::rpc::types::GoalContext>,
+    supported: bool,
+}
+
+impl HostCallbacks for GoalHostCallbacks {
+    fn llm_chat(&self, _: LlmChatRequest) -> BoxFuture<'static, Result<LlmChatResponse, String>> {
+        Box::pin(async { Err("not used".into()) })
+    }
+    fn execute_tool(
+        &self,
+        _: ToolExecuteRequest,
+    ) -> BoxFuture<'static, Result<ToolExecuteResponse, String>> {
+        Box::pin(async { Err("not used".into()) })
+    }
+    fn check_permission(
+        &self,
+        _: PermissionCheckRequest,
+    ) -> BoxFuture<'static, Result<PermissionDecision, String>> {
+        Box::pin(async { Ok(PermissionDecision::allow()) })
+    }
+    fn goal(&self) -> BoxFuture<'static, Result<Option<crate::rpc::types::GoalContext>, String>> {
+        if !self.supported {
+            return Box::pin(async { Err("host does not support goal".into()) });
+        }
+        let goal = self.goal.clone();
+        Box::pin(async move { Ok(goal) })
+    }
+}
+
+fn host_goal(goal_id: &str) -> crate::rpc::types::GoalContext {
+    crate::rpc::types::GoalContext {
+        goal_id: goal_id.into(),
+        objective: "Ship it".into(),
+        status: crate::rpc::types::GoalStatus::Active,
+        token_budget: None,
+        turn_budget: None,
+        wall_clock_budget_ms: None,
+        wall_clock_ms: 0,
+        tokens_used: 0,
+        turns_used: 0,
+        updated_at: 1,
+        terminal_reason: None,
+    }
+}
+
+fn workspace_state(workspace: &std::path::Path, domain: &str) -> serde_json::Value {
+    let raw = crate::storage::state_store::read_workspace_state(workspace, domain)
+        .expect("the domain must be stored");
+    serde_json::from_str(&raw).unwrap()
+}
+
+/// The undo anchor is pushed at the head of a turn, and a host-owned goal only
+/// reaches the store through a goal-domain write (the turn-end fold, a model
+/// `UpdateGoal`). A goal the user created between turns was therefore missing
+/// from the anchor, and an undo restored the "no goal" the store still held —
+/// the goal vanished from the panel. v2 pushed the same checkpoint against the
+/// store its goal writes landed in, so the fold happens before the snapshot.
+#[tokio::test]
+async fn test_checkpoint_state_captures_the_host_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_workspace(dir.path()).unwrap());
+    let adapter = StateStoreCallbacks {
+        inner: Arc::new(GoalHostCallbacks {
+            goal: Some(host_goal("goal-host")),
+            supported: true,
+        }),
+        store: store.clone(),
+        cron_store: store.clone(),
+    };
+    assert!(store.goal_context().is_none());
+
+    adapter.checkpoint_state().await.unwrap();
+
+    let stored = workspace_state(dir.path(), "goal");
+    assert_eq!(stored["goal"]["goalId"], "goal-host");
+    assert_eq!(stored["goal"]["objective"], "Ship it");
+}
+
+/// A host that reports no goal has cleared its own copy (v2 `cancelGoal`), and
+/// the store must follow — otherwise the anchor resurrects a goal the user
+/// cancelled.
+#[tokio::test]
+async fn test_checkpoint_state_follows_a_host_that_has_no_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_workspace(dir.path()).unwrap());
+    store
+        .sync_goal_from_context(&host_goal("goal-host"))
+        .unwrap();
+    let adapter = StateStoreCallbacks {
+        inner: Arc::new(GoalHostCallbacks {
+            goal: None,
+            supported: true,
+        }),
+        store: store.clone(),
+        cron_store: store.clone(),
+    };
+
+    adapter.checkpoint_state().await.unwrap();
+
+    assert!(store.goal_context().is_none());
+    assert_eq!(
+        workspace_state(dir.path(), "goal")["goal"],
+        serde_json::json!(null)
+    );
+}
+
+/// An engine-created goal the host has not adopted yet (a model `CreateGoal`
+/// that no turn has reported) must survive a host saying it has none, and a
+/// host without the seam at all must leave the store alone.
+#[tokio::test]
+async fn test_checkpoint_state_keeps_a_goal_the_host_never_adopted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::storage::StateStore::for_workspace(dir.path()).unwrap());
+    let outcome = store
+        .apply_write(
+            "goal",
+            &serde_json::json!({ "action": "create", "objective": "Model goal" }),
+        )
+        .unwrap();
+    store.write_domain("goal", &outcome.stored).unwrap();
+
+    for supported in [true, false] {
+        let adapter = StateStoreCallbacks {
+            inner: Arc::new(GoalHostCallbacks {
+                goal: None,
+                supported,
+            }),
+            store: store.clone(),
+            cron_store: store.clone(),
+        };
+        adapter.checkpoint_state().await.unwrap();
+        assert_eq!(
+            store.goal_context().map(|goal| goal.objective),
+            Some("Model goal".to_string()),
+            "supported={supported} must not clear a goal the host never adopted"
+        );
+    }
+}

@@ -36,6 +36,13 @@ function originKind(message: { readonly origin?: unknown }): string | undefined 
   return (message.origin as { readonly kind?: string } | undefined)?.kind;
 }
 
+/**
+ * A tool call the mock model makes on its next request, consumed once. An
+ * active goal keeps the engine's pump continuing turns, so a test that wants a
+ * settled session has to let the model finish the goal in the same turn.
+ */
+let queuedToolCall: { readonly name: string; readonly arguments: string } | null = null;
+
 describe.skipIf(!hasNativeAddon)('session undo semantics', () => {
   let homeDir: string;
   let workDir: string;
@@ -43,6 +50,7 @@ describe.skipIf(!hasNativeAddon)('session undo semantics', () => {
   let server: import('node:http').Server;
 
   beforeEach(async () => {
+    queuedToolCall = null;
     const { createServer } = await import('node:http');
     server = createServer((req, res) => {
       req.on('data', () => {});
@@ -64,6 +72,23 @@ describe.skipIf(!hasNativeAddon)('session undo semantics', () => {
             model: 'mock',
             choices: [{ index: 0, delta, finish_reason: finish }],
           })}\n\n`;
+        const toolCall = queuedToolCall;
+        queuedToolCall = null;
+        if (toolCall !== null) {
+          res.write(
+            chunk({
+              role: 'assistant',
+              content: '',
+              tool_calls: [
+                { index: 0, id: 'call_1', type: 'function', function: toolCall },
+              ],
+            }),
+          );
+          res.write(chunk({}, 'tool_calls'));
+          res.write('data: [DONE]\n\n');
+          res.end();
+          return;
+        }
         res.write(chunk({ role: 'assistant', content: 'ok' }));
         res.write(chunk({}, 'stop'));
         res.write('data: [DONE]\n\n');
@@ -145,6 +170,47 @@ max_context_size = 200000
     await expect(session.undoHistory(1)).rejects.toMatchObject({
       code: 'session.undo_unavailable',
     });
+    await session.close();
+  }, 30_000);
+
+  /**
+   * The engine's rollback carries the goal with it, and the host's cached copy
+   * is what the next turn's goal provider hands back to the engine — a stale
+   * one let `sync_goal_from_context` write the undone fold straight back, so
+   * the goal silently disagreed with the transcript it had just been rewound
+   * with. `meta.goal` now follows the store the rollback restored.
+   */
+  it('restores the goal the cut turn started with', async () => {
+    const session = await harness.createSession({ id: 'ses_undo_goal', workDir });
+    await session.createGoal({ objective: 'Ship the undo tail' });
+    expect((await session.getGoal()).goal?.status).toBe('active');
+
+    // The model completes the goal in its turn, so the pump does not keep
+    // continuing an active goal and the session settles for the undo.
+    queuedToolCall = {
+      name: 'UpdateGoal',
+      arguments: JSON.stringify({ status: 'complete' }),
+    };
+    const ended = waitForTurnEnded(session);
+    await session.prompt('one');
+    await expect(ended).resolves.toMatchObject({ reason: 'completed' });
+    // The store moved during the turn and the host adopted the engine's
+    // `goal.updated` — the folded goal is the state undo has to rewind.
+    expect((await session.getGoal()).goal?.status).toBe('complete');
+
+    const updates: (string | null)[] = [];
+    const unsubscribe = session.onEvent((event) => {
+      if (event.type === 'goal.updated') updates.push(event.snapshot?.status ?? null);
+    });
+    await session.undoHistory(1);
+    unsubscribe();
+
+    // The rollback restored the goal as the cut turn started it, and the host
+    // followed instead of handing the completed copy back to the engine.
+    expect((await session.getGoal()).goal?.status).toBe('active');
+    // The panel has to see the rewind as an update, or it keeps showing the
+    // goal the engine no longer holds.
+    expect(updates).toEqual(['active']);
     await session.close();
   }, 30_000);
 });

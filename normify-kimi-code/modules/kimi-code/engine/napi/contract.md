@@ -10,9 +10,9 @@ description:
   en: >
       The JS-side type contract: index.native.d.ts and napi-contract.d.ts mirroring the napi exports.
       
-revision: 28f4b101d79bba811d53e53662341c0bb0fe93c0
-updated_at: "2026-11-06T04:54:04.163Z"
-fingerprint: 56f7ef89cace5998bff5303ff7b5b14dd56dbfc56e1da0134cd975b5bffd1e8c
+revision: 0d56d0f231fbf1ce583869a837bde532d1473c9e
+updated_at: "2026-11-06T11:21:01.076Z"
+fingerprint: 72086b3290b1dc2865f5cceb4b0ddc4041040efd9d4ad95cd827d43a034abb21
 source:
   - path: "packages/kimi-agent/index.native.d.ts"
   - path: "packages/kimi-agent/napi-contract.d.ts"

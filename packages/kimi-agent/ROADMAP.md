@@ -403,3 +403,67 @@ turn**。回合内子代理触发的 hook 输出因此只能被读成主代理�
 | `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
 | `bun run typecheck` | 0 | clean |
 | `bun run check:all` | 0 | 19 道全绿（`kimi-agent`/`node-sdk` 指纹、normify 4 模块刷新） |
+
+## 11. 2026-11-06 补 Rust 之六：undo 的 goal 尾巴（exit 0）
+
+**落点**：`packages/kimi-agent/src/callbacks.rs`（`StateStoreCallbacks::checkpoint_state`）、
+`packages/node-sdk/src/native/sdk-client/helpers.ts`（`goalStateFromEngineStore`、goal 映射）、
+`packages/node-sdk/src/native/sdk-rpc-client-native.ts`（`undoHistory`）、
+`packages/kimi-agent/napi-contract.d.ts`（重新生成）。
+
+### 11.1 对齐判定（对着 TS 逐缝核实）
+
+| 缝 | 判定 |
+|---|---|
+| `undoHistory` 的引擎回滚（`nativeRollbackEngineState` → `rollback_scoped_state`） | **Rust 已完全等价**：按 undo-anchor 回合数弹会话快照，栈耗尽静默停止 |
+| undo 之后的 goal 投影 | **不是 Rust 单侧能收口的缺口**：宿主把 `meta.goal` 作为下一回合的 goal 提供者交给引擎，`sync_goal_from_context` 按 `updated_at` 信任更晚的宿主副本，于是引擎刚回滚掉的 goal 会被下一次回合原样写回——回滚的有效期只有一个回合 |
+| checkpoint 的内容 | **Rust 侧的等价缺口（本批修）**：v2 的 undo 锚取自 goal 写入的同一个 store；本仓 goal 是 host-owned，靠回合末 fold 才落 store，回合头的锚看不到"用户刚建的 goal"，undo 会把 goal 删掉 |
+| `plan` 域 | **已知偏差，不按缺陷处理**：plan 是 host-first（`stateRead` / `stateWrite` 由宿主回答），引擎回滚的 plan 快照是惰性的；undo 不回退 `planMode` 与计划文件。这是 M5 的设计决定，要改需另立裁决 |
+| `todo` 域 | 不需处理：宿主每次 `getTodos` 都向引擎读 |
+
+### 11.2 改动
+
+1. `StateStoreCallbacks::checkpoint_state` 先折宿主 goal 再推快照：`Ok(Some)` → `sync_goal_from_context`；
+   `Ok(None)` → `clear_host_goal`（只清 `host_owned`，引擎自建且宿主未采纳的不受影响）；
+   `Err`（宿主没有该缝，如 standalone server / REPL）→ 一个字都不动。同步失败只 `warn`，不阻断锚点。
+2. `goalStateFromEngineStore`：解码 store 的 `goal` 域。它与 `goal.updated` 的快照不同形——限额拼作
+   `budgetLimits`，`wallClockMs` 是**已结算**值，续跑锚点 `wallClockResumedAt` 在旁边；宿主按 `updatedAt`
+   外推（v2 `liveWallClockMs`），所以 active 目标要把 settled 值重锚到 now，否则每次都少算"上次 fold 到现在"。
+   三态返回：`undefined` = 读不出来（保留宿主副本，绝不凭空造 state）、`null` = 存储里的"无 goal"。
+3. `undoHistory`：rollback 消费了快照（`consumed > 0`）才采纳引擎回滚后的 goal。栈耗尽时引擎状态没变，
+   宿主仍是权威，不动。只在 goal 的身份/计数真变时发 `goal.updated`——时间戳被重锚过，不能当变化判据。
+4. `goalStateFromSnapshot` 补回 `terminalReason` / `completionCriterion`：此前两者被静默丢弃，
+   宿主每次 `goal.updated` 都把引擎报的停机原因丢掉；`toGoalSnapshot` 同口径输出。
+
+### 11.3 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib callbacks::tests::test_checkpoint_state` | 0 | 3 passed |
+| **变异验证（sync）** | — | 把 `Ok(Some)` 分支的同步打掉 → `test_checkpoint_state_captures_the_host_goal` 红；还原即绿 |
+| **变异验证（clear）** | — | 把 `Ok(None)` 分支改成空实现 → `test_checkpoint_state_follows_a_host_that_has_no_goal` 红；还原即绿 |
+| `bun --bun run vitest run packages/node-sdk/test/goal-state.test.ts` | 0 | 9 passed |
+| `bun --bun run vitest run packages/node-sdk/test/session-undo.test.ts` | 0 | 2 passed |
+| **变异验证（读回）** | — | 关掉 undo 的读回 → 集成用例报 `expected 'complete' to be 'active'`；还原即绿 |
+| `cargo test --lib`（全量） | 0 | 3658 passed / 0 failed |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun run check:parity` | 0 | napi 104 / tools 89 / WS events 27 |
+| `bun run typecheck` | 0 | 全部包 exit 0 |
+| `bun run check:architecture` | 0 | 21 modules；指纹 `kimi-agent` / `node-sdk` 经 `--update` 刷新后复核 |
+| `bun run check:normify` | 0 | 0 error / 60 warning；`napi.contract` / `sdk.node` / `sdk.node.native-client` 三个指纹经 `normify_module_refresh` 刷新 |
+| `bun run scan:hardcoded:rust` | 0（第二次） | 首次失败：两条新 `warn` 文案未登记。按 `diagnostic` 逐行补进 `scripts/hardcoded-rust-allowlist.json`（+2 条，既有条目一字未动），复核 2729 recorded / 2729 found、0 new / 0 stale |
+| `bun run check:all` | 0 | 20 道全绿（含上述扫描） |
+
+### 11.4 说明与仍未收口
+
+- 集成用例必须让模型在同一回合内 `UpdateGoal{status:'complete'}` 收尾：goal 处于 active 时引擎的泵会立刻续跑
+  下一回合，`tryAcquireQuiescence()` 因此拒绝 undo（`SESSION_BUSY`）。这是既有语义，不是测试假象。
+- `native-harness.test.ts` 的「installs a plugin…」用例在 `afterEach` 报
+  `EBUSY: rm`（Windows 上目录仍被占用）。**与本节无关，属既有缺陷**：把本节唯一的 Rust 改动回退、重建插件后
+  原样复现（`1 failed | 19 passed`），故不在此批处理，留作独立条目。
+- `napi-contract.d.ts` 是构建产物：此前三次批次新增的字段注释（`terminalReason` / `alias` /
+  `notifyUserEnabled`）没回写，本次构建补齐，纯注释变化，无签名变动。
+- plan 的 undo 语义仍是开放项（见 §11.1 表格），与 §4 的待裁决清单一并跟踪。
+- **`check:upstream-v2-delta` 的绿只代表"对该 pin 无新 delta"**：本机没有 `upstream` remote，且仓库是
+  partial clone、promisor 远端走 HTTPS（github.com:443 在本机超时），`git fetch` 刷不动 ref，仍停在
+  `a2afdbc7d`。要真正判定上游新增，需要先在能联网的机器上刷新该 ref 再复跑。

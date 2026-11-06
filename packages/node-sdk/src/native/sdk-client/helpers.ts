@@ -182,6 +182,8 @@ export interface NativeGoalBudget {
 export interface NativeGoalState {
   goalId: string;
   objective: string;
+  /** The verifiable end state the goal was created with, when it has one. */
+  completionCriterion?: string;
   status: GoalStatus;
   createdAt: number;
   updatedAt: number;
@@ -205,13 +207,18 @@ export interface NativeGoalState {
  * snapshot: the engine owns the goal fold (usage counters, status
  * transitions, budget limits), so the host adopts what it reports instead of
  * re-deriving it. Accepts both spellings the engine has used — camelCase
- * (`goalId`) and the snake_case GoalState aliases (`goal_id`).
+ * (`goalId`) and the snake_case GoalState aliases (`goal_id`) — and both limit
+ * spellings (`budget` on a snapshot, `budgetLimits` on the durable state the
+ * store keeps).
  */
 export function goalStateFromSnapshot(snapshot: Record<string, unknown>): NativeGoalState {
-  const budget =
-    typeof snapshot['budget'] === 'object' && snapshot['budget'] !== null
-      ? (snapshot['budget'] as Record<string, unknown>)
-      : {};
+  const limits = (key: string): Record<string, unknown> | undefined => {
+    const value = snapshot[key];
+    return typeof value === 'object' && value !== null
+      ? (value as Record<string, unknown>)
+      : undefined;
+  };
+  const budget = limits('budget') ?? limits('budgetLimits') ?? {};
   const number = (value: unknown): number | undefined =>
     typeof value === 'number' && Number.isFinite(value) ? value : undefined;
   const text = (value: unknown): string => (typeof value === 'string' ? value : '');
@@ -221,9 +228,16 @@ export function goalStateFromSnapshot(snapshot: Record<string, unknown>): Native
   const tokenBudget = number(budget['tokenBudget']);
   const turnBudget = number(budget['turnBudget']);
   const wallClockBudgetMs = number(budget['wallClockBudgetMs']);
+  const criterion = text(snapshot['completionCriterion']);
+  // Why the goal stopped (v2 `GoalSnapshot.terminalReason`). The engine folds
+  // this into the snapshot it reports, and the host hands it back on the next
+  // turn's goal provider — dropping it here made the panel and the transcript
+  // unable to say why a goal ended, whatever the engine had recorded.
+  const terminalReason = text(snapshot['terminalReason']);
   return {
     goalId: text(snapshot['goalId']) || text(snapshot['goal_id']),
     objective: text(snapshot['objective']),
+    completionCriterion: criterion || undefined,
     status: typeof status === 'string' ? (status as GoalStatus) : 'active',
     createdAt,
     updatedAt: number(snapshot['updatedAt']) ?? number(snapshot['updated_at']) ?? createdAt,
@@ -239,7 +253,49 @@ export function goalStateFromSnapshot(snapshot: Record<string, unknown>): Native
       turnBudget: turnBudget ?? null,
       wallClockBudgetMs: wallClockBudgetMs ?? null,
     },
+    terminalReason: terminalReason || undefined,
   };
+}
+
+/**
+ * Decode the engine's stored `goal` domain
+ * (`nativeReadEngineState(workDir, 'goal', sessionId)`) into the host's cached
+ * projection.
+ *
+ * The store keeps the durable v2 `GoalState`, not the snapshot the engine emits
+ * on `goal.updated`: the limits are spelled `budgetLimits`, the wall-clock
+ * figure is the **settled** elapsed time, and the stamp it accrues from
+ * (`wallClockResumedAt`) rides beside it. The host's live clock extrapolates
+ * from `updatedAt` (v2 `liveWallClockMs`), so the settled figure is rebased
+ * onto now while the goal is running — reading it verbatim would report a
+ * figure that stops at the last fold.
+ *
+ * `undefined` means the payload could not be read, and the caller keeps its own
+ * copy rather than inventing state; `null` is a stored "no goal".
+ */
+export function goalStateFromEngineStore(raw: string | null): NativeGoalState | null | undefined {
+  if (raw === null) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || !('goal' in parsed)) return undefined;
+  const stored = (parsed as { goal?: unknown }).goal;
+  if (stored === null) return null;
+  if (typeof stored !== 'object' || Array.isArray(stored)) return undefined;
+  const record = stored as Record<string, unknown>;
+  const goal = goalStateFromSnapshot(record);
+  if (goal.status === 'active') {
+    const now = Date.now();
+    const resumedAt = record['wallClockResumedAt'];
+    goal.wallClockMs =
+      (goal.wallClockMs ?? 0) +
+      (typeof resumedAt === 'number' ? Math.max(0, now - resumedAt) : 0);
+    goal.updatedAt = now;
+  }
+  return goal;
 }
 
 /**
@@ -278,6 +334,8 @@ export function toGoalSnapshot(goal: NativeGoalState): GoalSnapshot {
   return {
     goalId: goal.goalId,
     objective: goal.objective,
+    completionCriterion: goal.completionCriterion,
+    terminalReason: goal.terminalReason,
     status: goal.status,
     turnsUsed: goal.turnsUsed,
     tokensUsed: goal.tokensUsed,

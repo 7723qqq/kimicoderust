@@ -182,6 +182,7 @@ import { buildSessionHandle, type BuildHandleDeps } from './sdk-client/build-han
 import {
   toTurnEndReason,
   toGoalSnapshot,
+  goalStateFromEngineStore,
   nativeGoalWallClockMs,
   computeUndoCut,
   formatUndoUnavailable,
@@ -1682,8 +1683,40 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       // snapshots restores todo/plan/goal to the state the earliest cut turn
       // started from. An exhausted stack (a fork copied history only) is
       // normal and stops early without failing the undo.
-      const { nativeRollbackEngineState } = await import('@moonshot-ai/kimi-agent/native');
-      nativeRollbackEngineState(meta.workDir, meta.id, cut.removedCount);
+      const { nativeReadEngineState, nativeRollbackEngineState } =
+        await import('@moonshot-ai/kimi-agent/native');
+      const consumed = nativeRollbackEngineState(meta.workDir, meta.id, cut.removedCount);
+      // `meta.goal` is what the next turn's goal provider hands the engine, and
+      // the engine trusts a fresher host copy (`sync_goal_from_context`), so a
+      // stale cache wrote the undone goal straight back into the store: the
+      // rollback survived exactly one turn. The host now adopts the goal the
+      // rollback restored, exactly as an engine `goal.updated` would have left
+      // it. A stack that consumed nothing (a fork copies history only) changed
+      // no engine state, so the host's own goal stays the authority there.
+      if (consumed > 0) {
+        const restored = goalStateFromEngineStore(
+          nativeReadEngineState(meta.workDir, 'goal', meta.id),
+        );
+        if (restored !== undefined) {
+          const previous = meta.goal;
+          meta.goal = restored;
+          // Only a real change is an update: the restored copy is rebased onto
+          // now, so comparing the timestamps would report one on every undo.
+          const identity = (goal: typeof previous): string =>
+            goal === null ? 'null' : JSON.stringify({ ...goal, updatedAt: 0, wallClockMs: 0 });
+          if (identity(previous) !== identity(restored)) {
+            this.receiveEvent({
+              sessionId: input.sessionId,
+              agentId: 'main',
+              type: 'goal.updated',
+              snapshot:
+                restored === null
+                  ? null
+                  : (toGoalSnapshot(restored) as unknown as ProtocolGoalSnapshot),
+            });
+          }
+        }
+      }
     } finally {
       await meta.handle.releaseQuiescence();
     }

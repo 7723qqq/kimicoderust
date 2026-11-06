@@ -1859,7 +1859,33 @@ impl HostCallbacks for StateStoreCallbacks {
 
     fn checkpoint_state(&self) -> BoxFuture<'static, Result<(), String>> {
         let store = self.store.clone();
-        Box::pin(async move { store.checkpoint() })
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            // The undo anchor is pushed at the *head* of a turn, and a
+            // host-owned goal only reaches the store through a goal-domain
+            // write (the turn-end fold, a model `UpdateGoal`). A goal the user
+            // created after the previous turn therefore was not in the anchor:
+            // an undo restored the "no goal" the store still held and the goal
+            // vanished from the panel. v2 pushed the same checkpoint against
+            // the store its goal writes landed in, so folding the host snapshot
+            // in first is what makes this anchor equivalent. Fail-open — a host
+            // without the seam (`Err`) leaves the store as it was, and a sync
+            // error is logged rather than failing the checkpoint itself.
+            match inner.goal().await {
+                Ok(Some(context)) => {
+                    if let Err(error) = store.sync_goal_from_context(&context) {
+                        tracing::warn!(%error, "could not sync the goal before the checkpoint");
+                    }
+                }
+                Ok(None) => {
+                    if let Err(error) = store.clear_host_goal() {
+                        tracing::warn!(%error, "could not clear the goal before the checkpoint");
+                    }
+                }
+                Err(_) => {}
+            }
+            store.checkpoint()
+        })
     }
 
     fn list_tools(&self) -> BoxFuture<'static, Result<ListToolsResponse, String>> {

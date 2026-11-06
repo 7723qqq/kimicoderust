@@ -511,6 +511,16 @@
       "text": "Tool execute serialize error: {e}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/callbacks.rs:could not clear the goal before the checkpoint": {
+      "file": "packages/kimi-agent/src/callbacks.rs",
+      "text": "could not clear the goal before the checkpoint",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/callbacks.rs:could not sync the goal before the checkpoint": {
+      "file": "packages/kimi-agent/src/callbacks.rs",
+      "text": "could not sync the goal before the checkpoint",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/callbacks.rs:could not clear the local goal": {
       "file": "packages/kimi-agent/src/callbacks.rs",
       "text": "could not clear the local goal",

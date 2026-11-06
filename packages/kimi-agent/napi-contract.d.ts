@@ -213,6 +213,12 @@ export interface JsGoalContext {
   tokensUsed: number
   turnsUsed: number
   updatedAt: number
+  /**
+   * Why the host stopped the goal, when it stopped one (v2
+   * `GoalSnapshot.terminalReason`). Without it the engine's synced copy of a
+   * host-side pause has no reason to show.
+   */
+  terminalReason?: string
 }
 
 export interface JsLlmProviderDef {
@@ -305,6 +311,12 @@ export interface JsMessage {
 export interface JsNativeLlmConfig {
   /** "openai" (Chat Completions) or "anthropic" (Messages), or "google" / "openai_responses". */
   protocol: string
+  /**
+   * The `[models.<alias>]` name the host resolved this entry from (v2
+   * `ApiErrorEvent.alias`), carried so the engine's telemetry can name the
+   * alias the user selected rather than only the wire model.
+   */
+  alias?: string
   /**
    * Declared provider family (`[providers.*].type`, e.g. "kimi"): the
    * transport encodes the Kimi `thinking` object instead of a top-level
@@ -528,6 +540,12 @@ export interface JsRunTurnParams {
    * probe.
    */
   towerEnabled?: boolean
+  /**
+   * Host-resolved NotifyUser availability (`KIMI_CODE_EXPERIMENTAL_NOTIFY_USER`
+   * flag AND a host update panel — upstream #4054's two-input gate).
+   * `None` = `true`: the TUI host has an updates panel.
+   */
+  notifyUserEnabled?: boolean
   /**
    * Main-agent profile name (`--agent`, or the name a `--agent-file`
    * defines). Selects the role overlay built into the session prompt;
