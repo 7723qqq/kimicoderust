@@ -36,6 +36,7 @@ pub mod entry_op;
 pub mod event_class;
 pub mod headless;
 pub mod layout;
+pub mod render;
 pub mod render_backend;
 
 pub use coalesce::CoalescingPolicy;

@@ -1,0 +1,10 @@
+[package]
+name = "kimi-tui-app"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI application layer: drives kimi-ui-terminal from a decoded input stream and an EntryOp stream."
+
+[dependencies]
+crossterm = "0.29"
+kimi-ui-core = { path = "../kimi-ui-core" }
+kimi-ui-terminal = { path = "../kimi-ui-terminal" }

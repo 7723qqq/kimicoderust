@@ -61,6 +61,10 @@ pub struct TerminalBackend<W: Write> {
     /// Alt screen only: whether bytes of a frame are currently on screen, which
     /// `stop` needs before deciding to repaint.
     painted: bool,
+    /// How many lines the terminal currently holds. Scrollback keeps the last
+    /// of them **open** (no newline written after it) so a streamed append can
+    /// rewrite that line in place instead of printing the transcript again.
+    painted_lines: usize,
     /// Whether to emit SGR at all. A pipe, a `NO_COLOR` terminal or a dumb
     /// terminal gets the same text without the escape sequences.
     color: bool,
@@ -75,6 +79,7 @@ impl<W: Write> TerminalBackend<W> {
             mode,
             out,
             painted: false,
+            painted_lines: 0,
             color: true,
             last_error: None,
         }
@@ -149,6 +154,97 @@ impl<W: Write> TerminalBackend<W> {
             self.last_error = Some(error);
         }
     }
+
+    /// Append to the scrollback, keeping the last line **open**.
+    ///
+    /// The open line is what makes streaming work here: a token append changes
+    /// the last line, and a scrollback terminal cannot retract a line it has
+    /// terminated. So the previous paint left the cursor on that line, and this
+    /// pass rewrites it in place (`\r`, the new text, `\x1b[K`) instead of
+    /// reprinting the transcript below itself.
+    ///
+    /// Everything above the open line is closed and cannot be corrected; a
+    /// change up there — or a frame that lost lines — falls back to a full
+    /// repaint, which is the caller's cue to accept duplicated output or pick
+    /// the alt-screen mode.
+    fn paint_scrollback(&mut self, styled: &[(String, Style)]) -> Vec<String> {
+        let len = styled.len();
+        let prev_len = self.painted_lines;
+        let common = styled
+            .iter()
+            .zip(self.state.last_frame.lines())
+            .take_while(|((line, _), previous)| line == *previous)
+            .count();
+        let unfixable =
+            self.state.force || (prev_len > 0 && (common + 1 < prev_len || len < prev_len));
+        let mut emitted = Vec::new();
+
+        if unfixable || prev_len == 0 {
+            for (index, (line, style)) in styled.iter().enumerate() {
+                self.write_styled_line(line, *style);
+                if index + 1 < len {
+                    self.write_raw("\r\n");
+                }
+                emitted.push(line.clone());
+            }
+            if len > 0 {
+                self.write_raw(CLEAR_LINE);
+            }
+        } else {
+            let open = prev_len - 1;
+            if common <= open {
+                // The open line changed under the cursor: rewrite it.
+                self.write_raw("\r");
+                self.write_styled_line(&styled[open].0, styled[open].1);
+                self.write_raw(CLEAR_LINE);
+                emitted.push(styled[open].0.clone());
+            }
+            if len > prev_len {
+                // Finalise the open line and print what follows it.
+                self.write_raw("\r\n");
+                for (index, (line, style)) in styled.iter().enumerate().skip(prev_len) {
+                    self.write_styled_line(line, *style);
+                    if index + 1 < len {
+                        self.write_raw("\r\n");
+                    }
+                    emitted.push(line.clone());
+                }
+                self.write_raw(CLEAR_LINE);
+            }
+        }
+
+        self.painted_lines = len;
+        self.flush();
+        emitted
+    }
+
+    /// Repaint the viewport in place: the alt screen owns the whole screen, so
+    /// there is nothing to preserve and no open line to keep.
+    fn paint_alt_screen(&mut self, styled: &[(String, Style)]) -> Vec<String> {
+        let changed = styled
+            .iter()
+            .map(|(line, _)| line)
+            .ne(self.state.last_frame.lines().iter());
+        if !changed && !self.state.force {
+            return Vec::new();
+        }
+        self.write_raw(HOME);
+        let last = styled.len().saturating_sub(1);
+        let mut emitted = Vec::with_capacity(styled.len());
+        for (index, (line, style)) in styled.iter().enumerate() {
+            self.write_styled_line(line, *style);
+            self.write_raw(CLEAR_LINE);
+            if index != last {
+                self.write_raw("\r\n");
+            }
+            emitted.push(line.clone());
+        }
+        self.write_raw(CLEAR_BELOW);
+        self.painted = true;
+        self.painted_lines = styled.len();
+        self.flush();
+        emitted
+    }
 }
 
 impl<W: Write> RenderBackend for TerminalBackend<W> {
@@ -173,51 +269,14 @@ impl<W: Write> RenderBackend for TerminalBackend<W> {
             return Frame::empty();
         }
         let styled = self.styled_lines();
-        let frame = Frame::new(styled.iter().map(|(line, _)| line.clone()));
-        let emitted = if self.state.force {
-            frame.clone()
-        } else {
-            frame.tail_after(&self.state.last_frame)
+        let emitted = match self.mode {
+            Mode::Scrollback => self.paint_scrollback(&styled),
+            Mode::AltScreen => self.paint_alt_screen(&styled),
         };
-        let repaint = !emitted.is_empty() || self.state.force;
-
-        if repaint {
-            match self.mode {
-                Mode::Scrollback => {
-                    // `tail_after` answers with a suffix of `frame`, so the
-                    // styles line up by offset. A full repaint has offset 0.
-                    let offset = frame.len().saturating_sub(emitted.len());
-                    let slice: Vec<(String, Style)> = styled
-                        .iter()
-                        .skip(offset)
-                        .map(|(line, style)| (line.clone(), *style))
-                        .collect();
-                    for (line, style) in &slice {
-                        self.write_styled_line(line, *style);
-                        self.write_raw("\r\n");
-                    }
-                }
-                Mode::AltScreen => {
-                    self.write_raw(HOME);
-                    let last = styled.len().saturating_sub(1);
-                    for (index, (line, style)) in styled.iter().enumerate() {
-                        self.write_styled_line(line, *style);
-                        self.write_raw(CLEAR_LINE);
-                        if index != last {
-                            self.write_raw("\r\n");
-                        }
-                    }
-                    self.write_raw(CLEAR_BELOW);
-                    self.painted = true;
-                }
-            }
-            self.flush();
-        }
-
-        self.state.last_frame = frame;
+        self.state.last_frame = Frame::new(styled.iter().map(|(line, _)| line.clone()));
         self.state.pending = false;
         self.state.force = false;
-        emitted
+        Frame::new(emitted)
     }
 
     fn start(&mut self) -> io::Result<()> {
@@ -245,7 +304,12 @@ impl<W: Write> RenderBackend for TerminalBackend<W> {
                 }
             }
             self.painted = false;
+        } else if self.painted_lines > 0 {
+            // The last line was left open for streaming; terminate it so the
+            // shell prompt does not land on the transcript's last row.
+            self.write_raw("\r\n");
         }
+        self.painted_lines = 0;
         self.flush();
         self.state.started = false;
         self.state.input.clear();
@@ -385,7 +449,8 @@ mod tests {
         backend.mount(ComponentNode::styled("bold", Style::DEFAULT.bold()), None);
         backend.request_render(false);
         backend.render();
-        assert_eq!(painted(&backend), "bold\r\n");
+        // The line is left open for streaming, and cleared to its end.
+        assert_eq!(painted(&backend), format!("bold{CLEAR_LINE}"));
     }
 
     #[test]
@@ -394,7 +459,59 @@ mod tests {
         backend.mount(ComponentNode::styled("x", Style::DEFAULT.bold()), None);
         backend.request_render(false);
         backend.render();
-        assert_eq!(painted(&backend), "\x1b[1mx\x1b[0m\r\n");
+        assert_eq!(painted(&backend), format!("\x1b[1mx\x1b[0m{CLEAR_LINE}"));
+    }
+
+    #[test]
+    fn a_streamed_append_rewrites_the_open_line_instead_of_reprinting() {
+        let mut backend = backend(Mode::Scrollback);
+        let first = mount_text(&mut backend, "one");
+        backend.request_render(false);
+        backend.render();
+
+        // A streamed delta grows the last entry; the app re-mounts it.
+        backend.unmount(first);
+        mount_text(&mut backend, "one two");
+        backend.request_render(false);
+        let emitted = backend.render();
+        assert_eq!(emitted.lines(), ["one two"]);
+        let out = painted(&backend);
+        assert!(out.contains("\rone two"), "rewritten in place: {out:?}");
+        assert_eq!(
+            out.matches("\r\n").count(),
+            0,
+            "nothing was terminated or reprinted: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_new_line_finalises_the_open_one() {
+        let mut backend = backend(Mode::Scrollback);
+        mount_text(&mut backend, "first");
+        backend.request_render(false);
+        backend.render();
+        mount_text(&mut backend, "second");
+        backend.request_render(false);
+        let emitted = backend.render();
+        assert_eq!(emitted.lines(), ["second"]);
+        let out = painted(&backend);
+        assert!(out.contains("\r\nsecond"), "{out:?}");
+        assert_eq!(
+            out.matches("first").count(),
+            1,
+            "the closed line is not reprinted: {out:?}"
+        );
+    }
+
+    #[test]
+    fn stopping_finalises_the_open_line() {
+        let mut backend = backend(Mode::Scrollback);
+        backend.start().unwrap();
+        mount_text(&mut backend, "tail");
+        backend.request_render(false);
+        backend.render();
+        backend.stop(StopOptions::default()).unwrap();
+        assert!(painted(&backend).ends_with("\r\n"));
     }
 
     #[test]

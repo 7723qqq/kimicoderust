@@ -10557,6 +10557,70 @@ kimi-ui-core 的 72 个既有测试保持全绿；指纹随 `--update` 刷新
 用 `cargo test --offline`（缓存里已有 serde/serde_json）即可；`Cargo.lock` 随 crate
 一并入库，之后的构建不再需要索引。
 
+## 58. 2026-11-06 应用层：垂直切片的 UI 一半（kimi-tui-app）
+
+§49 打通了「录制事件流 → 投影 → 后端 → 排版输出」的可测链，§57 把最后一段换成真实
+ANSI。本批补上切片的应用层：终端事件解成契约事件、`EntryOp` 流画到终端、用户的两条
+命令（提交 prompt / Esc 取消）回给会话。**引擎不链接**——会话侧是 `UiTransport` trait。
+
+### 58.1 先抽出唯一的「条目长什么样」
+
+`HeadlessBackend::paint` 原来私藏了 gutter、换行与「哪类条目淡化」三件事。终端侧若自己
+再写一遍，两处一定会漂移（用户恰好最先看到这些细节）。新增
+`packages/kimi-ui-core/src/render.rs`：
+
+- `kind_gutter` / `style_for_kind` / `GUTTER_WIDTH` 成为公开词表；
+- `entry_lines(store, width) -> Vec<(String, Style)>` 是唯一的渲染入口；
+- `HeadlessBackend::paint` 改为委托，输出逐字不变（`tests/ui_slice_integration.rs`
+  断言的正是它）。
+
+kimi-ui-core 72 → **76** 测（+4：gutter、dim、续行缩进、正文宽度扣除 gutter）。
+
+### 58.2 新 crate：`packages/kimi-tui-app`（21 测）
+
+- `input.rs`：`crossterm::Event` → `InputEvent` 的唯一映射处。按键名表、修饰键、
+  paste、resize、滚轮与主键；**按键释放**与契约没有意义的键（F 键、右键）解成 `None`，
+  这是「没有含义」而不是错误。
+- `app.rs`：`App<W: Write, T: UiTransport>`——`EntryStore` + 终端后端 + 输入缓冲。
+  Enter 提交（空白行不提交）、Esc/Ctrl-C 取消、Backspace 删一个字符、**Ctrl/Alt 组合
+  不插入文本**、paste 进缓冲、resize 重排并整屏重画。
+- `UiTransport` + `RecordingTransport`：宿主实现前者（它持有引擎句柄），测试用后者。
+
+### 58.3 接上时发现的真实缺陷：scrollback 流式会把整段 transcript 重印
+
+第一版用 `Frame::tail_after` 做差量，测试立刻红了。原因不是测试写错：流式追加改的是
+**最后一行**，而 `tail_after` 在「已打印过的行有变化」时返回整帧（这是它对 scrollback
+的正确判断，因为终止过的行改不了）。结果就是每个 token 都重印整段——产品上不可用。
+
+修法是把最后一行的语义显式化：scrollback 的每次渲染**不给最后一行写换行**，把它留成
+「open line」，下一次渲染用 `\r` + 新文本 + `\x1b[K` 原地重写：
+
+- 新增行的情形：先把 open line 用 `\r\n` 定格，再写新行，最后一行仍留 open；
+- 只有末行变化：`\r` 重写，不换行、不重印；
+- 已终止行变化或帧变短：整屏重画（scrollback 无法回退，这是唯一诚实的答案）；
+- `stop` 补一个换行，避免 shell 提示符落在 transcript 末行上。
+
+kimi-ui-terminal 19 → **22** 测（+3：流式原地重写、新行定格 open line、stop 定格）。
+
+### 58.4 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test`（kimi-ui-core / terminal / app） | **76 / 22 / 21** |
+| `cargo clippy --all-targets -- -D warnings`（三个 crate） | 0 |
+| `cargo fmt --check`（三个 crate） | 0 |
+| `bun run check:all` | 0（`check:architecture` 21 modules） |
+
+### 58.5 边界与构建
+
+- **不做**：raw mode 与事件循环（需要真实终端句柄，属宿主的 `main`）、编辑器语义
+  （多行、光标、补全）、引擎链接（`UiTransport` 由宿主实现）。
+- **新依赖**：`crossterm 0.29`（本仓第一个第三方终端库），只出现在 `kimi-tui-app`；
+  `kimi-ui-core` 与 `kimi-ui-terminal` 仍零终端依赖。
+- 首次取依赖需要 `CARGO_HTTP_CHECK_REVOKE=false`（本机吊销服务器不可达时 cargo 的
+  TLS 检查会失败）；`Cargo.lock` 入库后离线可构建。
+
+
 
 
 

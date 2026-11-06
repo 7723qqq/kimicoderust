@@ -13,9 +13,7 @@
 //!   by [`EntryId`] and are never copied — the store already holds exactly one
 //!   allocation per entry, moved in at projection time.
 
-use crate::entry_id::EntryKind;
 use crate::entry_op::{EntryOp, EntryStore};
-use crate::layout::{Style, width, wrap};
 use crate::render_backend::{
     BackendState, CapabilitySet, ComponentNode, Frame, InputEvent, NodeId, RenderBackend,
     StopOptions,
@@ -83,55 +81,15 @@ impl HeadlessBackend {
     /// painted rows — minus the terminal. `snapshot()` above dumps the table
     /// verbatim and is what the projection tests assert on; this is what a
     /// slice test asserts on when the question is "what would the user see".
+    ///
+    /// The lines themselves come from [`crate::render::entry_lines`], which is
+    /// also what the terminal backend mounts, so the two cannot disagree about
+    /// gutters, wrapping or which kinds are dim.
     pub fn paint(&self, total_width: usize) -> Vec<String> {
-        let mut lines = Vec::new();
-        for (_id, content) in self.store.entries() {
-            let gutter = format!("{}| ", kind_gutter(content.kind));
-            // The gutter occupies columns too; the text wraps in what is left.
-            let gutter_width = width(&gutter);
-            let body_width = total_width.saturating_sub(gutter_width).max(1);
-            let style = style_for_kind(content.kind);
-            for (index, row) in wrap(&content.text, body_width, style)
-                .into_iter()
-                .enumerate()
-            {
-                if index == 0 {
-                    lines.push(format!("{gutter}{}", row.text));
-                } else {
-                    lines.push(format!("{}{}", " ".repeat(gutter_width), row.text));
-                }
-            }
-        }
-        lines
-    }
-}
-
-/// Short left-margin label for an entry kind: what the terminal user sees
-/// instead of a raw entry id. One character where it can be, so the gutter does
-/// not eat the line.
-fn kind_gutter(kind: EntryKind) -> &'static str {
-    match kind {
-        EntryKind::UserMsg => ">",
-        EntryKind::AssistantMsg => " ",
-        EntryKind::Thinking => "~",
-        EntryKind::ToolCall => "$",
-        EntryKind::Status => "*",
-        EntryKind::Banner => "=",
-        EntryKind::CompactionBoundary => "-",
-    }
-}
-
-/// The style a terminal backend paints an entry in, so the headless renderer
-/// and a real one agree on which blocks are de-emphasised.
-fn style_for_kind(kind: EntryKind) -> Style {
-    match kind {
-        // Reasoning is present but secondary: dim, so a reader can skip it.
-        EntryKind::Thinking => Style::DEFAULT.dim(),
-        // Status and compaction fences are chrome, not content.
-        EntryKind::Status | EntryKind::CompactionBoundary | EntryKind::Banner => {
-            Style::DEFAULT.dim()
-        }
-        _ => Style::DEFAULT,
+        crate::render::entry_lines(&self.store, total_width)
+            .into_iter()
+            .map(|(line, _style)| line)
+            .collect()
     }
 }
 
