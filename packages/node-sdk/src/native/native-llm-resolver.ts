@@ -21,6 +21,12 @@ export interface JsNativeLlmConfig {
    * that share a protocol can still encode thinking differently — Kimi packs
    * the effort into a `thinking` object instead of `reasoning_effort`.
    */
+  /**
+   * The `[models.<alias>]` name this entry was resolved from (v2
+   * `ApiErrorEvent.alias`): the engine's telemetry names the model the user
+   * selected, not only the wire model behind it.
+   */
+  alias?: string;
   providerType?: string;
   baseUrl: string;
   apiKey: string;
@@ -311,6 +317,7 @@ export function resolveNativeLlmForAlias(
 
   return {
     protocol,
+    alias,
     providerType: typeStr.length > 0 ? typeStr : undefined,
     baseUrl: normalizeBaseUrl(protocol, rawBaseUrl),
     apiKey,
@@ -464,6 +471,7 @@ export interface SecondaryModelPoolWire {
 function nativeLlmWire(config: JsNativeLlmConfig): Record<string, unknown> {
   return {
     protocol: config.protocol,
+    alias: config.alias,
     provider_type: config.providerType,
     base_url: config.baseUrl,
     api_key: config.apiKey,

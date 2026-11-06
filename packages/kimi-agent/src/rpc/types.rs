@@ -635,6 +635,12 @@ pub enum ContentBlock {
 pub struct NativeLlmConfig {
     /// Wire protocol: `"openai"` (Chat Completions) or `"anthropic"` (Messages).
     pub protocol: String,
+    /// The `[models.<alias>]` name this transport was resolved from (v2
+    /// `ApiErrorEvent.alias`). Absent when the caller has none — the host
+    /// resolves every native entry by alias, the engine's own config knows it,
+    /// and a test stub has no alias to report.
+    #[serde(default)]
+    pub alias: Option<String>,
     /// Declared provider family (`[providers.*].type`, e.g. `"openai"`,
     /// `"kimi"`, `"anthropic"`). The protocol decides the request shape; this
     /// distinguishes providers that share one but encode thinking differently

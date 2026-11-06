@@ -1364,6 +1364,22 @@ impl LLM for NativeHttpLlm {
         "native-http"
     }
 
+    fn model_alias(&self) -> Option<&str> {
+        self.config.alias.as_deref()
+    }
+
+    fn provider_type(&self) -> Option<&str> {
+        self.config.provider_type.as_deref()
+    }
+
+    fn protocol(&self) -> Option<&str> {
+        Some(self.config.protocol.as_str())
+    }
+
+    fn thinking_effort(&self) -> Option<&str> {
+        self.config.reasoning_effort.as_deref()
+    }
+
     fn media_target(&self) -> Option<crate::llm::media_resolver::MediaTarget> {
         let capabilities = self.config.capabilities.as_deref().unwrap_or_default();
         let declares = |name: &str| capabilities.iter().any(|c| c == name);
@@ -1793,6 +1809,7 @@ mod tests {
     fn config(protocol: &str, base_url: &str) -> NativeLlmConfig {
         NativeLlmConfig {
             protocol: protocol.into(),
+            alias: None,
             provider_type: None,
             base_url: base_url.into(),
             api_key: "test-key".into(),

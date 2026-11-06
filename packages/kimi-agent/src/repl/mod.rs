@@ -397,6 +397,7 @@ pub async fn start_repl(
     let llm: Arc<dyn crate::turn_loop::types::LLM> = Arc::new(NativeHttpLlm::new(
         NativeLlmConfig {
             protocol: native_llm_def.protocol,
+            alias: native_llm_def.alias,
             provider_type: Some(native_llm_def.provider_type.clone())
                 .filter(|value| !value.is_empty()),
             base_url: native_llm_def.base_url,

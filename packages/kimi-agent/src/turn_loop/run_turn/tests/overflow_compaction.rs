@@ -726,7 +726,13 @@ async fn a_failing_summarizer_reports_compaction_failed() {
         "the failure class must be named: {failed:?}"
     );
     assert!(failed[0].get("reason").is_none());
+    // `turn_id` is v2's numeric per-agent index. This test's wire id carries
+    // none (`test-compaction-cap`), so the property is absent rather than a
+    // string standing in for a number.
     assert!(failed[0].get("turn_id").is_none());
+    // `thinking_effort` is required by v2; the stub transport reports no
+    // effort, and `none` is the wire's own spelling for that.
+    assert_eq!(failed[0]["thinking_effort"], "none");
 
     // The terminal card still goes out: the turn owes one once
     // compaction.started has been emitted.

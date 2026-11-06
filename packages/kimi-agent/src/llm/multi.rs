@@ -328,6 +328,30 @@ impl LLM for MultiLLM {
         &self.label
     }
 
+    fn model_alias(&self) -> Option<&str> {
+        self.providers
+            .first()
+            .and_then(|entry| entry.native.as_ref()?.alias.as_deref())
+    }
+
+    fn provider_type(&self) -> Option<&str> {
+        self.providers
+            .first()
+            .and_then(|entry| entry.native.as_ref()?.provider_type.as_deref())
+    }
+
+    fn protocol(&self) -> Option<&str> {
+        self.providers
+            .first()
+            .and_then(|entry| entry.native.as_ref().map(|native| native.protocol.as_str()))
+    }
+
+    fn thinking_effort(&self) -> Option<&str> {
+        self.providers
+            .first()
+            .and_then(|entry| entry.native.as_ref()?.reasoning_effort.as_deref())
+    }
+
     fn transport(&self) -> &'static str {
         "multi"
     }
@@ -709,6 +733,7 @@ mod tests {
         let callbacks: Arc<dyn HostCallbacks> = Arc::new(RefusingHost);
         let mut config = NativeLlmConfig {
             protocol: "openai".into(),
+            alias: None,
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: "test-key".into(),
             model: "racer-model".into(),
@@ -763,6 +788,7 @@ mod tests {
         let callbacks: Arc<dyn HostCallbacks> = Arc::new(RefusingHost);
         let config = NativeLlmConfig {
             protocol: "openai".into(),
+            alias: None,
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: "test-key".into(),
             model: "solo".into(),

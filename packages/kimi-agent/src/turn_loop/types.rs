@@ -113,6 +113,35 @@ pub trait LLM: Send + Sync {
     fn transport(&self) -> &'static str {
         "custom"
     }
+
+    /// The `[models.<alias>]` name this transport was resolved from (v2
+    /// `ApiErrorEvent.alias`).
+    ///
+    /// `None` for a transport that only knows the wire model name — the host
+    /// proxy. Every field below exists so the engine's telemetry can carry the
+    /// values v2 declares, instead of omitting them and leaving a consumer to
+    /// group on the model id alone.
+    fn model_alias(&self) -> Option<&str> {
+        None
+    }
+
+    /// The declared provider family (`[providers.*].type`, v2
+    /// `ApiErrorEvent.provider_type`).
+    fn provider_type(&self) -> Option<&str> {
+        None
+    }
+
+    /// The wire protocol in use (`openai` / `anthropic` / `google`, v2
+    /// `ApiErrorEvent.protocol`).
+    fn protocol(&self) -> Option<&str> {
+        None
+    }
+
+    /// The reasoning effort in effect for this transport's requests (v2
+    /// `CompactionFailedEvent.thinking_effort`, which that event requires).
+    fn thinking_effort(&self) -> Option<&str> {
+        None
+    }
     /// What the media resolver needs to know about the model behind this LLM
     /// (v2 `ModelRequester.model`): which media it accepts, and where an
     /// upload would go. `None` accepts everything and uploads nothing — a

@@ -135,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
                 providers: Vec::new(),
                 native_llm: Some(NativeLlmConfig {
                     protocol: native.protocol,
+                    alias: None,
                     provider_type: Some(native.provider_type.clone())
                         .filter(|value| !value.is_empty()),
                     base_url: native.base_url,
@@ -1336,6 +1337,7 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
         providers,
         native_llm: Some(NativeLlmConfig {
             protocol: native.protocol,
+            alias: None,
             provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
             base_url: native.base_url,
             api_key: native.api_key,

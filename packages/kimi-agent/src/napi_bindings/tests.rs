@@ -8,6 +8,7 @@ use super::*;
 fn js_native_llm() -> JsNativeLlmConfig {
     JsNativeLlmConfig {
         protocol: "openai".into(),
+        alias: None,
         provider_type: None,
         base_url: "https://api.example.com/v1".into(),
         api_key: "test-key".into(),

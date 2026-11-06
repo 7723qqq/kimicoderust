@@ -1364,6 +1364,7 @@ pub fn run_turn<'a>(
                         &request_messages,
                     )),
                     input.max_context_tokens,
+                    Some(total_usage.input_tokens),
                 )
                 .await;
                 let e = match call {
@@ -1616,22 +1617,40 @@ pub fn run_turn<'a>(
                             // (`CompactionFailedEvent`); `reason` was this
                             // engine's invention and v2 has no such field.
                             //
-                            // `thinking_effort` is required by v2's schema and is
-                            // deliberately absent: it lives on the
-                            // `TelemetryContext` the wrappers own, and `run_turn`
-                            // does not receive it. An empty string would claim an
-                            // effort that was never in effect, which is worse than
-                            // a missing property. Threading the context in is the
-                            // follow-up.
-                            callbacks.telemetry(serde_json::json!({
+                            // `thinking_effort` is required by v2's schema and
+                            // is read off the transport actually serving this
+                            // turn; `none` is the same spelling the wire uses
+                            // when no effort is in effect, so it states the
+                            // truth rather than omitting a required property.
+                            let mut payload = serde_json::json!({
                                 "event": "compaction_failed",
                                 "source": "auto",
                                 "tokens_before": crate::compaction::estimate_messages_tokens(&messages),
                                 "duration_ms": compaction_started.elapsed().as_millis() as u64,
                                 "round": consecutive_overflow_compactions,
                                 "retry_count": compaction_config.max_overflow_compaction_attempts,
+
                                 "error_type": format!("{error:?}"),
-                            }));
+                                "thinking_effort": input.llm.thinking_effort().unwrap_or("none"),
+                            });
+                            if let Some(index) = crate::turn_loop::turn_index(&turn_id) {
+                                payload["turn_id"] = serde_json::json!(index);
+                            }
+                            // The summarizer request's trace id, when the
+                            // failure carried one (v2 `request_id`).
+                            let summarizer_error = match &error {
+                                crate::compaction::CompactionError::Provider(inner) => {
+                                    Some(inner.as_ref())
+                                }
+                                _ => None,
+                            };
+                            if let Some(id) = summarizer_error
+                                .and_then(|inner| inner.downcast_ref::<crate::llm::LlmError>())
+                                .and_then(crate::llm::LlmError::trace_id)
+                            {
+                                payload["request_id"] = serde_json::json!(id);
+                            }
+                            callbacks.telemetry(payload);
                             return Err(Box::new(error) as Box<dyn std::error::Error + 'a>);
                         }
                     };
@@ -2397,6 +2416,7 @@ Deliver your final response as text now. Further tool calls are refused.",
                             Some(&telemetry),
                             Some(crate::compaction::estimate_messages_tokens(&messages)),
                             input.max_context_tokens,
+                            Some(total_usage.input_tokens),
                         )
                         .await;
 

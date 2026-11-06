@@ -272,6 +272,7 @@ pub fn execute_loop_step<'a>(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -309,6 +310,10 @@ pub fn execute_loop_step_with_retry<'a>(
     // them (v2 `usedContextTokens` / `maxContextTokens`).
     used_context_tokens: Option<u32>,
     max_context_tokens: Option<u32>,
+    // v2 `ApiErrorEvent.input_tokens`: the turn's accumulated input tokens
+    // before this request. `run_turn` owns that accumulator, so it passes the
+    // running total in rather than the step re-deriving it.
+    turn_input_tokens: Option<u32>,
 ) -> BoxFuture<'a, Result<StepResult, Box<dyn std::error::Error + Send + Sync>>> {
     let retry_config = retry_config.clone();
     let cancel_token = cancel.cloned();
@@ -390,9 +395,12 @@ pub fn execute_loop_step_with_retry<'a>(
                 //
                 // The property names are v2's, not this engine's invention.
                 // `ApiErrorEvent` requires `error_type`, `model`, `retryable`
-                // and `duration_ms`; `status_code` and `trace_id` are optional
-                // and are omitted rather than nulled, because the schema types
-                // them as numbers/strings.
+                // and `duration_ms`; the rest are optional and are omitted
+                // rather than nulled, because the schema types them as
+                // numbers/strings. The transport identity (`alias`,
+                // `provider_type`, `protocol`), the turn's accumulated
+                // `input_tokens`, the numeric `turn_id` and `request_kind` are
+                // carried whenever the values exist.
                 //
                 // Deliberately NOT a property: the provider's message. v2 has no
                 // field for it — `error_type` is the classified category — and a
@@ -424,13 +432,35 @@ pub fn execute_loop_step_with_retry<'a>(
                         "model": llm.model_name(),
                         "retryable": retryable,
                         "duration_ms": started.elapsed().as_millis() as u64,
+                        "request_kind": "turn",
                         "step_no": step,
                     });
+                    // The fields v2 declares and this fork used to omit. Every
+                    // one of them is a value the transport already knows, so a
+                    // consumer grouping errors by alias, provider or protocol
+                    // no longer has to fall back to the model id.
+
+                    if let Some(alias) = llm.model_alias() {
+                        payload["alias"] = serde_json::json!(alias);
+                    }
+                    if let Some(provider) = llm.provider_type() {
+                        payload["provider_type"] = serde_json::json!(provider);
+                    }
+                    if let Some(protocol) = llm.protocol() {
+                        payload["protocol"] = serde_json::json!(protocol);
+                    }
+                    if let Some(tokens) = turn_input_tokens {
+                        payload["input_tokens"] = serde_json::json!(tokens);
+                    }
+                    if let Some(index) = crate::turn_loop::turn_index(turn_id) {
+                        payload["turn_id"] = serde_json::json!(index);
+                    }
                     if let Some(code) = status_code {
                         payload["status_code"] = serde_json::json!(code);
                     }
                     if let Some(id) = typed.and_then(crate::llm::LlmError::trace_id) {
-                        payload["trace_id"] = serde_json::json!(id);
+                        // v2's property name; `trace_id` was this engine's.
+                        payload["request_id"] = serde_json::json!(id);
                     }
                     telemetry(payload);
                 }
@@ -614,6 +644,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(
@@ -645,6 +676,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -668,6 +700,7 @@ mod tests {
             &[],
             &[],
             &config,
+            None,
             None,
             None,
             None,
@@ -701,6 +734,18 @@ mod tests {
         }
         fn model_name(&self) -> &str {
             &self.model_name
+        }
+        fn model_alias(&self) -> Option<&str> {
+            Some("alias-under-test")
+        }
+        fn provider_type(&self) -> Option<&str> {
+            Some("kimi")
+        }
+        fn protocol(&self) -> Option<&str> {
+            Some("openai")
+        }
+        fn thinking_effort(&self) -> Option<&str> {
+            Some("high")
         }
         fn is_retryable_error(&self, error: &str) -> bool {
             // The production classifier's rule: 429 is retryable.
@@ -739,7 +784,7 @@ mod tests {
         };
 
         let _ = execute_loop_step_with_retry(
-            "t1",
+            "turn-7",
             3,
             &llm,
             &[],
@@ -750,6 +795,7 @@ mod tests {
             Some(&telemetry),
             None,
             None,
+            Some(1234),
         )
         .await;
 
@@ -765,6 +811,8 @@ mod tests {
             2,
             "one backoff, one api_error: {recorded:?}"
         );
+        // The turn's accumulated input tokens ride the failure event
+        // (v2 `ApiErrorEvent.input_tokens`), so the test passes a value.
         let event = &recorded[0];
         assert_eq!(event["event"], "TurnStepRetrying");
         assert_eq!(event["step"], 3);
@@ -792,8 +840,18 @@ mod tests {
         // It retried before giving up, so v2's `retryable` is true.
         assert_eq!(api_error["retryable"], true);
         assert!(api_error["duration_ms"].is_u64());
+        // The transport's identity, so a consumer can group failures by the
+        // alias, provider and protocol the user actually selected.
+        assert_eq!(api_error["alias"], "alias-under-test");
+        assert_eq!(api_error["provider_type"], "kimi");
+        assert_eq!(api_error["protocol"], "openai");
+        assert_eq!(api_error["request_kind"], "turn");
+        assert_eq!(api_error["turn_id"], 7);
+        assert_eq!(api_error["input_tokens"], 1234);
         // No `x-trace-id` was sent, and v2 types the property as an optional
-        // string: a null would be a type error, so it must be absent.
+        // string: a null would be a type error, so it must be absent. The
+        // property is `request_id` — `trace_id` was this engine's spelling.
+        assert!(api_error.get("request_id").is_none());
         assert!(api_error.get("trace_id").is_none());
         assert!(api_error.get("attempts").is_none());
         assert!(api_error.get("step").is_none());
@@ -841,6 +899,7 @@ mod tests {
             Some(&telemetry),
             None,
             None,
+            None,
         )
         .await;
         // The claim is that nothing retried, not that nothing was recorded:
@@ -873,6 +932,7 @@ mod tests {
             &[],
             &[],
             &config,
+            None,
             None,
             None,
             None,
@@ -938,6 +998,7 @@ mod tests {
             &[],
             &[],
             &RetryConfig::default(),
+            None,
             None,
             None,
             None,
@@ -1019,6 +1080,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_ok());
@@ -1049,6 +1111,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1071,6 +1134,7 @@ mod tests {
             &[],
             &[],
             &config,
+            None,
             None,
             None,
             None,
@@ -1192,6 +1256,7 @@ mod tests {
             &[],
             &config,
             Some(&token),
+            None,
             None,
             None,
             None,
@@ -1370,6 +1435,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("the third attempt carries a real answer");
@@ -1399,6 +1465,7 @@ mod tests {
                 &[],
                 &[],
                 &config,
+                None,
                 None,
                 None,
                 None,
@@ -1472,6 +1539,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("the proxy leg owns its own transcript");
@@ -1497,6 +1565,7 @@ mod tests {
             &[],
             &[],
             &config,
+            None,
             None,
             None,
             None,
@@ -1582,6 +1651,7 @@ mod tests {
             Some(&telemetry),
             None,
             None,
+            None,
         )
         .await;
 
@@ -1593,7 +1663,7 @@ mod tests {
         );
         assert_eq!(recorded[0]["event"], "api_error");
         assert_eq!(recorded[0]["status_code"], 503);
-        assert_eq!(recorded[0]["trace_id"], "trace-42");
+        assert_eq!(recorded[0]["request_id"], "trace-42");
         // v2's required set, all four present.
         assert_eq!(recorded[0]["error_type"], "APIStatusError");
         assert_eq!(recorded[0]["model"], "typed");

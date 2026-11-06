@@ -333,6 +333,10 @@ pub struct JsLlmProviderDef {
 pub struct JsNativeLlmConfig {
     /// "openai" (Chat Completions) or "anthropic" (Messages), or "google" / "openai_responses".
     pub protocol: String,
+    /// The `[models.<alias>]` name the host resolved this entry from (v2
+    /// `ApiErrorEvent.alias`), carried so the engine's telemetry can name the
+    /// alias the user selected rather than only the wire model.
+    pub alias: Option<String>,
     /// Declared provider family (`[providers.*].type`, e.g. "kimi"): the
     /// transport encodes the Kimi `thinking` object instead of a top-level
     /// `reasoning_effort` for it.

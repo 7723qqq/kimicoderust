@@ -26,7 +26,7 @@
           "description": "ACP stdio protocol server"
         }
       ],
-      "fingerprint": "27eb1f4d6709e1f6"
+      "fingerprint": "0552c61546225afd"
     },
     {
       "id": "node-sdk",
@@ -49,7 +49,7 @@
           "description": "Public SDK package"
         }
       ],
-      "fingerprint": "ed3834eab7d2a770"
+      "fingerprint": "6461cb42cdd02fff"
     },
     {
       "id": "kimi-code",

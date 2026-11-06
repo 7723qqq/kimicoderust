@@ -748,6 +748,11 @@ pub struct KimiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedNativeLlm {
     pub protocol: String,
+    /// The `[models.<alias>]` key (or declared alias name) this entry was
+    /// resolved for — v2 `ApiErrorEvent.alias`. Carried so telemetry can name
+    /// the model the user selected rather than the wire model behind it.
+    #[serde(default)]
+    pub alias: Option<String>,
     /// Declared provider family (`[providers.*].type`), lowercased. The
     /// transport uses it for provider-specific wire encodings that the
     /// protocol alone cannot express (the Kimi `thinking` object).
@@ -1062,6 +1067,7 @@ impl KimiConfig {
 
         Some(ResolvedNativeLlm {
             protocol: protocol.into(),
+            alias: Some(model_key.to_string()),
             provider_type: p_type,
             base_url,
             api_key,
@@ -1884,6 +1890,7 @@ fn native_llm_config(
 ) -> NativeLlmConfig {
     let mut llm = NativeLlmConfig {
         protocol: resolved.protocol,
+        alias: resolved.alias,
         provider_type: Some(resolved.provider_type).filter(|value| !value.is_empty()),
         base_url: resolved.base_url,
         api_key: resolved.api_key,

@@ -780,6 +780,7 @@ impl ServerEngine {
         let native = config.extract_native_llm(Some(model))?;
         Some(crate::rpc::types::NativeLlmConfig {
             protocol: native.protocol,
+            alias: native.alias,
             provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
             base_url: native.base_url,
             api_key: native.api_key,

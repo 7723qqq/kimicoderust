@@ -670,6 +670,7 @@ pub(crate) async fn build_engine_pipeline(
                         model: p.model.clone(),
                         native: p.native.as_ref().map(|cfg| NativeLlmConfig {
                             protocol: cfg.protocol.clone(),
+                            alias: cfg.alias.clone(),
                             provider_type: cfg.provider_type.clone(),
                             base_url: cfg.base_url.clone(),
                             api_key: cfg.api_key.clone(),
@@ -695,6 +696,7 @@ pub(crate) async fn build_engine_pipeline(
             .unwrap_or_default(),
         native_llm: params.native_llm.as_ref().map(|cfg| NativeLlmConfig {
             protocol: cfg.protocol.clone(),
+            alias: cfg.alias.clone(),
             provider_type: cfg.provider_type.clone(),
             base_url: cfg.base_url.clone(),
             api_key: cfg.api_key.clone(),

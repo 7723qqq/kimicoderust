@@ -273,5 +273,57 @@ REPL / 任何没有该回调的宿主第一次真正拿到操作数目录（此�
 的"纯 Rust 无 C 依赖"性质因此改变（`workflow-js` 早已引入 rquickjs），napi / Nix 打包面需在
 下一次原生构建时复核。
 
+## 8. 2026-11-06 补 Rust 之三：遥测事件的 v2 属性集（exit 0）
+
+**落点**：`src/turn_loop/turn_step.rs`（`api_error`）、`src/turn_loop/run_turn.rs`
+（`compaction_failed`）、`src/turn_loop/types.rs`（`LLM` 元信息访问器）、
+`src/llm/http.rs` / `src/llm/multi.rs`（实现与委派）、`src/rpc/types.rs` +
+`src/napi_bindings/params.rs` + `src/napi_bindings/turn.rs` + `src/config/mod.rs` +
+`src/repl/mod.rs` + `src/server/engine.rs`（`alias` 字段贯通）、
+`packages/node-sdk/src/native/native-llm-resolver.ts`（宿主侧带上 alias，含 pool 的
+`nativeLlmWire` 显式映射）。
+
+### 8.1 事实：两个事件都只发了 v2 声明集的子集
+
+- v2 `ApiErrorEvent`（`app/telemetry/events.ts`）要求的属性本仓发了 4 个必填 + `step_no`，
+  缺 `alias` / `provider_type` / `protocol` / `input_tokens` / `turn_id` / `request_kind`，
+  且把可选属性 `request_id` **写成 `trace_id`**——消费者按 v2 名字取不到。
+- v2 `CompactionFailedEvent` 的 `thinking_effort` 是**必填**，本仓此前以注释说明"故意缺失"
+  （旧注释理由是"上下文不在 run_turn 里"）。这正是本轮标准下的未完成项。
+
+### 8.2 改动
+
+- `LLM` trait 新增 `model_alias` / `provider_type` / `protocol` / `thinking_effort`
+  （默认 `None`）：`NativeHttpLlm` 从自身配置读，`MultiProviderLlm` 委派给首个 racer，
+  host-proxy 保持 `None`。
+- `NativeLlmConfig` / `JsNativeLlmConfig` / `ResolvedNativeLlm` 新增 `alias`，napi 映射、
+  Rust 原生入口（repl/server）与宿主解析器（含 `[secondary_model]` 的显式 wire 映射）
+  都填上——`ApiErrorEvent.alias` 因此有值可发，而不是补一个空字段。
+- `api_error` 补齐：`alias`、`provider_type`、`protocol`、`request_kind: "turn"`、
+  回合累计 `input_tokens`（`run_turn` 的 `total_usage` 传入 step，新增一个参数）、
+  数值 `turn_id`（`turn_loop::turn_index` 从 `turn-N` / `subturn-N` 推出，其它形状省略）、
+  `request_id`（由 `trace_id` 更名）。
+- `compaction_failed` 补齐：`thinking_effort`（取当前 transport 的 effort，无 effort 时用
+  wire 自己的 `none` 拼写）、数值 `turn_id`、摘要请求的 `request_id`（从
+  `CompactionError::Provider` 内的 `LlmError` 取 trace id）。
+
+### 8.3 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib turn_loop::turn_step` | 0 | 22 passed（`api_error` 断言新增 6 个字段） |
+| `cargo test --lib overflow_compaction` | 0 | 10 passed（`compaction_failed` 断言 `thinking_effort`） |
+| `cargo test --lib turn_loop::turn_index` | 0 | 1 passed（`turn-7`/`subturn-3` 映射、非法形状省略） |
+| **变异验证 ×2** | — | 删 `thinking_effort` → 摘要失败用例红；删 `alias` → `api_error` 用例红；均按预期 |
+| `cargo test --lib`（全量） | 0 | 3655 passed / 0 failed |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun run typecheck` | 0 | clean |
+| `bun run check:all` | 0 | 19 道全绿（architecture `kimi-agent`/`node-sdk`、normify 5 模块刷新） |
+
+**未做**：`ApiErrorEvent.request_id` 只在 provider 回了 trace id 时出现（与 v2 的"响应头缺失
+时省略"一致）；`compaction_failed` 的 `request_id` 同理。`telemetry` 事件本身不改语义——
+本轮只补属性，不新增事件。
+
+
 
 
