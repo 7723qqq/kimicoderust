@@ -169,6 +169,7 @@ impl LLM for HostLlmProxy {
                     name: tc.name,
                     arguments: tc.arguments,
                     extras: tc.extras,
+                    args_parse_error: None,
                 })
                 .collect();
 

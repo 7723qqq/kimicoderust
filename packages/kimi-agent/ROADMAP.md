@@ -828,3 +828,77 @@ v2 的 `readTool` 在"读的路径本身就是 spill 文件"时给结果打 `spi
 
 边界条件（写进 A 的验收）：流式参数被截断、参数不是对象、`arguments` 为空串、provider 返回非流式坏 JSON —— 四种都要
 变成"一条可读的错误 tool 结果"，并有用例钉住其中至少三种。属独立一批（跨 `llm/*` 与 `turn_loop`），不在本步半做。
+
+## 19. 2026-11-06 补 Rust 之十：坏参数的工具调用保留并回给模型（exit 0）
+
+**来源**：§17.4 / §18.4。**落点**：`src/llm/tool_args.rs`（新）、`src/turn_loop/types.rs`、
+`src/llm/{openai,anthropic,openai_responses}.rs`、`src/turn_loop/run_turn.rs`、
+`src/turn_loop/run_turn/tests/basic_loop.rs`、`packages/i18n-catalog/src/locales/{en,zh}.ts`，
+以及 148 处 `ToolCall` 字面量。
+
+### 19.1 回源修正：v2 并没有一条"参数不是合法 JSON"的模型文案
+
+§17.4 把 v2 的行为写成"带回 `parseFailed` 并让模型看到一个'参数不是合法 JSON'的错误结果"。回源后两处要改：
+
+| v2 事实 | 位置 |
+|---|---|
+| `parseToolCallArguments` 失败返回 `{ data: {}, parseFailed: true, error }`，**调用不丢** | `packages/agent-core-v2/src/tool/tool-args-parse.ts:12-20` |
+| `preflightToolCall` 只把 `parseFailed` 写 debug 日志，随后拿 `{}` 去跑 Ajv；模型读到的是 `Invalid args for tool "<name>": <ajv error>` | `packages/agent-core-v2/src/agent/toolExecutor/toolExecutorService.ts:738-746`、`:778-786` |
+| 也就是说，`{}` 若恰好能满足 schema（全参数可选的工具），v2 **会照常执行** | 同上（`kind: 'runnable'` 分支） |
+
+所以对齐点是"保留调用 + 不丢反馈 + 不执行假参数"，不是抄一句 v2 不存在的文案。本仓没有 Ajv，逐工具校验的措辞
+也各不相同，这一点记为**已登记偏差**（见 19.4）。
+
+### 19.2 本仓修前三套互斥行为
+
+| 路径 | 修前 | 后果 |
+|---|---|---|
+| openai 流式（`StreamAccumulator::finish`） | `filter_map` 丢掉解析失败的调用 | 模型零反馈，只能盲重试 |
+| openai 非流式（`parse_response`） | `unwrap_or_else(|_| json!({}))` | 带空参数**真的去执行**（Bash/Write 无输入） |
+| `openai_responses` 流式与非流式 | 整条响应 `?` / 置 `error` | 一个坏调用杀死整轮，模型无从纠正 |
+| anthropic 流式 | `if let Ok(...)` 丢弃 | 同 openai 流式 |
+
+### 19.3 改动
+
+1. `ToolCall.args_parse_error: Option<String>`，`#[serde(skip)]`——引擎内部判定，不上线格式；线格式仍只有
+   `arguments`（已解码值）。字段落地的实际代价：编译器报 **148 处**字面量缺字段（§18.4 估的 243 把
+   `StreamDelta::ToolCall` / `StreamKind::ToolCall` 一并算进去了），按编译器位置逐处补齐。
+2. `llm::tool_args::parse_tool_arguments`（v2 同名函数的逐分支移植）：缺省、`""` → `{}` 且不失败；
+   合法 JSON → 原样；解析失败 → `{}` + serde 的原因。四条传输路径统一走它，`openai` 非流式的"非字符串
+   `arguments`"分支按 v2 `typeof raw !== 'string'` 保留原值。
+3. `run_turn` 预检（v2 `preflightToolCall`）：`arguments: null` 先归一成 `{}`（v2 的 null 分支）；
+   解析失败或解出的不是对象 → 从可执行集摘出，逐条补一条 `role: "tool"` 错误结果。assistant 消息在这之前
+   已经带上全部调用，所以 `tool_use`/`tool_result` 的配对不破。
+4. 文案走引擎 i18n，落在既有 `Invalid <tool> arguments: …` 家族：`engine.tools.argsNotJson`
+   （`{{tool}}` + `{{detail}}`）、`engine.tools.argsNotObject`（`{{tool}}`）。`{{detail}}` 是 serde 原文，
+   与 v2 把 provider 错误文本原样带上是同一口径。
+
+### 19.4 已登记的行为偏差
+
+- **v2 在 `{}` 能通过 schema 时会执行，本仓一律拒执行。** 本仓没有中心 schema 校验，逐工具校验对"全参数可选"
+  的工具不成立，执行 `{}` 会退化成"以空参数运行 Bash/Write"。因此选更窄的一侧：拒绝并提供可读原因。
+  这条写进了 `unusable_tool_arguments` 的注释，不是默认行为。
+- **预检拒绝的调用不发 `tool.native` 事件**，与既有 swarm 拒绝同形（那条路径也只推消息）。模型看得到失败，
+  TUI 卡片看不到；v2 两种拒绝都走 `tool.result` 通道。单列一条，不在本批扩。
+
+### 19.5 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib --features cli -- llm::` | 0 | 267 passed（含 decoder 3 条 + 三条传输路径改写后的 4 条） |
+| `cargo test --lib --features cli -- a_call_with_unusable_arguments_is_answered_not_executed` | 0 | 1 passed（0.01s；坏 JSON 与非对象两条调用各得一条 tool 结果，assistant 仍带两个 `tool_use`，回合继续到第 2 步） |
+| **变异验证（预检）** | — | `unusable_tool_arguments` 恒 `None` → 5.01s 超时失败，信息为"an unrunnable call must be answered, not dispatched to the host" |
+| **变异验证（传输层）** | — | openai 流式把 `ToolCall.args_parse_error` 换成 `None` → `truncated_tool_call_arguments_keep_the_call_and_its_reason` 红 |
+| `cargo test --lib --features cli`（全量） | 0 | **3666 passed / 0 failed**（26.4s） |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean（clippy 先报了 `redundant_guards`，改成 `Some("")` 分支后清） |
+| `bun run typecheck` | 0 | 全部包 exit 0 |
+| `bun run check:all` | 0 | 20 道全绿：`architecture` 指纹 `kimi-agent` / `i18n-catalog` 刷新；normify 14 模块刷新；`scan:hardcoded:rust` 2729 → **2727**（两条被删掉的 fail-closed 文案按 stale 清除，无新增） |
+
+**测试设计上的一处修正**：变异第一次不是"失败"而是"挂住"——预检摘掉后坏调用真的被派发给测试替身宿主，
+而那个 RPC 替身没有处理器。挂起是红灯但不可作回归信号，因此 `run_turn` 外面套了 5 秒 `tokio::time::timeout`，
+失败信息直接说明"本应被回答，而不是派发给会阻塞的宿主"。
+
+**下一步（已由用户裁决）**：Rust TUI 的基座整体换成 `textual-rs`（MIT，0.3.16，ratatui 0.30 + crossterm 0.29
+后端，自带 headless `TestApp`），本仓只保留 `EntryOp`/`EntryId` 契约与投影；`kimi-ui-core` 的组件树、
+`kimi-ui-terminal` 的 ANSI 后端、`kimi-tui-app` 的 crossterm 循环随之退役。本机取包需
+`CARGO_HTTP_CHECK_REVOKE=false`（schannel 吊销检查离线失败），registry 已是 rsproxy。

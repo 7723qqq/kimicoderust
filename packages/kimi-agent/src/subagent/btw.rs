@@ -154,6 +154,7 @@ mod tests {
             name: "Read".into(),
             arguments: serde_json::json!({ "path": "test.txt" }),
             extras: None,
+            args_parse_error: None,
         };
         let history = vec![
             LLMMessage::new("user", "check the config"),

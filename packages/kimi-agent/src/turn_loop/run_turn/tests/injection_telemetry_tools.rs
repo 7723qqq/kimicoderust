@@ -230,6 +230,7 @@ async fn test_todo_reminder_reads_state_updated_earlier_in_turn() {
                             ]
                         }),
                         extras: None,
+                        args_parse_error: None,
                     }]
                 } else if call <= 10 {
                     vec![ToolCall {
@@ -237,6 +238,7 @@ async fn test_todo_reminder_reads_state_updated_earlier_in_turn() {
                         name: "Echo".into(),
                         arguments: serde_json::json!({ "step": call }),
                         extras: None,
+                        args_parse_error: None,
                     }]
                 } else {
                     Vec::new()
@@ -672,6 +674,7 @@ async fn test_list_tools_refreshes_table_per_step() {
                             name: "read".into(),
                             arguments: serde_json::json!({"path": "/a.txt"}),
                             extras: None,
+                            args_parse_error: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),

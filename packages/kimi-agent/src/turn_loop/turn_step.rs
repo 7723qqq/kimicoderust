@@ -975,12 +975,14 @@ mod tests {
                                 name: "read".into(),
                                 arguments: serde_json::json!({}),
                                 extras: None,
+                                args_parse_error: None,
                             },
                             ToolCall {
                                 id: "  ".into(),
                                 name: "glob".into(),
                                 arguments: serde_json::json!({}),
                                 extras: None,
+                                args_parse_error: None,
                             },
                         ],
                         finish_reason: Some("tool_calls".into()),
@@ -1048,6 +1050,7 @@ mod tests {
                                 name: "read".into(),
                                 arguments: serde_json::json!({}),
                                 extras: None,
+                                args_parse_error: None,
                             }]
                         } else {
                             vec![]
@@ -1322,6 +1325,7 @@ mod tests {
             name: "Read".into(),
             arguments: serde_json::json!({ "path": "a.txt" }),
             extras: None,
+            args_parse_error: None,
         }
     }
 

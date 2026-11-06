@@ -374,6 +374,7 @@ async fn test_http_transcript_routes() {
         name: "ExitPlanMode".into(),
         arguments: json!({}),
         extras: None,
+        args_parse_error: None,
     }];
     let mut tool = crate::turn_loop::types::LLMMessage::new(
         "tool",

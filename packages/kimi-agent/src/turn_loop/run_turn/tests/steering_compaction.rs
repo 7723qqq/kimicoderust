@@ -141,6 +141,7 @@ async fn test_max_steps_enforcement() {
             name: "read".into(),
             arguments: serde_json::json!({"path": "/x"}),
             extras: None,
+            args_parse_error: None,
         }],
     };
 

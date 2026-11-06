@@ -1664,6 +1664,7 @@ mod tests {
                 name: "Read".into(),
                 arguments: serde_json::json!({}),
                 extras: None,
+                args_parse_error: None,
             }],
             tool_call_id: None,
             prompt_id: None,

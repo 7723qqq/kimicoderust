@@ -66,6 +66,7 @@ impl LLM for BenchLlm {
                 name: "read".into(),
                 arguments: serde_json::json!({ "path": path, "_bench_step": seq }),
                 extras: None,
+                args_parse_error: None,
             })
             .collect();
         Box::pin(async move {

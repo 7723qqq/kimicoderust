@@ -158,6 +158,7 @@ impl LLM for PartialThenBlockLlm {
                 name: "echo".into(),
                 arguments: serde_json::json!({}),
                 extras: None,
+                args_parse_error: None,
             };
             // Seeding mode: the first call answers plainly and ends the
             // turn, so the initial run completes with a resumable history.

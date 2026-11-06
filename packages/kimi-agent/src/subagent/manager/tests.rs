@@ -258,6 +258,7 @@ async fn a_subagents_real_tool_event_is_attributed_to_it() {
                         name: "probe_tool".into(),
                         arguments: serde_json::json!({}),
                         extras: None,
+                        args_parse_error: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage,
@@ -627,6 +628,7 @@ impl crate::turn_loop::types::LLM for ToolThenBlockLlm {
                         name: "read".into(),
                         arguments: serde_json::json!({ "path": "/a.txt" }),
                         extras: None,
+                        args_parse_error: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage: crate::rpc::types::TokenUsage {
@@ -649,6 +651,7 @@ impl crate::turn_loop::types::LLM for ToolThenBlockLlm {
                         name: "read".into(),
                         arguments: serde_json::json!({ "path": "/b.txt" }),
                         extras: None,
+                        args_parse_error: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage: crate::rpc::types::TokenUsage {

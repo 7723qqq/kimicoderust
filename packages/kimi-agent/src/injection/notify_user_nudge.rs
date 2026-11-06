@@ -172,6 +172,7 @@ mod tests {
                     name: name.to_string(),
                     arguments: serde_json::Value::Null,
                     extras: None,
+                    args_parse_error: None,
                 })
                 .collect(),
             ..Default::default()

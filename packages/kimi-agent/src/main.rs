@@ -1596,6 +1596,7 @@ fn wire_message_to_llm(m: Message) -> LLMMessage {
                 name: tc.name,
                 arguments: tc.arguments,
                 extras: tc.extras,
+                args_parse_error: None,
             })
             .collect(),
         tool_call_id: m.tool_call_id,

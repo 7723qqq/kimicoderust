@@ -245,6 +245,7 @@ async fn test_acp_load_replays_tool_results() {
                 name: "Read".into(),
                 arguments: json!({ "path": "a.txt" }),
                 extras: None,
+                args_parse_error: None,
             }],
             ..Default::default()
         },

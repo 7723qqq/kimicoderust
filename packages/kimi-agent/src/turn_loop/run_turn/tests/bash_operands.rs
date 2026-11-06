@@ -45,6 +45,7 @@ impl LLM for BashThenStopLlm {
                         name: "Bash".into(),
                         arguments: bash_args,
                         extras: None,
+                        args_parse_error: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage,

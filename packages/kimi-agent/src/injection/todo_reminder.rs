@@ -273,6 +273,7 @@ mod tests {
                 name: TODO_LIST_TOOL_NAME.into(),
                 arguments: serde_json::json!({ "todos": todos }),
                 extras: None,
+                args_parse_error: None,
             }],
             ..Default::default()
         }
@@ -286,6 +287,7 @@ mod tests {
                 name: TODO_LIST_TOOL_NAME.into(),
                 arguments: serde_json::json!({}),
                 extras: None,
+                args_parse_error: None,
             }],
             ..Default::default()
         }

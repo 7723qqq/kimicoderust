@@ -21,6 +21,7 @@ async fn fork_inherits_conversation_history_and_runs_natively() {
                 name: "Agent".into(),
                 arguments: serde_json::json!({ "prompt": "child task", "fork": true }),
                 extras: None,
+                args_parse_error: None,
             }],
             tool_call_id: None,
             prompt_id: None,

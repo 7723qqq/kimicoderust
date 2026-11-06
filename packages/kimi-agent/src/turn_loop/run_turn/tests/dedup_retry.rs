@@ -38,6 +38,7 @@ async fn test_same_step_duplicate_executes_once() {
                                 name: "read".into(),
                                 arguments: serde_json::json!({"path": "/a.txt"}),
                                 extras: None,
+                                args_parse_error: None,
                             },
                             // Same key, different call id — the repeat.
                             ToolCall {
@@ -45,6 +46,7 @@ async fn test_same_step_duplicate_executes_once() {
                                 name: "read".into(),
                                 arguments: serde_json::json!({"path": "/a.txt"}),
                                 extras: None,
+                                args_parse_error: None,
                             },
                         ],
                         finish_reason: Some("tool_calls".into()),
@@ -163,12 +165,14 @@ async fn test_same_step_duplicate_of_host_tool_still_executes_twice() {
                                 name: "echo".into(),
                                 arguments: serde_json::json!({"text": "hello"}),
                                 extras: None,
+                                args_parse_error: None,
                             },
                             ToolCall {
                                 id: "tc2".into(),
                                 name: "echo".into(),
                                 arguments: serde_json::json!({"text": "hello"}),
                                 extras: None,
+                                args_parse_error: None,
                             },
                         ],
                         finish_reason: Some("tool_calls".into()),
@@ -274,6 +278,7 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
                         name: "read".into(),
                         arguments: serde_json::json!({"path": "/a.txt"}),
                         extras: None,
+                        args_parse_error: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage: TokenUsage::default(),

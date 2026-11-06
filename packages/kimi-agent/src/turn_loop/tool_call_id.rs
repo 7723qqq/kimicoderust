@@ -354,6 +354,7 @@ mod tests {
             name: "Bash".into(),
             arguments: serde_json::json!({}),
             extras: None,
+            args_parse_error: None,
         }
     }
 

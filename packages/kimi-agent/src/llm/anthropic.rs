@@ -484,6 +484,7 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                     name,
                     arguments,
                     extras: None,
+                    args_parse_error: None,
                 });
             }
             _ => {}
@@ -839,17 +840,20 @@ impl StreamAccumulator {
                     name,
                     input_json,
                 } if !name.is_empty() => {
-                    // A truncated stream leaves input_json incomplete — never
-                    // fabricate an empty-argument call (it would execute a
-                    // tool with no real inputs); drop the call instead.
-                    if let Ok(arguments) = serde_json::from_str(&input_json) {
-                        tool_calls.push(ToolCall {
-                            id,
-                            name,
-                            arguments,
-                            extras: None,
-                        });
-                    }
+                    // A truncated stream leaves `input_json` incomplete. The
+                    // call is kept and the reason travels with it (v2
+                    // `parseToolCallArguments`): the model reads an error result
+                    // for the call it issued, and no tool runs on a fabricated
+                    // `{}`.
+                    let (arguments, args_parse_error) =
+                        crate::llm::tool_args::parse_tool_arguments(Some(input_json.as_str()));
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        extras: None,
+                        args_parse_error,
+                    });
                 }
                 _ => {}
             }
@@ -883,6 +887,7 @@ mod tests {
                     name: "Read".into(),
                     arguments: json!({ "path": "a.txt" }),
                     extras: None,
+                    args_parse_error: None,
                 }],
             ),
             WireMessage::tool_result("tu_1", "file body"),
@@ -943,12 +948,14 @@ mod tests {
                         name: "Read".into(),
                         arguments: json!({ "path": "a.txt" }),
                         extras: None,
+                        args_parse_error: None,
                     },
                     ToolCall {
                         id: "call_2".into(),
                         name: "Read".into(),
                         arguments: json!({ "path": "b.txt" }),
                         extras: None,
+                        args_parse_error: None,
                     },
                 ],
             ),
@@ -1408,9 +1415,11 @@ mod tests {
     }
 
     #[test]
-    fn truncated_tool_use_input_is_dropped_not_fabricated() {
-        // A stream cut inside the input JSON must NOT execute a tool call
-        // with an empty argument object (e.g. Bash without a command).
+    fn truncated_tool_use_input_keeps_the_call_and_its_reason() {
+        // A stream cut inside the input JSON must NOT execute a tool call with
+        // an empty argument object (e.g. Bash without a command), and must not
+        // drop it either: the loop answers the kept call with an error result
+        // (v2 `parseToolCallArguments`).
         let mut acc = StreamAccumulator::default();
         acc.feed(&json!({
             "type": "content_block_start",
@@ -1423,7 +1432,16 @@ mod tests {
             "delta": { "type": "input_json_delta", "partial_json": "{\"command\": \"ech" }
         }));
         let resp = acc.finish();
-        assert!(resp.tool_calls.is_empty(), "truncated call must be dropped");
+        assert_eq!(
+            resp.tool_calls.len(),
+            1,
+            "the call survives its own parse failure"
+        );
+        assert_eq!(resp.tool_calls[0].arguments, json!({}));
+        assert!(
+            resp.tool_calls[0].args_parse_error.is_some(),
+            "the reason must travel with the call so the loop can report it"
+        );
     }
 
     #[test]
@@ -1776,6 +1794,7 @@ mod tests {
                     name: "glob".into(),
                     arguments: json!({ "pattern": "*.rs" }),
                     extras: None,
+                    args_parse_error: None,
                 }],
                 tool_call_id: None,
             },
@@ -1859,6 +1878,7 @@ mod tests {
                         name: "glob".into(),
                         arguments: json!({ "pattern": "*.rs" }),
                         extras: None,
+                        args_parse_error: None,
                     }],
                 )],
             ),
@@ -1990,6 +2010,7 @@ mod tests {
                 name: "glob".into(),
                 arguments: json!({ "pattern": "*.rs" }),
                 extras: None,
+                args_parse_error: None,
             }],
             tool_call_id: None,
         }];

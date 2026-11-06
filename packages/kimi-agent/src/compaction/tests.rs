@@ -17,6 +17,7 @@ fn tool_call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
         name: name.into(),
         arguments: args,
         extras: None,
+        args_parse_error: None,
     }
 }
 

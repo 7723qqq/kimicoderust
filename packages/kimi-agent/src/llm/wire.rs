@@ -156,6 +156,7 @@ mod tests {
                     name: "Read".into(),
                     arguments: json!({ "path": "a" }),
                     extras: None,
+                    args_parse_error: None,
                 }],
                 tool_call_id: None,
                 prompt_id: None,

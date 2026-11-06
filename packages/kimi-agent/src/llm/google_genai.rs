@@ -524,6 +524,7 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                     name: name.to_string(),
                     arguments,
                     extras,
+                    args_parse_error: None,
                 });
             }
         }
@@ -673,6 +674,7 @@ impl StreamAccumulator {
                     name: name.to_string(),
                     arguments,
                     extras,
+                    args_parse_error: None,
                 });
             }
         }
@@ -950,6 +952,7 @@ mod tests {
                     name: "Grep".into(),
                     arguments: json!({ "query": "abc" }),
                     extras: None,
+                    args_parse_error: None,
                 }],
             ),
             WireMessage::tool_result("Grep", "results: none"),
@@ -1075,6 +1078,7 @@ mod tests {
                     name: "read_file".into(),
                     arguments: json!({ "path": "test.txt" }),
                     extras: None,
+                    args_parse_error: None,
                 }],
                 tool_call_id: None,
             },
@@ -1185,6 +1189,7 @@ mod tests {
                 name: "Grep".into(),
                 arguments: json!({ "query": "x" }),
                 extras: Some(json!({ "thought_signature_b64": "sig-b64" })),
+                args_parse_error: None,
             }],
         )];
         let req = build_request_full(&messages, &[], None, false);

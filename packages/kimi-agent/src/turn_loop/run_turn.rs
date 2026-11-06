@@ -1800,6 +1800,16 @@ pub fn run_turn<'a>(
                     return Ok(result);
                 }
                 LoopStepStopReason::ToolCalls(mut tool_calls) => {
+                    // v2 `parseToolCallArguments` reads a `null` payload as an
+                    // absent one. Normalizing before the message is pushed keeps
+                    // what we replay to the provider identical to what the loop
+                    // judged.
+                    for tc in &mut tool_calls {
+                        if tc.arguments.is_null() {
+                            tc.arguments = serde_json::json!({});
+                        }
+                    }
+
                     // Append ONE assistant message carrying all tool calls. Wire
                     // formats group an assistant turn's calls into a single
                     // message; keeping them structural (not flattened into
@@ -1814,6 +1824,35 @@ pub fn run_turn<'a>(
                         prompt_id: None,
                         origin: None,
                     });
+
+                    // v2 `preflightToolCall` (`toolExecutorService.ts`): a call
+                    // whose arguments did not decode, or decoded to something
+                    // other than an object, is neither executed nor dropped. The
+                    // assistant message above keeps its `tool_use` — a strict
+                    // provider rejects a `tool_use` with no matching
+                    // `tool_result` — and the call is answered with an error the
+                    // model can read and correct. Dropping it (what the streaming
+                    // transports used to do) gave the model nothing; executing a
+                    // fabricated `{}` would run Bash/Write with no inputs.
+                    let mut unusable_arguments = Vec::new();
+                    tool_calls.retain(|tc| {
+                        let Some(reason) = unusable_tool_arguments(tc) else {
+                            return true;
+                        };
+                        unusable_arguments.push((tc.id.clone(), tc.name.clone(), reason));
+                        false
+                    });
+                    for (tool_call_id, tool_name, reason) in unusable_arguments {
+                        messages.push(LLMMessage {
+                            role: "tool".into(),
+                            content: reason.message(&tool_name),
+                            blocks: Vec::new(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: Some(tool_call_id),
+                            prompt_id: None,
+                            origin: None,
+                        });
+                    }
 
                     // v2 `AgentSwarmService`'s first gate: in swarm mode the
                     // single-subagent `Agent` tool is refused, so the model uses
@@ -2568,6 +2607,43 @@ fn format_elapsed(ms: i64) -> String {
     }
     let hours = minutes / 60;
     format!("{hours}h{}m", minutes % 60)
+}
+
+/// Why a tool call's arguments cannot be executed (v2 `preflightToolCall`).
+enum UnusableArguments {
+    /// The provider's payload was not valid JSON; the reason is what the decoder
+    /// reported.
+    NotJson(String),
+    /// The payload decoded, but tool arguments are always a JSON object.
+    NotObject,
+}
+
+impl UnusableArguments {
+    /// The model-facing sentence. It follows the `Invalid <tool> arguments: …`
+    /// family the per-tool validators already use, so one failure reads like the
+    /// next. `detail` stays as the decoder reported it — v2 likewise hands the
+    /// provider error text through rather than rewriting it.
+    fn message(&self, tool_name: &str) -> String {
+        match self {
+            Self::NotJson(detail) => crate::i18n::LocalizedText::with_params(
+                "engine.tools.argsNotJson",
+                crate::i18n::i18n_params!["tool" => tool_name, "detail" => detail],
+            ),
+            Self::NotObject => crate::i18n::LocalizedText::with_params(
+                "engine.tools.argsNotObject",
+                crate::i18n::i18n_params!["tool" => tool_name],
+            ),
+        }
+        .render()
+    }
+}
+
+/// v2 `preflightToolCall`: why this call cannot run, or `None` when it can.
+fn unusable_tool_arguments(call: &ToolCall) -> Option<UnusableArguments> {
+    if let Some(detail) = &call.args_parse_error {
+        return Some(UnusableArguments::NotJson(detail.clone()));
+    }
+    (!call.arguments.is_object()).then_some(UnusableArguments::NotObject)
 }
 
 #[cfg(test)]

@@ -1131,6 +1131,7 @@ mod tests {
                                 name: "probe_tool".into(),
                                 arguments: serde_json::json!({}),
                                 extras: None,
+                                args_parse_error: None,
                             }]
                         } else {
                             vec![]

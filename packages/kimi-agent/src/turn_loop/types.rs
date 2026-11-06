@@ -325,6 +325,18 @@ pub struct ToolCall {
     /// Gemini `thoughtSignature` attestation, v2 `ToolCall.extras`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extras: Option<serde_json::Value>,
+    /// Why the provider's raw argument payload could not be decoded, when it
+    /// could not.
+    ///
+    /// v2 `parseToolCallArguments` keeps such a call: the failure is reported
+    /// at preflight (`toolExecutorService.ts`), so the model reads an error
+    /// result for the call it actually issued. A transport that drops the call
+    /// instead leaves the model with no feedback and no way to correct itself.
+    ///
+    /// Engine-internal and never serialized: the wire carries decoded
+    /// `arguments`, and only this step's preflight reads the reason.
+    #[serde(skip)]
+    pub args_parse_error: Option<String>,
 }
 
 // ── ExecutableTool trait ───────────────────────────────────────────────────

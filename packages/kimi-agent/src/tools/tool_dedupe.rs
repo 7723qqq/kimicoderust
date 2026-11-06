@@ -233,6 +233,7 @@ mod tests {
             name: name.into(),
             arguments: args,
             extras: None,
+            args_parse_error: None,
         }
     }
 

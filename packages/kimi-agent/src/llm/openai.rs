@@ -505,18 +505,24 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            // arguments is a JSON string; parse it back to a value (tolerating
-            // a malformed/partial string by falling back to an empty object).
-            let args_str = func
-                .get("arguments")
-                .and_then(|x| x.as_str())
-                .unwrap_or("{}");
-            let arguments = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+            // `arguments` is a JSON string in this dialect. v2
+            // `parseToolCallArguments` keeps a call whose payload will not
+            // decode and records the reason, so the loop answers that call with
+            // an error result; a fabricated `{}` would run Bash/Write with no
+            // inputs, and dropping the call would leave the model no feedback.
+            let (arguments, args_parse_error) = match func.get("arguments") {
+                Some(serde_json::Value::String(raw)) => {
+                    crate::llm::tool_args::parse_tool_arguments(Some(raw.as_str()))
+                }
+                Some(other) => (other.clone(), None),
+                None => crate::llm::tool_args::parse_tool_arguments(None),
+            };
             tool_calls.push(ToolCall {
                 id,
                 name,
                 arguments,
                 extras: None,
+                args_parse_error,
             });
         }
     }
@@ -843,18 +849,22 @@ impl StreamAccumulator {
             .tool_calls
             .into_iter()
             .filter(|tc| !tc.name.is_empty())
-            .filter_map(|tc| {
-                // A truncated stream leaves `arguments` unparseable — never
-                // fabricate an empty-argument call (it would execute a tool
-                // with no real inputs); drop the call instead.
-                serde_json::from_str(&tc.arguments)
-                    .ok()
-                    .map(|arguments| ToolCall {
-                        id: tc.id,
-                        name: tc.name,
-                        arguments,
-                        extras: None,
-                    })
+            .map(|tc| {
+                // A truncated stream leaves `arguments` unparseable. The call is
+                // kept and the reason travels with it (v2
+                // `parseToolCallArguments`): the model reads an error result for
+                // the call it issued, no tool runs on a fabricated `{}`, and a
+                // strict provider still sees the `tool_use` paired with a
+                // `tool_result`.
+                let (arguments, args_parse_error) =
+                    crate::llm::tool_args::parse_tool_arguments(Some(tc.arguments.as_str()));
+                ToolCall {
+                    id: tc.id,
+                    name: tc.name,
+                    arguments,
+                    extras: None,
+                    args_parse_error,
+                }
             })
             .collect();
 
@@ -981,6 +991,7 @@ mod tests {
                     name: "Read".into(),
                     arguments: json!({ "path": "a.txt" }),
                     extras: None,
+                    args_parse_error: None,
                 }],
             ),
             WireMessage::tool_result("call_1", "file body"),
@@ -1740,9 +1751,12 @@ mod tests {
     }
 
     #[test]
-    fn truncated_tool_call_arguments_are_dropped_not_fabricated() {
+    fn truncated_tool_call_arguments_keep_the_call_and_its_reason() {
         // A stream cut inside the JSON arguments must NOT execute a tool call
-        // with an empty argument object (e.g. Bash without a command).
+        // with an empty argument object (e.g. Bash without a command), and must
+        // not drop it either: the assistant message keeps its `tool_use` and the
+        // loop answers the call with an error result the model can read (v2
+        // `parseToolCallArguments`).
         let mut acc = StreamAccumulator::default();
         acc.feed(&json!({
             "choices": [{
@@ -1755,7 +1769,17 @@ mod tests {
             }]
         }));
         let resp = acc.finish();
-        assert!(resp.tool_calls.is_empty(), "truncated call must be dropped");
+        assert_eq!(
+            resp.tool_calls.len(),
+            1,
+            "the call survives its own parse failure"
+        );
+        assert_eq!(resp.tool_calls[0].name, "Bash");
+        assert_eq!(resp.tool_calls[0].arguments, json!({}));
+        assert!(
+            resp.tool_calls[0].args_parse_error.is_some(),
+            "the reason must travel with the call so the loop can report it"
+        );
         assert!(resp.content.is_empty());
     }
 

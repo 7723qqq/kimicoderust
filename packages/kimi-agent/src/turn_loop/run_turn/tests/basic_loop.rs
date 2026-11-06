@@ -69,12 +69,14 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
                         name: "AgentSwarm".into(),
                         arguments: serde_json::json!({}),
                         extras: None,
+                        args_parse_error: None,
                     },
                     ToolCall {
                         id: "bash-1".into(),
                         name: "Bash".into(),
                         arguments: serde_json::json!({ "command": "echo hi" }),
                         extras: None,
+                        args_parse_error: None,
                     },
                 ],
                 "tool_calls",
@@ -151,6 +153,130 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
 }
 
 #[tokio::test]
+async fn a_call_with_unusable_arguments_is_answered_not_executed() {
+    // v2 `preflightToolCall` (`toolExecutorService.ts`): a call whose payload
+    // did not decode, or decoded to something that is not an object, is neither
+    // executed with a fabricated `{}` nor dropped. The assistant message keeps
+    // its `tool_use` — a strict provider rejects a `tool_use` with no matching
+    // `tool_result` — and the call is answered with the reason, which is the
+    // only thing that lets the model correct itself.
+    let llm = SequencedLlm {
+        system_prompt: "You are helpful.".into(),
+        model_name: "test-model".into(),
+        steps: vec![
+            (
+                vec![
+                    ToolCall {
+                        id: "broken-json".into(),
+                        name: "Bash".into(),
+                        arguments: serde_json::json!({}),
+                        extras: None,
+                        args_parse_error: Some("EOF while parsing a string".into()),
+                    },
+                    ToolCall {
+                        id: "not-an-object".into(),
+                        name: "Read".into(),
+                        arguments: serde_json::json!("a.txt"),
+                        extras: None,
+                        args_parse_error: None,
+                    },
+                ],
+                "tool_calls",
+            ),
+            (vec![], "stop"),
+        ],
+    };
+
+    let server = Arc::new(RpcServer::new());
+    let callbacks = rpc_callbacks(server.clone());
+
+    let input = RunTurnInput {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: "test-turn-unusable-args".into(),
+        llm: &llm,
+        messages: vec![LLMMessage {
+            role: "user".into(),
+            content: "Run those.".into(),
+            ..Default::default()
+        }],
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: None,
+        media_dropped: None,
+        media_recovery: None,
+        toolset: None,
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_turn(input, &callbacks),
+    )
+    .await
+    .expect(
+        "an unrunnable call must be answered, not dispatched to the host, which would block here",
+    );
+    let turn = result.expect("a call the engine can answer is not a turn failure");
+
+    let assistant = turn
+        .messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("the assistant message is in the history");
+    assert_eq!(
+        assistant
+            .tool_calls
+            .iter()
+            .map(|tc| tc.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["broken-json", "not-an-object"],
+        "both calls stay in the message that issued them"
+    );
+
+    let answer_for = |id: &str| {
+        turn.messages
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(id))
+            .map(|m| m.content.clone())
+            .unwrap_or_else(|| panic!("{id} must still get a result: {:?}", turn.messages))
+    };
+
+    let broken = answer_for("broken-json");
+    assert!(
+        broken.contains("Invalid Bash arguments") && broken.contains("not valid JSON"),
+        "the answer names the real cause: {broken}"
+    );
+    assert!(
+        !broken.contains("{{"),
+        "both parameters are substituted: {broken}"
+    );
+    assert!(
+        broken.contains("EOF while parsing a string"),
+        "the decoder's reason reaches the model: {broken}"
+    );
+
+    let not_object = answer_for("not-an-object");
+    assert!(
+        not_object.contains("Invalid Read arguments") && not_object.contains("JSON object"),
+        "a non-object payload is refused for the same reason v2's schema check would: {not_object}"
+    );
+
+    assert_eq!(
+        turn.steps, 2,
+        "the model reads both answers and continues — it is not the end of the turn"
+    );
+    assert_eq!(turn.stop_reason, LoopTurnStopReason::EndTurn);
+}
+
+#[tokio::test]
 async fn a_mixed_batch_runs_other_tools_while_swarm_mode_is_off() {
     let agent_id = "swarm-veto-inactive-agent";
     let registry = crate::swarm::mode::swarm_mode_registry();
@@ -167,12 +293,14 @@ async fn a_mixed_batch_runs_other_tools_while_swarm_mode_is_off() {
                         name: "AgentSwarm".into(),
                         arguments: serde_json::json!({}),
                         extras: None,
+                        args_parse_error: None,
                     },
                     ToolCall {
                         id: "bash-off-1".into(),
                         name: "Bash".into(),
                         arguments: serde_json::json!({ "command": "echo hi" }),
                         extras: None,
+                        args_parse_error: None,
                     },
                 ],
                 "tool_calls",
@@ -271,12 +399,14 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
                     name: "AgentSwarm".into(),
                     arguments: serde_json::json!({}),
                     extras: None,
+                    args_parse_error: None,
                 },
                 ToolCall {
                     id: "bash-1".into(),
                     name: "Bash".into(),
                     arguments: serde_json::json!({ "command": "echo hi" }),
                     extras: None,
+                    args_parse_error: None,
                 },
             ],
             "tool_calls",
@@ -428,6 +558,7 @@ async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
                 "todos": [{ "title": "Ship it", "status": "in_progress" }]
             }),
             extras: None,
+            args_parse_error: None,
         }],
         ..Default::default()
     });
@@ -495,6 +626,7 @@ async fn test_todo_stale_reminder_is_main_agent_only() {
                 "todos": [{ "title": "Ship it", "status": "in_progress" }]
             }),
             extras: None,
+            args_parse_error: None,
         }],
         ..Default::default()
     });
@@ -1226,6 +1358,7 @@ async fn test_max_steps_exhaustion_reports_max_steps() {
             name: "WebSearch".into(),
             arguments: serde_json::json!({ "query": "x" }),
             extras: None,
+            args_parse_error: None,
         }],
     };
 

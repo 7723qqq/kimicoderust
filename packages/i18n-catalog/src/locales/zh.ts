@@ -1007,6 +1007,8 @@ export const zh = {
       argMustBeArray: '{{tool}} 参数无效：`{{field}}` 必须是数组。',
       argMustNotBeEmpty: '{{tool}} 参数无效：`{{field}}` 不能为空。',
       argRequired: '{{tool}} 参数无效：缺少 `{{field}}`。',
+      argsNotJson: '{{tool}} 参数无效：参数不是合法的 JSON（{{detail}}）。',
+      argsNotObject: '{{tool}} 参数无效：参数必须是 JSON 对象。',
     },
   },
   startup: {

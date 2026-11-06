@@ -323,6 +323,7 @@ async fn a_turn_resends_with_the_strict_projection_after_a_shape_rejection() {
                     name: "Bash".into(),
                     arguments: serde_json::json!({}),
                     extras: None,
+                    args_parse_error: None,
                 }],
                 ..Default::default()
             },
@@ -341,6 +342,7 @@ async fn a_turn_resends_with_the_strict_projection_after_a_shape_rejection() {
                     name: "Bash".into(),
                     arguments: serde_json::json!({}),
                     extras: None,
+                    args_parse_error: None,
                 }],
                 ..Default::default()
             },

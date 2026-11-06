@@ -516,14 +516,14 @@
       "text": "could not clear the goal before the checkpoint",
       "reason": "diagnostic"
     },
-    "packages/kimi-agent/src/callbacks.rs:could not sync the goal before the checkpoint": {
-      "file": "packages/kimi-agent/src/callbacks.rs",
-      "text": "could not sync the goal before the checkpoint",
-      "reason": "diagnostic"
-    },
     "packages/kimi-agent/src/callbacks.rs:could not clear the local goal": {
       "file": "packages/kimi-agent/src/callbacks.rs",
       "text": "could not clear the local goal",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/callbacks.rs:could not sync the goal before the checkpoint": {
+      "file": "packages/kimi-agent/src/callbacks.rs",
+      "text": "could not sync the goal before the checkpoint",
       "reason": "diagnostic"
     },
     "packages/kimi-agent/src/callbacks.rs:could not sync the local goal from the host snapshot": {
@@ -1843,16 +1843,6 @@
     "packages/kimi-agent/src/llm/openai_responses.rs:failed: {err_msg}": {
       "file": "packages/kimi-agent/src/llm/openai_responses.rs",
       "text": "failed: {err_msg}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/llm/openai_responses.rs:function call '{name}' has invalid arguments ({e})": {
-      "file": "packages/kimi-agent/src/llm/openai_responses.rs",
-      "text": "function call '{name}' has invalid arguments ({e})",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/llm/openai_responses.rs:function call '{name}' has truncated (non-JSON) arguments ({e}); refusing to execute with fabricated empty arguments": {
-      "file": "packages/kimi-agent/src/llm/openai_responses.rs",
-      "text": "function call '{name}' has truncated (non-JSON) arguments ({e}); refusing to execute with fabricated empty arguments",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/llm/openai_responses.rs:responses stream error: {err_msg}": {

@@ -570,6 +570,7 @@ mod tests {
                 name: name.into(),
                 arguments: serde_json::json!({ "path": "global/profile.md" }),
                 extras: None,
+                args_parse_error: None,
             }],
             ..Default::default()
         }
@@ -693,6 +694,7 @@ mod tests {
                     name: "Bash".into(),
                     arguments: serde_json::json!({ "command": "cargo test" }),
                     extras: None,
+                    args_parse_error: None,
                 }],
                 ..Default::default()
             },
@@ -704,6 +706,7 @@ mod tests {
                     name: "TodoList".into(),
                     arguments: serde_json::json!({ "todos": [] }),
                     extras: None,
+                    args_parse_error: None,
                 }],
                 ..Default::default()
             },

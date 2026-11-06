@@ -306,22 +306,25 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_string();
-                    // Absent or empty arguments are a valid no-args call;
-                    // present-but-unparsable arguments are corruption — fail
-                    // the parse instead of executing with a fabricated `{}`.
-                    let arguments: Value = match item.get("arguments") {
-                        None => json!({}),
-                        Some(a) if a.as_str().is_some_and(|s| s.trim().is_empty()) => json!({}),
-                        Some(Value::String(s)) => serde_json::from_str(s).map_err(|e| {
-                            format!("function call '{name}' has invalid arguments ({e})")
-                        })?,
-                        Some(other) => other.clone(),
+                    // v2 `parseToolCallArguments`: an absent or empty payload is
+                    // a valid no-args call, and one that will not decode keeps
+                    // its call with the reason attached — the loop answers it
+                    // with an error result. Failing the whole response (what
+                    // this did) turned one corrupt call into a dead turn the
+                    // model could not correct.
+                    let (arguments, args_parse_error) = match item.get("arguments") {
+                        None => (json!({}), None),
+                        Some(Value::String(raw)) => {
+                            crate::llm::tool_args::parse_tool_arguments(Some(raw.as_str()))
+                        }
+                        Some(other) => (other.clone(), None),
                     };
                     tool_calls.push(ToolCall {
                         id,
                         name,
                         arguments,
                         extras: None,
+                        args_parse_error,
                     });
                 }
                 "reasoning" => {
@@ -572,32 +575,19 @@ impl StreamAccumulator {
                 .current_call_id
                 .take()
                 .unwrap_or_else(|| format!("call_{}", self.tool_calls.len()));
-            // Fail closed on truncated arguments: executing a tool with a
-            // fabricated `{}` (e.g. Bash/Write with empty params) is worse
-            // than failing the turn. An empty argument stream is a valid
-            // no-args call; a non-empty but unparsable one is corruption.
-            let trimmed = self.current_call_args.trim();
-            let arguments = if trimmed.is_empty() {
-                json!({})
-            } else {
-                match serde_json::from_str(trimmed) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        if self.error.is_none() {
-                            self.error = Some(format!(
-                                "function call '{name}' has truncated (non-JSON) arguments ({e}); refusing to execute with fabricated empty arguments"
-                            ));
-                        }
-                        self.current_call_args.clear();
-                        return;
-                    }
-                }
-            };
+            // v2 `parseToolCallArguments`: a truncated argument stream keeps its
+            // call with the reason attached, so the model reads an error result
+            // for it. Failing the whole response (what this did) left the model
+            // nothing to correct and turned one corrupt call into a dead turn.
+            // An empty stream is a valid no-args call.
+            let (arguments, args_parse_error) =
+                crate::llm::tool_args::parse_tool_arguments(Some(self.current_call_args.as_str()));
             self.tool_calls.push(ToolCall {
                 id,
                 name,
                 arguments,
                 extras: None,
+                args_parse_error,
             });
             self.current_call_args.clear();
         }
@@ -612,11 +602,11 @@ impl StreamAccumulator {
     pub fn finish(mut self) -> LLMChatResponse {
         self.flush_current_tool_call();
 
-        // Fail closed: a corrupted tool call (or a failed response) poisons
-        // the whole turn. Handing upward a partial tool set — or an empty
-        // answer with a "failed" finish reason — is what turned provider
-        // failures into silent empty completions. The contentless, toolless,
-        // reasonless response is mapped to `Err` by the transport.
+        // Fail closed on a provider or stream failure: handing upward a partial
+        // tool set — or an empty answer with a "failed" finish reason — is what
+        // turned provider failures into silent empty completions. A tool call
+        // whose arguments did not decode is not this case: it stays in the
+        // response with its reason, and the loop answers that one call.
         if self.error.is_some() {
             return LLMChatResponse {
                 content: String::new(),
@@ -1009,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn test_truncated_tool_call_arguments_are_an_error_not_empty_object() {
+    fn test_truncated_tool_call_arguments_keep_the_call_for_the_loop_to_answer() {
         let mut acc = StreamAccumulator::new();
         acc.feed(&json!({
             "type": "response.output_item.added",
@@ -1025,18 +1015,23 @@ mod tests {
             "delta": "{\"command\": \"rm -rf /tmp/x"
         }));
 
-        // The corruption only materializes at flush time; the transport
-        // surfaces mid-stream failures via take_error() and finish() refuses
-        // to hand up a partial tool set.
-        let resp = acc.finish();
+        let mut acc2 = acc;
         assert!(
-            resp.tool_calls.is_empty() && resp.content.is_empty(),
-            "the corrupted call must be dropped, not pushed with empty arguments"
+            acc2.take_error().is_none(),
+            "one corrupt call is not a transport failure and must not poison the turn"
         );
+        let resp = acc2.finish();
+        assert_eq!(
+            resp.tool_calls.len(),
+            1,
+            "the call is kept so the loop can answer it"
+        );
+        assert_eq!(resp.tool_calls[0].arguments, json!({}));
         assert!(
-            resp.finish_reason.is_none(),
-            "a poisoned turn must come back contentless/toolless/reasonless so the transport errors"
+            resp.tool_calls[0].args_parse_error.is_some(),
+            "the reason travels with the call (v2 `parseToolCallArguments`)"
         );
+        assert!(resp.content.is_empty());
     }
 
     #[test]
@@ -1060,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_response_rejects_invalid_arguments() {
+    fn test_parse_response_keeps_a_call_whose_arguments_do_not_decode() {
         let bad = json!({
             "status": "completed",
             "output": [{
@@ -1070,10 +1065,16 @@ mod tests {
                 "arguments": "{\"path\": \"/x"
             }]
         });
-        assert!(
-            parse_response(&bad).is_err(),
-            "non-streaming invalid arguments must fail the parse, not become {{}}"
+        let parsed = parse_response(&bad).expect(
+            "a corrupt call is not a parse failure — the call is kept so the loop can answer it",
         );
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].arguments, json!({}));
+        assert!(
+            parsed.tool_calls[0].args_parse_error.is_some(),
+            "the reason travels with the call (v2 `parseToolCallArguments`)"
+        );
+
         let no_args = json!({
             "status": "completed",
             "output": [{
@@ -1084,6 +1085,10 @@ mod tests {
         });
         let parsed = parse_response(&no_args).unwrap();
         assert_eq!(parsed.tool_calls[0].arguments, json!({}));
+        assert!(
+            parsed.tool_calls[0].args_parse_error.is_none(),
+            "absent arguments are a valid no-args call, not a failure"
+        );
     }
 
     #[test]

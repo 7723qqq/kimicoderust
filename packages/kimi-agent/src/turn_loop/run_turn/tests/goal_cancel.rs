@@ -467,6 +467,7 @@ async fn test_cancellation_during_tool_execution_aborts() {
             name: "read".into(),
             arguments: serde_json::json!({ "path": "/a.txt" }),
             extras: None,
+            args_parse_error: None,
         }],
     };
 
@@ -543,6 +544,7 @@ async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
             name: "read".into(),
             arguments: serde_json::json!({ "path": "/a.txt" }),
             extras: None,
+            args_parse_error: None,
         }],
     };
 
@@ -640,6 +642,7 @@ async fn test_tool_result_stop_turn_ends_turn_completed() {
             name: "read".into(),
             arguments: serde_json::json!({ "path": "/a.txt" }),
             extras: None,
+            args_parse_error: None,
         }],
     };
 

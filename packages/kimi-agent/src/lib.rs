@@ -86,6 +86,7 @@ pub fn event_store_message_to_llm(msg: crate::native::event_store::Message) -> L
                 name,
                 arguments,
                 extras: None,
+                args_parse_error: None,
             });
         }
     }
@@ -817,6 +818,7 @@ mod engine_tests {
                                 "path": "package.json"
                             }),
                             extras: None,
+                            args_parse_error: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: crate::rpc::types::TokenUsage::default(),

@@ -57,6 +57,7 @@ impl LLM for ToolForeverLlm {
                     name: "echo".into(),
                     arguments: serde_json::json!({}),
                     extras: None,
+                    args_parse_error: None,
                 }],
                 finish_reason: Some("tool_calls".into()),
                 usage: TokenUsage::default(),

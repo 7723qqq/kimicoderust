@@ -665,6 +665,7 @@ mod tests {
             name: name.to_string(),
             arguments: json!({ "path": "a.txt" }),
             extras: None,
+            args_parse_error: None,
         }
     }
 

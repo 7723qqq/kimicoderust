@@ -22,6 +22,7 @@ async fn a_swarm_tool_call_rides_its_display_on_the_started_event() {
                 "items": ["a", "b", "c"],
             }),
             extras: None,
+            args_parse_error: None,
         }],
     };
 
@@ -101,6 +102,7 @@ async fn a_tool_without_a_display_ships_none() {
             name: "WebSearch".into(),
             arguments: serde_json::json!({ "query": "x" }),
             extras: None,
+            args_parse_error: None,
         }],
     };
 
@@ -178,6 +180,7 @@ async fn test_tool_call_lifecycle_events_bracket_execution() {
             name: "WebSearch".into(),
             arguments: serde_json::json!({ "query": "x" }),
             extras: None,
+            args_parse_error: None,
         }],
     };
 
@@ -272,6 +275,7 @@ async fn step_boundaries_are_paired_one_begin_and_one_end_per_step() {
             name: "WebSearch".into(),
             arguments: serde_json::json!({ "query": "x" }),
             extras: None,
+            args_parse_error: None,
         }],
     };
 

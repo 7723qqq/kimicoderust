@@ -15,6 +15,7 @@ pub mod proxy;
 pub mod request_structure;
 pub mod thinking_guard;
 pub mod timing;
+pub mod tool_args;
 pub mod wire;
 
 pub use error::LlmError;
