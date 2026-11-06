@@ -467,3 +467,55 @@ turn**。回合内子代理触发的 hook 输出因此只能被读成主代理�
 - **`check:upstream-v2-delta` 的绿只代表"对该 pin 无新 delta"**：本机没有 `upstream` remote，且仓库是
   partial clone、promisor 远端走 HTTPS（github.com:443 在本机超时），`git fetch` 刷不动 ref，仍停在
   `a2afdbc7d`。要真正判定上游新增，需要先在能联网的机器上刷新该 ref 再复跑。
+
+## 12. 2026-11-06 补 Rust 之七：undo 的可用性以 checkpoint 深度为准（exit 0）
+
+**前提**：`.tmp/v2-ref` 与 `.tmp/v2-ref-upstream` 都不在本机。**已用本仓历史重建**
+（`git archive ecad4136d9^ packages/{agent-core-v2,kap-server,klient,acp-server}` 解到 `.tmp/v2-ref`，
+19 MB，全程无网络）；`.tmp/v2-ref-upstream` 仍缺 —— 它要 `upstream/main`，而本机无 `upstream` remote、
+promisor 远端走 HTTPS 不通，见 §11.4。
+
+### 12.1 v2 对照（`agent-core-v2/src/agent/undo/undoService.ts`）
+
+| | v2 | 本仓（修前） |
+|---|---|---|
+| 可用性判据 | `availability()` = `min(computeUndoCut, checkpointDepth())`，`assertUndoAvailable` 在**切历史前**比对 | 只看 `computeUndoCut` |
+| 栈不够时 | 拒绝：`SESSION_UNDO_UNAVAILABLE` + `reason: 'checkpoint_lost'`，文案 "Nothing to undo: conversation state checkpoints are incomplete"，什么都不动 | 照切 N 个回合，`rollback_scoped_state` 能弹几层弹几层 |
+| 后果 | — | 转录回退 N 回合、todo/goal 等只回退 M<N 回合：面板与历史互相矛盾。fork 出来的会话（只复制转录、栈为空）是最常见的触发路径 |
+
+### 12.2 改动
+
+1. Rust `native_engine_state_checkpoint_depth(workspace_root, session_id)` → `StateStore::checkpoint_depth()`。
+   宿主算不出这个目录（路径是规范化 workspace 的 digest），所以由引擎回答；会话级，不看 workspace 级栈。
+2. TS `undoHistory`：取到 quiescence 之后、`setHistory` 之前读深度；`depth < cut.removedCount` →
+   `SESSION_UNDO_UNAVAILABLE` / `checkpoint_lost`，`details` 带 `requestedCount` 与 `undoableCount`（v2 同字段）。
+3. **手写转发层**：`packages/kimi-agent/index.native.cjs` 逐条转发 native 导出，新 `#[napi]` 不进去等于不存在
+   （首次运行即 `nativeEngineStateCheckpointDepth is not a function`）。已补 `.cjs` 包装函数 + 导出表项，
+   `index.native.d.ts` 的手写声明同步；`napi-contract.d.ts` 由构建重新生成。
+
+### 12.3 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib native::native_tool_bindings` | 0 | 1 passed（0 → push 后 1 → rollback 后 0；另一会话互不影响） |
+| `cargo test --lib`（全量） | 0 | 3659 passed / 0 failed |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun --bun run vitest run packages/node-sdk/test/session-undo.test.ts` | 0 | 3 passed（含 fork 场景 `checkpoint_lost`，且拒绝后转录一字未动） |
+| **变异验证** | — | 把 `depth < cut.removedCount` 改成永不触发 → fork 用例转红；还原即绿 |
+| `bun run typecheck` | 0 | 全部包 exit 0 |
+| `bun run check:all` | 0 | 20 道全绿（`architecture` 指纹与 `napi` / `napi.contract` / `sdk.node` / `sdk.node.native-client` 四个 normify 模块经官方通道刷新） |
+| `bun --bun run vitest run packages/node-sdk` | 1 | 447 passed / 1 failed —— 唯一失败是 §11.4 记录的既有 `native-harness` EBUSY，与本批无关 |
+
+### 12.4 仍未收口
+
+- **TUI `/undo` 菜单的可用性仍只按转录算**（`apps/kimi-code/src/tui/commands/undo.ts` 的
+  `resolveUndoAvailability` 取 transcript 锚点与 context 锚点的较小值），不比 checkpoint 深度。v2 的
+  `availability()` 取 `min(cut, checkpointDepth)`，所以 fork / 导入会话在菜单里仍会先给出选项、执行时才被拒。
+  补齐需要 SDK 暴露一个可用性读取（转录 + 深度），属下一批。
+- `packages/kimi-agent/test/surface-contract.test.ts` **在 HEAD 上就红**：`sessionTowerStatus` /
+  `sessionTakeoverLock` 既不进手写转发层也不在 `UNWRAPPED_BINDINGS` 豁免表里（`357ffaea4` 引入；两者实际走
+  `findKimiAgentAddon()` 的 raw addon 路径，`session-handle.ts` 与 `tower-status.ts` 直接 require）。
+  与本节无关，未改动；要么补转发、要么按真实链路登记豁免，需单独一批。
+- 本节新暴露的接缝值得记住：`#[napi]` 新导出有**三条**必经之路（Rust 属性、`index.native.cjs` 手写转发、
+  手写 `index.native.d.ts`），`check:parity` 只覆盖第一条与生成契约之间的差集，第二条靠
+  `surface-contract.test.ts` 兜，而那个套件当前是红的。

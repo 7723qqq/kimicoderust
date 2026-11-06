@@ -1039,6 +1039,19 @@ pub fn native_rollback_engine_state(workspace_root: String, session_id: String, 
     ) as u32
 }
 
+/// How many state checkpoints one session still holds (native undo gating).
+///
+/// The transcript cut and the state rollback are one operation, so an undo the
+/// checkpoint stack cannot cover is refused before anything moves (v2
+/// `checkpoint_lost`). The host cannot count the files itself — the layout is
+/// a digest of the canonicalized workspace path — so it asks here first.
+#[napi]
+pub fn native_engine_state_checkpoint_depth(workspace_root: String, session_id: String) -> u32 {
+    crate::storage::StateStore::for_session(std::path::Path::new(&workspace_root), &session_id)
+        .map(|store| store.checkpoint_depth() as u32)
+        .unwrap_or(0)
+}
+
 /// The post-jitter next fire (epoch ms) for one stored cron entry, or `null`
 /// when its expression never fires again.
 ///
@@ -1662,5 +1675,42 @@ pub async fn native_web_search(
             })
             .collect(),
         error: result.error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The depth the host gates undo on is the session's own stack: a fresh
+    /// session answers zero, a pushed anchor adds one, and the rollback that
+    /// consumes it takes it back. A session that never checkpointed (a fork
+    /// copies the transcript only) therefore reports the zero that makes the
+    /// host refuse, instead of silently cutting history the state cannot follow.
+    #[test]
+    fn test_checkpoint_depth_export_tracks_the_sessions_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let depth = || native_engine_state_checkpoint_depth(workspace.clone(), "session-a".into());
+        assert_eq!(depth(), 0);
+
+        let store = crate::storage::StateStore::for_session(dir.path(), "session-a").unwrap();
+        store
+            .write_domain("todo", &serde_json::json!([{ "id": "T1", "title": "one" }]))
+            .unwrap();
+        store.checkpoint().unwrap();
+        assert_eq!(depth(), 1);
+
+        // Another session has its own stack; undo is per session, never the
+        // workspace-level one.
+        let other = crate::storage::StateStore::for_session(dir.path(), "session-b").unwrap();
+        other.checkpoint().unwrap();
+        assert_eq!(depth(), 1);
+
+        assert_eq!(
+            crate::storage::state_store::rollback_scoped_state(dir.path(), "session-a", 1),
+            1
+        );
+        assert_eq!(depth(), 0);
     }
 }

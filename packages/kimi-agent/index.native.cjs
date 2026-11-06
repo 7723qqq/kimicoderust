@@ -781,6 +781,16 @@ function nativeRollbackEngineState(workspaceRoot, sessionId, count) {
 }
 
 /**
+ * How many state checkpoints one session still holds.
+ * @param {string} workspaceRoot - the workspace the state belongs to
+ * @param {string} sessionId - the session whose stack to count
+ * @returns {number} the number of snapshots the next undo can consume
+ */
+function nativeEngineStateCheckpointDepth(workspaceRoot, sessionId) {
+  return binding.nativeEngineStateCheckpointDepth(workspaceRoot, sessionId);
+}
+
+/**
  * The post-jitter next fire (epoch ms) for one stored cron entry, or null
  * when its expression never fires again. The host cannot reproduce the
  * parser, the local timezone, or the jitter derivation, so a host listing
@@ -1126,6 +1136,7 @@ module.exports = {
   // Engine state store
   nativeReadEngineState,
   nativeRollbackEngineState,
+  nativeEngineStateCheckpointDepth,
   nativeCronNextFire,
 
   // Engine locale

@@ -213,4 +213,55 @@ max_context_size = 200000
     expect(updates).toEqual(['active']);
     await session.close();
   }, 30_000);
+
+  /**
+   * v2 refuses an undo the state checkpoints cannot cover (`checkpoint_lost`)
+   * instead of cutting the transcript and rolling back whatever is left: the
+   * two halves of an undo have to move together or the panels describe a state
+   * the history no longer has. A fork is the case that reaches this — it copies
+   * the transcript and starts with an empty checkpoint stack.
+   */
+  it('refuses an undo the state checkpoints cannot cover', async () => {
+    const session = await harness.createSession({ id: 'ses_undo_fork_src', workDir });
+    const ended = waitForTurnEnded(session);
+    await session.prompt('one');
+    await expect(ended).resolves.toMatchObject({ reason: 'completed' });
+    // The source session has the one checkpoint its turn pushed.
+    await expect(session.undoHistory(2)).rejects.toMatchObject({
+      code: 'session.undo_unavailable',
+      details: { reason: 'insufficient' },
+    });
+
+    // `prompt` submits and returns, and the session's busy flag clears only
+    // when the turn's outcome settles — a beat after `turn.ended`. Wait for
+    // the fork to be admitted instead of racing that flag.
+    let forked: Awaited<ReturnType<KimiHarness['forkSession']>> | undefined;
+    let forkError: unknown;
+    for (let attempt = 0; attempt < 100 && forked === undefined; attempt += 1) {
+      try {
+        forked = await harness.forkSession({
+          id: 'ses_undo_fork_src',
+          forkId: 'ses_undo_fork',
+        });
+      } catch (error) {
+        forkError = error;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    if (forked === undefined) throw forkError;
+    const before = await forked.getContext();
+    expect(
+      before.history.filter((message) => message.role === 'user' && originKind(message) !== 'injection'),
+    ).toHaveLength(1);
+
+    await expect(forked.undoHistory(1)).rejects.toMatchObject({
+      code: 'session.undo_unavailable',
+      details: { reason: 'checkpoint_lost', requestedCount: 1, undoableCount: 0 },
+    });
+    // Nothing moved: the refusing undo leaves the transcript where it was.
+    const after = await forked.getContext();
+    expect(after.history).toHaveLength(before.history.length);
+    await session.close();
+    await forked.close();
+  }, 30_000);
 });

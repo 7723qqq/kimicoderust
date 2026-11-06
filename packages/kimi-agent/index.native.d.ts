@@ -338,6 +338,22 @@ export function nativeRollbackEngineState(
 ): number;
 
 /**
+ * How many state checkpoints one session still holds.
+ *
+ * The transcript cut and the state rollback are one operation, so an undo the
+ * checkpoint stack cannot cover is refused before anything moves (v2
+ * `checkpoint_lost`).
+ *
+ * @param workspaceRoot - the workspace the state belongs to
+ * @param sessionId - the session whose stack to count
+ * @returns the number of snapshots the next undo can consume
+ */
+export function nativeEngineStateCheckpointDepth(
+  workspaceRoot: string,
+  sessionId: string,
+): number;
+
+/**
  * The post-jitter next fire (epoch ms) for one stored cron entry, or `null`
  * when its expression never fires again.
  *

@@ -1677,22 +1677,43 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       );
     }
     try {
+      const { nativeEngineStateCheckpointDepth, nativeReadEngineState, nativeRollbackEngineState } =
+        await import('@moonshot-ai/kimi-agent/native');
+      // v2 `assertUndoAvailable`: the transcript cut and the state rollback are
+      // one operation, so an undo the checkpoint stack cannot cover is refused
+      // before anything moves. Cutting the turns anyway and unwinding what
+      // happens to be there left the transcript describing one state and the
+      // panels (todo / goal / plan) another. A fork is the case that reaches
+      // this: it copies the transcript and starts with an empty stack.
+      const depth = nativeEngineStateCheckpointDepth(meta.workDir, meta.id);
+      if (depth < cut.removedCount) {
+        throw new KimiError(
+          ErrorCodes.SESSION_UNDO_UNAVAILABLE,
+          'Nothing to undo: conversation state checkpoints are incomplete',
+          {
+            details: {
+              reason: 'checkpoint_lost',
+              requestedCount: input.count,
+              undoableCount: depth,
+            },
+          },
+        );
+      }
       await meta.handle.setHistory(history.slice(0, cut.cutIndex));
       // Engine state follows the transcript: the engine pushes one checkpoint
       // at each undo-anchor turn's head, so unwinding the same number of
       // snapshots restores todo/plan/goal to the state the earliest cut turn
-      // started from. An exhausted stack (a fork copied history only) is
-      // normal and stops early without failing the undo.
-      const { nativeReadEngineState, nativeRollbackEngineState } =
-        await import('@moonshot-ai/kimi-agent/native');
+      // started from.
       const consumed = nativeRollbackEngineState(meta.workDir, meta.id, cut.removedCount);
       // `meta.goal` is what the next turn's goal provider hands the engine, and
       // the engine trusts a fresher host copy (`sync_goal_from_context`), so a
       // stale cache wrote the undone goal straight back into the store: the
       // rollback survived exactly one turn. The host now adopts the goal the
       // rollback restored, exactly as an engine `goal.updated` would have left
-      // it. A stack that consumed nothing (a fork copies history only) changed
-      // no engine state, so the host's own goal stays the authority there.
+      // it. The depth gate above guarantees the stack covers the whole cut, so
+      // a short count here means a snapshot failed to read — the store logged
+      // it and left that domain alone, and the host then keeps its own copy
+      // rather than inventing one.
       if (consumed > 0) {
         const restored = goalStateFromEngineStore(
           nativeReadEngineState(meta.workDir, 'goal', meta.id),

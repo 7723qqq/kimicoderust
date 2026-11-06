@@ -1124,6 +1124,16 @@ export declare function nativeDetectFileType(path: string, header: Uint8Array): 
  */
 export declare function nativeEdit(path: string, oldString: string, newString: string, replaceAll?: boolean | undefined | null): Promise<EditResult>
 
+/**
+ * How many state checkpoints one session still holds (native undo gating).
+ *
+ * The transcript cut and the state rollback are one operation, so an undo the
+ * checkpoint stack cannot cover is refused before anything moves (v2
+ * `checkpoint_lost`). The host cannot count the files itself — the layout is
+ * a digest of the canonicalized workspace path — so it asks here first.
+ */
+export declare function nativeEngineStateCheckpointDepth(workspaceRoot: string, sessionId: string): number
+
 /** Escape all XML-significant characters: & < > " */
 export declare function nativeEscapeXml(text: string): string
 
