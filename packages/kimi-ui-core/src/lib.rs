@@ -48,6 +48,7 @@ pub use event_class::{
 pub use headless::HeadlessBackend;
 pub use layout::{Attributes, Block, Color, Row, Style, char_width, expand_tabs, width, wrap};
 pub use render_backend::{
-    AltScreenBackend, CapabilitySet, ComponentNode, InputEvent, Key, KeyEvent, Modifiers,
-    MouseEvent, MouseKind, NodeId, RenderBackend, ScrollbackBackend, StopOptions,
+    AltScreenBackend, BackendState, CapabilitySet, ComponentNode, Frame, InputEvent, InputOutcome,
+    InputQueue, Key, KeyEvent, Modifiers, MouseEvent, MouseKind, NodeId, RenderBackend,
+    ScrollbackBackend, StopOptions, StyledRow,
 };

@@ -623,31 +623,41 @@ impl InputQueue {
 
 /// State every built-in backend keeps: the tree, focus, the viewport size, the
 /// pending-render flag, and the input queue.
+///
+/// Public because it is the seam a backend outside this crate builds on: the
+/// in-crate [`ScrollbackBackend`] and [`AltScreenBackend`] own one, and a
+/// terminal backend elsewhere (`kimi-ui-terminal`) owns one the same way. It
+/// carries no I/O of its own, so widening it costs the crate none of its
+/// "zero terminal dependency" promise.
 #[derive(Debug, Default)]
-pub(crate) struct BackendState {
-    pub(crate) arena: NodeArena,
-    pub(crate) focus: Option<NodeId>,
-    pub(crate) pending: bool,
-    pub(crate) force: bool,
-    pub(crate) started: bool,
-    pub(crate) size: (u16, u16),
-    pub(crate) input: InputQueue,
-    pub(crate) last_frame: Frame,
+pub struct BackendState {
+    pub arena: NodeArena,
+    pub focus: Option<NodeId>,
+    /// A render pass has been requested and not yet consumed.
+    pub pending: bool,
+    /// The pending pass must repaint everything rather than diff.
+    pub force: bool,
+    pub started: bool,
+    pub size: (u16, u16),
+    /// Events no component consumed; the host drains them.
+    pub input: InputQueue,
+    /// What the last pass painted, which is what a diff compares against.
+    pub last_frame: Frame,
 }
 
 impl BackendState {
-    pub(crate) fn mount(&mut self, node: ComponentNode, parent: Option<NodeId>) -> Option<NodeId> {
+    pub fn mount(&mut self, node: ComponentNode, parent: Option<NodeId>) -> Option<NodeId> {
         self.arena.mount(node, parent)
     }
 
-    pub(crate) fn unmount(&mut self, id: NodeId) {
+    pub fn unmount(&mut self, id: NodeId) {
         self.arena.unmount(id);
         if self.focus == Some(id) || self.focus.is_some_and(|f| !self.arena.contains(f)) {
             self.focus = None;
         }
     }
 
-    pub(crate) fn request_render(&mut self, force: bool) {
+    pub fn request_render(&mut self, force: bool) {
         self.pending = true;
         self.force |= force;
     }
@@ -655,7 +665,7 @@ impl BackendState {
     /// Lay out at `width` and return the resulting frame. Mutable because a
     /// node caches its wrapped rows; the read-only [`RenderBackend::frame`]
     /// reports the cached result instead.
-    pub(crate) fn layout_frame(&mut self, width: usize) -> Frame {
+    pub fn layout_frame(&mut self, width: usize) -> Frame {
         Frame::new(
             self.arena
                 .layout(width)
@@ -667,14 +677,23 @@ impl BackendState {
 
     /// The viewport width a paint should use: the last resize, else a
     /// generous default so a backend used before any resize still lays out.
-    pub(crate) fn paint_width(&self) -> usize {
+    pub fn paint_width(&self) -> usize {
         match self.size.0 {
             0 => DEFAULT_PAINT_WIDTH,
             columns => columns as usize,
         }
     }
 
-    pub(crate) fn set_focus(&mut self, id: Option<NodeId>) {
+    /// Coalesced styled rows for one paint at `width`.
+    ///
+    /// The plain [`Self::layout_frame`] drops colour, which is all a
+    /// scrollback diff needs; a backend that emits escape sequences needs the
+    /// runs, grouped so consecutive rows of one style become one span.
+    pub fn styled_rows(&mut self, width: usize) -> Vec<StyledRow> {
+        self.arena.styled_rows(width)
+    }
+
+    pub fn set_focus(&mut self, id: Option<NodeId>) {
         if let Some(target) = id
             && !self.arena.is_focusable(target)
         {
@@ -687,7 +706,7 @@ impl BackendState {
     /// the focused node's handler. Anything the focused handler ignores (or
     /// everything, when nothing is focused) is queued for the host, so a
     /// dispatch is never a silent drop.
-    pub(crate) fn dispatch_input(&mut self, ev: InputEvent) {
+    pub fn dispatch_input(&mut self, ev: InputEvent) {
         if let InputEvent::Resize { columns, rows } = ev {
             self.size = (columns, rows);
             // A resize is geometry, not something a component consumes: it

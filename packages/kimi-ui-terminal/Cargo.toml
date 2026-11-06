@@ -1,0 +1,8 @@
+[package]
+name = "kimi-ui-terminal"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal backend for the Rust UI migration: paints the shared component tree as ANSI bytes."
+
+[dependencies]
+kimi-ui-core = { path = "../kimi-ui-core" }

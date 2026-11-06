@@ -194,7 +194,18 @@
       "source": "packages/kimi-ui-core/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "1e3536ebe57d94d5"
+      "fingerprint": "586bc770c17891f2"
+    },
+    {
+      "id": "kimi-ui-terminal",
+      "name": "Kimi UI Terminal (ANSI render backend)",
+      "source": "packages/kimi-ui-terminal/src",
+      "layer": "app",
+      "deps": [
+        "kimi-ui-core"
+      ],
+      "_depsNote": "Only edge is kimi-ui-core: the terminal backend builds on its component tree, RenderBackend contract and Style vocabulary (design reports/design/RUST-UI-DECOUPLING.md §1.3/§3). No terminal crate dependency — ANSI bytes are written to any std::io::Write, so raw mode and key decoding stay with the application crate that owns the terminal handle.",
+      "fingerprint": "d8f3d32fb9f6b05d"
     },
     {
       "id": "vis-server",

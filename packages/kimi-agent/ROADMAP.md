@@ -10498,6 +10498,66 @@ swarm 模式时执行；这个 e2e 写于 2026-10-01，从未开启该模式，�
 排在「未定位」的原判断（权限拒绝 / 门禁否决 / napi fail 三选一）就地修正为：门禁否决，
 且是**测试**缺了前提，不是产品缺陷。
 
+## 57. 2026-11-06 终端后端：把渲染契约接上真实 ANSI 输出（kimi-ui-terminal）
+
+§46–§49 把渲染后端做到了 headless（`paint()` 出文本行），真实终端那一步一直缺着。
+本批补上**可测的那一半**：新 crate `packages/kimi-ui-terminal`，零终端依赖，
+把组件树画成 ANSI 字节。
+
+### 57.1 先补一个缝：外 crate 原本无法实现 `RenderBackend`
+
+`RenderBackend` 是公开、object-safe 的 trait，但它的脚手架全是 `pub(crate)`：
+`BackendState`、`NodeArena::layout`、`styled_rows`、`get_mut`、`is_focusable`。
+也就是说「再写一个后端」在契约上被允许、在类型上做不到——`kimi-ui-core` 自己的三个
+后端靠同 crate 私有可见性工作。
+
+本批把这层脚手架开成公开 API（**纯可见性放宽，零行为变化**）：
+
+- `BackendState` 与其字段 `pub`，并补 `styled_rows(width) -> Vec<StyledRow>`——
+  `layout_frame` 只给文本，而发 ANSI 的后端需要样式分块；
+- `lib.rs` 追加 `BackendState`/`Frame`/`StyledRow`/`InputQueue`/`InputOutcome` 导出。
+
+kimi-ui-core 的 72 个既有测试保持全绿；指纹随 `--update` 刷新
+（`1e3536ebe57d94d5` → `586bc770c17891f2`）。
+
+### 57.2 新 crate：两种渲染策略 + SGR
+
+- `ansi` 模块：`Style` → SGR 参数（固定顺序，golden 可比）；16 色按 30-37/90-97、
+  背景 40-47/100-107，RGB 走 `38;2`/`48;2`；plain 样式**不产**转义。
+- `TerminalBackend<W: Write>`：泛型在 sink 上，所以测试读得回字节、应用传 stdout。
+  - `Mode::Scrollback`：只追加 `tail_after` 的差量，样式按同一 offset 对齐；
+  - `Mode::AltScreen`：`ESC[H` + 整帧重绘 + `ESC[K`/`ESC[J`；
+  - `start`/`stop`：alt-screen 进出缓冲，`keep_frame` 在离开后把最后一帧重画到主屏
+    （否则离开 alt screen 等于丢掉整个 transcript）；
+  - `with_color(false)` 供 `NO_COLOR`/管道；
+  - **写失败不吞**：`render` 的返回类型是 `Frame`，没有 Result，所以错误留在
+    `take_error()`，宿主每次取走一次。
+
+**明确不做**（写在 crate 文档里）：raw mode、按键解码、鼠标捕获、inline image。
+前三项需要应用持有的终端句柄，而 `kimi-ui-core` 的 `InputEvent` 已经是宿主解码后的
+中性形状；在下层再解一遍等于把平台怪癖实现两次。
+
+### 57.3 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test`（kimi-ui-terminal） | **19 passed / 0 failed** |
+| `cargo test`（kimi-ui-core） | 72 passed（可见性放宽后不变） |
+| `cargo clippy --all-targets -- -D warnings`（两个 crate） | 0 |
+| `cargo fmt --check`（两个 crate） | 0 |
+| `bun run check:all` | 0（`check:architecture` 20 modules） |
+
+判定测试覆盖：差量只印新行、force 整帧重印、无 pending 不输出、alt-screen 归位与清屏、
+二次重绘整屏、关色后零转义、样式随每行重复、换行时每片都带 SGR、进出 alt-screen、
+`keep_frame` 重画、能力集差异、写失败只报一次。
+
+### 57.4 构建注意
+
+新 crate 首次构建需要 registry 解析：本机 TLS 吊销检查离线时 `cargo test` 会失败，
+用 `cargo test --offline`（缓存里已有 serde/serde_json）即可；`Cargo.lock` 随 crate
+一并入库，之后的构建不再需要索引。
+
+
 
 
 
