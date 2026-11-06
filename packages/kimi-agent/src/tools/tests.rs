@@ -582,6 +582,10 @@ async fn disclosure_refuses_a_call_to_a_deferred_unloaded_tool() {
         "{}",
         refused.content
     );
+    // `note` is model-facing prose (v2 `ToolResult.note`) and the engine
+    // appends it verbatim to the result the model reads: a provenance tag here
+    // showed up in the model's context on every deferred and every MCP call.
+    assert!(refused.note.is_none(), "note = {:?}", refused.note);
 
     // After loading through select_tools, the call goes through.
     let load = ts
@@ -597,6 +601,7 @@ async fn disclosure_refuses_a_call_to_a_deferred_unloaded_tool() {
         .await
         .expect("now loaded, the toolset still handles it");
     assert!(!executed.is_error, "{}", executed.content);
+    assert!(executed.note.is_none(), "note = {:?}", executed.note);
 }
 
 /// v2 #4364: the disclosure wait blocks until the manager's initial load
@@ -1068,6 +1073,28 @@ fn grep_search_policy_refuses_a_relative_escape_but_allows_an_absolute_one() {
         "content: {}",
         allowed.content
     );
+}
+
+/// A tool the `[tools]` filter disables is refused with the guidance text and
+/// **no note**: `note` is model-facing prose (v2 `ToolResult.note`) that the
+/// engine appends verbatim to the result the model reads, so an internal tag
+/// there wrote `tool_policy` into the model's context on every refused call.
+#[tokio::test]
+async fn disabled_tool_refusal_carries_no_provenance_tag() {
+    let (_dir, ts) = setup();
+    let ts = ts.with_tools_filter(Some(crate::tools::tool_policy::ToolsFilter {
+        enabled: Vec::new(),
+        disabled: vec!["Bash".into()],
+    }));
+
+    let refused = ts
+        .execute_tool_streaming(None, "Bash", &json!({ "command": "echo hi" }), None)
+        .await
+        .expect("a filtered tool is still a served call");
+
+    assert!(refused.is_error, "{}", refused.content);
+    assert!(refused.content.contains("Bash"), "{}", refused.content);
+    assert!(refused.note.is_none(), "note = {:?}", refused.note);
 }
 
 /// The same gate and policy as Grep, so a relative escape is refused here

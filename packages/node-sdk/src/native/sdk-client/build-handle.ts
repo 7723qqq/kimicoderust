@@ -268,6 +268,11 @@ export async function buildSessionHandle(
           name: String(parsed.tool_name ?? 'tool'),
           args: parsed.arguments ?? {},
         });
+        // The engine appends this prose to the result the model reads
+        // (v2 `ToolResult.note`); the host renders it after the output so the
+        // card says what the model was told — the encoding warning after a
+        // transcoded read, the resume hint after a truncated one.
+        const note = typeof parsed.note === 'string' ? parsed.note : '';
         deps.receiveEvent({
           sessionId,
           agentId: eventAgentId,
@@ -276,6 +281,7 @@ export async function buildSessionHandle(
           toolCallId,
           output: String(parsed.content ?? ''),
           isError: Boolean(parsed.is_error),
+          note: note.length > 0 ? note : undefined,
         });
       } else if (parsed.type === 'tool.native.progress') {
         deps.receiveEvent({

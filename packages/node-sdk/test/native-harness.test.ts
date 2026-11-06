@@ -756,6 +756,108 @@ max_context_size = 100000
       }
     }, 20_000);
 
+    it('carries the engine note on the tool result the host renders', async () => {
+      // The engine appends this prose to the result the model reads (v2
+      // `ToolResult.note`), and the host used to drop the field entirely: the
+      // card showed the bare output, so a user could not see the guidance the
+      // model was given. A line past the read cap is what makes Read produce
+      // one ("Lines [N] were truncated to 2000 characters; use Bash …").
+      const { createServer } = await import('node:http');
+      const longLine = 'x'.repeat(3000);
+      writeFileSync(join(homeDir, 'long-line.txt'), `${longLine}\n`);
+      let calls = 0;
+      const server = createServer((req, res) => {
+        req.on('data', () => {});
+        req.on('end', () => {
+          if (req.url?.includes('/chat/completions') !== true) {
+            res.writeHead(404).end();
+            return;
+          }
+          calls += 1;
+          const first = calls === 1;
+          res.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+            connection: 'keep-alive',
+          });
+          const chunk = (delta: Record<string, unknown>, finish: string | null = null): string =>
+            `data: ${JSON.stringify({
+              id: 'c',
+              object: 'chat.completion.chunk',
+              created: 0,
+              model: 'mock',
+              choices: [{ index: 0, delta, finish_reason: finish }],
+            })}\n\n`;
+          res.write(chunk({ role: 'assistant', content: '' }));
+          if (first) {
+            res.write(
+              chunk({
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'call_read_long',
+                    type: 'function',
+                    function: {
+                      name: 'Read',
+                      arguments: JSON.stringify({ path: join(homeDir, 'long-line.txt') }),
+                    },
+                  },
+                ],
+              }),
+            );
+            res.write(chunk({}, 'tool_calls'));
+          } else {
+            res.write(chunk({ content: 'done' }));
+            res.write(chunk({}, 'stop'));
+          }
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const port = (server.address() as { port: number }).port;
+      try {
+        writeFileSync(
+          join(homeDir, 'config.toml'),
+          `
+[providers.local]
+type = "openai"
+base_url = "http://127.0.0.1:${port}/v1"
+api_key = "sk-test"
+
+[models."mock"]
+provider = "local"
+model = "mock"
+max_context_size = 100000
+`,
+        );
+        const session = await harness.createSession({ workDir: homeDir, model: 'mock' });
+        const results: { output: string; note?: string }[] = [];
+        session.onEvent((event) => {
+          if (event.type !== 'tool.result') return;
+          const record = event as { output?: unknown; note?: string };
+          const output = typeof record.output === 'string' ? record.output : '';
+          results.push({ output, note: record.note });
+        });
+
+        await session.setPermission('yolo');
+        const ended = waitForTurnEnded(session);
+        await session.prompt('read the long line');
+        await ended;
+
+        const annotated = results.filter((result) => result.note !== undefined);
+        expect(annotated).toHaveLength(1);
+        // The note rides its own field rather than being folded into `output`:
+        // the host renders them in v2's order, and each half stays assertable.
+        expect(annotated[0]?.note).toContain('were truncated');
+        expect(annotated[0]?.note).toContain('use Bash');
+        expect(annotated[0]?.output).not.toContain('were truncated');
+        await session.close();
+      } finally {
+        server.close();
+      }
+    }, 20_000);
+
     it('emits goal.updated when a goal is created', async () => {
       // The goal panel is driven by `goal.updated`; nothing emitted it, so a
       // goal created through the SDK never reached the UI.

@@ -564,3 +564,60 @@ v2 的 `availability()` 是 `stoppedAtCompaction: cut.stoppedAtCompaction || max
   未转发也未登记豁免，见 §12.4），与本批无关。
 - `packages/kimi-agent` 的 undo 语义剩下 plan 一侧：undo 不回退 `planMode` 与计划文件（host-first 设计决定，
   §11.1 表格），需裁决后才能动。
+
+## 14. 2026-11-06 补 Rust 之九：工具结果的 note 贯通三层（exit 0）
+
+**来源**：v2 `renderToolResultForModel`（`agent-core-v2/src/agent/contextMemory/toolResultRender.ts`）
+在**模型可见**的工具结果上做三件事：状态包装、墙钟头、`content + '\n' + note`。本仓的前两件早已移植
+（`tool_result_render::render_status` + `wall_time::prepend_wall_time`，顺序与 v2 相同），第三件也在
+`run_turn` 里——但 `tool_result_render.rs` 的头注释写着"note 追加**没有**移植"，这句错话掩盖了一个真实缺陷。
+
+### 14.1 事实：`note` 被两种用途共用
+
+| 用途 | 位置 | 后果 |
+|---|---|---|
+| 给人/模型看的散文（v2 `ToolResult.note`） | Read 的续读提示与编码告示、readMedia 的视频说明 | 正确用途 |
+| 内部来源标签 | `tool_policy`、`tool_select`、`native_subagent`、`native_team`、`mcp:<server>` | 因为 `run_turn` 无条件追加，**每一次 MCP 调用、每一次被拒调用**的模型结果末尾都多一行标签 |
+
+这些标签没有任何读取方：宿主 SDK 过去根本不转发 `note`，全仓 TS 侧对这几个字面量零命中，属死写入。
+
+### 14.2 三层改动
+
+1. **引擎**：删掉 10 处标签写入（`tools/dispatch.rs` 2、`tools/subagent_tools.rs` 4、`tools/team_tool.rs` 2、
+   `mcp/manager.rs` 2），`note` 从此只有散文一个含义；`tool_result_render.rs` 与 `turn_loop/types.rs` 的字段文档
+   按实际行为重写。
+2. **协议**：`ToolResultEvent` 增可选 `note`（`packages/protocol/src/events.ts` 的类型与 zod schema 同步），
+   语义写明是"引擎追加进模型结果的那段散文"。
+3. **宿主**：SDK 的 `tool.native` 映射透传 `note`（空串转 `undefined`）；TUI 的 `handleToolResult` 按 v2 顺序
+   把它接在 `output` 之后，卡片因此显示模型看到的那段提示（此前用户看不到自己模型被告知了什么）。
+
+### 14.3 验证
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib tools::tests` | 0 | 247 passed（含新增：被 `[tools]` 禁用的调用 `note.is_none()`；延后加载的 MCP 调用与真正执行的 MCP 结果都 `note.is_none()`） |
+| **变异验证（标签）** | — | 把 `tool_policy` 标签加回去 → 新用例红（`note = Some("tool_policy")`）；把 `mcp:{server}` 加回去 → 延后测试红（`note = Some("mcp:github")`）；两处还原即绿 |
+| `bun --bun run vitest run packages/node-sdk/test/native-harness.test.ts -t "carries the engine note"` | 0 | 1 passed：真实引擎 + mock LLM 让模型 Read 一个 3000 字符长行 → `tool.result.note` 含 `were truncated` / `use Bash`，且 `output` 里不含它 |
+| **变异验证（宿主）** | — | 删掉 SDK 的 `note` 透传 → 该用例红（`expected [] to have a length of 1`）；还原即绿 |
+| `bun --bun run vitest run apps/kimi-code/test/tui/controllers/session-event-handler-plugin-updates.test.ts` | 0 | 8 passed（有 note 时卡片 output 为 `内容\nnote`；无 note 时保持原样） |
+| `bun run typecheck` | 0 | 全部包 exit 0 |
+| `cargo test --lib` / `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 | 见 §14.4 的实测数字 |
+| `bun run check:all` | 0 | 见 §14.4 |
+
+### 14.4 收口实测
+
+| 检查 | 出口码 | 输出 |
+|---|---:|---|
+| `cargo test --lib`（全量） | 0 | 3660 passed / 0 failed（`mcp::manager::tests` 的五处标签断言改为 `note.is_none()`） |
+| `cargo clippy --all-targets --features cli -- -D warnings` / `cargo fmt --check` | 0 / 0 | clean |
+| `bun run typecheck` | 0 | 全部包 exit 0 |
+| `bun --bun run vitest run apps/kimi-code/test/tui/controllers` | 0 | 412 passed / 22 files |
+| `bun --bun run vitest run packages/node-sdk` | 1 | 448 passed / 1 failed —— 唯一失败仍是 §11.4 记录的既有 `native-harness` EBUSY（与本批无关） |
+| `bun run check:all` | 0 | 20 道全绿；`architecture` 指纹经 `--update` 刷新，`engine.mcp` / `engine.mcp.manager` / `engine.tools.agent` / `engine.tools.team` 四个 normify 模块经 `normify_module_refresh` 刷新 |
+| 原生插件 | 0 | `bun run build`（release）重建，测试跑在新二进制上 |
+
+### 14.5 仍未收口
+
+- 卡片显示的仍是 `output + note`，不含引擎给模型加的 `<system>…</system>` 状态包装与墙钟头；v2 的卡片显示的是
+  同一次渲染的完整文本。补齐要决定"事件里的 content 该发渲染前还是渲染后"，属下一批（`tool_result_render`
+  与 `run_turn` 的发送点各一处）。

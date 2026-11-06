@@ -135,7 +135,7 @@ pub async fn execute_invoke_subagent(
         }))
         .unwrap_or_default(),
         is_error: false,
-        note: Some("native_subagent".into()),
+        note: None,
         display: None,
     }
 }
@@ -159,7 +159,7 @@ pub async fn execute_manage_subagents(
                 stop_turn: false,
                 content: serde_json::to_string_pretty(&list).unwrap_or_default(),
                 is_error: false,
-                note: Some("native_subagent".into()),
+                note: None,
                 display: None,
             }
         }
@@ -185,7 +185,7 @@ pub async fn execute_manage_subagents(
                 stop_turn: false,
                 content: serde_json::json!({ "killed": killed }).to_string(),
                 is_error: false,
-                note: Some("native_subagent".into()),
+                note: None,
                 display: None,
             }
         }
@@ -268,7 +268,7 @@ pub async fn execute_define_subagent(
         stop_turn: false,
         content: format!("Subagent '{name}' registered successfully."),
         is_error: false,
-        note: Some("native_subagent".into()),
+        note: None,
         display: None,
     }
 }

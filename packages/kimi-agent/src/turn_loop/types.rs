@@ -365,8 +365,11 @@ pub struct ExecutableToolResult {
     pub stop_turn: bool,
     pub content: String,
     pub is_error: bool,
-    /// Host-notice annotation (e.g. Read's `<system>…</system>` summary).
-    /// `None` when the tool produces none.
+    /// Model-facing prose appended to the rendered result (v2
+    /// `ToolResult.note`): Read's `<system>…</system>` summary, the encoding
+    /// guidance after a mangled read, the readMedia video note. Appended last,
+    /// after the status wrapper and the wall-time header. `None` when the tool
+    /// produces none — never an internal tag.
     pub note: Option<String>,
     /// Rich content delivered to the model as a follow-up user message
     /// (see [`ToolDelivery`]). `None` for every text-only tool.

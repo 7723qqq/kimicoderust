@@ -7,17 +7,20 @@
 //! otherwise dies with the event stream, and a tool that returns nothing reads
 //! to the model exactly like one that succeeded with nothing to say.
 //!
-//! Only v2's status step is ported here; its other two steps are deliberately
-//! elsewhere or absent:
+//! Only v2's status step lives in this module; its other two run at the same
+//! call site in `run_turn`, in v2's order:
 //!
-//!   - the wall-time header is `wall_time::prepend_wall_time`, applied at the
-//!     same call site in `run_turn`, where it is prepended *after* this
-//!     wrapper — the same order v2 uses;
-//!   - the trailing `note` append is **not** ported. This engine overloads
-//!     `note` as an internal provenance tag (`"tool_policy"`,
-//!     `"tool_select"`, `"native_subagent"`, …) besides model-facing prose, so
-//!     v2's unconditional `content + '\n' + note` would write those tags into
-//!     the model's context. Separating the two uses is its own change.
+//!   - the wall-time header is `wall_time::prepend_wall_time`, prepended
+//!     *after* this wrapper on the tools that declare it;
+//!   - the trailing `note` append is `content + '\n' + note`, applied last.
+//!
+//! `note` used to be overloaded as an internal provenance tag
+//! (`"tool_policy"`, `"tool_select"`, `"native_subagent"`, `"mcp:<server>"`)
+//! besides model-facing prose, so that append wrote the tags into the model's
+//! context on every MCP call and every refused call. The tags had no reader —
+//! the host never forwarded a note — and are gone; `note` now means what it
+//! means in v2 (`ToolResult.note`: prose the model is meant to read, e.g. the
+//! Read/Edit encoding guidance and the readMedia video note).
 //!
 //! The markers stay English on purpose: `<system>…</system>` is format
 //! scaffolding, which the repository's i18n rules put under "what not to

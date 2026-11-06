@@ -928,6 +928,13 @@ export interface ToolResultEvent {
   readonly output: unknown;
   readonly isError?: boolean;
   readonly synthetic?: boolean;
+  /**
+   * Prose the engine appended to the tool result the model read (v2
+   * `ToolResult.note`): the encoding guidance after a transcoded read, the
+   * advice after truncated lines, the readMedia video note. Carried apart from
+   * `output` because the host renders it after the output, as v2 does.
+   */
+  readonly note?: string;
 }
 
 export interface SubagentSpawnedEvent {
@@ -1979,6 +1986,7 @@ export const toolResultEventSchema = z.object({
   output: z.unknown(),
   isError: z.boolean().optional(),
   synthetic: z.boolean().optional(),
+  note: z.string().optional(),
 }) satisfies z.ZodType<ToolResultEvent>;
 
 export const subagentSpawnedEventSchema = z.object({

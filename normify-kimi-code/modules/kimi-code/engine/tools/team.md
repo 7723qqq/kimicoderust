@@ -10,9 +10,9 @@ description:
   en: >
       Registered tool names: Team, EnterPlanMode, ExitPlanMode, TodoList.
       
-revision: 28f4b101d79bba811d53e53662341c0bb0fe93c0
-updated_at: "2026-11-06T04:54:04.174Z"
-fingerprint: 0d4240c786138ce14c190d477765884f87b995233ed5ca38a7964904ff85b5cf
+revision: 9f2a3a6801d3d7ee6016df233dcc97b72158402e
+updated_at: "2026-11-06T13:38:51.687Z"
+fingerprint: 28229bc0ad53408485de5061631f3a1a410ca2f9f4661568af2107a6e3eb3237
 source:
   - path: "packages/kimi-agent/src/tools/team_tool.rs"
   - path: "packages/kimi-agent/src/tools/swarm_tool.rs"

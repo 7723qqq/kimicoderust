@@ -924,7 +924,7 @@ impl McpManager {
                     stop_turn: false,
                     content: text_parts.join("\n"),
                     is_error: res.is_error,
-                    note: Some(format!("mcp:{}", server_name)),
+                    note: None,
                     display: None,
                 })
             }
@@ -952,7 +952,7 @@ impl McpManager {
                     stop_turn: false,
                     content,
                     is_error: true,
-                    note: Some(format!("mcp:{}", server_name)),
+                    note: None,
                     display: None,
                 })
             }

@@ -879,9 +879,18 @@ export class SessionEventHandler {
     if (startMs !== undefined && event.synthetic !== true) {
       this.host.noteSessionToolCompleted(Date.now() - startMs);
     }
+    // v2 renders the note last, on the same text the model reads
+    // (`renderToolResultForModel`): the card says what the model was told —
+    // the encoding warning after a transcoded read, the resume hint after a
+    // truncated one. The engine appends it to the model's message; here it
+    // rides the displayed output.
+    const output = serializeToolResultOutput(event.output);
     const resultData: ToolResultBlockData = {
       tool_call_id: event.toolCallId,
-      output: serializeToolResultOutput(event.output),
+      output:
+        typeof event.note === 'string' && event.note.length > 0
+          ? `${output}\n${event.note}`
+          : output,
       is_error: event.isError,
       synthetic: event.synthetic,
     };

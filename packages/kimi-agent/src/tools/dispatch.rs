@@ -91,7 +91,7 @@ impl NativeToolset {
                 )
                 .render(),
                 is_error: true,
-                note: Some("tool_policy".into()),
+                note: None,
                 display: None,
             });
         }
@@ -121,7 +121,7 @@ impl NativeToolset {
                     stop_turn: false,
                     content: select_tools::not_loaded_tool_output(tool_name),
                     is_error: true,
-                    note: Some("tool_select".into()),
+                    note: None,
                     display: None,
                 });
             }

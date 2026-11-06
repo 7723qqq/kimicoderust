@@ -218,3 +218,47 @@ describe('SessionEventHandler plugin update notices', () => {
     expect(host.noteSessionToolCompleted).not.toHaveBeenCalled();
   });
 });
+
+// The note the engine appends to the result the model reads used to stop at
+// the engine: the card showed the bare output, so a user could not see the
+// guidance the model was given (the encoding warning after a transcoded read,
+// the resume hint after a truncated one). v2 renders it after the output.
+describe('SessionEventHandler tool result notes', () => {
+  it('renders the engine note after the output on the tool card', () => {
+    const { host, streamingUI } = makeHost();
+    const handler = new SessionEventHandler(host, makeNotifier() as never);
+
+    handler.handleEvent(
+      {
+        type: 'tool.result',
+        sessionId: 's1',
+        agentId: 'main',
+        turnId: 1,
+        toolCallId: 't1',
+        output: 'file body',
+        note: '<system>Detected file encoding: UTF-16LE; content transcoded to UTF-8.</system>',
+      } as never,
+      sendQueued,
+    );
+
+    expect(streamingUI.completeToolResult).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        output:
+          'file body\n<system>Detected file encoding: UTF-16LE; content transcoded to UTF-8.</system>',
+      }),
+    );
+  });
+
+  it('leaves the output alone when the engine sent no note', () => {
+    const { host, streamingUI } = makeHost();
+    const handler = new SessionEventHandler(host, makeNotifier() as never);
+
+    handler.handleEvent(toolResult(), sendQueued);
+
+    expect(streamingUI.completeToolResult).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ output: 'ok' }),
+    );
+  });
+});

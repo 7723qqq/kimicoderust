@@ -29,7 +29,7 @@ async fn test_mcp_manager_discovery_and_call() {
         res_qualified.content,
         "Mock execution of github_sample_tool with {\"query\":\"kimi\"}"
     );
-    assert_eq!(res_qualified.note.as_deref(), Some("mcp:github"));
+    assert!(res_qualified.note.is_none(), "note = {:?}", res_qualified.note);
 
     // 2. A bare tool name is not routable to an MCP server
     let res_plain = manager
@@ -127,7 +127,7 @@ async fn test_mcp_manager_with_sse_client_and_call_tool() {
 
     assert!(!res.is_error);
     assert_eq!(res.content, "result: 42");
-    assert_eq!(res.note.as_deref(), Some("mcp:calc_server"));
+    assert!(res.note.is_none(), "note = {:?}", res.note);
 
     // Application-level error tool call
     let err_res = manager
@@ -136,7 +136,7 @@ async fn test_mcp_manager_with_sse_client_and_call_tool() {
         .expect("tool call failed");
     assert!(err_res.is_error);
     assert_eq!(err_res.content, "custom tool failure");
-    assert_eq!(err_res.note.as_deref(), Some("mcp:calc_server"));
+    assert!(err_res.note.is_none(), "note = {:?}", err_res.note);
 }
 
 #[tokio::test]
@@ -663,12 +663,12 @@ async fn test_same_tool_name_on_two_servers_routes_by_qualified_name() {
         .call_tool("mcp__alpha__ping", &json!({}), None)
         .await
         .expect("alpha call must resolve");
-    assert_eq!(alpha.note.as_deref(), Some("mcp:alpha"));
+    assert!(alpha.note.is_none(), "note = {:?}", alpha.note);
     let beta = manager
         .call_tool("mcp__beta__ping", &json!({}), None)
         .await
         .expect("beta call must resolve");
-    assert_eq!(beta.note.as_deref(), Some("mcp:beta"));
+    assert!(beta.note.is_none(), "note = {:?}", beta.note);
 }
 
 /// `enabled: false` keeps the server listed as `disabled` and never

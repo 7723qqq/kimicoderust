@@ -135,7 +135,7 @@ pub async fn execute_team(
                 stop_turn: false,
                 content: format_debate_result(&result),
                 is_error: false,
-                note: Some("native_team".into()),
+                note: None,
                 display: None,
             }
         }
@@ -194,7 +194,7 @@ pub async fn execute_team(
                 stop_turn: false,
                 content: format_discussion_result(&result),
                 is_error: false,
-                note: Some("native_team".into()),
+                note: None,
                 display: None,
             }
         }
