@@ -203,12 +203,19 @@ pub fn build_snippet_with_max_len(body: &str, query: &str, max_len: usize) -> St
             .trim()
             .to_string();
     };
-    // Byte offsets into `lower_body` are applied to `body`; for ASCII
-    // content (the realistic case) they coincide with v2's code-unit
-    // offsets. The boundaries are clamped so a length-changing lowercase
-    // (e.g. `İ` → `i̇`) can never panic mid-char.
-    let start = floor_char_boundary(body, idx.saturating_sub(40));
-    let end = floor_char_boundary(body, (idx + lower_query.len() + 80).min(body.len()));
+    // Byte offsets into `lower_body` are applied to `body`. A lowercase that
+    // grows a character (`İ` → `i̇`) makes `lower_body` longer than `body`, so
+    // an offset from the former can point past the latter. Clamp to `body.len()`
+    // *before* finding char boundaries — `is_char_boundary` returns false for
+    // `index > len` — and keep `start <= end` so the window is never inverted.
+    let raw_start = idx.saturating_sub(40);
+    let raw_end = (idx + lower_query.len() + 80).min(body.len());
+    // JS's `body.slice(start, end)` clamps an out-of-range `start` to `len`
+    // instead of panicking. A lowercase that grows a character (`İ` → `i̇`)
+    // can make `raw_start` point past `body`, so clamp both bounds and keep
+    // `start <= end`; an empty window is the same result v2's slice produces.
+    let end = floor_char_boundary(body, raw_end);
+    let start = floor_char_boundary(body, raw_start.min(body.len())).min(end);
     let mut snippet = body[start..end].trim().to_string();
     if start > 0 {
         snippet.insert_str(0, "...");
@@ -651,6 +658,20 @@ mod tests {
         let body = "记忆：决策记录\n# 标题\nneedle 内容";
         let snippet = build_snippet(body, "needle");
         assert!(snippet.contains("needle"));
+    }
+
+    /// `to_lowercase` can make a string longer (`İ` → `i̇`), so a match
+    /// offset from `lower_body` may point past `body`'s end. JS's
+    /// `slice(start, end)` clamps instead of panicking, and v2 returns an
+    /// empty snippet in that case; the Rust port must do the same.
+    #[test]
+    fn test_build_snippet_length_changing_lowercase_cannot_invert_the_window() {
+        let body = format!("{}needle", "İ".repeat(80));
+        let snippet = build_snippet(&body, "needle");
+        // v2 still adds the leading ellipsis when start > 0, so an empty
+        // window renders as "..." rather than "". The contract here is that
+        // the call completes and never panics on a mid-char boundary.
+        assert_eq!(snippet, "...", "{snippet:?}");
     }
 
     #[test]

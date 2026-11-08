@@ -43,10 +43,7 @@ pub struct DeleteRequest {
 
 /// v2 `normalizePath` followed by `sanitizeFileName` on the last segment
 /// (`:446`, `:452-455`). Existence is checked by the store layer, not here.
-pub fn prepare_delete(
-    path: Option<&str>,
-    exists: bool,
-) -> Result<DeleteRequest, DeleteRefusal> {
+pub fn prepare_delete(path: Option<&str>, exists: bool) -> Result<DeleteRequest, DeleteRefusal> {
     let Some(path) = path else {
         return Err(DeleteRefusal::MissingPath);
     };
@@ -79,10 +76,7 @@ mod tests {
 
     #[test]
     fn a_missing_path_is_refused_first() {
-        assert_eq!(
-            prepare_delete(None, true),
-            Err(DeleteRefusal::MissingPath)
-        );
+        assert_eq!(prepare_delete(None, true), Err(DeleteRefusal::MissingPath));
     }
 
     #[test]
