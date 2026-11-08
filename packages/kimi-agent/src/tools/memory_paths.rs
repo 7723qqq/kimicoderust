@@ -1,10 +1,14 @@
-//! Memory file-layout pure functions — a fork-original layout with no v2
-//! counterpart (neither upstream nor the fork's retired v2 has an
-//! `app/memory/` module). Layout contract: the project id is derived from
-//! the cwd via SHA-256, memory types are detected from markdown frontmatter
-//! or headings, titles come from the first H1 (or the file name), snippets
-//! are built around the first case-insensitive query hit, and relative
-//! paths follow the `memory/global|projects|sessions/` layout.
+//! Memory file-layout pure functions, ported from v2 `app/memory/memoryPaths.ts`.
+//!
+//! The layout contract: memory types are detected from markdown frontmatter
+//! or headings, titles come from the first H1 (or the file name), snippets are
+//! built around the first case-insensitive query hit, and relative paths
+//! follow the `memory/global|projects|sessions/` layout.
+//!
+//! The project id here is a plain SHA-256 of the cwd, which is **not** v2's
+//! `projectIdFromCwd`: v2 resolves a three-tier identity (git origin → git
+//! repo root → cwd) via `app/memory/projectIdentity.ts`. That difference is
+//! recorded in `reports/runbooks/v2-parity-ledger.md`.
 //!
 //! SHA-256 (FIPS 180-4) is implemented inline; it backs both the 12-hex
 //! project id and the 12-hex content version token.
@@ -77,7 +81,8 @@ pub struct ParsedMemoryPath {
 }
 
 /// Derive the project id from a cwd: the first 12 hex chars of the SHA-256
-/// digest of the cwd (v2 `projectIdFromCwd`).
+/// digest of the cwd. v2 `projectIdFromCwd` instead resolves a three-tier
+/// identity from git origin / repo root / cwd; see the module header.
 pub fn project_id_from_cwd(cwd: &str) -> String {
     content_version(cwd)
 }

@@ -101,10 +101,19 @@ Checked field by field against v2's zod schemas: no missing parameter.
   registered with `ShellToolResults`, `approvalRule:
   literalRulePattern(name, command)`, and `resolveExecutable` →
   `processService.spawn(exe.path, buildPowerShellArgs(script), {cwd, env})`.
-- **Memory** (v2 `app/memory`, 4 files, 1055 lines): v2 exposes one `Memory`
-  tool with seven actions (`search` / `read` / `write` / `list` / `delete` /
-  `log` / `revert`); this engine exposes six `memory_*` tools and has neither
-  `search`, `log` nor `revert`.
+- **Memory** (v2 `app/memory`, 4 files + `projectIdentity.ts`, 1247 lines,
+  read end to end): v2 exposes one `Memory` tool with seven actions
+  (`search` / `read` / `write` / `list` / `delete` / `log` / `revert`); this
+  engine exposes six `memory_*` tools and has neither `search`, `log` nor
+  `revert`. The whole tool is gated on the main agent and on the associative
+  memory flag being off (`memoryTool.ts:513-519`). The pure layout functions
+  in `tools/memory_paths.rs` **do** have v2 counterparts (`memoryPaths.ts`) —
+  the module header's "fork-original, no v2 counterpart" claim is stale and
+  must be corrected. Two real gaps: project identity is three-tier in v2
+  (git origin → git repo root → cwd, `projectIdentity.ts:105-118`) but a plain
+  cwd digest here; and v2's `search`/`log`/`revert` need MiniDb full-text
+  search, a git repo under the memory dir, and a lock file, none of which this
+  engine has. |
 
 ### Shell task lifecycle (v2 `agent/tools/os/bash/process-task.ts`, 318 lines —
 read end to end)
