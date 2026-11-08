@@ -57,6 +57,52 @@ verdict change from `tracked` to `ported` (or a recorded `not-applicable`):
 not-applicable by architecture, with a reason; `TRACKED` = gap queued for a
 future slice.
 
+## Tool surface (v2 `src/agent/tools`)
+
+The tool table is the one surface the model reads verbatim, so it was aligned
+name by name against `D:/kimi/kimi-code` @ `7f6bd87ce8`, then description by
+description, then field by field.
+
+### Removed — never a v2 tool, or deleted upstream
+
+| Tool | Evidence |
+|---|---|
+| `ListDirectory` | v2's `Read` says "Directories are not supported; use `ls` via Bash". The only listing helper v2 ever had was `tryNativeListDirectory`, deleted in `004903009c chore(agent-core): drop the dead native-tools wrappers`. The capability stays as `native::list_directory` for the environment prompt and the napi binding. |
+| `SwitchSearchEngine` | Zero hits in v2's history; fork-original (`c9d2f5b00 feat: add multi-engine hot-switch for web search`). The host API `setSearchEngine` stays — it is the manual half the `/search` command drives. |
+| `Team` | v2 removed it in `920add890d feat!: add hello-world mode and remove Team`, together with the `/team` slash command. |
+
+`Lsp` also became `lsp` (v2 `readonly name = 'lsp'`), which exposed a live
+inconsistency: `permission/mod.rs` listed both spellings, so a rule could miss
+the tool depending on which list answered.
+
+### Descriptions
+
+Every description is now v2's `.md` rendered with the same placeholder values:
+Bash, Glob, Edit, Grep, Write, Read, TaskList, TaskOutput, WaitFor,
+AskUserQuestion, and Agent including its background variant. Where this engine
+has behavior v2 has no reason to describe, the fork's paragraph is kept under a
+heading that says so: Edit and Read carry the CRLF and encoding rules, Read the
+sensitive-file and UTF-16 rules, WaitFor the steering interruption, Agent the
+2-hour timeout.
+
+### Schema fields
+
+Checked field by field against v2's zod schemas: no missing parameter.
+`TaskStop.reason`, `Read.column_offset` / `Read.max_chars`, `Glob.head_limit` /
+`Glob.offset`, `Grep.multiline` / `Grep.type`, `Edit.replace_all` all exist.
+
+### Open
+
+- **PowerShell** (v2 `agent/tools/os/powershell`, 165 + 320 lines): the
+  discovery and encoding layer is ported (`native/powershell.rs`, 9 tests); the
+  tool body and its dispatch are not. What remains is parameterizing
+  `tools/bash_exec.rs::bash_with` over the interpreter, so the timeout,
+  background-task and progress machinery is shared instead of duplicated.
+- **Memory** (v2 `app/memory`, 4 files, 1055 lines): v2 exposes one `Memory`
+  tool with seven actions (`search` / `read` / `write` / `list` / `delete` /
+  `log` / `revert`); this engine exposes six `memory_*` tools and has neither
+  `search`, `log` nor `revert`.
+
 ## state/ (v2 `src/state` — 7 files)
 
 | v2 surface | Rust counterpart | Status | Tests | Notes |
