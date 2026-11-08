@@ -113,65 +113,99 @@ impl NativeToolset {
                     };
                     let mut stdout_pipe = child.stdout.take();
                     let mut stderr_pipe = child.stderr.take();
-                    // Stream output and report it as `event.task.progress`, so
-                    // the Web task card updates live instead of only at settle.
-                    // Throttled the same way foreground Bash is.
-                    let last_emit = ProgressThrottle::new();
-                    let emit = |stream: &str, chunk: &[u8]| {
-                        if last_emit.admit(stream) {
-                            progress_runner.emit_progress(
-                                &progress_task_id,
-                                &String::from_utf8_lossy(chunk),
-                                stream,
-                            );
+                    // v2 `process-task.ts:50-53` starts both stream observers
+                    // at spawn, appending each chunk to a durable sink. Two
+                    // spawned tasks are the same shape here: they run while the
+                    // process is alive, and their output survives a drain grace
+                    // that expires because a grandchild still holds a pipe.
+                    let throttle = std::sync::Arc::new(ProgressThrottle::new());
+                    let total_bytes =
+                        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let limit_tripped =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let out_sink = crate::tools::stream_sink::StreamTail::default();
+                    let err_sink = crate::tools::stream_sink::StreamTail::default();
+
+                    let mut observers: Vec<
+                        tokio::task::JoinHandle<()>,
+                    > = Vec::new();
+                    if let Some(mut pipe) = stdout_pipe.take() {
+                        let throttle = throttle.clone();
+                        let runner = progress_runner.clone();
+                        let task_id = progress_task_id.clone();
+                        let total = total_bytes.clone();
+                        let tripped = limit_tripped.clone();
+                        let sink = out_sink.clone();
+                        observers.push(tokio::spawn(async move {
+                            let emit = |kind: &str, chunk: &[u8]| {
+                                if throttle.admit(kind) {
+                                    runner.emit_progress(
+                                        &task_id,
+                                        &String::from_utf8_lossy(chunk),
+                                        kind,
+                                    );
+                                }
+                            };
+                            crate::tools::stream_sink::read_bounded_stream_to_sink(
+                                &mut pipe,
+                                "stdout",
+                                &emit,
+                                &total,
+                                &tripped,
+                                &sink,
+                            )
+                            .await;
+                        }));
+                    }
+                    if let Some(mut pipe) = stderr_pipe.take() {
+                        let throttle = throttle.clone();
+                        let runner = progress_runner.clone();
+                        let task_id = progress_task_id.clone();
+                        let total = total_bytes.clone();
+                        let tripped = limit_tripped.clone();
+                        let sink = err_sink.clone();
+                        observers.push(tokio::spawn(async move {
+                            let emit = |kind: &str, chunk: &[u8]| {
+                                if throttle.admit(kind) {
+                                    runner.emit_progress(
+                                        &task_id,
+                                        &String::from_utf8_lossy(chunk),
+                                        kind,
+                                    );
+                                }
+                            };
+                            crate::tools::stream_sink::read_bounded_stream_to_sink(
+                                &mut pipe,
+                                "stderr",
+                                &emit,
+                                &total,
+                                &tripped,
+                                &sink,
+                            )
+                            .await;
+                        }));
+                    }
+                    let drained = async {
+                        for observer in observers {
+                            let _ = observer.await;
                         }
                     };
-                    // Shared across both streams because v2 counts the whole
-                    // task's output once (`entry.outputSizeBytes`).
-                    let total_bytes = std::sync::atomic::AtomicU64::new(0);
-                    let limit_tripped = std::sync::atomic::AtomicBool::new(false);
-                    let collect = async {
-                        // Both streams must be drained **concurrently**. Draining
-                        // stdout to EOF before touching stderr deadlocks: a
-                        // process that fills the stderr pipe blocks on writing
-                        // it, never closes stdout, and the stdout read waits
-                        // forever. `child.wait()` deliberately stays out of this
-                        // join so the caller can still kill it below.
-                        tokio::join!(
-                            async {
-                                match stdout_pipe.as_mut() {
-                                    Some(pipe) => {
-                                        read_bounded_stream(
-                                            pipe,
-                                            "stdout",
-                                            &emit,
-                                            &total_bytes,
-                                            &limit_tripped,
-                                        )
-                                        .await
-                                    }
-                                    None => Vec::new(),
-                                }
-                            },
-                            async {
-                                match stderr_pipe.as_mut() {
-                                    Some(pipe) => {
-                                        read_bounded_stream(
-                                            pipe,
-                                            "stderr",
-                                            &emit,
-                                            &total_bytes,
-                                            &limit_tripped,
-                                        )
-                                        .await
-                                    }
-                                    None => Vec::new(),
-                                }
-                            },
-                        )
-                    };
+
+                    // v2 `:67` waits for the process, then `:68` /
+                    // `:119-132` bounds the already-running observers with a
+                    // 250 ms grace. The task timeout still bounds the wait.
                     let (out, err) = match bg_timeout {
-                        Some(limit) => match tokio::time::timeout(limit, collect).await {
+                        Some(limit) => match tokio::time::timeout(limit, async {
+                            let _ = child.wait().await;
+                            let _ = tokio::time::timeout(
+                                Duration::from_millis(250),
+                                drained,
+                            )
+                            .await;
+                            (out_sink.take(), err_sink.take())
+                        })
+                        .await
+                        {
                             Ok(result) => result,
                             Err(_) => {
                                 let _ = child.kill().await;
@@ -182,7 +216,15 @@ impl NativeToolset {
                                 );
                             }
                         },
-                        None => collect.await,
+                        None => {
+                            let _ = child.wait().await;
+                            let _ = tokio::time::timeout(
+                                Duration::from_millis(250),
+                                drained,
+                            )
+                            .await;
+                            (out_sink.take(), err_sink.take())
+                        }
                     };
                     // v2 `appendOutput`'s limit arm (taskService.ts:962-969):
                     // trip once, stop the task, and stop accepting output. Both
@@ -191,9 +233,6 @@ impl NativeToolset {
                     let tripped = limit_tripped.load(std::sync::atomic::Ordering::Relaxed);
                     if tripped {
                         let _ = child.kill().await;
-                    }
-                    let _ = child.wait().await;
-                    if tripped {
                         return output_limit_reason();
                     }
                     let mut s = String::from_utf8_lossy(&out).into_owned();

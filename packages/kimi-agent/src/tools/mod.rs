@@ -72,55 +72,6 @@ fn output_limit_reason() -> String {
     .render()
 }
 
-/// Drain one of a background process's streams, keeping at most
-/// [`MAX_RETAINED_OUTPUT_BYTES`] of its tail and counting every byte the task
-/// produced.
-///
-/// The counter is shared between the two streams because v2's
-/// `entry.outputSizeBytes` is a per-task total (`taskService.ts:959`), so
-/// output split across stdout and stderr counts once against the cap.
-///
-/// Once the cap trips the reader stops draining. That is deliberate: the
-/// caller kills the process next, and a pipe nobody reads fills and wedges the
-/// writer — so returning here is what makes the kill land instead of hanging.
-async fn read_bounded_stream<R: tokio::io::AsyncRead + Unpin>(
-    pipe: &mut R,
-    stream: &str,
-    emit: &(dyn Fn(&str, &[u8]) + Sync),
-    total: &std::sync::atomic::AtomicU64,
-    tripped: &std::sync::atomic::AtomicBool,
-) -> Vec<u8> {
-    use std::sync::atomic::Ordering;
-    use tokio::io::AsyncReadExt;
-
-    let mut kept: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        if tripped.load(Ordering::Relaxed) {
-            break;
-        }
-        match pipe.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                emit(stream, &chunk[..n]);
-                let seen = total.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-                if seen > MAX_TASK_OUTPUT_BYTES as u64 {
-                    tripped.store(true, Ordering::Relaxed);
-                    break;
-                }
-                kept.extend_from_slice(&chunk[..n]);
-                // Amortised: trimming on every chunk would memmove a megabyte
-                // per 8 KiB read, so let one chunk of overshoot accumulate
-                // first. The result is the same tail, just cheaper.
-                if kept.len() > MAX_RETAINED_OUTPUT_BYTES + chunk.len() {
-                    let excess = kept.len() - MAX_RETAINED_OUTPUT_BYTES;
-                    kept.drain(..excess);
-                }
-            }
-        }
-    }
-    kept
-}
 
 /// Grep caps: scanned files, and wall-clock budget (host/addon
 /// DEFAULT_TIMEOUT_MS = 20s).

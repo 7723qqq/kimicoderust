@@ -53,139 +53,10 @@ fn bridge() -> ShellPathBridge {
 }
 
 // ── background output bounds (v2 agent/task/taskService.ts) ──────────
-
-fn noop_emit(_stream: &str, _chunk: &[u8]) {}
-
-/// Bytes under the cap come back whole, in order.
-#[tokio::test]
-async fn a_stream_under_the_cap_is_read_whole() {
-    let total = std::sync::atomic::AtomicU64::new(0);
-    let tripped = std::sync::atomic::AtomicBool::new(false);
-    let mut data: &[u8] = b"hello world";
-    let kept = read_bounded_stream(&mut data, "stdout", &noop_emit, &total, &tripped).await;
-    assert_eq!(kept, b"hello world");
-    assert_eq!(total.load(std::sync::atomic::Ordering::Relaxed), 11);
-    assert!(!tripped.load(std::sync::atomic::Ordering::Relaxed));
-}
-
-/// v2 `appendRetainedOutput` keeps the **tail** (it drops whole chunks from
-/// the front). The head is what the command started from; the tail is what
-/// answers what happened.
-#[tokio::test]
-async fn a_stream_over_the_retained_cap_keeps_its_tail() {
-    // 1 MiB of 'a' followed by a marker at the very end.
-    let mut payload = vec![b'a'; MAX_RETAINED_OUTPUT_BYTES + 4096];
-    payload.extend_from_slice(b"THE-END");
-
-    let total = std::sync::atomic::AtomicU64::new(0);
-    let tripped = std::sync::atomic::AtomicBool::new(false);
-    let mut data: &[u8] = &payload;
-    let kept = read_bounded_stream(&mut data, "stdout", &noop_emit, &total, &tripped).await;
-
-    assert!(
-        kept.len() <= MAX_RETAINED_OUTPUT_BYTES + 8192,
-        "the retained buffer must be capped, not merely annotated: {} bytes",
-        kept.len()
-    );
-    assert!(
-        kept.len() >= MAX_RETAINED_OUTPUT_BYTES,
-        "the trim should land on the cap, not under it: {} bytes",
-        kept.len()
-    );
-    assert!(
-        kept.ends_with(b"THE-END"),
-        "the tail survives the trim: {:?}",
-        String::from_utf8_lossy(&kept[kept.len().saturating_sub(16)..])
-    );
-    // The bytes were all *counted* even though they were not all kept —
-    // that is what makes the hard cap fire.
-    assert_eq!(
-        total.load(std::sync::atomic::Ordering::Relaxed) as usize,
-        payload.len(),
-        "the counter sees every byte, the buffer keeps only the tail"
-    );
-    assert!(
-        !tripped.load(std::sync::atomic::Ordering::Relaxed),
-        "1 MiB is under the 16 MiB hard cap"
-    );
-}
-/// The hard cap trips once, and a reader that trips it stops — which is
-/// what lets the caller kill the process instead of deadlocking on a pipe
-/// nobody drains.
-#[tokio::test]
-async fn crossing_the_hard_cap_trips_and_stops_the_reader() {
-    let total = std::sync::atomic::AtomicU64::new(MAX_TASK_OUTPUT_BYTES as u64);
-    let tripped = std::sync::atomic::AtomicBool::new(false);
-    // The counter starts *at* the cap, so this one read crosses it.
-    let mut data: &[u8] = &vec![b'x'; 8192][..];
-    let kept = read_bounded_stream(&mut data, "stdout", &noop_emit, &total, &tripped).await;
-
-    assert!(
-        tripped.load(std::sync::atomic::Ordering::Relaxed),
-        "crossing {} MiB must trip the cap",
-        MAX_TASK_OUTPUT_BYTES / (1024 * 1024)
-    );
-    assert!(
-        kept.is_empty(),
-        "the crossing chunk is not kept: v2 returns before appending"
-    );
-}
-
-/// A reader that trips the cap makes the *next* one return without reading
-/// — the cooperative half of "stop accepting output".
-#[tokio::test]
-async fn a_tripped_cap_short_circuits_the_other_stream() {
-    let total = std::sync::atomic::AtomicU64::new(0);
-    let tripped = std::sync::atomic::AtomicBool::new(true);
-    let mut data: &[u8] = b"never read";
-    let kept = read_bounded_stream(&mut data, "stderr", &noop_emit, &total, &tripped).await;
-    assert!(kept.is_empty());
-    assert_eq!(
-        total.load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "a short-circuited reader must not even count"
-    );
-}
-
-/// The counter is shared, so a task that splits its output across stdout
-/// and stderr is capped as **one** task (v2's per-task
-/// `outputSizeBytes`), not one cap per stream.
-#[tokio::test]
-async fn both_streams_count_against_one_cap() {
-    let total = std::sync::atomic::AtomicU64::new(0);
-    let tripped = std::sync::atomic::AtomicBool::new(false);
-    let half = MAX_TASK_OUTPUT_BYTES / 2 + 1024;
-    let payload = vec![b'y'; half];
-
-    let mut out: &[u8] = &payload;
-    let mut err: &[u8] = &payload;
-    let (a, b) = tokio::join!(
-        read_bounded_stream(&mut out, "stdout", &noop_emit, &total, &tripped),
-        read_bounded_stream(&mut err, "stderr", &noop_emit, &total, &tripped),
-    );
-
-    // Neither stream alone crosses the cap; together they do.
-    assert!(
-        tripped.load(std::sync::atomic::Ordering::Relaxed),
-        "two half-capped streams must trip the single cap"
-    );
-    // The counter stops at the moment the cap trips: the surviving reader
-    // short-circuits, so the total is *between* one cap and the full two.
-    // v2 behaves the same way — `appendOutput` returns once
-    // `outputLimitTripped` is set (`taskService.ts:971`).
-    let total = total.load(std::sync::atomic::Ordering::Relaxed) as usize;
-    assert!(
-        total > MAX_TASK_OUTPUT_BYTES && total <= 2 * half,
-        "the counter must have crossed the shared cap without running past both streams: {total}"
-    );
-    for kept in [&a, &b] {
-        assert!(
-            kept.len() <= MAX_RETAINED_OUTPUT_BYTES + 8192,
-            "each stream is still retained-output capped: {}",
-            kept.len()
-        );
-    }
-}
+// The sink-shaped reader in `stream_sink` now owns these contracts; its own
+// tests pin them against `StreamTail`. The old local-Vec reader was removed
+// with the 250 ms drain-grace wiring, so repeating them here would test a
+// function that no longer exists.
 
 /// v2's reason is a catalog string, not a literal: `outputLimitReason()`
 /// (`taskService.ts:153-160`) is the engine's own text, and the fork
@@ -3740,10 +3611,16 @@ async fn test_native_bash_background_task_runner() {
     // ran concurrently, so the bound now covers what the product itself
     // allows a shell task. The happy path still returns in milliseconds.
     let wait_res = runner.wait(task_id, 60_000).await;
-    assert!(matches!(
-        wait_res,
-        crate::storage::TaskWaitResult::Completed(_)
-    ));
+    let crate::storage::TaskWaitResult::Completed(entry) = wait_res else {
+        panic!("the background task must settle as completed: {wait_res:?}");
+    };
+    // The 250 ms stream-drain grace (`process-task.ts:119-132`) must not
+    // discard output that arrived before the process exited.
+    let output = entry["output"].as_str().unwrap_or_default();
+    assert!(
+        output.contains("bg hello"),
+        "the background task's stdout must survive the drain: {entry:?}"
+    );
 }
 
 #[tokio::test]
