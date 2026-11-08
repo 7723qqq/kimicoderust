@@ -8144,11 +8144,6 @@
       "reason": "model-input",
       "note": "tool description text, ported verbatim from v2 read.md / zod describe"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- A write lock serializes same-file edits in response order, but serialization does not make stale `old_string` valid.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- A write lock serializes same-file edits in response order, but serialization does not make stale `old_string` valid.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed. When the task depends on an exact file, API, or output shape, inspect the final external contract before finishing.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed. When the task depends on an exact file, API, or output shape, inspect the final external contract before finishing.",
@@ -8167,6 +8162,11 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Command availability depends on the host; run `which <command>` before relying on an uncommon one. For GitHub work (PRs, issues, CI runs, API queries), prefer the `gh` CLI when installed.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Command availability depends on the host; run `which <command>` before relying on an uncommon one. For GitHub work (PRs, issues, CI runs, API queries), prefer the `gh` CLI when installed.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- DO NOT issue consecutive Edit calls on the same file. A previous Edit can invalidate a later Edit's `old_string`, causing `old_string not found`. Read the file again before the next Edit.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "- DO NOT issue consecutive Edit calls on the same file. A previous Edit can invalidate a later Edit's `old_string`, causing `old_string not found`. Read the file again before the next Edit.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Do not add an agent name or source prefix; the UI supplies it.": {
@@ -8194,24 +8194,14 @@
       "text": "- Drop the line-number prefix and tab; match only file content.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- For mixed endings or lone carriage returns, Read shows carriage returns as \\r; include actual \\r escapes in those positions.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- For mixed endings or lone carriage returns, Read shows carriage returns as \\r; include actual \\r escapes in those positions.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- For new content too large for one call, overwrite the first chunk, then append subsequent chunks. Never chunk Write to modify an existing file.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- For new content too large for one call, overwrite the first chunk, then append subsequent chunks. Never chunk Write to modify an existing file.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- For pure CRLF files, Read shows LF; use LF in `old_string` and `new_string`, and Edit writes CRLF back.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- If `old_string` is ambiguous, add surrounding context.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- For pure CRLF files, Read shows LF; use LF in `old_string` and `new_string`, and Edit writes CRLF back.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- If `old_string` is ambiguous, add surrounding context. Use `replace_all` only when every occurrence should change — for example, renaming a symbol throughout the file.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- If `old_string` is ambiguous, add surrounding context. Use `replace_all` only when every occurrence should change — for example, renaming a symbol throughout the file.",
+      "text": "- If `old_string` is ambiguous, add surrounding context.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- If automatic compression cannot safely produce an image within model limits, the tool returns an error and does not send the original image. Follow the error: use Bash or an available image-processing tool to create a smaller copy, then read that copy. Do not retry the unchanged file.": {
@@ -8232,6 +8222,11 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Mode defaults to overwrite; append adds content at EOF without adding a newline.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Mode defaults to overwrite; append adds content at EOF without adding a newline.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Multiple Edit calls may run in one response only when they do not target the same file.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "- Multiple Edit calls may run in one response only when they do not target the same file.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).": {
@@ -8261,11 +8256,6 @@
       "text": "- Read before overwriting an existing file.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Read the target file before every Edit. DO NOT call Edit from memory, stale context, or a guessed `old_string`.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Read the target file before every Edit. DO NOT call Edit from memory, stale context, or a guessed `old_string`.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Relative paths resolve against the working directory; a path outside the working directory must be absolute.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Relative paths resolve against the working directory; a path outside the working directory must be absolute.",
@@ -8280,11 +8270,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused to protect secrets; do not attempt to read them. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public SSH keys such as `id_rsa.pub` read normally.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused to protect secrets; do not attempt to read them. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public SSH keys such as `id_rsa.pub` read normally.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Take `old_string` and `new_string` from the Read output view.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Take `old_string` and `new_string` from the Read output view.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- This tool informs the end user; it does not automatically send a message to your parent agent. Keep all important findings in your final reply or final handoff to the parent.": {
@@ -8327,19 +8312,14 @@
       "text": "- Write outputs content literally, including supplied line endings: \\n stays LF, \\r\\n stays CRLF.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `**/*.py` — recursive walk from the search root for an extension": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `*.ts` — recursive from the search root; `src/*.ts` — only directly inside `src/`": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `**/*.py` — recursive walk from the search root for an extension",
+      "text": "- `*.ts` — recursive from the search root; `src/*.ts` — only directly inside `src/`",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `*.ts` — all files matching an extension, at any depth below the search root (a bare pattern without `/` matches recursively)": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `*.{ts,tsx}` and `{src,test}/**/*.ts` — brace expansion": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `*.ts` — all files matching an extension, at any depth below the search root (a bare pattern without `/` matches recursively)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `*.{ts,tsx}` — brace expansion is supported": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `*.{ts,tsx}` — brace expansion is supported",
+      "text": "- `*.{ts,tsx}` and `{src,test}/**/*.ts` — brace expansion",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `echo` / `printf` (talk to the user) → just output text directly": {
@@ -8357,29 +8337,14 @@
       "text": "- `ls` / `find` (list files) → `Glob`",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `node_modules/**/*.js`, `.venv/**/*.py`, `__pycache__/**`, `target/**` can produce thousands of results that truncate at the match cap and waste context. Prefer specific subpaths like `node_modules/react/src/**/*.js`.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `node_modules/**/*.js`, `.venv/**/*.py`, `__pycache__/**`, `target/**` can produce thousands of results that truncate at the match cap and waste context. Prefer specific subpaths like `node_modules/react/src/**/*.js`.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `old_string` must be unique unless `replace_all` is set.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- `old_string` must be unique unless `replace_all` is set.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `src/**/*.ts` — recursive walk with a subdirectory anchor and extension": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `src/**/*.ts` — recursive beneath `src/`": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `src/**/*.ts` — recursive walk with a subdirectory anchor and extension",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `src/*.ts` — files directly inside `src/` (one level, not recursive)": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `src/*.ts` — files directly inside `src/` (one level, not recursive)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `{src,test}/**/*.ts` — cartesian brace expansion is supported too": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `{src,test}/**/*.ts` — cartesian brace expansion is supported too",
+      "text": "- `src/**/*.ts` — recursive beneath `src/`",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:0-based character column (for definition, references, hover).": {
@@ -8435,6 +8400,11 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Also search files excluded by ignore files such as `.gitignore`, `.ignore`, and `.rgignore` (for example `node_modules` or build outputs). Sensitive files (such as `.env`) remain filtered out for safety. VCS metadata directories (`.git` and similar) are always skipped, even when this is true. Defaults to false.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "Also search files excluded by ignore files such as `.gitignore`, `.ignore`, and `.rgignore` (for example `node_modules` or build outputs). Sensitive files (such as `.env`) remain filtered out for safety. VCS metadata directories (`.git` and similar) are always skipped, even when this is true. Defaults to false.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:Avoid broad searches in dependency or build-output directories, especially with `include_ignored`; prefer a narrow `path` or `pattern`.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "Avoid broad searches in dependency or build-output directories, especially with `include_ignored`; prefer a narrow `path` or `pattern`.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Change one part of a memory file.": {
@@ -8497,6 +8467,11 @@
       "text": "Find files by glob pattern, sorted by modification time (most recent first).",
       "reason": "model-input"
     },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:Follow returned continuation offsets with unchanged search arguments. If results are partial, narrow the search and retry.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "Follow returned continuation offsets with unchanged search arguments. If results are partial, narrow the search and retry.",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Glob pattern to match files.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "Glob pattern to match files.",
@@ -8537,11 +8512,6 @@
       "text": "LSP action to perform: 'definition', 'references', 'hover', or 'symbols'.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:Large-directory caveat — avoid recursing into dependency / build output even with an anchor, especially when `include_ignored` is set:": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "Large-directory caveat — avoid recursing into dependency / build output even with an anchor, especially when `include_ignored` is set:",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Left edge of the crop, in original-image pixels.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "Left edge of the crop, in original-image pixels.",
@@ -8550,6 +8520,11 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Limit output to the first N lines/entries after offset. Defaults to 250. Pass 0 for unlimited.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "Limit output to the first N lines/entries after offset. Defaults to 250. Pass 0 for unlimited.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:Line endings, which v2 does not have to state: for pure CRLF files Read shows LF, so write `old_string` and `new_string` with LF and Edit restores CRLF; for mixed endings Read shows carriage returns as \\r and those positions need actual \\r escapes.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "Line endings, which v2 does not have to state: for pure CRLF files Read shows LF, so write `old_string` and `new_string` with LF and Edit restores CRLF; for mixed endings Read shows carriage returns as \\r and those positions need actual \\r escapes.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Maximum characters in the returned text, including line numbers and status. Omit for the configured default; requests above the configured maximum are capped.": {
@@ -8677,9 +8652,9 @@
       "text": "Perform exact replacements in existing files.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:Powered by ripgrep. Respects `.gitignore`, `.ignore`, and `.rgignore` by default — set `include_ignored` to also match ignored files (e.g. build outputs, `node_modules`). Sensitive files (such as `.env`) are always filtered out. Matches are files only — directories themselves are never listed; to find a directory, glob for a file inside it (e.g. `**/fixtures/**`).": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:Powered by ripgrep. Matches are files only — directories themselves are never listed; to find a directory, glob for a file inside it (e.g. `**/fixtures/**`).": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "Powered by ripgrep. Respects `.gitignore`, `.ignore`, and `.rgignore` by default — set `include_ignored` to also match ignored files (e.g. build outputs, `node_modules`). Sensitive files (such as `.env`) are always filtered out. Matches are files only — directories themselves are never listed; to find a directory, glob for a file inside it (e.g. `**/fixtures/**`).",
+      "text": "Powered by ripgrep. Matches are files only — directories themselves are never listed; to find a directory, glob for a file inside it (e.g. `**/fixtures/**`).",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Prefix each matching line with its line number. Applies only when `output_mode` is `content`. Defaults to true.": {
@@ -8730,11 +8705,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Replacement text.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "Replacement text.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:Results are capped at the first 100 matching paths. If a search would return more, a truncation marker is appended. Refine the pattern (extension, subdirectory) when 100 is not enough, or call again with a narrower anchor.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "Results are capped at the first 100 matching paths. If a search would return more, a truncation marker is appended. Refine the pattern (extension, subdirectory) when 100 is not enough, or call again with a narrower anchor.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Returns each file's content and its version token — pass that token as `if_version` on the next write to the same file. Read a file before updating it, and read whenever a question concerns the user or their world: the listing says which files exist, not what is in them.": {
