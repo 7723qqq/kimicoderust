@@ -8138,15 +8138,9 @@
       "text": "- **Images and videos** (max 100MB) are sent to the model as multimodal media instead of text; this requires a model with the matching vision capability (`image_in` / `video_in`). `region` and `full_resolution` apply only to images; `line_offset` and `n_lines` apply only to text files.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line count, range completeness, truncation, line-ending notes) and is not part of the file itself.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line count, range completeness, truncation, line-ending notes) and is not part of the file itself.",
-      "reason": "model-input",
-      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed. When the task depends on an exact file, API, or output shape, inspect the final external contract before finishing.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed. When the task depends on an exact file, API, or output shape, inspect the final external contract before finishing.",
+      "text": "- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Avoid `..` paths outside the working directory, and do not modify files outside it unless explicitly instructed.": {
@@ -8209,14 +8203,14 @@
       "text": "- If automatic compression cannot safely produce an image within model limits, the tool returns an error and does not send the original image. Follow the error: use Bash or an available image-processing tool to create a smaller copy, then read that copy. Do not retry the unchanged file.",
       "reason": "model-input"
     },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- If the status block reports an incomplete range, continue with its `Next Read` arguments exactly. Do not answer from a partial page when the task requires the remaining content.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "- If the status block reports an incomplete range, continue with its `Next Read` arguments exactly. Do not answer from a partial page when the task requires the remaining content.",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Missing parent directories are created automatically (like `mkdir(parents=True, exist_ok=True)`).": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Missing parent directories are created automatically (like `mkdir(parents=True, exist_ok=True)`).",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Mixed or lone carriage-return line endings are shown as `\\r` and require exact `Edit.old_string` escapes.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Mixed or lone carriage-return line endings are shown as `\\r` and require exact `Edit.old_string` escapes.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Mode defaults to overwrite; append adds content at EOF without adding a newline.": {
@@ -8229,26 +8223,14 @@
       "text": "- Multiple Edit calls may run in one response only when they do not target the same file.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Output is `<line-number>\\t<content>` per line. A `<system>` status block may follow; it is not part of the file.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).",
-      "reason": "model-input",
-      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Output format: `<line-number>\\t<content>` per line.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Output format: `<line-number>\\t<content>` per line.",
+      "text": "- Output is `<line-number>\\t<content>` per line. A `<system>` status block may follow; it is not part of the file.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read toward the end of the file; the page still ends on the `max_chars` budget.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Pure CRLF files are displayed with LF line endings; mixed or lone carriage returns are shown as `\\r` and need exact escapes in a later Edit.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read toward the end of the file; the page still ends on the `max_chars` budget.",
-      "reason": "model-input",
-      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Pure CRLF files are displayed with LF line endings; `Edit` matches this output and preserves CRLF when writing back.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Pure CRLF files are displayed with LF line endings; `Edit` matches this output and preserves CRLF when writing back.",
+      "text": "- Pure CRLF files are displayed with LF line endings; mixed or lone carriage returns are shown as `\\r` and need exact escapes in a later Edit.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Read before overwriting an existing file.": {
@@ -8261,15 +8243,14 @@
       "text": "- Relative paths resolve against the working directory; a path outside the working directory must be absolute.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Results are bounded by `max_chars`: 100 000 by default, up to 500 000. A page that hits the budget says so in the status block and returns the arguments to continue from.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Results are bounded by `max_chars`: 100000 by default, up to 500000, and by about 500000 divided by four estimated tokens.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Results are bounded by `max_chars`: 100 000 by default, up to 500 000. A page that hits the budget says so in the status block and returns the arguments to continue from.",
-      "reason": "model-input",
-      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
+      "text": "- Results are bounded by `max_chars`: 100000 by default, up to 500000, and by about 500000 divided by four estimated tokens.",
+      "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused to protect secrets; do not attempt to read them. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public SSH keys such as `id_rsa.pub` read normally.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public keys such as `id_rsa.pub` read normally.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused to protect secrets; do not attempt to read them. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public SSH keys such as `id_rsa.pub` read normally.",
+      "text": "- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public keys such as `id_rsa.pub` read normally.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- This tool informs the end user; it does not automatically send a message to your parent agent. Keep all important findings in your final reply or final handoff to the parent.": {
@@ -8277,9 +8258,9 @@
       "text": "- This tool informs the end user; it does not automatically send a message to your parent agent. Keep all important findings in your final reply or final handoff to the parent.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- UTF-8 text files are read directly. UTF-16 LE/BE text files (with or without a BOM) are detected automatically and transcoded to UTF-8 for display; the status block notes the detected encoding, and Edit/Write on such a file still expect UTF-8 — convert its encoding first (e.g. with `iconv`). Other encodings (e.g. GBK), binary files, and files containing NUL bytes are refused.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- UTF-16 LE/BE text (with or without a BOM) is detected and transcoded to UTF-8 for display; the status block names the detected encoding, and Edit/Write on such a file still expect UTF-8. Other encodings (for example GBK), binary files, and files containing NUL bytes are refused.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- UTF-8 text files are read directly. UTF-16 LE/BE text files (with or without a BOM) are detected automatically and transcoded to UTF-8 for display; the status block notes the detected encoding, and Edit/Write on such a file still expect UTF-8 — convert its encoding first (e.g. with `iconv`). Other encodings (e.g. GBK), binary files, and files containing NUL bytes are refused.",
+      "text": "- UTF-16 LE/BE text (with or without a BOM) is detected and transcoded to UTF-8 for display; the status block names the detected encoding, and Edit/Write on such a file still expect UTF-8. Other encodings (for example GBK), binary files, and files containing NUL bytes are refused.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use Write only when the file does not exist, you intend a complete replacement, or the new contents have little continuity with the old contents.": {
@@ -8330,6 +8311,11 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `grep` / `rg` (search file contents) → `Grep`": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- `grep` / `rg` (search file contents) → `Grep`",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `line_offset` accepts a negative value to read from the end of the file (for example, -100 reads the last 100 lines).": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "- `line_offset` accepts a negative value to read from the end of the file (for example, -100 reads the last 100 lines).",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `ls` / `find` (list files) → `Glob`": {
@@ -8485,6 +8471,11 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Hidden files (dotfiles such as `.gitlab-ci.yml` or `.eslintrc.json`) are searched by default. To also search files excluded by `.gitignore` (such as `node_modules` or build outputs), set `include_ignored` to `true`. Sensitive files (such as `.env`) are always skipped for safety, even when `include_ignored` is `true`.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "Hidden files (dotfiles such as `.gitlab-ci.yml` or `.eslintrc.json`) are searched by default. To also search files excluded by `.gitignore` (such as `node_modules` or build outputs), set `include_ignored` to `true`. Sensitive files (such as `.env`) are always skipped for safety, even when `include_ignored` is `true`.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:If the user provides a concrete file path to a text file, call Read directly. Do not `Glob`, `ls`, or otherwise pre-check known text file paths; missing or invalid file paths return errors you can handle.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "If the user provides a concrete file path to a text file, call Read directly. Do not `Glob`, `ls`, or otherwise pre-check known text file paths; missing or invalid file paths return errors you can handle.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:If true, do not apply a timeout to the command. Only applies when run_in_background is true.": {
@@ -8672,9 +8663,9 @@
       "text": "Raw full file content to write exactly as provided. This does not use the Read/Edit text view.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:Read a text file from the local filesystem.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:Read a text file from the active environment's filesystem. Do not fully trust comments and documentation.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "Read a text file from the local filesystem.",
+      "text": "Read a text file from the active environment's filesystem. Do not fully trust comments and documentation.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Read one or more memory files.": {
@@ -8812,6 +8803,11 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:The working directory in which to run the command. When omitted, the command runs in the session's working directory.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "The working directory in which to run the command. When omitted, the command runs in the session's working directory.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:This engine's own additions, which v2 has no reason to state:": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "This engine's own additions, which v2 has no reason to state:",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Top edge of the crop, in original-image pixels.": {

@@ -10,9 +10,9 @@ description:
   en: >
       Registered core tool names: Read, Write, Edit, Bash, Grep, Glob, ListDirectory and the goal/cron/task/ask families.
       
-revision: 3c57258318945e757e0c9ef03e04489ad779eb96
-updated_at: "2026-11-08T09:45:15.434Z"
-fingerprint: b9d68655325f350ccf5c50bc4ae229708c73eab3eaaac210cb6e0959fdc90c61
+revision: 21ce7bee005a293bba71028a5cec6eedd4c9d00c
+updated_at: "2026-11-08T09:50:23.392Z"
+fingerprint: b82ea4747b41e7d727bee0dad78ef0bbc60afcdbef6e35f2b66f760ded4026e2
 source:
   - path: "packages/kimi-agent/src/tools/core_tool_defs.rs"
   - path: "packages/kimi-agent/src/tools/sandbox.rs"

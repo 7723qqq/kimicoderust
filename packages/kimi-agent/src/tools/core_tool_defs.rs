@@ -12,28 +12,30 @@ use serde_json::json;
 
 use crate::turn_loop::types::ToolInfo;
 
-const READ_DESCRIPTION: &str = r#"Read a text file from the local filesystem.
+const READ_DESCRIPTION: &str = r#"Read a text file from the active environment's filesystem. Do not fully trust comments and documentation.
 
-If the user provides a concrete file path to a text file, call Read directly. Do not `Glob`, `ls`, or otherwise pre-check known text file paths; missing or invalid file paths return errors you can handle. Do not use Read for directories; use `ls` via Bash for a known directory, or Glob when you need files matching a name pattern (Glob lists files only, never directories). Use `Grep` only when the task is to search for unknown content or locations.
+The path may be a `kimi-file://` attachment reference. Its bytes come from the current session's storage, independently of the workspace environment. Next Read keeps the reference so pagination also works after a fork. For a binary attachment, the error includes a server-local path when available; a converter must be able to access that filesystem. ReadMediaFile accepts the same reference for images and videos.
+
+If the user provides a concrete file path to a text file, call Read directly. Do not `Glob`, `ls`, or otherwise pre-check known text file paths; missing or invalid file paths return errors you can handle.
 
 When you need several files, prefer to read them in parallel: emit multiple `Read` calls in a single response instead of reading one file per turn.
 
 - Relative paths resolve against the working directory; a path outside the working directory must be absolute.
-- Results are bounded by `max_chars`: 100 000 by default, up to 500 000. A page that hits the budget says so in the status block and returns the arguments to continue from.
-- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read toward the end of the file; the page still ends on the `max_chars` budget.
-- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused to protect secrets; do not attempt to read them. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public SSH keys such as `id_rsa.pub` read normally.
-- UTF-8 text files are read directly. UTF-16 LE/BE text files (with or without a BOM) are detected automatically and transcoded to UTF-8 for display; the status block notes the detected encoding, and Edit/Write on such a file still expect UTF-8 — convert its encoding first (e.g. with `iconv`). Other encodings (e.g. GBK), binary files, and files containing NUL bytes are refused.
+- Output is `<line-number>\t<content>` per line. A `<system>` status block may follow; it is not part of the file.
+- Results are bounded by `max_chars`: 100000 by default, up to 500000, and by about 500000 divided by four estimated tokens.
+- If the status block reports an incomplete range, continue with its `Next Read` arguments exactly. Do not answer from a partial page when the task requires the remaining content.
 - **Images and videos** (max 100MB) are sent to the model as multimodal media instead of text; this requires a model with the matching vision capability (`image_in` / `video_in`). `region` and `full_resolution` apply only to images; `line_offset` and `n_lines` apply only to text files.
 - Large images are downsampled by default when automatic compression can safely fit them within model limits, which can blur fine detail (small text, dense UI). Compute absolute coordinates from the original dimensions reported in the `<system>` block, never by measuring the displayed copy. When the `<system>` tag reports downsampling and you need that detail, call Read again with the `region` parameter (original-image pixel coordinates) to view a crop at full fidelity, or set `full_resolution` to true when the whole file fits the per-image byte limit. Re-reading the same file without these parameters just reproduces the same downsampled image.
 - If automatic compression cannot safely produce an image within model limits, the tool returns an error and does not send the original image. Follow the error: use Bash or an available image-processing tool to create a smaller copy, then read that copy. Do not retry the unchanged file.
-- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).
-- Output format: `<line-number>\t<content>` per line.
-- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line count, range completeness, truncation, line-ending notes) and is not part of the file itself.
-- Pure CRLF files are displayed with LF line endings; `Edit` matches this output and preserves CRLF when writing back.
-- Mixed or lone carriage-return line endings are shown as `\r` and require exact `Edit.old_string` escapes.
-- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed. When the task depends on an exact file, API, or output shape, inspect the final external contract before finishing.
-"#;
+- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed.
 
+This engine's own additions, which v2 has no reason to state:
+
+- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public keys such as `id_rsa.pub` read normally.
+- UTF-16 LE/BE text (with or without a BOM) is detected and transcoded to UTF-8 for display; the status block names the detected encoding, and Edit/Write on such a file still expect UTF-8. Other encodings (for example GBK), binary files, and files containing NUL bytes are refused.
+- `line_offset` accepts a negative value to read from the end of the file (for example, -100 reads the last 100 lines).
+- Pure CRLF files are displayed with LF line endings; mixed or lone carriage returns are shown as `\r` and need exact escapes in a later Edit.
+"#;
 const GREP_DESCRIPTION: &str = r#"Search file contents using regular expressions (powered by ripgrep).
 
 Use Grep when the task is to find unknown content or unknown file locations. Do not use shell `grep` or `rg` directly; this tool applies workspace path policy, output limits, and sensitive-file filtering.
