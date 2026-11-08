@@ -133,9 +133,13 @@ mod tests {
 
     #[test]
     fn an_explicit_scope_chooses_its_own_directory() {
-        let global =
-            prepare_write(Some("std.md"), Some("## decision\nkeep"), Some(MemoryScope::Global), "")
-                .unwrap();
+        let global = prepare_write(
+            Some("std.md"),
+            Some("## decision\nkeep"),
+            Some(MemoryScope::Global),
+            "",
+        )
+        .unwrap();
         assert_eq!(global.rel_path, "global/std.md");
         assert_eq!(global.memory_type, "decision");
         let session = prepare_write(

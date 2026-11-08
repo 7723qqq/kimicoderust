@@ -196,6 +196,7 @@ pub mod memory_read_handler;
 pub mod memory_store;
 pub mod memory_tool;
 pub mod memory_write;
+pub mod memory_write_handler;
 pub mod mode_mutex;
 pub mod moonshot_service;
 pub mod plan_mode;
