@@ -94,14 +94,31 @@ Checked field by field against v2's zod schemas: no missing parameter.
 ### Open
 
 - **PowerShell** (v2 `agent/tools/os/powershell`, 165 + 320 lines): the
-  discovery and encoding layer is ported (`native/powershell.rs`, 9 tests); the
-  tool body and its dispatch are not. What remains is parameterizing
-  `tools/bash_exec.rs::bash_with` over the interpreter, so the timeout,
-  background-task and progress machinery is shared instead of duplicated.
+  discovery, encoding, spawn-env and description-variant layers are ported
+  (`native/powershell.rs`, 14 tests); the tool body and its dispatch are not.
+  Reading `powershellTool.ts` end to end settled what the body needs:
+  registration gated on `process.platform === 'win32'` (`:319`), a `ProcessTask`
+  registered with `ShellToolResults`, `approvalRule:
+  literalRulePattern(name, command)`, and `resolveExecutable` →
+  `processService.spawn(exe.path, buildPowerShellArgs(script), {cwd, env})`.
 - **Memory** (v2 `app/memory`, 4 files, 1055 lines): v2 exposes one `Memory`
   tool with seven actions (`search` / `read` / `write` / `list` / `delete` /
   `log` / `revert`); this engine exposes six `memory_*` tools and has neither
   `search`, `log` nor `revert`.
+
+### Shell task lifecycle (v2 `agent/tools/os/bash/process-task.ts`, 318 lines —
+read end to end)
+
+Three behaviours of that file were checked against `tools/bash_exec.rs` and
+`storage/task_runner.rs`:
+
+| v2 behaviour | v2 line | This engine | Verdict |
+|---|---|---|---|
+| Settlement statuses `completed` / `failed` / `killed`, with `stopReason` on a non-abort failure | `:70-79` | `TaskStatus::{Completed,Failed,Killed}` (`task_runner.rs:146`) | aligned |
+| Task id prefix `bash`, `command` + `pid` + `exitCode` + `parentToolCallId` in the task info | `:37`, `:97-106` | `generate_task_id("bash")`; `pid` / `exitCode` not carried | id aligned, the three fields are the same gap `backgroundStartedResult` records |
+| Wait for the process, **then** drain the streams with a 250 ms grace | `:65-69`, `:33` | drains concurrently with `child.wait()`, bounded only by the task timeout | **gap**: a grandchild holding the pipe keeps the task running until the 600 s ceiling instead of settling at exit + 250 ms |
+| A stream that closes without `end` is `ERR_STREAM_PREMATURE_CLOSE` | `:171-178` | `read_bounded_stream` treats a closed pipe as EOF | **not-applicable**: the distinction is a Node stream artifact; a tokio pipe reader reports EOF, and the fork has no `close`-without-`end` state to test |
+| `SIGTERM` on abort, `SIGKILL` only on `forceStop` | `:56-58`, `:87-95` | `child.kill()` (SIGKILL on Unix) on timeout and on drop | **recorded divergence** — a killed shell cannot clean up its own children |
 
 ## state/ (v2 `src/state` — 7 files)
 
