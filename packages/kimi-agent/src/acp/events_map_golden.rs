@@ -181,7 +181,9 @@ fn tool_kind_and_call_id_match_v2() {
 /// union produces, variant by variant — the `kind` tag is what hosts switch on.
 #[test]
 fn tool_input_display_wire_shape_matches_v2_variants() {
-    use crate::tool_input_display::{PlanReviewOption, ToolInputDisplay as D};
+    use crate::tool_input_display::{
+        PlanReviewOption, SpecReviewDocument, ToolInputDisplay as D,
+    };
 
     let cases: Vec<(D, &str)> = vec![
         (
@@ -276,6 +278,20 @@ fn tool_input_display_wire_shape_matches_v2_variants() {
             "plan_review",
         ),
         (
+            D::SpecReview {
+                dir: "/spec".into(),
+                documents: vec![SpecReviewDocument {
+                    name: "requirements.md".into(),
+                    content: "# Requirements".into(),
+                }],
+                options: Some(vec![PlanReviewOption {
+                    label: "approve".into(),
+                    description: "continue".into(),
+                }]),
+            },
+            "spec_review",
+        ),
+        (
             D::GoalStart {
                 objective: "o".into(),
                 completion_criterion: Some("c".into()),
@@ -293,8 +309,8 @@ fn tool_input_display_wire_shape_matches_v2_variants() {
     ];
     assert_eq!(
         cases.len(),
-        13,
-        "v2's union has 12 variants, plus this guard"
+        14,
+        "v2's toolInputDisplay.ts declares 14 variants"
     );
     for (value, kind) in cases {
         let wire = serde_json::to_value(&value).expect("serializes");

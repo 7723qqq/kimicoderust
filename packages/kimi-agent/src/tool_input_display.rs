@@ -2,7 +2,7 @@
 //! a rich card instead of a raw argument string.
 //!
 //! Ported from v2 `packages/agent-core-v2/src/tool/toolInputDisplay.ts` —
-//! the discriminated union of 12 variants, field for field. v2 hangs it off
+//! the discriminated union of 14 variants, field for field. v2 hangs it off
 //! `RunnableToolExecution.display` (declared before execution) and
 //! `ToolResult.display` (settled after); both exist here, and a client that
 //! knows the union can render the same card v2 clients do.
@@ -23,6 +23,13 @@ use serde_json::Value;
 pub struct TodoListItem {
     pub title: String,
     pub status: String,
+}
+
+/// One entry of a `spec_review` display: a named document and its content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecReviewDocument {
+    pub name: String,
+    pub content: String,
 }
 
 /// The label/description pair offered by a `plan_review`.
@@ -121,6 +128,13 @@ pub enum ToolInputDisplay {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         options: Option<Vec<PlanReviewOption>>,
     },
+    /// A spec directory and the documents the user is asked to review.
+    SpecReview {
+        dir: String,
+        documents: Vec<SpecReviewDocument>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<Vec<PlanReviewOption>>,
+    },
     /// A goal the agent is starting.
     GoalStart {
         objective: String,
@@ -153,6 +167,7 @@ impl ToolInputDisplay {
             Self::Task { .. } => "task",
             Self::TaskStop { .. } => "task_stop",
             Self::PlanReview { .. } => "plan_review",
+            Self::SpecReview { .. } => "spec_review",
             Self::GoalStart { .. } => "goal_start",
             Self::Generic { .. } => "generic",
         }
