@@ -2,7 +2,7 @@
 //! `app/memory/tools/memoryTool.ts:411-440`.
 //!
 //! Pure layer only: the caller supplies the store's paths plus an optional
-//! per-path entry (title and type). The next slice wires it to
+//! per-path entry (title and type). `memory_list_handler` supplies them from
 //! `memory_store::list_entries_for`.
 
 use crate::i18n::{LocalizedText, i18n_params};

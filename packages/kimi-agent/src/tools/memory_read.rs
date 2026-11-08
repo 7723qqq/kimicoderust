@@ -3,7 +3,7 @@
 //!
 //! v2 renders seven lines — a title header, four metadata lines, a blank line,
 //! then the body. This module owns only that rendering and the two refusal
-//! sentences; the handler that wires it to the store comes in the next slice.
+//! sentences; `memory_read_handler` wires it to the store.
 //!
 //! The fork has no `MemoryEntry` with `scopeId` / `updatedAt`, so the caller
 //! passes the pieces it can supply. `scope_id` renders the v2 parenthesised

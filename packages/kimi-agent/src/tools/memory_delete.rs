@@ -1,9 +1,9 @@
 //! The `delete` action's validation and non-git result, from v2
 //! `app/memory/tools/memoryTool.ts:442-483`.
 //!
-//! Pure layer only. The git-memory branches (`deletedNotCommitted` and the
-//! \`forget:\` commit) are not ported yet and are named in the module header
-//! of the write layer too.
+//! Pure layer only: the store-wiring handler is the next slice. The
+//! git-memory branches (`deletedNotCommitted` and the `forget:` commit) are
+//! not ported yet and are named in the write layer's module header too.
 
 use crate::i18n::{LocalizedText, i18n_params};
 use crate::tools::memory_paths::sanitize_file_name;

@@ -1,9 +1,9 @@
 //! v2 `app/memory/tools/memoryTool.ts:38-59, :114-134`: the single `Memory`
 //! tool's action vocabulary, input schema and unknown-action refusal.
 //!
-//! This is the first piece of the tool itself. It is deliberately standalone:
-//! the seven handlers are ported one at a time, and the six `memory_*` tool
-//! definitions stay in place until every handler has a counterpart.
+//! This is the schema/vocabulary module. The handlers are ported one at a
+//! time (`read`, `write`, `list` and `delete` have handlers so far); the
+//! six `memory_*` tool definitions stay until all seven exist.
 
 use serde_json::{Value, json};
 
