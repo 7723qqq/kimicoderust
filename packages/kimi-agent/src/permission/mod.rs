@@ -854,10 +854,7 @@ fn rule_subject_variants(tool_lower: &str, raw: Option<String>, cwd: Option<&str
         return Vec::new();
     };
     let mut variants = vec![raw.clone()];
-    if !matches!(
-        tool_lower,
-        "read" | "write" | "edit" | "grep" | "glob"
-    ) {
+    if !matches!(tool_lower, "read" | "write" | "edit" | "grep" | "glob") {
         return variants;
     }
     let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {

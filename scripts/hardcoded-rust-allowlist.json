@@ -3490,6 +3490,21 @@
       "text": "permission pattern: missing closing paren in \"{pattern}\"",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/native/powershell.rs:C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe": {
+      "file": "packages/kimi-agent/src/native/powershell.rs",
+      "text": "C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe",
+      "reason": "dev-surface"
+    },
+    "packages/kimi-agent/src/native/powershell.rs:C:\\Program Files\\PowerShell\\7\\pwsh.exe": {
+      "file": "packages/kimi-agent/src/native/powershell.rs",
+      "text": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "reason": "dev-surface"
+    },
+    "packages/kimi-agent/src/native/powershell.rs:PowerShell was not found on this host. Install PowerShell 7, or set KIMI_PWSH_PATH to a pwsh executable. Checked: {checked}": {
+      "file": "packages/kimi-agent/src/native/powershell.rs",
+      "text": "PowerShell was not found on this host. Install PowerShell 7, or set KIMI_PWSH_PATH to a pwsh executable. Checked: {checked}",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/native/read.rs:\"{}\" does not exist.": {
       "file": "packages/kimi-agent/src/native/read.rs",
       "text": "\"{}\" does not exist.",

@@ -46,6 +46,7 @@ mod write;
 pub mod event_store;
 pub mod lsp;
 pub mod permission_engine;
+pub mod powershell;
 
 pub use list_directory::{ListDirectoryConfig, ListDirectoryResult, list_directory};
 
