@@ -26,7 +26,7 @@
           "description": "ACP stdio protocol server"
         }
       ],
-      "fingerprint": "a92e69876a4b104b"
+      "fingerprint": "4747d5b33ddec0cb"
     },
     {
       "id": "node-sdk",
@@ -143,7 +143,7 @@
       "source": "packages/i18n-catalog/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "4d24124b1dec5e3d"
+      "fingerprint": "57737cd0a8e03f53"
     },
     {
       "id": "i18n-runtime",

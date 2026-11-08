@@ -1054,6 +1054,8 @@ export const en = {
         importFailed: 'Knowledge import failed: {{e}}',
       },
       memory: {
+        readPathRequired: 'Read requires a `path` parameter.',
+        notFound: 'Memory file not found: {{path}}',
         cannotRead: 'Cannot read {{rel}}: {{e}}',
         cannotDelete: 'Cannot delete {{rel}}: {{e}}',
         oldStrNotFound:

@@ -975,6 +975,8 @@ export const zh = {
         importFailed: '知识库导入失败：{{e}}',
       },
       memory: {
+        readPathRequired: '读取需要 `path` 参数。',
+        notFound: '未找到 memory 文件: {{path}}',
         cannotRead: '无法读取 {{rel}}：{{e}}',
         cannotDelete: '无法删除 {{rel}}：{{e}}',
         oldStrNotFound:

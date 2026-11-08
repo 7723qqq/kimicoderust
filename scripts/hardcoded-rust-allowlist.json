@@ -10308,6 +10308,11 @@
       "text": "static inline regex",
       "reason": "format-scaffolding"
     },
+    "packages/kimi-agent/src/tools/memory_read.rs:# {title} path: {path} scope: {scope_line} type: {memory_type} updated: {updated} {body}": {
+      "file": "packages/kimi-agent/src/tools/memory_read.rs",
+      "text": "# {title} path: {path} scope: {scope_line} type: {memory_type} updated: {updated} {body}",
+      "reason": "format-scaffolding"
+    },
     "packages/kimi-agent/src/tools/memory_store.rs:<memory_listing>": {
       "file": "packages/kimi-agent/src/tools/memory_store.rs",
       "text": "<memory_listing>",

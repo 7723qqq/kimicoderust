@@ -887,6 +887,8 @@
         "importFailed": "Knowledge import failed: {{e}}"
       },
       "memory": {
+        "readPathRequired": "Read requires a `path` parameter.",
+        "notFound": "Memory file not found: {{path}}",
         "cannotRead": "Cannot read {{rel}}: {{e}}",
         "cannotDelete": "Cannot delete {{rel}}: {{e}}",
         "oldStrNotFound": "`old_str` was not found in {{rel}}. Match the file's text exactly.\n\nCurrent content:\n{{content}}",
