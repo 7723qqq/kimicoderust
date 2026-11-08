@@ -3490,6 +3490,11 @@
       "text": "permission pattern: missing closing paren in \"{pattern}\"",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/native/powershell.rs:Background execution is disabled for this agent. Do not set `run_in_background=true`.": {
+      "file": "packages/kimi-agent/src/native/powershell.rs",
+      "text": "Background execution is disabled for this agent. Do not set `run_in_background=true`.",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/native/powershell.rs:C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe": {
       "file": "packages/kimi-agent/src/native/powershell.rs",
       "text": "C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe",
@@ -3500,10 +3505,25 @@
       "text": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
       "reason": "dev-surface"
     },
+    "packages/kimi-agent/src/native/powershell.rs:If `run_in_background=true`,": {
+      "file": "packages/kimi-agent/src/native/powershell.rs",
+      "text": "If `run_in_background=true`,",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/native/powershell.rs:PowerShell was not found on this host. Install PowerShell 7, or set KIMI_PWSH_PATH to a pwsh executable. Checked: {checked}": {
       "file": "packages/kimi-agent/src/native/powershell.rs",
       "text": "PowerShell was not found on this host. Install PowerShell 7, or set KIMI_PWSH_PATH to a pwsh executable. Checked: {checked}",
       "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/native/powershell.rs:a foreground call that hits its timeout is killed.": {
+      "file": "packages/kimi-agent/src/native/powershell.rs",
+      "text": "a foreground call that hits its timeout is killed.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/native/powershell.rs:a foreground call that hits its timeout is moved to the background instead of being killed.": {
+      "file": "packages/kimi-agent/src/native/powershell.rs",
+      "text": "a foreground call that hits its timeout is moved to the background instead of being killed.",
+      "reason": "model-input"
     },
     "packages/kimi-agent/src/native/read.rs:\"{}\" does not exist.": {
       "file": "packages/kimi-agent/src/native/read.rs",

@@ -76,6 +76,70 @@ pub fn encode_script(script: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// The env v2 sets on every PowerShell spawn (`powershellTool.ts:171-175`).
+///
+/// `NO_COLOR` keeps ANSI out of captured output; the two `*_OPTOUT` variables
+/// stop a first run from printing a telemetry notice and from blocking on an
+/// update check — both surface as banner text the model would then read as
+/// command output.
+pub const POWER_SHELL_ENV: &[(&str, &str)] = &[
+    ("NO_COLOR", "1"),
+    ("POWERSHELL_TELEMETRY_OPTOUT", "1"),
+    ("POWERSHELL_UPDATECHECK_OPTOUT", "1"),
+];
+
+/// The description variants v2 applies at render time
+/// (`powershellTool.ts:56-77`): the template names the background behavior, so
+/// the two configurations that disable part of it must say so instead of
+/// describing a capability the agent does not have.
+pub struct DescriptionVariants;
+
+impl DescriptionVariants {
+    /// v2 `withoutBackgroundDescription`: the tool table has no TaskList /
+    /// TaskOutput / TaskStop, so a background call would be unobservable.
+    pub fn without_background(description: &str) -> String {
+        replace_paragraph(
+            description,
+            "If `run_in_background=true`,",
+            "Background execution is disabled for this agent. Do not set `run_in_background=true`.",
+        )
+    }
+
+    /// v2 `withoutAutoBackgroundOnTimeout`: the foreground timeout kills the
+    /// script instead of re-homing it, and the template's sentence says the
+    /// opposite.
+    pub fn without_auto_background(description: &str) -> String {
+        description.replace(
+            "a foreground call that hits its timeout is moved to the background instead of being killed.",
+            "a foreground call that hits its timeout is killed.",
+        )
+    }
+}
+
+/// Replace the paragraph that starts with `prefix` with `replacement`.
+///
+/// The template's paragraphs are separated by a blank line; a paragraph is
+/// dropped whole rather than edited in place, which is what v2's regex does and
+/// what keeps the replacement from leaving a half sentence behind.
+fn replace_paragraph(description: &str, prefix: &str, replacement: &str) -> String {
+    let Some(start) = description.find(prefix) else {
+        return description.to_string();
+    };
+    let end = description[start..]
+        .find(
+            "
+
+",
+        )
+        .map(|offset| start + offset)
+        .unwrap_or(description.len());
+    let mut out = String::with_capacity(description.len());
+    out.push_str(&description[..start]);
+    out.push_str(replacement);
+    out.push_str(&description[end..]);
+    out
+}
+
 /// The argv after the executable itself. `-NoProfile` keeps a user's profile
 /// from changing output shape; `-NonInteractive` keeps a prompt from hanging the
 /// turn.
@@ -306,5 +370,67 @@ mod tests {
             .filter(|path| path.ends_with("pwsh.exe"))
             .count();
         assert_eq!(pwsh_count, 3, "PATH hit plus two install roots");
+    }
+}
+
+#[cfg(test)]
+mod description_variants {
+    use super::*;
+
+    const TEMPLATE: &str = "Execute a Windows PowerShell script natively.
+
+Foreground calls default to 60s and allow up to 300s; a foreground call that hits its timeout is moved to the background instead of being killed.
+
+If `run_in_background=true`, the script will be started as a background task and this tool will return a task ID. If a human user wants to inspect background tasks themselves, point them to the background-task panel.
+
+**Safety:** do not use this tool to escape the working directory.";
+
+    #[test]
+    fn the_default_variant_keeps_the_template() {
+        assert!(TEMPLATE.contains("moved to the background"));
+        assert!(TEMPLATE.contains("If `run_in_background=true`"));
+    }
+
+    #[test]
+    fn without_background_replaces_the_whole_paragraph() {
+        let rendered = DescriptionVariants::without_background(TEMPLATE);
+        assert!(rendered.contains(
+            "Background execution is disabled for this agent. Do not set `run_in_background=true`."
+        ));
+        assert!(!rendered.contains("If `run_in_background=true`"));
+        assert!(!rendered.contains("background-task panel"));
+        // The paragraphs before and after are untouched.
+        assert!(rendered.starts_with("Execute a Windows PowerShell script natively."));
+        assert!(
+            rendered.contains("**Safety:** do not use this tool to escape the working directory.")
+        );
+    }
+
+    #[test]
+    fn without_auto_background_swaps_the_sentence_and_nothing_else() {
+        let rendered = DescriptionVariants::without_auto_background(TEMPLATE);
+        assert!(rendered.contains("a foreground call that hits its timeout is killed."));
+        assert!(!rendered.contains("moved to the background instead of being killed"));
+        assert!(rendered.contains("If `run_in_background=true`"));
+    }
+
+    #[test]
+    fn a_template_without_the_paragraph_is_returned_unchanged() {
+        let plain = "A description with no background paragraph.";
+        assert_eq!(DescriptionVariants::without_background(plain), plain);
+    }
+
+    #[test]
+    fn every_spawn_carries_the_telemetry_and_colour_opts_outs() {
+        let names: Vec<&str> = POWER_SHELL_ENV.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "NO_COLOR",
+                "POWERSHELL_TELEMETRY_OPTOUT",
+                "POWERSHELL_UPDATECHECK_OPTOUT"
+            ]
+        );
+        assert!(POWER_SHELL_ENV.iter().all(|(_, value)| *value == "1"));
     }
 }
