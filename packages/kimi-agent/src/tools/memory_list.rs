@@ -107,9 +107,7 @@ mod tests {
         ];
         let rendered = render_list(&entries, None);
         assert!(rendered.starts_with("Memory files (2):\n"), "{rendered}");
-        assert!(
-            rendered.find("global/a.md").unwrap() < rendered.find("projects/p/z.md").unwrap()
-        );
+        assert!(rendered.find("global/a.md").unwrap() < rendered.find("projects/p/z.md").unwrap());
         assert!(rendered.contains("  global/a.md — A [decision]"));
     }
 

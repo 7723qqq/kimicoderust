@@ -191,6 +191,7 @@ pub mod lsp_tool;
 pub mod memory_action;
 pub mod memory_filing;
 pub mod memory_list;
+pub mod memory_list_handler;
 pub mod memory_paths;
 pub mod memory_read;
 pub mod memory_read_handler;
