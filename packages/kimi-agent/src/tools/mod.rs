@@ -220,6 +220,7 @@ pub mod agent_tool;
 pub mod args_validate;
 pub mod ask_user_question;
 mod bash_exec;
+pub mod bash_null_redirect;
 pub mod bash_target_dirs;
 pub mod core_tool_defs;
 pub mod create_goal;

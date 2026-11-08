@@ -16,6 +16,15 @@ impl NativeToolset {
         on_update: Option<OutputUpdate<'_>>,
     ) -> Option<ExecutableToolResult> {
         let command = args.get("command")?.as_str()?;
+        // v2 `bashTool.ts:182` rewrites `> NUL` to `> /dev/null` only when
+        // the host reports a Windows OS: Git Bash has no NUL device, so the
+        // cmd.exe idiom would otherwise create a file named NUL.
+        let command = if cfg!(windows) {
+            crate::tools::bash_null_redirect::rewrite_windows_null_redirect(command)
+        } else {
+            command.to_string()
+        };
+        let command = command.as_str();
         let starts_in_background =
             args.get("run_in_background").and_then(|value| value.as_bool()) == Some(true);
         // v2 \`validateRunRequest\` checks the command first and the background
