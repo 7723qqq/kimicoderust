@@ -984,6 +984,8 @@ export const zh = {
         written: '已写入 memory：{{path}}\n标题：{{title}}\n类型：{{type}}',
         noFilesFound: '没有找到 memory 文件。',
         listHeader: 'Memory 文件（{{count}}）：\n',
+        deletePathRequired: '删除需要 `path` 参数。',
+        deleted: '已删除：{{path}}',
         cannotRead: '无法读取 {{rel}}：{{e}}',
         cannotDelete: '无法删除 {{rel}}：{{e}}',
         oldStrNotFound:

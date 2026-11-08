@@ -1063,6 +1063,8 @@ export const en = {
         written: 'Memory written to {{path}}\ntitle: {{title}}\ntype: {{type}}',
         noFilesFound: 'No memory files found.',
         listHeader: 'Memory files ({{count}}):\n',
+        deletePathRequired: 'Delete requires a `path` parameter.',
+        deleted: 'Deleted: {{path}}',
         cannotRead: 'Cannot read {{rel}}: {{e}}',
         cannotDelete: 'Cannot delete {{rel}}: {{e}}',
         oldStrNotFound:

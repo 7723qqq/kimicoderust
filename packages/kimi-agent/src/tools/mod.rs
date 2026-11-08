@@ -189,6 +189,7 @@ pub mod knowledge_tool;
 pub mod list_directory;
 pub mod lsp_tool;
 pub mod memory_action;
+pub mod memory_delete;
 pub mod memory_filing;
 pub mod memory_list;
 pub mod memory_list_handler;
