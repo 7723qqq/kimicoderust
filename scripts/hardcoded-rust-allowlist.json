@@ -10954,34 +10954,34 @@
       "text": "{description} #{idx} (resume)",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/task_tools.rs:- A finished task's result is delivered exactly once: tasks reported by TaskWait do not also produce an automatic completion notification.": {
+    "packages/kimi-agent/src/tools/task_tools.rs:- A finished task's result is delivered exactly once: tasks reported by WaitFor do not also produce an automatic completion notification.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "- A finished task's result is delivered exactly once: tasks reported by TaskWait do not also produce an automatic completion notification.",
+      "text": "- A finished task's result is delivered exactly once: tasks reported by WaitFor do not also produce an automatic completion notification.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/task_tools.rs:- A timeout is not an error: the tool reports the timeout and you decide whether to wait again or do other work meanwhile; completion also arrives via automatic notification. Prefer moving on to other work over calling TaskWait again; repeated waits keep the user waiting.": {
+    "packages/kimi-agent/src/tools/task_tools.rs:- After a timeout, prefer moving on to other work over calling WaitFor again; repeated waits keep the user waiting.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "- A timeout is not an error: the tool reports the timeout and you decide whether to wait again or do other work meanwhile; completion also arrives via automatic notification. Prefer moving on to other work over calling TaskWait again; repeated waits keep the user waiting.",
+      "text": "- After a timeout, prefer moving on to other work over calling WaitFor again; repeated waits keep the user waiting.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/task_tools.rs:- Before calling TaskWait, think about what else you can do meanwhile: another part of the task, verifying earlier work, or ending your turn with a progress update. If there is anything, do that instead.": {
+    "packages/kimi-agent/src/tools/task_tools.rs:- Before calling WaitFor, think about what else you can do meanwhile: another part of the task, verifying earlier work, or ending your turn with a progress update. If there is anything, do that instead.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "- Before calling TaskWait, think about what else you can do meanwhile: another part of the task, verifying earlier work, or ending your turn with a progress update. If there is anything, do that instead.",
+      "text": "- Before calling WaitFor, think about what else you can do meanwhile: another part of the task, verifying earlier work, or ending your turn with a progress update. If there is anything, do that instead.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/task_tools.rs:- Do not call TaskWait right after dispatching work whose result you do not need yet — finished background tasks notify you automatically. TaskWait is for the moment you genuinely cannot proceed without a result.": {
+    "packages/kimi-agent/src/tools/task_tools.rs:- Do not call WaitFor right after dispatching work whose result you do not need yet.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "- Do not call TaskWait right after dispatching work whose result you do not need yet — finished background tasks notify you automatically. TaskWait is for the moment you genuinely cannot proceed without a result.",
+      "text": "- Do not call WaitFor right after dispatching work whose result you do not need yet.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/task_tools.rs:- Steering ends the wait early (a `wait_status: interrupted` report): read the new input, then decide whether to wait again. Background tasks keep running and still notify you on completion.": {
+    "packages/kimi-agent/src/tools/task_tools.rs:- Waiting has no side effects on the waited tasks: WaitFor never stops a task, and interrupting the wait (for example, a new user message) leaves every task running.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "- Steering ends the wait early (a `wait_status: interrupted` report): read the new input, then decide whether to wait again. Background tasks keep running and still notify you on completion.",
+      "text": "- Waiting has no side effects on the waited tasks: WaitFor never stops a task, and interrupting the wait (for example, a new user message) leaves every task running.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/task_tools.rs:- Waiting has no side effects on the waited tasks: TaskWait never stops a task, and interrupting the wait (for example, a user interruption) leaves every task running.": {
+    "packages/kimi-agent/src/tools/task_tools.rs:- When no background tasks are running, WaitFor returns immediately without waiting.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "- Waiting has no side effects on the waited tasks: TaskWait never stops a task, and interrupting the wait (for example, a user interruption) leaves every task running.",
+      "text": "- When no background tasks are running, WaitFor returns immediately without waiting.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/task_tools.rs:- With `task_id`, the wait ends when that task finishes. An unknown `task_id` is an error; a task that has already finished returns immediately.": {
@@ -10989,19 +10989,14 @@
       "text": "- With `task_id`, the wait ends when that task finishes. An unknown `task_id` is an error; a task that has already finished returns immediately.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/task_tools.rs:- Without `task_id`, the wait ends as soon as any background task that was running at call time finishes; with nothing running it returns immediately.": {
+    "packages/kimi-agent/src/tools/task_tools.rs:- Without `task_id`, tasks started during the wait are not covered by it; their completion arrives via the usual automatic notification.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "- Without `task_id`, the wait ends as soon as any background task that was running at call time finishes; with nothing running it returns immediately.",
+      "text": "- Without `task_id`, tasks started during the wait are not covered by it; their completion arrives via the usual automatic notification.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/task_tools.rs:- You can only wait for background tasks started by this agent; task IDs belonging to other agents are unknown here.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
       "text": "- You can only wait for background tasks started by this agent; task IDs belonging to other agents are unknown here.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/task_tools.rs:- `timeout` is required, in seconds, capped at 90. Pick it from how long you expect the task to take, not the maximum.": {
-      "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "- `timeout` is required, in seconds, capped at 90. Pick it from how long you expect the task to take, not the maximum.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/task_tools.rs:Invalid TaskList arguments: `limit` must be an integer between 1 and 100.": {
@@ -11128,6 +11123,11 @@
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
       "text": "The wait ended before the task finished — a timeout is not an error. Prefer continuing with other work over waiting again; completion arrives via automatic notification.",
       "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/task_tools.rs:This engine's own addition: a steering message ends the wait early and reports it (`wait_status: interrupted`); the tasks keep running and still notify you when they finish.": {
+      "file": "packages/kimi-agent/src/tools/task_tools.rs",
+      "text": "This engine's own addition: a steering message ends the wait early and reports it (`wait_status: interrupted`); the tasks keep running and still notify you when they finish.",
+      "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/task_tools.rs:Wait for background tasks to finish without ending the current turn.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",

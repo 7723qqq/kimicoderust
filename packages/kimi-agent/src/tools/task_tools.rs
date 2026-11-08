@@ -1057,22 +1057,23 @@ Guidelines:
 ///   and the steering guideline below is the one that describes the latter.
 const TASK_WAIT_DESCRIPTION: &str = r#"Wait for background tasks to finish without ending the current turn.
 
-Use this when your next step depends on the result of a running background task (a sub-agent, a background bash command, or a background AskUserQuestion). The call suspends inside the current turn until the task finishes, the timeout elapses, or a steering message arrives, then returns the outcome so you can keep working in the same turn. While waiting, no LLM requests are made, but the user is kept waiting too.
+Only call this tool when you really have no other work to do and your next step cannot proceed without the result of a running background task (a sub-agent, a background bash command, or a background AskUserQuestion). The call suspends inside the current turn until the task finishes or the timeout elapses, then returns the outcome so you can keep working in the same turn. While waiting, no LLM requests are made, but the user is kept waiting too.
 
 When background tasks finish, they notify you automatically, so you do not need to busily wait for them.
 
 Guidelines:
 
-- Before calling TaskWait, think about what else you can do meanwhile: another part of the task, verifying earlier work, or ending your turn with a progress update. If there is anything, do that instead.
-- Do not call TaskWait right after dispatching work whose result you do not need yet — finished background tasks notify you automatically. TaskWait is for the moment you genuinely cannot proceed without a result.
-- `timeout` is required, in seconds, capped at 90. Pick it from how long you expect the task to take, not the maximum.
-- A timeout is not an error: the tool reports the timeout and you decide whether to wait again or do other work meanwhile; completion also arrives via automatic notification. Prefer moving on to other work over calling TaskWait again; repeated waits keep the user waiting.
+- Before calling WaitFor, think about what else you can do meanwhile: another part of the task, verifying earlier work, or ending your turn with a progress update. If there is anything, do that instead.
+- Do not call WaitFor right after dispatching work whose result you do not need yet.
+- After a timeout, prefer moving on to other work over calling WaitFor again; repeated waits keep the user waiting.
+- Without `task_id`, tasks started during the wait are not covered by it; their completion arrives via the usual automatic notification.
 - With `task_id`, the wait ends when that task finishes. An unknown `task_id` is an error; a task that has already finished returns immediately.
-- Without `task_id`, the wait ends as soon as any background task that was running at call time finishes; with nothing running it returns immediately.
-- Steering ends the wait early (a `wait_status: interrupted` report): read the new input, then decide whether to wait again. Background tasks keep running and still notify you on completion.
-- Waiting has no side effects on the waited tasks: TaskWait never stops a task, and interrupting the wait (for example, a user interruption) leaves every task running.
-- A finished task's result is delivered exactly once: tasks reported by TaskWait do not also produce an automatic completion notification.
-- You can only wait for background tasks started by this agent; task IDs belonging to other agents are unknown here."#;
+- When no background tasks are running, WaitFor returns immediately without waiting.
+- Waiting has no side effects on the waited tasks: WaitFor never stops a task, and interrupting the wait (for example, a new user message) leaves every task running.
+- A finished task's result is delivered exactly once: tasks reported by WaitFor do not also produce an automatic completion notification.
+- You can only wait for background tasks started by this agent; task IDs belonging to other agents are unknown here.
+
+This engine's own addition: a steering message ends the wait early and reports it (`wait_status: interrupted`); the tasks keep running and still notify you when they finish."#;
 
 /// The `WaitFor` / `TaskWait` definition body, parameterized by the advertised
 /// name so the product tool (`WaitFor`, v2 `WaitForTool`) and the REPL-only
@@ -1080,7 +1081,7 @@ Guidelines:
 fn task_wait_def(name: &str) -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: name.into(),
-        description: TASK_WAIT_DESCRIPTION.replace("TaskWait", name),
+        description: TASK_WAIT_DESCRIPTION.replace("WaitFor", name),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
