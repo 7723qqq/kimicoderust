@@ -253,6 +253,7 @@ pub mod select_tools;
 pub mod shell_results;
 pub mod skill;
 pub mod stale_guard;
+pub mod stream_sink;
 pub mod subagent_tools;
 pub mod swarm_tool;
 pub mod task_format;
