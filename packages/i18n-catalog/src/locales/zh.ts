@@ -982,6 +982,8 @@ export const zh = {
         invalidFilename:
           '无效的 memory 文件名："{{path}}"。请使用不含路径分隔符或 ".." 的普通文件名。',
         written: '已写入 memory：{{path}}\n标题：{{title}}\n类型：{{type}}',
+        noFilesFound: '没有找到 memory 文件。',
+        listHeader: 'Memory 文件（{{count}}）：\n',
         cannotRead: '无法读取 {{rel}}：{{e}}',
         cannotDelete: '无法删除 {{rel}}：{{e}}',
         oldStrNotFound:

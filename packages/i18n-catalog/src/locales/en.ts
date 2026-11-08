@@ -1061,6 +1061,8 @@ export const en = {
         invalidFilename:
           'Invalid memory filename: "{{path}}". Use a plain filename without path separators or "..".',
         written: 'Memory written to {{path}}\ntitle: {{title}}\ntype: {{type}}',
+        noFilesFound: 'No memory files found.',
+        listHeader: 'Memory files ({{count}}):\n',
         cannotRead: 'Cannot read {{rel}}: {{e}}',
         cannotDelete: 'Cannot delete {{rel}}: {{e}}',
         oldStrNotFound:
