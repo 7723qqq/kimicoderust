@@ -857,10 +857,6 @@
         "hotFeedFallback": "搜索未返回相关结果（Bing 回退到了热搜 feed）。请尝试更宽泛或不同的查询。",
         "sogouHttpFailed": "搜索失败：Sogou 搜索返回 HTTP {{status}}"
       },
-      "switchEngine": {
-        "unknown": "未知搜索引擎：{{name}}。可用：bing、ddg、sogou。",
-        "switched": "搜索引擎已切换为 {{name}}。"
-      },
       "readMedia": {
         "tooLargeToSend": "图像压缩后仍过大，无法安全发送（{{final_bytes}} 字节；上限为 {{read_byte_budget}} 字节且最长边 {{max_edge}} 像素）。原始图像未发送给模型。请不要原样重试，使用 Bash 或可用的图像处理工具生成一个同时满足两项限制的较小副本，然后对副本调用 Read。",
         "tooLargeToProcess": "图像过大，无法安全处理 region 或 full_resolution（{{final_bytes}} 字节；安全解码上限 {{MAX_IMAGE_DECODE_BYTES}} 字节）。原始图像未发送给模型。请不要原样重试，使用 Bash 或可用的图像处理工具生成较小副本，或把需要的区域裁剪成单独图像，然后对结果文件调用 Read。",

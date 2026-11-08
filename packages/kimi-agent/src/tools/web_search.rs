@@ -963,35 +963,6 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
     })
 }
 
-/// SwitchSearchEngine tool — lets the AI change the active search engine at
-/// runtime. This is the "AI can switch" half of the hot-switch; the host napi
-/// call is the manual half.
-pub async fn execute_switch_engine(args: &Value) -> Option<ExecutableToolResult> {
-    let name = args.get("engine")?.as_str()?;
-    let Some(engine) = SearchEngine::from_name(name) else {
-        return Some(err_result(
-            LocalizedText::with_params(
-                "engine.tools.switchEngine.unknown",
-                i18n_params!["name" => name],
-            )
-            .render(),
-        ));
-    };
-    set_active_engine(engine);
-    Some(ExecutableToolResult {
-        delivery: None,
-        stop_turn: false,
-        content: LocalizedText::with_params(
-            "engine.tools.switchEngine.switched",
-            i18n_params!["name" => engine.name()],
-        )
-        .render(),
-        is_error: false,
-        note: None,
-        display: None,
-    })
-}
-
 // ── HTML Parsing ─────────────────────────────────────────────────────────────
 //
 // The Bing scrape (selectors, URL encoding) lives in `native::web_search` so
@@ -1114,22 +1085,6 @@ mod tests {
         assert_eq!(active_engine(), SearchEngine::Ddg);
         set_active_engine(SearchEngine::Bing);
         assert_eq!(active_engine(), SearchEngine::Bing);
-        set_active_engine(prev);
-    }
-
-    #[tokio::test]
-    async fn test_execute_switch_engine() {
-        let prev = active_engine();
-        let args = json!({ "engine": "ddg" });
-        let result = execute_switch_engine(&args).await.unwrap();
-        assert!(!result.is_error);
-        assert!(result.content.contains("ddg"));
-        assert_eq!(active_engine(), SearchEngine::Ddg);
-
-        let args = json!({ "engine": "google" });
-        let result = execute_switch_engine(&args).await.unwrap();
-        assert!(result.is_error);
-
         set_active_engine(prev);
     }
 }

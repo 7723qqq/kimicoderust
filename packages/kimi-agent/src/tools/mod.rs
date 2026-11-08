@@ -295,11 +295,6 @@ pub const NATIVE_TOOL_NAMES: &[&str] = &[
     "fetch_url",
     "websearch",
     "web_search",
-    "switchengine",
-    "switch_engine",
-    "switchsearchengine",
-    "listdirectory",
-    "list_directory",
     // Lsp has an execution arm (`Self::execute_tool`) and a tool definition in
     // `all_native_tool_defs()`, which `GET /api/v1/tools` reports as an active
     // builtin. Leaving it out of this list made `handles()` false, so a host

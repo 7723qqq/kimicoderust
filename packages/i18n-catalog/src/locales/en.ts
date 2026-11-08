@@ -1011,10 +1011,6 @@ export const en = {
         hotFeedFallback: 'Search returned no relevant results (Bing fell back to a hot-feed). Try a broader or different query.',
         sogouHttpFailed: 'Search failed: Sogou search returned HTTP {{status}}',
       },
-      switchEngine: {
-        unknown: 'Unknown search engine: {{name}}. Available: bing, ddg, sogou.',
-        switched: 'Search engine switched to {{name}}.',
-      },
       readMedia: {
         tooLargeToSend:
           'Image is too large to send safely after compression ({{final_bytes}} bytes; limit {{read_byte_budget}} bytes and {{max_edge}}px on the longest edge). The original image was not sent to the model. Do not retry the same file unchanged. Use Bash or an available image-processing tool to create a smaller copy within both limits, then call Read on the smaller copy.',

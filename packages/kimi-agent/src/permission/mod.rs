@@ -1242,7 +1242,7 @@ mod tests {
             "Grep",
             "Glob",
             "ListDirectory",
-            "Lsp",
+            "lsp",
             "memory_write",
             "memory_str_replace",
             "memory_append",

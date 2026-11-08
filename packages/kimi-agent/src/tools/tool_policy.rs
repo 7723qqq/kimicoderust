@@ -916,7 +916,7 @@ mod tests {
         }
         assert!(!names.contains(&"TowerInit"), "tower tools are gated");
         assert!(
-            !names.contains(&"Lsp"),
+            !names.contains(&"lsp"),
             "tower/lsp stay out of the advertised table"
         );
     }

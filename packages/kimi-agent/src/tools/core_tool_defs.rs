@@ -143,11 +143,6 @@ Each result includes its title, its URL, and a snippet, plus its source site and
 When you rely on a result in your answer, cite its source URL so the user can verify it.
 "#;
 
-const SWITCH_ENGINE_DESCRIPTION: &str = r#"Switch the active web search engine at runtime. Use this when the current engine is failing or returning poor results, to try an alternative without restarting.
-
-Available engines: bing (Bing HTML scrape, key-free), ddg (DuckDuckGo HTML scrape, key-free), sogou (Sogou HTML scrape, key-free). The switch takes effect immediately for subsequent WebSearch calls.
-"#;
-
 /// Windows-only suffix appended to the Glob description, mirroring the v2
 /// `GlobTool.description` getter (pathClass === 'win32').
 const GLOB_WINDOWS_PATH_HINT: &str = r#"
@@ -538,24 +533,6 @@ fn build_core_tool_defs() -> Vec<ToolInfo> {
                 "additionalProperties": false
             }),
         },
-        ToolInfo {
-            name: "SwitchSearchEngine".into(),
-            description: SWITCH_ENGINE_DESCRIPTION.into(),
-            input_schema: json!({
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "type": "object",
-                "properties": {
-                    "engine": {
-                        "type": "string",
-                        "description": "The search engine to activate: bing or ddg."
-                    }
-                },
-                "required": [
-                    "engine"
-                ],
-                "additionalProperties": false
-            }),
-        },
     ]
 }
 
@@ -611,7 +588,7 @@ Supported actions:
 /// Tool definition for the native LSP tool.
 pub fn lsp_tool_def() -> ToolInfo {
     ToolInfo {
-        name: "Lsp".into(),
+        name: "lsp".into(),
         description: LSP_DESCRIPTION.into(),
         input_schema: json!({
             "$schema": "http://json-schema.org/draft-07/schema#",
@@ -644,35 +621,8 @@ pub fn lsp_tool_def() -> ToolInfo {
     }
 }
 
-/// Tool definition for the native ListDirectory tool.
-///
-/// The capability has been executable (native arm + `NATIVE_TOOL_NAMES` entry)
-/// and verified through a host-supplied tool table, but no definition advertised
-/// it — so it was listed nowhere and the model could never call it.
-pub fn list_directory_tool_def() -> ToolInfo {
-    ToolInfo {
-        name: "ListDirectory".into(),
-        description: "List a directory as a compact two-level tree (directories and files). Use it to orient yourself in a directory before reading individual files. Hidden directories are expanded unless `collapse_hidden_dirs` is set.".into(),
-        input_schema: json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Directory to list. Relative paths resolve against the workspace root; defaults to the workspace root."
-                },
-                "collapse_hidden_dirs": {
-                    "type": "boolean",
-                    "description": "Collapse dot-directories instead of expanding them (defaults to false)."
-                }
-            },
-            "additionalProperties": false
-        }),
-    }
-}
-
-/// All native tool definitions including LSP, ListDirectory, NotifyUser and
-/// the six memory tools.
+/// All native tool definitions including LSP, NotifyUser and the six memory
+/// tools.
 ///
 /// Invariant: every entry here must satisfy [`crate::tools::is_native_tool_name`].
 /// This list is what `GET /api/v1/tools` reports as active builtins, so an entry
@@ -680,7 +630,6 @@ pub fn list_directory_tool_def() -> ToolInfo {
 pub fn all_native_tool_defs() -> Vec<ToolInfo> {
     let mut defs = core_tool_defs();
     defs.push(lsp_tool_def());
-    defs.push(list_directory_tool_def());
     defs.push(notify_user_tool_def());
     defs.extend(memory_tool_defs());
     defs
@@ -916,8 +865,7 @@ mod tests {
                 "Edit",
                 "Bash",
                 "FetchURL",
-                "WebSearch",
-                "SwitchSearchEngine"
+                "WebSearch"
             ]
         );
     }
@@ -996,7 +944,6 @@ mod tests {
         assert_eq!(required("Bash"), json!(["command"]));
         assert_eq!(required("FetchURL"), json!(["url"]));
         assert_eq!(required("WebSearch"), json!(["query"]));
-        assert_eq!(required("SwitchSearchEngine"), json!(["engine"]));
     }
 
     #[test]
@@ -1055,14 +1002,13 @@ mod tests {
     #[test]
     fn test_lsp_tool_def_schema() {
         let lsp = lsp_tool_def();
-        assert_eq!(lsp.name, "Lsp");
+        assert_eq!(lsp.name, "lsp");
         assert_eq!(lsp.input_schema["required"], json!(["action", "path"]));
         assert_eq!(lsp.input_schema["additionalProperties"], false);
 
         let all = all_native_tool_defs();
-        assert_eq!(all.len(), 18);
-        assert!(all.iter().any(|d| d.name == "Lsp"));
-        assert!(all.iter().any(|d| d.name == "ListDirectory"));
+        assert_eq!(all.len(), 16);
+        assert!(all.iter().any(|d| d.name == "lsp"));
         assert!(all.iter().any(|d| d.name == "NotifyUser"));
     }
 
@@ -1133,20 +1079,6 @@ mod tests {
                 def.name
             );
         }
-    }
-
-    #[test]
-    fn list_directory_tool_def_schema() {
-        let def = list_directory_tool_def();
-        assert_eq!(def.name, "ListDirectory");
-        assert_eq!(def.input_schema["type"], "object");
-        assert_eq!(def.input_schema["additionalProperties"], false);
-        assert_eq!(
-            def.input_schema["properties"]["collapse_hidden_dirs"]["type"],
-            "boolean"
-        );
-        // Neither field is required: the tool defaults to the workspace root.
-        assert!(def.input_schema.get("required").is_none());
     }
 
     #[test]
