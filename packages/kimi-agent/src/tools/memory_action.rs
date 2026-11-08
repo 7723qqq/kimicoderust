@@ -115,9 +115,7 @@ mod tests {
 
     #[test]
     fn all_seven_actions_round_trip() {
-        for name in [
-            "search", "read", "write", "list", "delete", "log", "revert",
-        ] {
+        for name in ["search", "read", "write", "list", "delete", "log", "revert"] {
             let action = MemoryAction::parse(name).expect("v2 action parses");
             assert_eq!(action.as_str(), name);
         }

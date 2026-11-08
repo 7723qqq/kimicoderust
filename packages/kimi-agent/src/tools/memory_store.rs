@@ -62,6 +62,14 @@ pub fn project_id_for(workspace_root: &Path) -> String {
     resolve_project_identity(&workspace_root.to_string_lossy()).id
 }
 
+/// Resolve a model-supplied relative path to its normalized store path.
+///
+/// Exposed so an action handler can distinguish "file does not exist" from a
+/// path-policy refusal without matching on localized error strings.
+pub fn resolve_read_path(base: &Path, rel_path: &str) -> Result<(String, PathBuf), String> {
+    resolve_path(base, rel_path)
+}
+
 /// Read a memory file: its content and the version token of that content.
 pub fn read(base: &Path, rel_path: &str) -> Result<(String, String), String> {
     let (rel, path) = resolve_path(base, rel_path)?;
