@@ -736,6 +736,8 @@
       "reject": "拒绝"
     },
     "tools": {
+      "memoryAction": "Memory: {{action}}",
+      "unknownMemoryAction": "未知的 memory 操作: {{action}}",
       "disabled": "工具 '{{tool_name}}' 已被 [tools] 配置禁用，无法运行。",
       "read": {
         "pathRequired": "\"path\" 为必填项，且必须是字符串。",

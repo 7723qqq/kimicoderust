@@ -872,6 +872,8 @@ export const en = {
       reject: 'Reject',
     },
     tools: {
+      memoryAction: 'Memory: {{action}}',
+      unknownMemoryAction: 'Unknown memory action: {{action}}',
       // The failure surface of the native file tools and Bash — what a user
       // stops to read when something breaks. Informational footers ("Total
       // lines in file", "Showing matches …") are deliberately not here yet.

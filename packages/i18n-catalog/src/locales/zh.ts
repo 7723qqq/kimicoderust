@@ -802,6 +802,8 @@ export const zh = {
       reject: '拒绝',
     },
     tools: {
+      memoryAction: 'Memory: {{action}}',
+      unknownMemoryAction: '未知的 memory 操作: {{action}}',
       // 原生文件工具与 Bash 的失败面——用户出问题时会停下来读的那些文案。
       // 信息性页脚（"Total lines in file"、"Showing matches" 等）暂不在此列。
       disabled: "工具 '{{tool_name}}' 已被 [tools] 配置禁用，无法运行。",

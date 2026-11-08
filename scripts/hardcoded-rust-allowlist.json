@@ -10178,6 +10178,36 @@
       "text": "Unsupported file type for LSP: {}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/memory_action.rs:Markdown content (for `write` action).": {
+      "file": "packages/kimi-agent/src/tools/memory_action.rs",
+      "text": "Markdown content (for `write` action).",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/memory_action.rs:Memory file path (for `read`, `write`, `delete`). Can include or omit `.md` extension. For `read`/`delete`, this is the full relative path (e.g. `global/auth.md`). For `write`, this is the filename within the chosen scope.": {
+      "file": "packages/kimi-agent/src/tools/memory_action.rs",
+      "text": "Memory file path (for `read`, `write`, `delete`). Can include or omit `.md` extension. For `read`/`delete`, this is the full relative path (e.g. `global/auth.md`). For `write`, this is the filename within the chosen scope.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/memory_action.rs:Memory repository commit sha (for `revert` action).": {
+      "file": "packages/kimi-agent/src/tools/memory_action.rs",
+      "text": "Memory repository commit sha (for `revert` action).",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/memory_action.rs:Memory scope (for `search`, `write`, `list`). `search` defaults to every scope of every project; `write` defaults to `project`; `list` defaults to all scopes.": {
+      "file": "packages/kimi-agent/src/tools/memory_action.rs",
+      "text": "Memory scope (for `search`, `write`, `list`). `search` defaults to every scope of every project; `write` defaults to `project`; `list` defaults to all scopes.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/memory_action.rs:Search query (for `search` action).": {
+      "file": "packages/kimi-agent/src/tools/memory_action.rs",
+      "text": "Search query (for `search` action).",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/memory_action.rs:The memory operation to perform. Required.": {
+      "file": "packages/kimi-agent/src/tools/memory_action.rs",
+      "text": "The memory operation to perform. Required.",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/tools/memory_filing.rs:- [stated] {text}": {
       "file": "packages/kimi-agent/src/tools/memory_filing.rs",
       "text": "- [stated] {text}",

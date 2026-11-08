@@ -736,6 +736,8 @@
       "reject": "Reject"
     },
     "tools": {
+      "memoryAction": "Memory: {{action}}",
+      "unknownMemoryAction": "Unknown memory action: {{action}}",
       "disabled": "Tool '{{tool_name}}' is disabled by the [tools] configuration and cannot run.",
       "read": {
         "pathRequired": "\"path\" is required and must be a string.",
