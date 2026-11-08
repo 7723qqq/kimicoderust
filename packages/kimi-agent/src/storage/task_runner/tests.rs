@@ -115,6 +115,7 @@ async fn reconcile_does_not_misreport_a_live_in_process_task() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-live".into(),
             "long build".into(),
@@ -160,6 +161,7 @@ async fn task_hooks_fire_on_spawn_and_settle() {
                 kind: "subagent",
                 subagent_type: Some("explore"),
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-hook".into(),
             "explore the tree".into(),
@@ -409,6 +411,7 @@ async fn reconcile_reports_the_orphan_but_never_the_live_task() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-live".into(),
             "long build".into(),
@@ -458,13 +461,13 @@ async fn reconcile_reports_the_orphan_but_never_the_live_task() {
 fn background_limits_from_wire_drops_only_meaningless_zeroes() {
     // Unset wire values keep every built-in.
     assert_eq!(
-        BackgroundLimits::from_wire(None, None, None, None),
+        BackgroundLimits::from_wire(None, None, None, None, None),
         BackgroundLimits::default()
     );
     // A zero grace period / concurrency cap is not meaningful (JSON has no
     // way to say "unset"), so it falls back to the built-in...
     assert_eq!(
-        BackgroundLimits::from_wire(Some(0), Some(0), None, None),
+        BackgroundLimits::from_wire(Some(0), Some(0), None, None, None),
         BackgroundLimits::default()
     );
     // ...but `bash_task_timeout_s = 0` is a real value meaning "no
@@ -474,6 +477,7 @@ fn background_limits_from_wire_drops_only_meaningless_zeroes() {
         Some(u64::from(u32::MAX) + 1),
         Some(false),
         Some(0),
+        None,
     );
     assert_eq!(
         limits,
@@ -482,11 +486,12 @@ fn background_limits_from_wire_drops_only_meaningless_zeroes() {
             max_running_tasks: None,
             bash_auto_background_on_timeout: Some(false),
             bash_task_timeout_s: Some(0),
+            keep_alive_on_exit: None,
         }
     );
     // A cap that fits is carried through.
     assert_eq!(
-        BackgroundLimits::from_wire(None, Some(4), None, None).max_running_tasks,
+        BackgroundLimits::from_wire(None, Some(4), None, None, None).max_running_tasks,
         Some(4)
     );
 }
@@ -509,6 +514,7 @@ async fn lifecycle_events_carry_the_session_and_both_vocabularies() {
                 kind: "subagent",
                 subagent_type: Some("research"),
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-ev".into(),
             "Subagent research: investigate".into(),
@@ -572,6 +578,7 @@ async fn emit_progress_reports_on_the_running_tasks_lane() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-prog".into(),
             "background job".into(),
@@ -607,7 +614,7 @@ async fn emit_progress_reports_on_the_running_tasks_lane() {
 async fn background_limits_cap_concurrent_tasks() {
     // `[background].max_running_tasks`: the cap refuses a spawn rather
     // than queueing it, and frees up once a task settles.
-    let runner = Arc::new(TaskRunner::new(None).with_background_limits(None, Some(1)));
+    let runner = Arc::new(TaskRunner::new(None).with_background_limits(None, Some(1), None));
     // A oneshot (not a Notify): the release must not race the task's
     // first poll, or the wait never ends.
     let (release, held) = tokio::sync::oneshot::channel::<()>();
@@ -783,6 +790,7 @@ async fn stop_session_flags_only_its_own_tasks() {
                     kind: "bash",
                     subagent_type: None,
                     agent_id: None,
+                    timeout_ms: None,
                 },
                 id.into(),
                 format!("task {id}"),
@@ -816,6 +824,7 @@ async fn stop_session_is_empty_for_a_session_that_owns_nothing() {
                 kind: "tool",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "unattributed".into(),
             "no session".into(),
@@ -837,6 +846,7 @@ async fn stop_session_does_not_overwrite_a_reason_already_set() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-r".into(),
             "reasoned".into(),
@@ -1136,6 +1146,7 @@ async fn notifications_are_scoped_to_the_settling_tasks_session() {
                     kind: "bash",
                     subagent_type: None,
                     agent_id: None,
+                    timeout_ms: None,
                 },
                 id.into(),
                 format!("job {id}"),
@@ -1226,6 +1237,7 @@ async fn settle_stays_silent_when_the_host_reports_the_session_dead() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-gone".into(),
             "job".into(),
@@ -1280,6 +1292,7 @@ async fn liveness_gate_is_per_session() {
                     kind: "bash",
                     subagent_type: None,
                     agent_id: None,
+                    timeout_ms: None,
                 },
                 id.into(),
                 format!("job {id}"),
@@ -1328,6 +1341,7 @@ async fn without_a_liveness_predicate_the_settle_path_keeps_firing() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-legacy".into(),
             "job".into(),
@@ -1418,6 +1432,7 @@ async fn a_failed_outcome_settles_as_failed_and_keeps_its_reason() {
                 kind: "subagent",
                 subagent_type: Some("research"),
                 agent_id: None,
+                timeout_ms: None,
             },
             "t-failed".into(),
             "Subagent research: investigate".into(),
@@ -1463,6 +1478,7 @@ async fn success_failure_and_kill_settle_three_different_statuses() {
                 kind: "subagent",
                 subagent_type: Some("research"),
                 agent_id: None,
+                timeout_ms: None,
             },
             "t-bad".into(),
             "broken".into(),

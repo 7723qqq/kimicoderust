@@ -13,19 +13,31 @@
 
 use serde_json::Value;
 
+use crate::turn_loop::types::ArgsParseError;
+
 /// Decode a provider's JSON-string argument payload.
 ///
 /// Returns the arguments the call carries and, when the payload did not parse,
-/// the reason it did not. The caller keeps the call either way: the assistant
-/// message must keep its `tool_use` or a strict provider rejects the
-/// transcript, and the model needs to read what went wrong.
-pub fn parse_tool_arguments(raw: Option<&str>) -> (Value, Option<String>) {
+/// the failure with the payload it came from. The caller keeps the call either
+/// way: the assistant message must keep its `tool_use` or a strict provider
+/// rejects the transcript, and the model needs to read what went wrong.
+///
+/// The failure keeps `raw` because decoding collapses every bad payload to
+/// `{}` — see [`ArgsParseError`] — and the dedupe key distinguishes them by the
+/// text the provider actually sent.
+pub fn parse_tool_arguments(raw: Option<&str>) -> (Value, Option<ArgsParseError>) {
     match raw {
         None => (serde_json::json!({}), None),
         Some("") => (serde_json::json!({}), None),
         Some(raw) => match serde_json::from_str(raw) {
             Ok(value) => (value, None),
-            Err(error) => (serde_json::json!({}), Some(error.to_string())),
+            Err(error) => (
+                serde_json::json!({}),
+                Some(ArgsParseError {
+                    raw: raw.to_string(),
+                    error: error.to_string(),
+                }),
+            ),
         },
     }
 }
@@ -57,6 +69,16 @@ mod tests {
         let (arguments, error) = parse_tool_arguments(Some(r#"{"command": "ech"#));
         assert_eq!(arguments, serde_json::json!({}));
         let error = error.expect("a truncated payload must report why");
-        assert!(!error.is_empty(), "the reason must name the failure");
+        assert!(!error.error.is_empty(), "the reason must name the failure");
+    }
+
+    #[test]
+    fn an_unparseable_payload_keeps_the_text_it_failed_on() {
+        // v2 `registerSkipped` keys the dedupe on the raw payload, so the
+        // decoder has to hand it back — the `{}` it returns is identical for
+        // every broken payload.
+        let payload = r#"{"command": "ech"#;
+        let (_, error) = parse_tool_arguments(Some(payload));
+        assert_eq!(error.expect("broken payload").raw, payload);
     }
 }

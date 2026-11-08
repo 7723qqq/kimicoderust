@@ -205,3 +205,150 @@ fn a_cancelled_turn_keeps_the_partial_output() {
     );
     assert_eq!(store.len(), 2, "prompt and partial answer");
 }
+
+/// v2 #4663: `turn.step.stream_reset` seals the partial stream. A later
+/// delta starts a fresh entry instead of appending to text the provider
+/// discarded.
+#[test]
+fn a_stream_reset_seals_the_dropped_partial_before_new_text() {
+    let store = project(&[
+        r#"{"type":"turn.started","agent_id":"main","turn_id":"t1","prompt":"go"}"#,
+        r#"{"type":"assistant.delta","agent_id":"main","turn_id":"t1","delta":"discarded","block":0}"#,
+        r#"{"type":"turn.step.stream_reset","agent_id":"main","turn_id":"t1","step":1,"step_id":"s1"}"#,
+        r#"{"type":"assistant.delta","agent_id":"main","turn_id":"t1","delta":"fresh","block":0}"#,
+        r#"{"type":"turn.ended","agent_id":"main","turn_id":"t1","reason":"end_turn"}"#,
+    ]);
+    let rendered = text(&store);
+    assert!(
+        rendered.contains("discarded"),
+        "the dropped partial was shown: {rendered}"
+    );
+    assert!(
+        rendered.contains("fresh"),
+        "the fresh delta was lost: {rendered}"
+    );
+    assert!(
+        !rendered.contains("discardedfresh"),
+        "the reset did not seal the old entry: {rendered}"
+    );
+    assert_eq!(store.len(), 3, "prompt, dropped partial, fresh answer");
+}
+
+/// A subagent's stream is its own entry, and the owner rides the entry.
+///
+/// Both deltas are `assistant` text on the same turn; without the agent key they
+/// would coalesce into one paragraph and the reader could not tell which member
+/// said what (v2 announces the agent on every event, and `EntryContent.agent_id`
+/// exists for exactly this).
+#[test]
+fn a_subagent_stream_does_not_fold_into_the_parent_answer() {
+    let store = project(&[
+        r#"{"type":"turn.started","agent_id":"main","turn_id":"t2","prompt":"run two members"}"#,
+        r#"{"type":"llm.delta","agent_id":"main","turn_id":"t2","step":1,"part":{"type":"text","text":"the parent says "}}"#,
+        r#"{"type":"llm.delta","agent_id":"sub-1","turn_id":"t2","step":1,"part":{"type":"text","text":"the member says"}}"#,
+        r#"{"type":"llm.delta","agent_id":"main","turn_id":"t2","step":1,"part":{"type":"text","text":"done"}}"#,
+        r#"{"type":"turn.ended","agent_id":"main","turn_id":"t2","reason":"end_turn"}"#,
+    ]);
+
+    let answers: Vec<(&str, Option<&str>)> = store
+        .entries()
+        .filter(|(_, content)| content.kind == kimi_ui_core::EntryKind::AssistantMsg)
+        .map(|(_, content)| (content.text.as_str(), content.agent_id.as_deref()))
+        .collect();
+    assert_eq!(
+        answers,
+        vec![
+            ("the parent says done", None),
+            ("the member says", Some("sub-1")),
+        ],
+        "the parent's fragments continue its own entry; the member's answer is a separate, attributed entry"
+    );
+    assert_eq!(
+        store.violations(),
+        &[],
+        "both streams keep their own seq continuity"
+    );
+}
+
+/// v2 #4627: a steer row the host injects goes through the projector's
+/// allocator, so it lands between the text streamed before it and the answer
+/// that follows. The post-steer answer is a new entry, not a continuation: the
+/// model received the steer as input, so its next message begins after it.
+#[test]
+fn a_steer_row_sits_between_the_text_before_it_and_the_answer_after_it() {
+    fn feed(projector: &mut Projector, store: &mut EntryStore, raw: &str) {
+        let event = EngineEvent::from_json(serde_json::from_str(raw).expect("fixture is JSON"));
+        for op in projector.project(event) {
+            store.apply(op);
+        }
+    }
+
+    let mut projector = Projector::new(CoalescingPolicy::default());
+    let mut store = EntryStore::new();
+    feed(
+        &mut projector,
+        &mut store,
+        r#"{"type":"turn.started","agent_id":"main","turn_id":"t1","prompt":"start"}"#,
+    );
+    feed(
+        &mut projector,
+        &mut store,
+        r#"{"type":"assistant.delta","agent_id":"main","turn_id":"t1","delta":"before"}"#,
+    );
+
+    let (_id, ops) = projector
+        .note_user_entry("t1", "steer me")
+        .expect("the turn is open");
+    for op in ops {
+        store.apply(op);
+    }
+
+    feed(
+        &mut projector,
+        &mut store,
+        r#"{"type":"assistant.delta","agent_id":"main","turn_id":"t1","delta":"after"}"#,
+    );
+    feed(
+        &mut projector,
+        &mut store,
+        r#"{"type":"turn.ended","agent_id":"main","turn_id":"t1","reason":"end_turn"}"#,
+    );
+
+    assert_eq!(text(&store), "start\nbefore\nsteer me\nafter");
+    assert_eq!(store.violations(), &[]);
+}
+
+/// A real transport flushes a step's text with `is_final = false` at every
+/// `llm.step.end`; the turn-end seal must close that stream with a final
+/// marker anyway. Without it, every real turn recorded `SealWithoutFinal` —
+/// found by the real-transport steer test in `kimi-tui-host`.
+#[test]
+fn a_step_flush_before_turn_end_does_not_record_a_tail_loss() {
+    let mut projector = Projector::new(CoalescingPolicy::default());
+    let mut store = EntryStore::new();
+    for raw in [
+        r#"{"type":"turn.started","agent_id":"main","turn_id":"t1","prompt":"q"}"#,
+        r#"{"type":"assistant.delta","agent_id":"main","turn_id":"t1","delta":"the answer"}"#,
+        r#"{"type":"llm.step.end","agent_id":"main","turn_id":"t1","step":0,"usage":null}"#,
+        r#"{"type":"turn.ended","agent_id":"main","turn_id":"t1","reason":"end_turn"}"#,
+    ] {
+        let event = EngineEvent::from_json(serde_json::from_str(raw).expect("fixture is JSON"));
+        assert!(
+            !matches!(event, EngineEvent::Custom(_)),
+            "event did not deserialize: {raw}"
+        );
+        for op in projector.project(event) {
+            store.apply(op);
+        }
+    }
+    assert_eq!(
+        store.violations(),
+        &[],
+        "the step-end flush must not read as a lost tail"
+    );
+    assert_eq!(
+        text(&store),
+        "q
+the answer"
+    );
+}

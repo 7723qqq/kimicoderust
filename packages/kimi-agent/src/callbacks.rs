@@ -29,6 +29,15 @@ pub const CHECKPOINT_UNSUPPORTED: &str = "host does not support checkpoint";
 /// `session/agentLifecycle/agentLifecycle.ts:13`.
 pub const MAIN_AGENT_ID: &str = "main";
 
+/// Adapts any host callback chain to the title generator's telemetry sink.
+pub struct TitleTelemetry<'a>(pub &'a dyn HostCallbacks);
+
+impl crate::session::title::TitleTelemetrySink for TitleTelemetry<'_> {
+    fn track(&self, event: serde_json::Value) {
+        self.0.telemetry(event);
+    }
+}
+
 /// Host-provided callbacks that the turn loop needs to call back to JS.
 pub trait HostCallbacks: Send + Sync {
     /// Send an LLM chat request to the JS host and return the response.
@@ -632,6 +641,43 @@ pub struct NativeToolCallbacks {
 /// [`crate::tools::plan_mode::plan_denial`] for the decision semantics).
 pub type PlanGuard =
     dyn Fn(&str, &serde_json::Value) -> BoxFuture<'static, Option<String>> + Send + Sync;
+
+impl NativeToolCallbacks {
+    /// The wiring a standalone host needs: native execution plus the
+    /// in-process permission engine and truncator, and no host vetoes.
+    ///
+    /// Every veto and guard starts absent on purpose. A host without a
+    /// plan / tower / swarm context gets the engine's defaults instead of
+    /// stubs it would have to keep in step, and a guard added to the struct
+    /// later defaults to "the host has no opinion" here rather than breaking
+    /// every composition root.
+    pub fn for_standalone(
+        inner: Arc<dyn HostCallbacks>,
+        toolset: Arc<crate::tools::NativeToolset>,
+        native_count: Arc<std::sync::atomic::AtomicU32>,
+        permission_engine: Option<Arc<crate::permission::PermissionEngine>>,
+        truncator: Option<Arc<crate::tool_result_truncation::ToolResultTruncator>>,
+    ) -> Self {
+        Self {
+            inner,
+            toolset,
+            native_count,
+            truncator,
+            permission_engine,
+            plan_guard: None,
+            stale_guard: None,
+            goal_guard: None,
+            hook_guard: None,
+            agent_tool_veto: None,
+            tools_veto: None,
+            todo_tool_veto: None,
+            tower_worktree_root: None,
+            tower_enabled: true,
+            notify_user_enabled: true,
+            sandbox_policy: None,
+        }
+    }
+}
 
 impl HostCallbacks for NativeToolCallbacks {
     fn hook_guard(&self) -> Option<Arc<crate::tools::external_hooks::HookGuard>> {
@@ -1330,6 +1376,12 @@ impl HostCallbacks for NativeToolCallbacks {
             if let Some(filter) = &filter {
                 tools.retain(|tool| filter.allows(&tool.name));
             }
+            // v2 #4720 / #4719: the initial registry snapshot is the table
+            // after MCP's first discovery has settled. Pin it once; without
+            // dynamic loading, later requests reconcile the live table into
+            // these names, so a runtime-only addition is not advertised as an
+            // unannounced top-level tool.
+            toolset.record_initial_tool_table_ref(&tools);
             // Rewrite the Agent tool's per-profile `Tools:` lines against the
             // table that actually exists: `native_tool_defs` rendered them from
             // each profile's static allowlist, before the host and MCP tables

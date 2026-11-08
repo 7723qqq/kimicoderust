@@ -328,6 +328,12 @@ pub struct McpServerConfig {
     /// (v2 `bearerTokenEnvVar`, client-remote.ts:9-23).
     #[serde(default, alias = "bearerTokenEnvVar")]
     pub bearer_token_env_var: Option<String>,
+    /// The server's authentication mode (v2 `config.auth`). `"oauth"` opts a
+    /// remote server into the OAuth flow, which keeps a 401 flipping to
+    /// `needs-auth` even when extra headers are configured. Absent applies the
+    /// header-vs-credential heuristic.
+    #[serde(default)]
+    pub auth: Option<String>,
     /// Explicit transport (`stdio` / `sse` / `http`). Without it a `url`
     /// defaults to Streamable HTTP and a `command` to stdio, matching the v2
     /// config preprocess (config-schema.ts:58-65).
@@ -376,6 +382,19 @@ pub struct McpConfig {
     /// server declares `deferred` itself (v2 #4210, `defaultDeferred`).
     #[serde(default, alias = "defaultDeferred")]
     pub default_deferred: Option<bool>,
+    /// Retry a failed startup automatically (v2 `reconnectRetryEnabled`, which
+    /// the workspace host sets to `true`). Default `true`; `false` keeps a
+    /// transient failure at `failed` until an explicit reconnect.
+    #[serde(default, alias = "reconnectRetryEnabled")]
+    pub reconnect_retry_enabled: Option<bool>,
+    /// First retry delay in milliseconds (v2
+    /// `DEFAULT_RECONNECT_INITIAL_DELAY_MS`, 5 000).
+    #[serde(default, alias = "reconnectInitialDelayMs")]
+    pub reconnect_initial_delay_ms: Option<u64>,
+    /// Retry delay cap in milliseconds (v2 `DEFAULT_RECONNECT_MAX_DELAY_MS`,
+    /// 300 000).
+    #[serde(default, alias = "reconnectMaxDelayMs")]
+    pub reconnect_max_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -583,6 +602,10 @@ pub struct BackgroundConfig {
     /// considered killed. Defaults to 5s when unset.
     #[serde(rename = "kill_grace_period_ms", alias = "killGracePeriodMs", default)]
     pub kill_grace_period_ms: Option<u64>,
+    /// `keepAliveOnExit`: leave background tasks running when the session
+    /// closes (v2). Defaults to false.
+    #[serde(rename = "keep_alive_on_exit", alias = "keepAliveOnExit", default)]
+    pub keep_alive_on_exit: Option<bool>,
 }
 
 /// The `[task]` section (v2 `agent/task/configSection.ts`). Its values override
@@ -1087,6 +1110,22 @@ impl KimiConfig {
         })
     }
 
+    /// The effective `[models]` record for `alias` (table key first, then a
+    /// declared alias name), with its `overrides` folded in.
+    fn effective_model_for(&self, alias: &str) -> Option<ModelAliasConfig> {
+        self.models
+            .get(alias)
+            .or_else(|| {
+                self.models.values().find(|entry| {
+                    entry
+                        .aliases
+                        .as_ref()
+                        .is_some_and(|names| names.iter().any(|name| name == alias))
+                })
+            })
+            .map(ModelAliasConfig::effective)
+    }
+
     /// Resolve `[secondary_model]` into the engine's subagent model pool (v2
     /// `resolveSubagentModelPool` + `assertValidSubagentModelConfig`).
     ///
@@ -1114,10 +1153,15 @@ impl KimiConfig {
             );
         }
         let table = section.models.as_ref();
-        let default_model = section
-            .default_model
-            .as_deref()
-            .or(section.model.as_deref());
+        // v2: the legacy `model` key forms the fallback pool only while no
+        // table exists. With a table it is not a pool default, so a section
+        // carrying both fails the `default_model` requirement below instead of
+        // silently pinning the pool to whatever `model` happens to name.
+        let default_model = match section.default_model.as_deref() {
+            Some(default) => Some(default),
+            None if table.is_none() => section.model.as_deref(),
+            None => None,
+        };
 
         if table.is_none() && default_model.is_none() {
             return Ok(None);
@@ -1162,6 +1206,7 @@ impl KimiConfig {
         }
 
         let thinking_keep = self.resolve_thinking_keep();
+        let thinking_enabled = self.thinking.enabled.unwrap_or(true);
         let models = entries
             .into_iter()
             .map(|(alias, hint)| {
@@ -1170,14 +1215,31 @@ impl KimiConfig {
                         "[secondary_model.models] entry \"{alias}\" could not be resolved: add it to [models] with a provider that has credentials."
                     )
                 })?;
+                // v2 `resolveSubagentThinking`: with no pool-wide effort the
+                // entry keeps the effort its own `[models]` record declares,
+                // but only while thinking is enabled and the declared value is
+                // one the record lists support for (v2
+                // `declaredDefaultEffortForModel`). A value outside that list
+                // resolves to "unset" rather than to the model's middle
+                // effort, and an empty `support_efforts` declares nothing.
+                let declared_effort = section.default_effort.is_none().then(|| {
+                    let model = self.effective_model_for(&alias)?;
+                    let declared = model.default_effort.as_deref()?.trim();
+                    let supported = model
+                        .support_efforts
+                        .as_ref()
+                        .is_some_and(|efforts| efforts.iter().any(|value| value.trim() == declared));
+                    (thinking_enabled && supported && model_supports_thinking(Some(&model)))
+                        .then(|| declared.to_string())
+                });
+                let effort = section
+                    .default_effort
+                    .clone()
+                    .or(declared_effort.flatten());
                 Ok(SecondaryModelEntry {
                     alias,
                     hint,
-                    llm: native_llm_config(
-                        resolved,
-                        section.default_effort.as_deref(),
-                        thinking_keep.as_deref(),
-                    ),
+                    llm: native_llm_config(resolved, effort.as_deref(), thinking_keep.as_deref()),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1532,6 +1594,7 @@ impl KimiConfig {
             max_running_tasks: self.resolve_background_max_running_tasks(),
             bash_auto_background_on_timeout: self.background.bash_auto_background_on_timeout,
             bash_task_timeout_s: self.resolve_bash_task_timeout_s(),
+            keep_alive_on_exit: self.background.keep_alive_on_exit,
         }
     }
 
@@ -1961,6 +2024,42 @@ fn env_non_negative_u64(name: &str) -> Option<u64> {
 /// invalid values are ignored so the next source applies.
 fn env_positive_u64(name: &str) -> Option<u64> {
     env_non_negative_u64(name).filter(|value| *value > 0)
+}
+
+impl KimiConfig {
+    /// The native transport config for a resolved provider entry, as the REPL
+    /// and the terminal host build it.
+    ///
+    /// It is deliberately not shared with `server/engine.rs` and `main.rs`:
+    /// those two pass the provider's OAuth binding through as `auth_provider`,
+    /// while the REPL has always dropped it, and unifying them would change
+    /// what the REPL does. Two copies that agree beat four that silently
+    /// disagree; picking the right `auth_provider` behaviour is a separate
+    /// decision.
+    pub fn native_llm_config(&self, def: &ResolvedNativeLlm) -> crate::rpc::types::NativeLlmConfig {
+        crate::rpc::types::NativeLlmConfig {
+            protocol: def.protocol.clone(),
+            alias: def.alias.clone(),
+            provider_type: Some(def.provider_type.clone()).filter(|value| !value.is_empty()),
+            base_url: def.base_url.clone(),
+            api_key: def.api_key.clone(),
+            api_key_env: def.api_key_env.clone(),
+            model: def.model.clone(),
+            max_tokens: def.max_output_size.or(def.max_tokens),
+            custom_headers: def.custom_headers.clone(),
+            reasoning_effort: self.resolve_effort(def.off_effort.as_deref()),
+            thinking_budget: None,
+            auth_provider: None,
+            thinking_keep: self.resolve_thinking_keep(),
+            beta_api: def.beta_api,
+            capabilities: def.capabilities.clone(),
+            system_prompt: def.system_prompt.clone(),
+            max_input_size: def.max_input_size,
+            adaptive_thinking: def.adaptive_thinking,
+            reasoning_key: def.reasoning_key.clone(),
+            off_effort: None,
+        }
+    }
 }
 
 #[cfg(test)]

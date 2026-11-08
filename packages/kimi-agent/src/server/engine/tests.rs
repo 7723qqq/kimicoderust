@@ -904,6 +904,95 @@ fn work_turn_reason_maps_the_loop_vocabulary() {
     assert_eq!(work_turn_reason(&LoopTurnStopReason::Aborted), "cancelled");
 }
 
+/// v2 `buildContextCompactionShape` (`compactionHandoff.ts:107-111`): after a
+/// compaction the summary message's size is the summarization request's
+/// measured output, not an estimate of its text. Without that substitution the
+/// context gauge keeps guessing the largest fixed message in the new history.
+#[test]
+fn the_rebase_substitutes_the_measured_summary_output() {
+    use crate::turn_loop::types::LLMMessage;
+    let summary = LLMMessage {
+        role: "user".into(),
+        content: format!(
+            "{} the summary body",
+            crate::compaction::COMPACTION_SUMMARY_PREFIX
+        ),
+        ..Default::default()
+    };
+    let messages = vec![
+        LLMMessage {
+            role: "system".into(),
+            content: "system prompt".into(),
+            ..Default::default()
+        },
+        summary,
+        LLMMessage {
+            role: "assistant".into(),
+            content: "kept reply".into(),
+            ..Default::default()
+        },
+    ];
+    let estimate = crate::session::token_counting::estimate_messages(&messages);
+    let summary_estimate = crate::session::token_counting::estimate_message(&messages[1]);
+
+    assert_eq!(
+        rebased_tokens(&messages, None),
+        estimate,
+        "without a measurement the estimate stands"
+    );
+    assert_eq!(
+        rebased_tokens(&messages, Some(0)),
+        estimate - summary_estimate,
+        "a measured zero replaces the estimate entirely"
+    );
+    assert_eq!(
+        rebased_tokens(&messages, Some(7)),
+        estimate - summary_estimate + 7,
+        "the measured count is what the summary costs"
+    );
+    assert_eq!(
+        rebased_tokens(&messages[..1], Some(7)),
+        crate::session::token_counting::estimate_messages(&messages[..1]),
+        "a history without the summary message has nothing to substitute"
+    );
+}
+
+/// v2 `TurnEnded` filter: the interruption reminder arms only when the turn
+/// was cancelled **by the user** (`interruptReason === 'user_cancelled'`). A
+/// teardown flips the same cancel flag and lands the same `cancelled` reason,
+/// but telling the model "the user interrupted" after a shutdown is false.
+#[test]
+fn only_a_user_cancel_arms_the_interruption_reminder() {
+    let engine = engine();
+
+    engine.publish_turn_ended("s", 1, "cancelled");
+    assert!(
+        !engine.take_last_turn_aborted("s"),
+        "a cancelled turn nobody asked for is a teardown, not a user interrupt"
+    );
+
+    engine.publish_turn_ended("s", 2, "completed");
+    assert!(!engine.take_last_turn_aborted("s"));
+
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    engine
+        .active_turns
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert("s".into(), flag.clone());
+    assert!(engine.cancel_turn("s"), "the running turn is cancellable");
+    assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+    engine.publish_turn_ended("s", 3, "cancelled");
+    assert!(
+        engine.take_last_turn_aborted("s"),
+        "the user's stop arms the reminder for the next turn"
+    );
+    assert!(
+        !engine.take_last_turn_aborted("s"),
+        "the trigger is read-and-clear"
+    );
+}
+
 #[test]
 fn engine_with_mcp_manager_wires_and_exposes_manager() {
     let engine = engine();

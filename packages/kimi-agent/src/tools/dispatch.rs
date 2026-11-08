@@ -27,6 +27,31 @@ impl NativeToolset {
         is_native_tool_name(tool_name)
     }
 
+    /// v2 `toolRegistry.resolve(name)` + `isDynamicallyLoadable(info)`: what the
+    /// current registry says about a name.
+    ///
+    /// A native tool is always inline. An MCP name is deferred while its server
+    /// is marked deferred and inline otherwise, and missing once its client is
+    /// gone. Any other name is missing *as far as this engine knows* — a
+    /// host-registered tool lives in the host's table, and
+    /// [`Self::execute_tool_streaming`] returns `None` for it so the host runs
+    /// it; only a name the session loaded is ever refused on that basis.
+    async fn tool_registration(&self, tool_name: &str) -> select_tools::ToolRegistration {
+        if is_builtin_tool_name(tool_name) {
+            return select_tools::ToolRegistration::Inline;
+        }
+        match self.mcp_manager.as_ref() {
+            Some(mcp) if mcp.is_tool_available(tool_name).await => {
+                if mcp.deferred_tool_names_blocking().contains(tool_name) {
+                    select_tools::ToolRegistration::Deferred
+                } else {
+                    select_tools::ToolRegistration::Inline
+                }
+            }
+            _ => select_tools::ToolRegistration::Missing,
+        }
+    }
+
     /// Execute a tool natively (async).
     ///
     /// The file-I/O tools (`read` / `grep` / `glob` / `write` / `edit`)
@@ -76,6 +101,37 @@ impl NativeToolset {
             return Some(denial);
         }
 
+        // v2 `preflightToolCall`'s order (`toolExecutorService.ts:752-782`): the
+        // missing-tool describer first, then the policy guard, then the
+        // unavailable-tool describer. Both describers live in `select_tools` and
+        // are named after v2's (`describeMissingTool` / `describeUnavailableTool`)
+        // so the two call sites cannot drift into one table that reorders them.
+        let registration = self.tool_registration(tool_name).await;
+        let was_loaded = self
+            .loaded_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(tool_name);
+        // A loaded name that left the registry (its MCP server went away) is
+        // answered here, before the policy guard, exactly as v2 resolves the
+        // tool before guarding it. Without this the call falls through to the
+        // host and comes back as a generic unknown-tool error with no guidance.
+        if let Some(refusal) = select_tools::missing_refusal(
+            self.tool_select_enabled,
+            tool_name,
+            registration,
+            was_loaded,
+        ) {
+            return Some(ExecutableToolResult {
+                delivery: None,
+                stop_turn: false,
+                content: refusal,
+                is_error: true,
+                note: None,
+                display: None,
+            });
+        }
+
         // Global `[tools]` switch (v2 tool policy): enforced again before
         // execution so a disabled tool is refused even when the model calls
         // it from memory instead of reading the advertised table.
@@ -96,35 +152,26 @@ impl NativeToolset {
             });
         }
 
-        // Progressive tool disclosure (v2 `shouldIntercept`): with the
-        // disclosure switch on, a call to a deferred MCP tool the model has
-        // not loaded yet is refused with load guidance instead of executed —
-        // the table hid it, so the call came from memory and running it would
-        // defeat the point of keeping its schema out of the request.
-        if self.tool_select_enabled
-            && tool_name.starts_with("mcp__")
-            && !tool_name.starts_with(crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME)
-        {
-            let deferred = self
-                .mcp_manager
-                .as_ref()
-                .map(|mcp| mcp.deferred_tool_names_blocking())
-                .unwrap_or_default();
-            let loaded_ok = self
-                .loaded_tools
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(tool_name);
-            if deferred.contains(tool_name) && !loaded_ok {
-                return Some(ExecutableToolResult {
-                    delivery: None,
-                    stop_turn: false,
-                    content: select_tools::not_loaded_tool_output(tool_name),
-                    is_error: true,
-                    note: None,
-                    display: None,
-                });
-            }
+        // v2 `describeUnavailableTool` is asked only after the guard passes and
+        // only for a name the registry still has (`toolExecutorService.ts:773`).
+        // A deferred tool the model has not loaded is told to load it — the table
+        // hid it, so the call came from memory and running it would defeat
+        // keeping its schema out of the request. A loaded tool the registry now
+        // offers inline is told the session's load no longer applies.
+        if let Some(refusal) = select_tools::unavailable_refusal(
+            self.tool_select_enabled,
+            tool_name,
+            registration,
+            was_loaded,
+        ) {
+            return Some(ExecutableToolResult {
+                delivery: None,
+                stop_turn: false,
+                content: refusal,
+                is_error: true,
+                note: None,
+                display: None,
+            });
         }
 
         match tool_name.to_ascii_lowercase().as_str() {
@@ -337,6 +384,59 @@ impl NativeToolset {
                 }
             }
             "select_tools" | "selecttools" => {
+                // v2 `SelectToolsInputSchema`: `names` and `query` are both
+                // optional and at least one is required. The query branch
+                // ranks the deferred catalogue and returns candidates without
+                // loading them (`selectToolsTool.ts`), so it never touches the
+                // loaded set.
+                if args.get("names").is_none() {
+                    if !self.tool_select_enabled {
+                        return Some(select_tools::text_result(
+                            select_tools::SELECT_TOOLS_UNAVAILABLE,
+                            true,
+                        ));
+                    }
+                    let Some(query) = args.get("query").and_then(Value::as_str) else {
+                        return Some(select_tools::text_result(
+                            select_tools::SELECT_TOOLS_PROVIDE_NAMES_OR_QUERY,
+                            true,
+                        ));
+                    };
+                    if query.is_empty() {
+                        return Some(select_tools::text_result(
+                            select_tools::SELECT_TOOLS_PROVIDE_NAMES_OR_QUERY,
+                            true,
+                        ));
+                    }
+                    let entries: Vec<crate::tools::tool_retriever::ToolSearchEntry> = self
+                        .mcp_manager
+                        .as_ref()
+                        .map(|mcp| {
+                            mcp.deferred_tool_infos_blocking()
+                                .into_iter()
+                                .map(|(name, description, schema)| {
+                                    let parameter_names = schema
+                                        .get("properties")
+                                        .and_then(Value::as_object)
+                                        .map(|properties| properties.keys().cloned().collect())
+                                        .unwrap_or_default();
+                                    crate::tools::tool_retriever::ToolSearchEntry {
+                                        name,
+                                        description,
+                                        source: "mcp".into(),
+                                        parameter_names,
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let hits =
+                        crate::tools::tool_retriever::rank_tools_by_query(&entries, query, 10);
+                    return Some(select_tools::text_result(
+                        &select_tools::search_output(query, &hits),
+                        false,
+                    ));
+                }
                 // A failed enumeration is not an empty catalogue. Collapsing it
                 // to an empty set made every requested name look like a typo the
                 // model had made, hiding the RPC failure behind "unknown tool".

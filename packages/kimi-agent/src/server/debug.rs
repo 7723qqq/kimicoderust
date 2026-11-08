@@ -490,7 +490,8 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
         }
 
         if let Some((session_id, rest)) = rest.split_once("/agent/")
-            && let Some((agent_id, "runtime-binding")) = rest.split_once('/')
+            && let Some((agent_id, method)) = rest.split_once('/')
+            && matches!(method, "runtime-binding" | "environment-binding")
         {
             let Some(session) = server.store().get_session(session_id).ok().flatten() else {
                 return Some(HttpResponse::envelope_err(
@@ -507,11 +508,29 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                 .unwrap_or_else(|| encode_workdir_key(&cwd));
             let available = server.engine().is_some();
             // Contract-shaped constants, not measured values: a standalone
-            // engine has exactly one in-process runtime, so `runtimeId`,
-            // `generation` and `capabilities` are literals rather than probed
+            // engine has exactly one in-process local environment, so the ids,
+            // generation and capabilities are literals rather than probed
             // facts. `available` is the only field derived from real state.
-            return Some(HttpResponse::envelope_ok(
-                &json!({
+            let status = if available { "ready" } else { "unavailable" };
+            let data = if method == "environment-binding" {
+                json!({
+                    "sessionId": session_id,
+                    "agentId": agent_id,
+                    "binding": {
+                        "workspaceId": workspace_id,
+                        "cwd": cwd,
+                        "environmentId": "local",
+                    },
+                    "available": available,
+                    "environment": {
+                        "environmentId": "local",
+                        "cwd": cwd,
+                        "status": status,
+                        "capabilities": ["process", "filesystem", "terminal", "mcp"],
+                    },
+                })
+            } else {
+                json!({
                     "sessionId": session_id,
                     "agentId": agent_id,
                     "binding": {
@@ -522,12 +541,12 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                     "runtime": {
                         "runtimeId": "local",
                         "generation": 1,
-                        "status": if available { "ready" } else { "unavailable" },
+                        "status": status,
                         "capabilities": ["process", "filesystem", "terminal", "mcp"],
                     },
-                }),
-                &req_id,
-            ));
+                })
+            };
+            return Some(HttpResponse::envelope_ok(&data, &req_id));
         }
     }
 
@@ -1500,6 +1519,31 @@ model = "gpt-y"
         assert!(binding_val["data"]["available"].is_boolean());
         assert!(binding_val["data"]["runtime"]["generation"].is_number());
         assert!(binding_val["data"]["runtime"]["capabilities"].is_array());
+
+        // The user fork's environment-binding name answers the same local
+        // binding with the environment-shaped descriptor.
+        let environment_binding = get(
+            &server,
+            "/api/v1/debug/session/s1/agent/main/environment-binding",
+        )
+        .await;
+        assert_eq!(environment_binding.status, 200);
+        let environment_val: Value = serde_json::from_slice(&environment_binding.body).unwrap();
+        assert_eq!(environment_val["data"]["binding"]["environmentId"], "local");
+        assert_eq!(environment_val["data"]["binding"]["cwd"], root);
+        assert_eq!(
+            environment_val["data"]["environment"]["environmentId"],
+            "local"
+        );
+        assert_eq!(
+            environment_val["data"]["environment"]["status"],
+            if server.engine().is_some() {
+                "ready"
+            } else {
+                "unavailable"
+            }
+        );
+        assert_eq!(environment_val["data"]["environment"]["cwd"], root);
 
         // Workspace snapshot follows the WorkspaceInstanceSnapshot shape.
         let snapshot = get(

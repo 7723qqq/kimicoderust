@@ -6,6 +6,7 @@ import { findKimiAgentAddon } from '@moonshot-ai/kimi-agent/session-handle';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createKimiHarnessNative, type KimiHarness } from '../src/index';
+import { listenOnEphemeralPort } from './listen-server';
 import { TEST_IDENTITY } from './test-identity';
 
 // The native harness drives the Rust engine through the compiled napi addon, a
@@ -64,17 +65,23 @@ describe.skipIf(!hasNativeAddon)(
 
     afterEach(async () => {
       vi.unstubAllEnvs();
+      // `close()` releases both process-wide stores the engine opened for this
+      // host — the plugin registry behind `<homeDir>/agent/sessions.db` and the
+      // MCP managers whose stdio children run inside a plugin's directory.
+      // Windows refuses to delete either while it is busy, so the teardown has
+      // to happen before the cleanup below.
       await harness.close();
-      // Windows keeps a lock on files a killed MCP child (or the engine's
-      // async runtime) still holds for a few ms after close(); retry the
-      // directory removal instead of failing the test on teardown timing.
+      // A killed MCP child still holds its files for a few ms; retry the
+      // directory removal instead of failing the test on teardown timing. The
+      // budget stays under vitest's 10 s hook timeout: both stores are released
+      // above, so what remains is a short close() tail, not a long wait.
       for (let attempt = 0; ; attempt += 1) {
         try {
           rmSync(homeDir, { recursive: true, force: true });
           break;
         } catch (error) {
-          if (attempt >= 10) throw error;
-          await new Promise((resolveTime) => setTimeout(resolveTime, 200));
+          if (attempt >= 12) throw error;
+          await new Promise((resolveTime) => setTimeout(resolveTime, 400));
         }
       }
     });
@@ -316,8 +323,7 @@ multi_llm = ["local/a", "local/b"]
           res.end();
         });
       });
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const port = (server.address() as { port: number }).port;
+      const port = await listenOnEphemeralPort(server);
       try {
         writeFileSync(
           join(homeDir, 'config.toml'),
@@ -386,8 +392,7 @@ max_context_size = 100000
           res.end();
         });
       });
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const port = (server.address() as { port: number }).port;
+      const port = await listenOnEphemeralPort(server);
       try {
         writeFileSync(
           join(homeDir, 'config.toml'),
@@ -429,11 +434,7 @@ max_context_size = 100000
         expect(typeof firstId).toBe('number');
         expect(secondId).toBe((firstId as number) + 1);
 
-        const stepTypes = new Set([
-          'turn.step.started',
-          'turn.step.completed',
-          'assistant.delta',
-        ]);
+        const stepTypes = new Set(['turn.step.started', 'turn.step.completed', 'assistant.delta']);
         for (const turn of [
           { events: firstTurn, id: firstId },
           { events: secondTurn, id: secondId },
@@ -484,8 +485,7 @@ max_context_size = 100000
           res.end();
         });
       });
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const port = (server.address() as { port: number }).port;
+      const port = await listenOnEphemeralPort(server);
 
       const recorded: { event: string; properties?: Record<string, unknown> }[] = [];
       const telemetry = {
@@ -600,8 +600,7 @@ max_context_size = 100000
           res.end();
         });
       });
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const port = (server.address() as { port: number }).port;
+      const port = await listenOnEphemeralPort(server);
       try {
         writeFileSync(
           join(homeDir, 'config.toml'),
@@ -706,8 +705,7 @@ max_context_size = 100000
           res.end();
         });
       });
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const port = (server.address() as { port: number }).port;
+      const port = await listenOnEphemeralPort(server);
       try {
         writeFileSync(
           join(homeDir, 'config.toml'),
@@ -814,8 +812,7 @@ max_context_size = 100000
           res.end();
         });
       });
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const port = (server.address() as { port: number }).port;
+      const port = await listenOnEphemeralPort(server);
       try {
         writeFileSync(
           join(homeDir, 'config.toml'),
@@ -849,9 +846,12 @@ max_context_size = 100000
         expect(annotated).toHaveLength(1);
         // The note rides its own field rather than being folded into `output`:
         // the host renders them in v2's order, and each half stays assertable.
-        expect(annotated[0]?.note).toContain('were truncated');
-        expect(annotated[0]?.note).toContain('use Bash');
-        expect(annotated[0]?.output).not.toContain('were truncated');
+        // A 3,000-character line comes back whole — v2 pages on characters
+        // only, with no per-line cap — so the note this fixture gets is Read's
+        // page footer, not the "truncated to 2000 characters" guidance an
+        // older engine produced.
+        expect(annotated[0]?.note).toContain('1 line read from file');
+        expect(annotated[0]?.output).not.toContain('1 line read from file');
         await session.close();
       } finally {
         server.close();
@@ -892,7 +892,8 @@ max_context_size = 100000
       // path as prompt: the submission resolves and the turn fails loudly through
       // the event stream rather than silently succeeding.
       const ended = waitForTurnEnded(session);
-      await expect(session.steer('Steer instruction')).resolves.toBeUndefined();
+      const submission = await session.steer('Steer instruction');
+      expect(submission.state).toBe('running');
       await expect(ended).resolves.toMatchObject({ reason: 'failed' });
       await session.close();
     }, 15_000);

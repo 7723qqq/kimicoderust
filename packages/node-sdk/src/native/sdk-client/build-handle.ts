@@ -6,6 +6,7 @@ import type {
   CronJobOrigin,
   GoalSnapshot as ProtocolGoalSnapshot,
   TaskInfo,
+  TurnSteerEvent,
 } from '@moonshot-ai/protocol';
 
 import { type AgentFileDefinition } from '#/agent-file';
@@ -14,6 +15,7 @@ import { loadRuntimeConfigLenient } from '#/config-local';
 import { ErrorCodes, KimiError } from '#/error-protocol';
 import type { QuestionItem, ToolInputDisplay } from '#/events';
 import { type SetSessionPlanModeRpcInput } from '#/rpc';
+
 import type { KimiHostIdentity, PromptOrigin, TelemetryClient } from '#/types';
 
 import {
@@ -310,6 +312,25 @@ export async function buildSessionHandle(
           type: 'turn.step.started',
           turnId: meta.currentTurnId,
           step: stepSeq,
+        });
+      } else if (parsed.type === 'llm.step.interrupted') {
+        // v2 `TurnStepInterrupted` (loopService.ts:2301-2313): a step that
+        // began but never completed is closed with the reason it ended. Without
+        // this arm the host's `turn.step.interrupted` handler was dead code —
+        // no layer produced the event, so a failed or cancelled step kept its
+        // "streaming" state until `turn.ended` overwrote it.
+        deps.receiveEvent({
+          sessionId,
+          agentId: eventAgentId,
+          type: 'turn.step.interrupted',
+          turnId: meta.currentTurnId,
+          // The engine numbers steps from zero; the protocol ordinal matches
+          // the turn.step.started this closes, which is stepSeq.
+          step: stepSeq,
+          reason: String(parsed.reason ?? 'error'),
+          ...(typeof parsed.message === 'string' && parsed.message.length > 0
+            ? { message: parsed.message }
+            : {}),
         });
       } else if (parsed.type === 'llm.step.end') {
         // Two emitters send `llm.step.end`. The transport (llm/http.rs)
@@ -922,6 +943,24 @@ export async function buildSessionHandle(
           // tell an activation turn from a typed one.
           origin: (parsed.origin as PromptOrigin | undefined) ?? { kind: 'user' },
           prompt: String(parsed.prompt ?? ''),
+          // v2 #4627: the prompt id the engine minted at admission. A host
+          // that submitted a prompt as a steer uses it to clear the entry's
+          // "not read yet" state once the turn really starts.
+          ...(typeof parsed.promptId === 'string' ? { promptId: parsed.promptId } : {}),
+        });
+      } else if (parsed.type === 'turn.steer') {
+        // v2 #4627 `TurnSteer`: the engine consumed a steered message into the
+        // running turn's context — the read acknowledgement a host needs to
+        // stop showing that message as pending.
+        deps.receiveEvent({
+          sessionId,
+          agentId: eventAgentId,
+          type: 'turn.steer',
+          turnId,
+          input: (Array.isArray(parsed.input) ? parsed.input : []) as TurnSteerEvent['input'],
+          origin: (parsed.origin as PromptOrigin | undefined) ?? { kind: 'user' },
+          ...(Array.isArray(parsed.promptIds) ? { promptIds: parsed.promptIds.map(String) } : {}),
+          ...(typeof parsed.messageId === 'string' ? { messageId: parsed.messageId } : {}),
         });
       } else if (parsed.type === 'turn.ended') {
         const endedTurnId =
@@ -1177,6 +1216,10 @@ export async function buildSessionHandle(
     // The engine installs its OAuth service from this directory, so stored
     // grants are injected and refreshed on the same connection.
     mcpOauthDir: deps.mcpOAuthDir,
+    // v2 `resolveClientName` (`workspaceMcpService.ts:42`): every MCP client
+    // announces the host identity, not the builtin name. Absent identity keeps
+    // the engine's `kimi-code` default.
+    ...(deps.identity ? { mcpClientName: deps.identity.productName } : {}),
     // M1c turn telemetry: the host knows the model configuration, the
     // engine contributes the outcome fields and emits turn_started /
     // turn_ended / turn_interrupted through the telemetry callback (v2's

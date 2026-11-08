@@ -829,6 +829,7 @@ mod tests {
                 agent_id: "main".into(),
                 turn_id: "turn-2".into(),
                 delta: "Hello world".into(),
+                block: None,
             },
         );
         let frame1: Value =

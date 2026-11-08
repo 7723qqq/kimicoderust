@@ -10,9 +10,19 @@
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, unlink } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  unlink,
+} from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { createZstdDecompress } from 'node:zlib';
 
 import { valid } from 'semver';
 import { z } from 'zod';
@@ -208,11 +218,7 @@ function isUpdaterOwnedStagingFile(entry: string): boolean {
   // version (.<pid>.<epoch-ms>.<n>, or the older .<pid>.<n>) — try with and
   // without stripping it (the infix is dot-numeric, which is ambiguous with
   // prerelease suffixes, so every candidate is checked).
-  const candidates = [
-    name,
-    name.replace(/\.\d+\.\d+$/, ''),
-    name.replace(/\.\d+\.\d+\.\d+$/, ''),
-  ];
+  const candidates = [name, name.replace(/\.\d+\.\d+$/, ''), name.replace(/\.\d+\.\d+\.\d+$/, '')];
   return candidates.some((candidate) => valid(candidate) !== null);
 }
 
@@ -379,6 +385,26 @@ async function downloadAndHash(
 }
 
 /**
+ * The Bun file surface this module uses. Module-local on purpose: a
+ * `declare global` merges with the SDK's own Bun surface during a
+ * cross-package typecheck, and the two declare different members.
+ * `BunFile` extends `Blob` (bun-types `bun.d.ts:2682`), so `stream()` is the
+ * standard `ReadableStream` over the file.
+ */
+declare const Bun: {
+  file(path: string): { stream(): ReadableStream<Uint8Array> };
+};
+
+/**
+ * Bun's `DecompressionStream` accepts `zstd` (bun-types `globals.d.ts:199`);
+ * `@types/node`'s `CompressionFormat` union predates that, so the constructor
+ * is widened once here instead of casting at every call site.
+ */
+const ZstdDecompressionStream = DecompressionStream as unknown as new (
+  format: string,
+) => TransformStream<Uint8Array, Uint8Array>;
+
+/**
  * Inflate a downloaded `.zst` artifact into `destPath`, hashing the plain
  * bytes as they stream through; **throws** when the result does not match
  * the manifest's bare-binary checksum. Returns the decompressed size.
@@ -392,15 +418,21 @@ async function decompressAndHash(
   let size = 0;
   const file = await open(destPath, 'w');
   try {
-    for await (const chunk of createReadStream(zstPath).pipe(createZstdDecompress())) {
-      hash.update(chunk as Buffer);
-      size += (chunk as Buffer).length;
+    // `Bun.file(...).stream()` reads natively and `DecompressionStream('zstd')`
+    // inflates natively, so the artifact never has to be buffered whole.
+    const decompressed = Bun.file(zstPath)
+      .stream()
+      .pipeThrough(new ZstdDecompressionStream('zstd'));
+    for await (const chunk of decompressed) {
+      const bytes = Buffer.from(chunk);
+      hash.update(bytes);
+      size += bytes.length;
       // Same short-write loop as downloadAndHash: FileHandle.write may
       // persist fewer bytes than requested, so loop until the chunk is
       // fully on disk.
       let offset = 0;
-      while (offset < (chunk as Buffer).length) {
-        const { bytesWritten } = await file.write(chunk as Buffer, offset);
+      while (offset < bytes.length) {
+        const { bytesWritten } = await file.write(bytes, offset);
         if (bytesWritten === 0) {
           throw new Error('failed to write the native binary to disk (disk full?)');
         }
@@ -499,14 +531,15 @@ export async function stageNativeUpdate(
   try {
     const manifest = await fetchNativeReleaseManifest(options.version, fetchImpl);
     const entry = selectBunPlatformEntry(manifest, platform, arch);
-    const compressed = entry.zstd === undefined
-      ? entry.compressed
-      : { filename: entry.zstd.file, checksum: entry.zstd.sha256 };
+    const compressed =
+      entry.zstd === undefined
+        ? entry.compressed
+        : { filename: entry.zstd.file, checksum: entry.zstd.sha256 };
     // Prefer the zstd-compressed artifact when the manifest carries one and
     // the runtime can inflate it (~4x smaller than the bare binary). Any
     // failure in the compressed path falls back to the bare download below.
     let size: number | undefined;
-    if (compressed !== undefined && typeof createZstdDecompress === 'function') {
+    if (compressed !== undefined) {
       const zstPartPath = join(stagingDir, `${exeFileName}.zst.part`);
       try {
         await downloadAndHash(

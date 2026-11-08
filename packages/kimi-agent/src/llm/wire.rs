@@ -134,8 +134,70 @@ pub fn to_wire(messages: &[LLMMessage]) -> Vec<WireMessage> {
         .collect()
 }
 
+/// v2 `isVacuousContentPart` (`agent/contextMemory/vacuousContent.ts`): a
+/// text part that trims to nothing, or a think part with no display text and
+/// no provider attestation.
+///
+/// This engine's think blocks carry two replay-only fields v2's part does not
+/// have — `details_summary` (a `reasoning_details` array entry) and
+/// `details_index` — and a block that exists only to rebuild that array is
+/// content even when its display text is empty. Dropping it would silently
+/// reshape the provider's reasoning replay.
+pub fn is_vacuous_part(part: &ContentBlock) -> bool {
+    match part {
+        ContentBlock::Text { text, .. } => text.trim().is_empty(),
+        ContentBlock::Think {
+            think,
+            encrypted,
+            details_index,
+            details_summary,
+            ..
+        } => {
+            think.trim().is_empty()
+                && encrypted.as_deref().is_none_or(str::is_empty)
+                && details_summary.as_deref().is_none_or(str::is_empty)
+                && details_index.is_none()
+        }
+        _ => false,
+    }
+}
+
+/// v2 `contextProjector`'s vacuous-content rule, applied where a provider
+/// request is assembled: vacuous parts are dropped from `blocks`, and a
+/// message with no tool calls whose remaining content is entirely vacuous is
+/// dropped whole. The stored history keeps the originals — v2's test asserts
+/// both sides of that split.
+///
+/// Tool results and system messages are never dropped: a tool result answers a
+/// call in the preceding assistant message, and removing it would leave the
+/// call unanswered at the provider. v2 reaches the same outcome by handling
+/// tool-result messages in a separate branch before the vacuous test.
+pub fn project_vacuous_messages(messages: &[LLMMessage]) -> Vec<LLMMessage> {
+    let mut out = Vec::with_capacity(messages.len());
+    for message in messages {
+        let mut projected = message.clone();
+        if !message.blocks.is_empty() {
+            projected.blocks = message
+                .blocks
+                .iter()
+                .filter(|part| !is_vacuous_part(part))
+                .cloned()
+                .collect();
+        }
+        let keep = message.role == "system"
+            || message.role == "tool"
+            || !message.tool_calls.is_empty()
+            || !projected.blocks.is_empty()
+            || !projected.content.trim().is_empty();
+        if keep {
+            out.push(projected);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
-mod tests {
+mod projection_tests {
     use super::*;
     use serde_json::json;
 
@@ -179,5 +241,114 @@ mod tests {
         assert_eq!(wire[1].tool_calls.len(), 1);
         assert_eq!(wire[1].tool_calls[0].id, "c1");
         assert_eq!(wire[2].tool_call_id.as_deref(), Some("c1"));
+    }
+
+    /// v2 `context.test.ts`: empty text parts are dropped only in the LLM
+    /// projection, a whitespace-only message disappears whole, an assistant
+    /// carrying tool calls keeps an empty content list, and an attested think
+    /// block survives with no display text.
+    #[test]
+    fn the_projection_drops_vacuous_content_without_touching_history() {
+        use crate::rpc::types::ContentBlock;
+        let messages = vec![
+            LLMMessage {
+                role: "user".into(),
+                content: String::new(),
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: String::new(),
+                        meta: None,
+                    },
+                    ContentBlock::Text {
+                        text: "Run the tool".into(),
+                        meta: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                blocks: vec![ContentBlock::Text {
+                    text: String::new(),
+                    meta: None,
+                }],
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                blocks: vec![ContentBlock::Text {
+                    text: String::new(),
+                    meta: None,
+                }],
+                tool_calls: vec![ToolCall {
+                    id: "call_empty".into(),
+                    name: "empty".into(),
+                    arguments: json!({}),
+                    extras: None,
+                    args_parse_error: None,
+                }],
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "tool".into(),
+                content: "done".into(),
+                tool_call_id: Some("call_empty".into()),
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                blocks: vec![ContentBlock::Think {
+                    think: String::new(),
+                    encrypted: Some("enc_empty_thinking".into()),
+                    details_index: None,
+                    reasoning_key: None,
+                    details_summary: None,
+                }],
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "user".into(),
+                content: "   ".into(),
+                ..Default::default()
+            },
+        ];
+
+        let projected = project_vacuous_messages(&messages);
+        assert_eq!(projected.len(), 4, "{projected:?}");
+        // The first user message keeps its one real text part.
+        assert_eq!(projected[0].blocks.len(), 1);
+        // The assistant carrying the call keeps an empty content list.
+        assert!(projected[1].blocks.is_empty());
+        assert_eq!(projected[1].tool_calls.len(), 1);
+        // The tool result survives, so the call stays answered.
+        assert_eq!(projected[2].tool_call_id.as_deref(), Some("call_empty"));
+        // The attested think block is content even with no display text.
+        assert_eq!(projected[3].blocks.len(), 1);
+        // Storage is untouched: the same messages still carry every part.
+        assert_eq!(messages[0].blocks.len(), 2);
+        assert_eq!(messages[1].blocks.len(), 1);
+    }
+
+    /// A think block that exists only to rebuild the provider's
+    /// `reasoning_details` array is content even with empty display text; a
+    /// whitespace-only text part is not.
+    #[test]
+    fn a_details_only_think_block_is_not_vacuous() {
+        use crate::rpc::types::ContentBlock;
+        let details_only = ContentBlock::Think {
+            think: String::new(),
+            encrypted: None,
+            details_index: Some(0),
+            reasoning_key: None,
+            details_summary: Some("earlier reasoning".into()),
+        };
+        assert!(!is_vacuous_part(&details_only));
+        assert!(is_vacuous_part(&ContentBlock::Text {
+            text: " \n".into(),
+            meta: None,
+        }));
     }
 }

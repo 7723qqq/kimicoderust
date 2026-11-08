@@ -1,8 +1,3 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { request as httpsRequest } from 'node:https';
-import { rootCertificates } from 'node:tls';
-import { URL } from 'node:url';
-
 import {
   ASTRON_MODEL_DEFS,
   ASTRON_REASONING_EFFORT_MODEL_IDS,
@@ -10,6 +5,7 @@ import {
 } from '@moonshot-ai/kosong/providers/astron-models';
 
 import { readApiErrorMessage } from './api-error';
+import { GOOGLE_GEMINI_DEFAULT_MODELS } from './google-models';
 import { parseKimiCodeCustomHeaders } from './identity';
 import { parseSupportsThinkingType, parseThinkEfforts } from './managed-kimi-code';
 import type {
@@ -17,7 +13,6 @@ import type {
   ManagedKimiConfigShape,
   ManagedKimiModelAlias,
 } from './managed-kimi-code';
-import { GOOGLE_GEMINI_DEFAULT_MODELS } from './google-models';
 import { MANAGED_KIMI_MODEL_FIELDS, mergeRefreshedModelAlias } from './model-alias-merge';
 import { isRecord } from './utils';
 
@@ -91,7 +86,9 @@ function toModelInfo(item: unknown): ManagedKimiCodeModelInfo | undefined {
     : undefined;
   const supportsToolUse = Object.hasOwn(item, 'supports_tool_use')
     ? Boolean(item['supports_tool_use'])
-    : (rawCaps !== undefined ? rawCaps.includes('tool_use') : true);
+    : rawCaps !== undefined
+      ? rawCaps.includes('tool_use')
+      : true;
   // Effort levels come from the nested `think_efforts` object
   // ({ support, valid_efforts, default_effort }) returned by /models.
   const thinkEfforts = parseThinkEfforts(item['think_efforts']);
@@ -102,12 +99,8 @@ function toModelInfo(item: unknown): ManagedKimiCodeModelInfo | undefined {
       Boolean(item['supports_reasoning']) ||
       (rawCaps?.includes('thinking') ?? false) ||
       (rawCaps?.includes('always_thinking') ?? false),
-    supportsImageIn:
-      Boolean(item['supports_image_in']) ||
-      (rawCaps?.includes('image_in') ?? false),
-    supportsVideoIn:
-      Boolean(item['supports_video_in']) ||
-      (rawCaps?.includes('video_in') ?? false),
+    supportsImageIn: Boolean(item['supports_image_in']) || (rawCaps?.includes('image_in') ?? false),
+    supportsVideoIn: Boolean(item['supports_video_in']) || (rawCaps?.includes('video_in') ?? false),
     supportsToolUse,
     supportsThinkingType: parseSupportsThinkingType(item['supports_thinking_type']),
     supportEfforts: thinkEfforts.supportEfforts,
@@ -148,91 +141,6 @@ export class OpenPlatformApiError extends Error {
     this.name = 'OpenPlatformApiError';
     this.status = status;
   }
-}
-
-// ── System CA fetch for providers with non-Mozilla CAs (e.g. xfyun.cn) ──────
-//     Dead code: fetchOpenPlatformModels returns early for astron, so the
-//     systemCaFetch branch is never selected.
-
-const SYSTEM_CA_PATHS = ['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt'];
-
-let _systemCaCerts: string[] | undefined;
-let _systemCaLoadedAt = 0;
-
-function loadSystemCAs(): string[] {
-  const now = Date.now();
-  // Refresh cached CAs every hour so newly installed certificates are picked up.
-  if (_systemCaCerts && now - _systemCaLoadedAt < 3_600_000) {
-    return _systemCaCerts;
-  }
-  _systemCaLoadedAt = now;
-  let systemCerts = '';
-  for (const path of SYSTEM_CA_PATHS) {
-    if (existsSync(path)) {
-      try {
-        systemCerts = readFileSync(path, 'utf-8');
-        break;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  _systemCaCerts = [systemCerts, ...rootCertificates].filter(Boolean);
-  return _systemCaCerts;
-}
-
-function systemCaFetch(url: string | URL, init?: RequestInit): Promise<Response> {
-  const parsed = typeof url === 'string' ? new URL(url) : url;
-  const ca = loadSystemCAs();
-  return new Promise((resolve, reject) => {
-    const headers: Record<string, string> = {};
-    if (init?.headers) {
-      const h = init.headers as Record<string, string>;
-      for (const [k, v] of Object.entries(h)) headers[k] = v;
-    }
-    const req = httpsRequest(
-      {
-        hostname: parsed.hostname,
-        port: parsed.port || 443,
-        path: parsed.pathname + parsed.search,
-        method: (init?.method ?? 'GET').toUpperCase(),
-        headers,
-        ca,
-        rejectUnauthorized: true,
-        timeout: 30_000,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
-        res.on('end', () => {
-          const body = Buffer.concat(chunks).toString('utf-8');
-          resolve(
-            new Response(body, {
-              status: res.statusCode ?? 0,
-              headers: res.headers as Record<string, string>,
-            }),
-          );
-        });
-      },
-    );
-    req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Connection timed out'));
-    });
-    if (init?.signal) {
-      const onAbort = (): void => {
-        req.destroy();
-        reject(new Error('Aborted'));
-      };
-      if (init.signal.aborted) {
-        onAbort();
-        return;
-      }
-      init.signal.addEventListener('abort', onAbort, { once: true });
-    }
-    req.end();
-  });
 }
 
 export async function fetchOpenPlatformModels(
@@ -277,12 +185,7 @@ export async function fetchOpenPlatformModels(
     });
   }
 
-  // Unreachable dead branch: astron returns early above, so the system-CA
-  // fetch (xfyun.cn's Chinese CA is not in the Mozilla store) can never be
-  // selected here. Kept for reference; loadSystemCAs/systemCaFetch are dead
-  // code.
-  const effectiveFetch =
-    fetchImpl ?? (platform.id === 'astron' ? (systemCaFetch as typeof fetch) : fetch);
+  const effectiveFetch = fetchImpl ?? fetch;
   const res = await effectiveFetch(`${platform.baseUrl.replace(/\/+$/, '')}/models`, {
     headers: {
       ...parseKimiCodeCustomHeaders(),

@@ -62,11 +62,14 @@ pub fn qualify_mcp_tool_name(server_name: &str, tool_name: &str) -> String {
 }
 
 /// FNV-1a over the input's code points, formatted exactly like the TS
-/// implementation (`tool-naming.ts:19-26`). The TS accumulator is a JS number
-/// that only becomes an int32 once an operator touches it, so a non-empty
-/// input renders through the signed interpretation (`-<hex>` without zero
-/// padding when negative, 8 zero-padded hex digits otherwise) while the empty
-/// input keeps the positive offset basis and renders unsigned. Not
+/// implementation (`tool-naming.ts:19-26`): `hash.toString(16).padStart(8,
+/// '0')`, where `hash` is a **signed** int32 after the first `Math.imul`.
+///
+/// `padStart` pads the whole rendered string, so a short negative tail gains
+/// its zero *before* the sign (`0-53fcf0`), not after it — the difference only
+/// shows below `0x1000000` (roughly one name in 256), but those names would
+/// otherwise hash to a different tool name than v2's. A 9-character negative
+/// tail (`-785fd989`) is already past the width and keeps no zero. Not
 /// cryptographic — only used for collision resistance among a handful of tool
 /// names within a single server's tool list.
 fn stable_hash8(input: &str) -> String {
@@ -75,15 +78,20 @@ fn stable_hash8(input: &str) -> String {
         bits ^= ch as u32;
         bits = bits.wrapping_mul(0x0100_0193);
     }
+    // The empty input never enters the loop, so the JS accumulator is still
+    // the positive literal — not the int32 the first `Math.imul` would make of
+    // it — and renders unsigned. Unreachable from `qualify` (the prefix is
+    // always present), kept because the TS contract is the spec.
     if input.is_empty() {
         return format!("{bits:08x}");
     }
     let signed = bits as i32;
-    if signed < 0 {
+    let text = if signed < 0 {
         format!("-{:x}", signed.unsigned_abs())
     } else {
-        format!("{signed:08x}")
-    }
+        format!("{signed:x}")
+    };
+    format!("{text:0>8}")
 }
 
 #[cfg(test)]
@@ -200,6 +208,18 @@ mod tests {
             "mcp__bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb__xxxxxxx_-7dafadb1"
         );
         assert_ne!(from_a, from_b);
+    }
+
+    /// v2 `toString(16).padStart(8, '0')` pads the whole rendered string, so a
+    /// negative tail shorter than seven hex digits gains its zero *before* the
+    /// sign. This input's FNV-1a lands at `-0x53fcf0`; v2 renders `0-53fcf0`,
+    /// and a name hashed differently from v2's is a different tool name.
+    #[test]
+    fn test_stable_hash_pads_a_short_negative_like_js() {
+        assert_eq!(stable_hash8("mcp__s190__t190"), "0-53fcf0");
+        // A nine-character negative tail is past the pad width: no zero.
+        let long_full = format!("mcp__{}__{}", "a".repeat(40), "b".repeat(40));
+        assert_eq!(stable_hash8(&long_full), "-785fd989");
     }
 
     #[test]

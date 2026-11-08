@@ -39,6 +39,14 @@ pub fn style_for_kind(kind: EntryKind) -> Style {
     }
 }
 
+/// The style an entry is painted in: the kind's policy, plus the pending
+/// presentation state (a steered message the engine has not read yet is
+/// dimmed, v2 #4627).
+pub fn style_for_entry(kind: EntryKind, pending: bool) -> Style {
+    let style = style_for_kind(kind);
+    if pending { style.dim() } else { style }
+}
+
 /// The gutter's printable width at any terminal width — constant, because the
 /// gutter is one character plus `"| "`.
 pub const GUTTER_WIDTH: usize = 2;
@@ -50,11 +58,11 @@ pub const GUTTER_WIDTH: usize = 2;
 /// column of its own.
 pub fn entry_lines(store: &EntryStore, total_width: usize) -> Vec<(String, Style)> {
     let mut lines = Vec::new();
-    for (_id, content) in store.entries() {
+    for (id, content) in store.entries() {
         let gutter = format!("{}| ", kind_gutter(content.kind));
         let gutter_width = width(&gutter);
         let body_width = total_width.saturating_sub(gutter_width).max(1);
-        let style = style_for_kind(content.kind);
+        let style = style_for_entry(content.kind, store.is_pending(id));
         for (index, row) in wrap(&content.text, body_width, style)
             .into_iter()
             .enumerate()
@@ -132,5 +140,26 @@ mod tests {
             assert!(width(line) <= GUTTER_WIDTH + 4, "{line:?} overflows");
         }
         assert!(lines.len() >= 3, "ten characters at four per row");
+    }
+
+    /// A pending entry is dimmed even when its kind is not; clearing it
+    /// restores the kind's own style.
+    #[test]
+    fn a_pending_entry_is_dimmed_regardless_of_its_kind() {
+        let id = EntryId::engine("t1", 0, EntryKind::UserMsg);
+        let mut store = EntryStore::new();
+        store.apply(EntryOp::Upsert {
+            id: id.clone(),
+            content: EntryContent::new(EntryKind::UserMsg, "steer me"),
+        });
+        store.apply(EntryOp::SetPending {
+            id: id.clone(),
+            pending: true,
+        });
+        assert!(store.is_pending(&id));
+        assert_eq!(entry_lines(&store, 40)[0].1, Style::DEFAULT.dim());
+
+        store.apply(EntryOp::SetPending { id, pending: false });
+        assert_eq!(entry_lines(&store, 40)[0].1, Style::DEFAULT);
     }
 }

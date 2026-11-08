@@ -128,7 +128,9 @@ impl AcpClient {
         }
     }
 
-    /// Send a request and read its response.
+    /// Send a request and read its response. Server-initiated notifications
+    /// may be emitted before the response (for example the command palette on
+    /// `session/new`); they are not responses and must not be counted as one.
     fn request(&mut self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         self.write_line(&serde_json::json!({
@@ -137,7 +139,13 @@ impl AcpClient {
             "method": method,
             "params": params,
         }))?;
-        let response = self.read_line(Duration::from_secs(30))?;
+        let response = loop {
+            let line = self.read_line(Duration::from_secs(30))?;
+            if line.get("method").is_some() {
+                continue;
+            }
+            break line;
+        };
         assert_eq!(
             response["id"],
             serde_json::json!(id),
@@ -277,8 +285,18 @@ fn acp_session_round_trip_with_content_blocks() {
         let line = client
             .read_line(Duration::from_secs(30))
             .expect("session/load must answer");
+        let update = line
+            .get("params")
+            .and_then(|params| params.get("update"))
+            .and_then(|update| update.get("sessionUpdate"));
+        let is_attachment_notice = matches!(
+            update.and_then(serde_json::Value::as_str),
+            Some("available_commands_update" | "session_info_update")
+        );
         if line.get("method").is_some() {
-            replayed.push(line);
+            if !is_attachment_notice {
+                replayed.push(line);
+            }
             continue;
         }
         break line;

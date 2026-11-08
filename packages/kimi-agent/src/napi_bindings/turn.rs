@@ -48,6 +48,14 @@ pub fn cancel_turn(turn_id: String) -> napi::Result<()> {
         {
             cancel.trigger();
         }
+        // v2 `interruptReason`: this entry point is the user's stop, so only
+        // this path arms the interruption reminder. A teardown flips the same
+        // cancel flag without ever reaching here.
+        if let Ok(entry) = session_entry(&turn_id) {
+            entry
+                .user_cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(())
     })
 }
@@ -547,6 +555,7 @@ pub(crate) async fn build_engine_pipeline(
                 startup_timeout_ms: cfg.startup_timeout_ms.map(u64::from),
                 tool_timeout_ms: cfg.tool_timeout_ms.map(u64::from),
                 deferred: cfg.deferred,
+                oauth: cfg.auth.as_deref().map(|auth| auth == "oauth"),
             },
         ));
     }
@@ -591,6 +600,7 @@ pub(crate) async fn build_engine_pipeline(
             startup_timeout_ms: defaults.startup_timeout_ms.map(u64::from),
             tool_timeout_ms: defaults.tool_timeout_ms.map(u64::from),
             default_deferred: defaults.default_deferred,
+            ..Default::default()
         });
     let mcp_manager = (!servers.is_empty()).then(|| {
         shared_mcp_manager(
@@ -600,6 +610,15 @@ pub(crate) async fn build_engine_pipeline(
                 .as_deref()
                 .map(std::path::PathBuf::from),
             mcp_defaults,
+            // v2 `stdioCwd`: a stdio server whose config omits `cwd` starts in
+            // the session's workspace, not in whatever directory the host
+            // process happened to launch from.
+            params
+                .workspace_root
+                .as_deref()
+                .map(std::path::PathBuf::from),
+            // v2 `resolveClientName`: the identity every MCP client announces.
+            params.mcp_client_name.clone(),
         )
     });
 
@@ -828,6 +847,7 @@ pub(crate) async fn build_engine_pipeline(
                     .and_then(|value| u64::try_from(value).ok()),
                 print_mode,
             ),
+            params.keep_alive_on_exit,
         ),
     };
 
@@ -932,6 +952,11 @@ async fn run_turn_rust_impl(
     let last_turn_aborted = session_entry(&turn_id)
         .ok()
         .map(|entry| entry.last_turn_aborted.clone());
+    // Whether the user asked for this turn to stop (v2 `interruptReason`).
+    // Read-and-cleared at settle; the teardown path never sets it.
+    let user_cancelled = session_entry(&turn_id)
+        .ok()
+        .map(|entry| entry.user_cancelled.clone());
     let previous_turn_aborted = last_turn_aborted
         .as_ref()
         .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
@@ -1068,8 +1093,14 @@ async fn run_turn_rust_impl(
 
     let result = result.map_err(|e| napi::Error::from_reason(format!("run_turn failed: {e}")))?;
     if let Some(flag) = &last_turn_aborted {
+        let user_cancelled = user_cancelled
+            .as_ref()
+            .is_some_and(|user| user.swap(false, std::sync::atomic::Ordering::Relaxed));
         flag.store(
-            result.stop_reason == crate::turn_loop::types::LoopTurnStopReason::Aborted,
+            crate::injection::interruption_reminder::arms_reminder(
+                result.stop_reason == crate::turn_loop::types::LoopTurnStopReason::Aborted,
+                user_cancelled,
+            ),
             std::sync::atomic::Ordering::Relaxed,
         );
     }

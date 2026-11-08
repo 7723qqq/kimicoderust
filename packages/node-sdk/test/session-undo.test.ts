@@ -6,6 +6,7 @@ import { findKimiAgentAddon } from '@moonshot-ai/kimi-agent/session-handle';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createKimiHarnessNative, type KimiHarness } from '../src/index';
+import { listenOnEphemeralPort } from './listen-server';
 import { TEST_IDENTITY } from './test-identity';
 
 const hasNativeAddon = findKimiAgentAddon() !== null;
@@ -79,9 +80,7 @@ describe.skipIf(!hasNativeAddon)('session undo semantics', () => {
             chunk({
               role: 'assistant',
               content: '',
-              tool_calls: [
-                { index: 0, id: 'call_1', type: 'function', function: toolCall },
-              ],
+              tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: toolCall }],
             }),
           );
           res.write(chunk({}, 'tool_calls'));
@@ -95,9 +94,7 @@ describe.skipIf(!hasNativeAddon)('session undo semantics', () => {
         res.end();
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const address = server.address();
-    const port = typeof address === 'object' && address !== null ? address.port : 0;
+    const port = await listenOnEphemeralPort(server);
     homeDir = mkdtempSync(join(tmpdir(), 'kimi-sdk-undo-home-'));
     workDir = mkdtempSync(join(tmpdir(), 'kimi-sdk-undo-work-'));
     writeFileSync(
@@ -258,7 +255,9 @@ max_context_size = 200000
     if (forked === undefined) throw forkError;
     const before = await forked.getContext();
     expect(
-      before.history.filter((message) => message.role === 'user' && originKind(message) !== 'injection'),
+      before.history.filter(
+        (message) => message.role === 'user' && originKind(message) !== 'injection',
+      ),
     ).toHaveLength(1);
 
     // The menu reads the same number the command enforces, so it never offers

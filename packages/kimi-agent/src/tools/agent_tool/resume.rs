@@ -16,6 +16,12 @@ use crate::subagent::manager::ForegroundTurnOutcome;
 use crate::subagent::types::ParentCancel;
 use crate::turn_loop::types::{ExecutableToolResult, LoopTurnStopReason};
 
+/// v2 `agentTool.ts` refuses a resume that also names a `subagent_type`: the
+/// resumed agent keeps its own profile, and accepting both would silently drop
+/// the type the caller asked for.
+pub const RESUME_WITH_TYPE_UNAVAILABLE: &str =
+    "Cannot set subagent_type when resuming an existing agent. Resume by agent id only.";
+
 /// The tower resume gate (v2 `towerService`'s foreground-resume veto,
 /// #3648): the denial message when the resumed agent is a tower agent —
 /// its profile is the tower worker profile *or* its id sits in the tower
@@ -77,6 +83,21 @@ pub(super) async fn execute_resume(
     parent_cancel: Option<&ParentCancel>,
     tool_call_id: Option<&str>,
 ) -> Option<ExecutableToolResult> {
+    // v2 checks the argument combination before it touches the lifecycle.
+    if args
+        .get("subagent_type")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Some(ExecutableToolResult {
+            delivery: None,
+            stop_turn: false,
+            content: RESUME_WITH_TYPE_UNAVAILABLE.to_string(),
+            is_error: true,
+            note: None,
+            display: None,
+        });
+    }
     let profile_name = manager.resume_profile(resume_id).await?;
     // v2 `agentTool.ts` guards the resume path before it does anything:
     // `AGENT_NOT_A_SUBAGENT`, `AGENT_NOT_OWNED` and `AGENT_ALREADY_RUNNING`.
@@ -217,7 +238,8 @@ pub(super) async fn execute_resume(
                     resume_id,
                     &profile_name,
                     USER_INTERRUPTED_SUBAGENT_MESSAGE,
-                    false,
+                    "cancelled",
+                    None,
                 ),
                 true,
             )
@@ -232,7 +254,13 @@ pub(super) async fn execute_resume(
                 }),
             );
             (
-                format_failure(resume_id, &profile_name, &message, false),
+                format_failure(
+                    resume_id,
+                    &profile_name,
+                    &message,
+                    super::format::run_failure_reason(&message),
+                    None,
+                ),
                 true,
             )
         }
@@ -248,7 +276,7 @@ pub(super) async fn execute_resume(
                 }),
             );
             (
-                format_failure(resume_id, &profile_name, &message, false),
+                format_failure(resume_id, &profile_name, &message, "error", None),
                 true,
             )
         }
@@ -267,7 +295,7 @@ pub(super) async fn execute_resume(
                 }),
             );
             (
-                format_failure(resume_id, &profile_name, &message, true),
+                format_failure(resume_id, &profile_name, &message, "timed_out", None),
                 true,
             )
         }
@@ -373,6 +401,7 @@ pub(super) async fn run_resume_in_background(
                 kind: "subagent",
                 subagent_type: Some(&profile),
                 agent_id: Some(resume_id),
+                timeout_ms: None,
             },
             task_id.clone(),
             format!("Resume {profile}: {prompt}"),

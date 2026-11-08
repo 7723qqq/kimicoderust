@@ -24,7 +24,7 @@ use crate::llm::http::NativeHttpLlm;
 use crate::mcp::McpManager;
 use crate::permission::PermissionEngine;
 use crate::rpc::types::{
-    AskQuestionRequest, AskQuestionResponse, LlmChatRequest, LlmChatResponse, NativeLlmConfig,
+    AskQuestionRequest, AskQuestionResponse, LlmChatRequest, LlmChatResponse,
     PermissionCheckRequest, PermissionDecision, StateReadRequest, StateReadResponse,
     StateWriteRequest, StateWriteResponse, TokenUsage, ToolExecuteRequest, ToolExecuteResponse,
 };
@@ -329,6 +329,15 @@ pub async fn start_repl(
 
     let session_store = SessionStore::for_workspace(&workspace)?;
     let state_store = Arc::new(StateStore::for_workspace(&workspace)?);
+    // v2 resumes a persisted agent by pausing a goal that was active when the
+    // engine stopped: the offline gap is never charged to its wall-clock
+    // budget (`test/wire/resume.test.ts:850-911`).
+    if let Some(paused) = state_store.pause_goal_on_resume() {
+        println!(
+            "  Goal paused after resume: {} (resume it with /goal)",
+            paused.objective
+        );
+    }
     let mut current_session_id = format!("session-{}", fastrand::u64(..));
 
     let active_model_str = current_model.as_deref().unwrap_or("default");
@@ -339,6 +348,9 @@ pub async fn start_repl(
     // `AgentSwarm` tool reads it at execution time.
     subagent_manager.set_swarm_timeout_ms(config.resolve_swarm_timeout_ms());
     let mcp_manager = Arc::new(McpManager::new());
+    // v2 `stdioCwd`: a stdio server with no configured `cwd` starts in the
+    // workspace, not in whatever directory the user launched from.
+    mcp_manager.set_default_stdio_cwd(workspace.clone());
     // P29 批 3 接线: connect MCP servers declared in config.toml so their
     // tools are discovered and exposed to the model this session.
     mcp_manager.spawn_from_config(&config).await;
@@ -348,6 +360,7 @@ pub async fn start_repl(
         crate::storage::task_runner::TaskRunner::for_workspace(&workspace)?.with_background_limits(
             config.background.kill_grace_period_ms,
             config.resolve_background_max_running_tasks(),
+            config.background.keep_alive_on_exit,
         ),
     );
     subagent_manager.set_task_runner_sync(task_runner.clone());
@@ -395,33 +408,7 @@ pub async fn start_repl(
         }
     };
     let llm: Arc<dyn crate::turn_loop::types::LLM> = Arc::new(NativeHttpLlm::new(
-        NativeLlmConfig {
-            protocol: native_llm_def.protocol,
-            alias: native_llm_def.alias,
-            provider_type: Some(native_llm_def.provider_type.clone())
-                .filter(|value| !value.is_empty()),
-            base_url: native_llm_def.base_url,
-            api_key: native_llm_def.api_key,
-            // The env-bound credential channel survives resolution: the
-            // transport reads the named variable at request time, exactly as
-            // the CLI entry point (`main.rs`) passes it through.
-            api_key_env: native_llm_def.api_key_env,
-            model: native_llm_def.model.clone(),
-            max_tokens: native_llm_def.max_output_size.or(native_llm_def.max_tokens),
-            custom_headers: native_llm_def.custom_headers,
-            reasoning_effort: config.resolve_effort(native_llm_def.off_effort.as_deref()),
-            thinking_budget: None,
-            auth_provider: None,
-            thinking_keep: config.resolve_thinking_keep(),
-            beta_api: native_llm_def.beta_api,
-            capabilities: native_llm_def.capabilities.clone(),
-            system_prompt: native_llm_def.system_prompt.clone(),
-            max_input_size: native_llm_def.max_input_size,
-            adaptive_thinking: native_llm_def.adaptive_thinking,
-            reasoning_key: native_llm_def.reasoning_key.clone(),
-            // `resolve_effort` above already applied the declared off-effort.
-            off_effort: None,
-        },
+        config.native_llm_config(&native_llm_def),
         "You are Kimi, a helpful agentic coding assistant.".to_string(),
     ));
 
@@ -586,12 +573,13 @@ pub async fn start_repl(
     let state_for_goal = state_store.clone();
     let state_for_checkpoint = state_store.clone();
     let session_config = crate::session::SessionConfig {
+        steer_trace: None,
         llm: llm.clone(),
         callbacks: tool_callbacks.clone(),
         // `[loop_control]` applies to the REPL too — the same config file
         // must behave the same on every entry point (`--serve` / `--acp`
         // resolve these through `with_standalone_limits`).
-        max_steps: config.resolve_max_steps_per_turn().unwrap_or(25),
+        max_steps: config.resolve_max_steps_per_turn().unwrap_or(0),
         max_attempts: config.resolve_max_attempts_per_step(),
         max_context_tokens: None,
         compaction_max_attempts: config.resolve_compaction_max_attempts(),

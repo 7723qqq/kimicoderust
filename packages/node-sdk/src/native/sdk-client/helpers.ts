@@ -1319,8 +1319,15 @@ export function discoverSubagentsFromToolResult(content: string): DiscoveredSuba
   }
   const agentIdMatch = /(?:^|\n)agent_id:\s*([^\s]+)\s*(?=\n|$)/.exec(content);
   if (!agentIdMatch) return [];
+  // The result is `<header>\n\n[summary]\n<answer>\n\nresume_hint: …` (plus a
+  // `next_step:` paragraph on failures). Only the answer belongs to the child's
+  // transcript: everything after the trailing metadata paragraphs is guidance
+  // for the *parent*, and copying it here made the resumed child "say" its own
+  // resume hint.
   const summaryMatch = /(?:^|\n)\[summary\]\n([\s\S]*)$/.exec(content);
-  return [{ agentId: agentIdMatch[1]!, summary: summaryMatch ? summaryMatch[1]! : '' }];
+  const rawSummary = summaryMatch ? summaryMatch[1]! : '';
+  const summary = rawSummary.split(/\n\n(?:resume_hint|next_step):/)[0] ?? '';
+  return [{ agentId: agentIdMatch[1]!, summary }];
 }
 
 export function parseSwarmResultMembers(content: string): DiscoveredSubagent[] {

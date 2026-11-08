@@ -16,18 +16,31 @@ export class UserMessageComponent implements Component {
   private readonly bullet?: string;
   private spacerComponent: Spacer;
   private imageThumbnails: ImageThumbnail[];
+  /** v2 #4627: a steered message stays dimmed until the engine reads it. */
+  private steerPending: boolean;
 
   private renderCache: { width: number; lines: string[] } | undefined;
 
-  constructor(text: string, images?: ImageAttachment[], bullet?: string) {
+  constructor(text: string, images?: ImageAttachment[], bullet?: string, steerPending = false) {
     this.text = text;
     this.bullet = bullet;
+    this.steerPending = steerPending;
     this.spacerComponent = new Spacer(1);
     // The thumbnails are rendered manually inside render(), so their async
     // sixel pixel swap must poke this component's render cache — a child
     // invalidate() alone never reaches it.
     this.imageThumbnails =
       images?.map((img) => new ImageThumbnail(img, () => this.markRenderDirty())) ?? [];
+  }
+
+  isSteerPending(): boolean {
+    return this.steerPending;
+  }
+
+  setSteerPending(pending: boolean): void {
+    if (this.steerPending === pending) return;
+    this.steerPending = pending;
+    this.markRenderDirty();
   }
 
   private markRenderDirty(): void {
@@ -71,7 +84,8 @@ export class UserMessageComponent implements Component {
     const textLines = new Text(coloredText, 0, 0).render(contentWidth);
     for (let i = 0; i < textLines.length; i++) {
       const prefix = i === 0 ? bullet : ' '.repeat(bulletWidth);
-      lines.push(prefix + textLines[i]);
+      const line = prefix + textLines[i];
+      lines.push(this.steerPending ? currentTheme.dim(line) : line);
     }
 
     // Images — indented to align with text after the bullet

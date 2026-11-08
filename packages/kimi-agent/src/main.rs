@@ -453,6 +453,7 @@ async fn main() -> anyhow::Result<()> {
                 }));
 
                 let session = EngineSession::new(SessionConfig {
+                    steer_trace: None,
                     llm: pipeline.llm.clone(),
                     callbacks: pipeline.callbacks.clone(),
                     max_steps: input.max_steps.unwrap_or(u32::MAX),
@@ -901,24 +902,37 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Register session/generate_title handler
-    RpcServer::register_arc(&server, types::methods::SESSION_GENERATE_TITLE, |params| {
-        Box::pin(async move {
-            let input: SessionGenerateTitleParams = serde_json::from_value(params)
-                .map_err(|e| types::JsonRpcError::internal_error(format!("Invalid params: {e}")))?;
-            let entry = session_entry(&input.session_id)?;
-            let history = entry.session.snapshot_history();
-            let title = kimi_agent::session::title::generate_session_title(
-                &history,
-                input.source.as_deref(),
-                entry.llm.as_ref(),
-            )
-            .await
-            .map_err(types::JsonRpcError::internal_error)?;
-            serde_json::to_value(title).map_err(|e| {
-                types::JsonRpcError::internal_error(format!("Serialization error: {e}"))
+    let title_server = Arc::clone(&server);
+    RpcServer::register_arc(
+        &server,
+        types::methods::SESSION_GENERATE_TITLE,
+        move |params| {
+            let title_server = Arc::clone(&title_server);
+            Box::pin(async move {
+                let input: SessionGenerateTitleParams =
+                    serde_json::from_value(params).map_err(|e| {
+                        types::JsonRpcError::internal_error(format!("Invalid params: {e}"))
+                    })?;
+                let entry = session_entry(&input.session_id)?;
+                let history = entry.session.snapshot_history();
+                let callbacks = Arc::new(RpcHostCallbacks {
+                    server: title_server,
+                });
+                let title = kimi_agent::session::title::generate_session_title_with_telemetry(
+                    &history,
+                    input.source.as_deref(),
+                    entry.llm.as_ref(),
+                    input.force,
+                    &kimi_agent::callbacks::TitleTelemetry(callbacks.as_ref()),
+                )
+                .await
+                .map_err(types::JsonRpcError::internal_error)?;
+                serde_json::to_value(title).map_err(|e| {
+                    types::JsonRpcError::internal_error(format!("Serialization error: {e}"))
+                })
             })
-        })
-    });
+        },
+    );
 
     // Register session/background_task_list handler
     RpcServer::register_arc(
@@ -1142,6 +1156,7 @@ async fn build_engine_pipeline(
             params.max_running_tasks.map(u64::from),
             params.bash_auto_background_on_timeout,
             kimi_agent::pipeline::print_timeout_default(params.bash_task_timeout_s, print_mode),
+            None,
         ),
     };
 
@@ -1443,6 +1458,11 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
 
     // `[mcp_servers]` from config.toml: the REPL connects them at startup;
     // the daemon must too, or one file behaves differently per entry point.
+    // v2 `stdioCwd`: a stdio server whose config omits `cwd` runs in the
+    // workspace, which for the daemon is its resolved default workspace.
+    if let Some(root) = server.default_workspace_root() {
+        server.mcp_manager().set_default_stdio_cwd(root);
+    }
     server.mcp_manager().spawn_from_config(&config).await;
 
     let web_assets_dir = cli.web_assets.clone().or_else(|| {

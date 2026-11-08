@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::native::event_store::{
-    EventStore, EventStoreError, Message, RawWireEvent, WIRE_PROTOCOL_VERSION, fold_wire_events,
-    read_fold_rows, refuse_newer_wire_version,
+    EventStore, EventStoreError, Message, RawWireEvent, WIRE_MIN_READER_VERSION,
+    WIRE_PROTOCOL_VERSION, fold_wire_events, read_fold_rows, refuse_newer_wire_version,
 };
 use crate::rpc::types::TokenUsage;
 use crate::turn_loop::types::LLMMessage;
@@ -526,6 +526,32 @@ impl CompactionReport {
     }
 }
 
+/// Why a turn's workspace files could not be reverted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileRevertError {
+    /// The file no longer matches what the tool wrote, so restoring the
+    /// pre-image would destroy a change made after it (v2 `manual_edit` /
+    /// `deleted`). The undo is refused rather than applied over the user's
+    /// edit.
+    Conflict { path: String, reason: String },
+    /// The filesystem refused the operation.
+    Io(String),
+}
+
+impl std::fmt::Display for FileRevertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { path, reason } => write!(
+                f,
+                "cannot revert {path}: {reason}; restoring would overwrite that change"
+            ),
+            Self::Io(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for FileRevertError {}
+
 impl SqliteSessionStore {
     /// Open or create a SQLite database file at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, rusqlite::Error> {
@@ -640,6 +666,7 @@ impl SqliteSessionStore {
                 is_compaction BOOLEAN NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 protocol_version TEXT,
+                min_protocol_version TEXT,
                 FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_wire_session_seq ON wire_events(session_id, seq);
@@ -656,6 +683,10 @@ impl SqliteSessionStore {
         if !columns.contains("tool_calls") {
             let _ = conn.execute(
                 "ALTER TABLE wire_events ADD COLUMN protocol_version TEXT",
+                [],
+            );
+            let _ = conn.execute(
+                "ALTER TABLE wire_events ADD COLUMN min_protocol_version TEXT",
                 [],
             );
             let _ = conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_reason TEXT", []);
@@ -1398,48 +1429,104 @@ impl SqliteSessionStore {
         session_id: &str,
         turn_id: usize,
         workspace_root: &Path,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, FileRevertError> {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT path, content_before, status FROM session_file_history
+                "SELECT path, content_before, content_after, status, oversize
+                 FROM session_file_history
                  WHERE session_id = ?1 AND turn_id = ?2 ORDER BY id DESC",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| FileRevertError::Io(e.to_string()))?;
 
         let rows = stmt
             .query_map(params![session_id, turn_id as i64], |row| {
                 let path: String = row.get(0)?;
                 let content_before: Option<String> = row.get(1)?;
-                let status: String = row.get(2)?;
-                Ok((path, content_before, status))
+                let content_after: Option<String> = row.get(2)?;
+                let status: String = row.get(3)?;
+                let oversize: bool = row.get(4)?;
+                Ok((path, content_before, content_after, status, oversize))
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| FileRevertError::Io(e.to_string()))?;
 
         let mut reverted = Vec::new();
         for item in rows {
-            let (rel_path, before, status) = item.map_err(|e| e.to_string())?;
-            let full_path = workspace_root.join(&rel_path);
-            if status == "added" {
-                if full_path.exists() {
-                    let _ = std::fs::remove_file(&full_path);
-                }
-            } else if let Some(text) = before {
-                if let Some(parent) = full_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                std::fs::write(&full_path, text)
-                    .map_err(|e| format!("Failed to restore {}: {e}", full_path.display()))?;
-            } else {
-                // The pre-image was not stored (a file over the history byte
-                // cap). Treating "no pre-image" as "the file was added" deleted
-                // the user's file; leave it untouched instead.
+            let (rel_path, before, after, status, oversize) =
+                item.map_err(|e| FileRevertError::Io(e.to_string()))?;
+            if oversize {
+                // No pre-image was stored (over the history byte cap): v2 keeps
+                // such a change in its `gaps` set and restores nothing for it.
                 tracing::warn!(
                     %session_id,
-                    path = %full_path.display(),
+                    path = %rel_path,
                     "cannot revert a file change without a stored pre-image; leaving the file untouched"
                 );
                 continue;
+            }
+            let full_path = workspace_root.join(&rel_path);
+            let current = match std::fs::read_to_string(&full_path) {
+                Ok(text) => Some(text),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(FileRevertError::Io(format!(
+                        "Failed to read {}: {error}",
+                        full_path.display()
+                    )));
+                }
+            };
+
+            if status == "added" {
+                // Nothing to delete when the file is already gone; deleting a
+                // file whose content moved on would destroy a manual edit
+                // (v2 `manual_edit`).
+                let Some(current) = current else {
+                    continue;
+                };
+                if let Some(expected) = &after
+                    && *expected != current
+                {
+                    return Err(FileRevertError::Conflict {
+                        path: rel_path,
+                        reason: "it was edited after the tool wrote it".into(),
+                    });
+                }
+                std::fs::remove_file(&full_path).map_err(|e| {
+                    FileRevertError::Io(format!("Failed to remove {}: {e}", full_path.display()))
+                })?;
+            } else {
+                let Some(current) = current else {
+                    return Err(FileRevertError::Conflict {
+                        path: rel_path,
+                        reason: "it was deleted after the tool wrote it".into(),
+                    });
+                };
+                if let Some(expected) = &after
+                    && *expected != current
+                {
+                    return Err(FileRevertError::Conflict {
+                        path: rel_path,
+                        reason: "it was edited after the tool wrote it".into(),
+                    });
+                }
+                let Some(text) = before else {
+                    // The pre-image is missing for a non-oversize row: the same
+                    // "no pre-image" case, left untouched rather than guessed.
+                    tracing::warn!(
+                        %session_id,
+                        path = %full_path.display(),
+                        "cannot revert a file change without a stored pre-image; leaving the file untouched"
+                    );
+                    continue;
+                };
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        FileRevertError::Io(format!("Failed to create {}: {e}", parent.display()))
+                    })?;
+                }
+                std::fs::write(&full_path, text).map_err(|e| {
+                    FileRevertError::Io(format!("Failed to restore {}: {e}", full_path.display()))
+                })?;
             }
             reverted.push(rel_path);
         }
@@ -2216,8 +2303,8 @@ impl SqliteSessionStore {
         }
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO wire_events (id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at, protocol_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO wire_events (id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at, protocol_version, min_protocol_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 session_id,
@@ -2227,6 +2314,7 @@ impl SqliteSessionStore {
                 is_compaction,
                 created_at,
                 WIRE_PROTOCOL_VERSION,
+                WIRE_MIN_READER_VERSION,
             ],
         )?;
         Ok(conn.last_insert_rowid() as u64)

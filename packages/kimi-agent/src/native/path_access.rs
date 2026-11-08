@@ -861,6 +861,37 @@ mod tests {
         assert!(outside);
     }
 
+    /// v2's `resolvePathAccess` case with an injected shell-path bridge: the
+    /// caller hands the already-bridged path in (`/tmp/notes.txt` →
+    /// `C:/Temp/notes.txt`) and the whole pipeline — normalize, expand,
+    /// canonicalize, gate — must report it as an absolute path outside the
+    /// workspace.
+    ///
+    /// The pieces are covered separately (the bridge's own tests, the gate's
+    /// tests); this is the only one that runs the composition v2's test asserts.
+    #[test]
+    fn a_bridged_shell_path_resolves_and_reports_outside_workspace() {
+        let access = resolve_path_access(
+            "C:/Temp/notes.txt",
+            "C:\\workspace",
+            &["C:\\workspace".to_string()],
+            None,
+            PathClass::Win32,
+            PathAccessOperation::Read,
+            &WorkspaceAccessPolicy::default(),
+        )
+        .expect("an absolute path outside the workspace is allowed by the gate");
+        // The canonical spelling here is this crate's Win32 form (`\`); v2's
+        // `pathe` would return `C:/Temp/notes.txt`. Both open the same file, and
+        // the difference is recorded rather than silently normalized, because
+        // the same spelling reaches error messages.
+        assert_eq!(access.path, r"C:\Temp\notes.txt");
+        assert!(
+            access.outside_workspace,
+            "a path outside every root is reported, not silently treated as inside"
+        );
+    }
+
     #[test]
     fn test_gate_write_and_search_verbs() {
         let err = |op| {

@@ -283,3 +283,71 @@ async fn timeout_reports_v2_failure_shape() {
     assert!(result.content.contains("Agent timed out after 300 ms."));
     assert!(result.content.contains("resume_hint:"));
 }
+
+/// LLM that ends its turn immediately without writing any assistant text.
+struct EmptyLlm;
+impl LLM for EmptyLlm {
+    fn system_prompt(&self) -> &str {
+        "test"
+    }
+    fn model_name(&self) -> &str {
+        "empty-llm"
+    }
+    fn is_retryable_error(&self, _: &str) -> bool {
+        false
+    }
+    fn chat(
+        &self,
+        _: LLMChatParams,
+    ) -> BoxFuture<'_, Result<TurnChatResponse, Box<dyn std::error::Error + Send + Sync>>> {
+        Box::pin(async {
+            Ok(TurnChatResponse {
+                content: String::new(),
+                thinking: vec![],
+                tool_calls: vec![],
+                finish_reason: Some("stop".into()),
+                usage: TokenUsage::default(),
+                timing: None,
+            })
+        })
+    }
+}
+
+/// v2 `runAgentTurn` `awaitRun`: a turn that ends without assistant text has
+/// no handoff to report, so it fails with `AGENT_NO_FINAL_MESSAGE` instead of
+/// completing with an empty summary.
+#[tokio::test]
+async fn a_turn_without_a_final_message_fails_the_run() {
+    let manager = manager_with(Arc::new(EmptyLlm)).await;
+    register_looper(&manager).await;
+    let result = execute_agent(
+        &manager,
+        None,
+        &serde_json::json!({ "subagent_type": "looper", "prompt": "say nothing" }),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("an empty turn is a native outcome, not a fallback");
+
+    assert!(result.is_error, "{}", result.content);
+    assert!(
+        result.content.contains("status: failed"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("Subagent turn ended without a final message."),
+        "v2 AGENT_NO_FINAL_MESSAGE text: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("stop_reason: no_final_message"),
+        "the report names the reason: {}",
+        result.content
+    );
+}

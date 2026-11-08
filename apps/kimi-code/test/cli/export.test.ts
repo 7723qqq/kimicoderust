@@ -481,6 +481,11 @@ describe('kimi export', () => {
       uiMode: 'shell',
       model: 'k2',
       sessionId: undefined,
+      // Region resolution rides the telemetry options: the endpoint flushes
+      // against the region the CLI resolved at startup (v2 region profile).
+      region: expect.any(String),
+      regionSource: expect.any(String),
+      resolveRegion: expect.any(Function),
       endpoint: expect.any(Function),
       getAccessToken: expect.any(Function),
       onUnexpectedError: expect.any(Function),

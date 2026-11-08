@@ -1,6 +1,32 @@
 //! Shared HTTP client construction and URL validation for MCP transports.
 
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::sync::Mutex;
+
+/// Weak session-evidence listener slot (v2 `SessionEvidenceListener` for
+/// `{ kind: 'weak' }`). Weak evidence says the transport thinks the session may
+/// be dead — a resumable HTTP stream gave up reconnecting — which is not a
+/// close: the session is probed before the entry is failed
+/// (connection-manager.ts:658-668). At most one listener; later registrations
+/// replace earlier ones.
+pub(crate) type WeakEvidenceListener = Arc<Mutex<Option<Box<dyn Fn(String) + Send + Sync>>>>;
+
+/// Fire the weak-evidence listener with `reason`, or buffer it for replay
+/// (v2 `fireSessionEvidence` with `{ kind: 'weak' }`, client-http.ts:151-160).
+pub(crate) async fn fire_or_buffer_weak_evidence(
+    weak_evidence: &WeakEvidenceListener,
+    pending: &Arc<Mutex<Option<String>>>,
+    reason: String,
+) {
+    let listener = weak_evidence.lock().await;
+    if let Some(f) = listener.as_ref() {
+        f(reason);
+    } else {
+        *pending.lock().await = Some(reason);
+    }
+}
 
 /// TCP + TLS connection budget for every MCP HTTP client.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

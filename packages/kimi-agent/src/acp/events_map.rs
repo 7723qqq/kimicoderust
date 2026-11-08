@@ -568,6 +568,7 @@ mod tests {
             agent_id: "main".into(),
             turn_id: "turn-7".into(),
             delta: "hello".into(),
+            block: None,
         };
         assert_eq!(
             engine_event_to_session_update("sess-1", &event),
@@ -587,6 +588,7 @@ mod tests {
             agent_id: "main".into(),
             turn_id: "turn-7".into(),
             delta: "hmm".into(),
+            block: None,
         };
         assert_eq!(
             engine_event_to_session_update("sess-1", &event),

@@ -10,9 +10,9 @@ description:
   en: >
       Scripts and build infrastructure guarding repo quality: the architecture drift gate, i18n checks, parity checks and packaging.
       
-revision: 932e017600564470d7e43d7b25bb49896c06cca1
-updated_at: "2026-11-01T08:11:48.025Z"
-fingerprint: 3cc056cac9ce6cdaa79f52627a0f2b1a7eabbf35ffe2d128527007759d532215
+revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
+updated_at: "2026-11-07T16:57:31.928Z"
+fingerprint: 8d214a3043aafec6ca157997d2459094d80ce20b87f97f9fb441d943c4ef0102
 source:
   - path: "scripts/check-architecture-drift.mjs"
 ---

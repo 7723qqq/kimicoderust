@@ -54,6 +54,10 @@ impl NativeToolset {
             turn_id: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             loaded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             announced_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            tool_select_state: Arc::new(std::sync::Mutex::new(
+                crate::tools::tool_select_state::ToolSelectState::new(),
+            )),
+            announcement_revision: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             empty_disclosure_announced: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             selection_failures: Arc::new(std::sync::Mutex::new(Default::default())),
             wait_tally: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -63,6 +67,7 @@ impl NativeToolset {
             image_max_edge_px: None,
             model_capabilities: None,
             tool_select_enabled: false,
+            initial_tool_names: std::sync::Arc::new(std::sync::Mutex::new(None)),
             bash_auto_background: true,
             bash_task_timeout_s: None,
             tower_max_running_tasks: None,
@@ -157,12 +162,32 @@ impl NativeToolset {
         self.tool_select_enabled
     }
 
+    /// v2 `toolSelectService.enabled()`: the flag and the model capability
+    /// must both hold. A history recorded under a capable model is reshaped
+    /// when this is false (v2 `shapeUnsupportedDynamicToolContext`).
+    pub fn supports_dynamic_tool_loading(&self) -> bool {
+        self.tool_select_enabled && self.declares_capability("dynamically_loaded_tools")
+    }
+
+    /// Record the initial tool-name snapshot once, before any runtime MCP
+    /// discovery can change the table. v2 keeps one immutable snapshot per
+    /// session and reconciles later requests into it; without disclosure, a
+    /// runtime-only addition must not become an advertised top-level tool.
+    pub fn record_initial_tool_table_ref(&self, tools: &[crate::turn_loop::types::ToolInfo]) {
+        let mut snapshot = self
+            .initial_tool_names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if snapshot.is_none() {
+            *snapshot = Some(tools.iter().map(|tool| tool.name.clone()).collect());
+        }
+    }
+
     /// The turn-start disclosure announcement (v2
-    /// `toolSelectAnnouncementsService`): on every new turn, diff the current
-    /// deferred tool set against what was already announced and render the
-    /// `<tools_added>`/`<tools_removed>` block. `None` when disclosure is off
-    /// or nothing changed. The announced set lives on the toolset, so the
-    /// diff spans turns within a session.
+    /// `toolSelectAnnouncementsService`): reconcile the live registry into the
+    /// session's revision ledger, then walk changes since the last announced
+    /// revision and render the first delta that carries a loadable tool.
+    /// `None` when disclosure is off or nothing changed.
     pub fn take_disclosure_announcement(&self) -> Option<String> {
         if !self.tool_select_enabled || !self.declares_capability("dynamically_loaded_tools") {
             return None;
@@ -172,21 +197,57 @@ impl NativeToolset {
             .as_ref()
             .map(|mcp| mcp.deferred_tool_names_blocking())
             .unwrap_or_default();
-        let mut announced = self
-            .announced_tools
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let added: Vec<String> = loadable
-            .iter()
-            .filter(|name| !announced.contains(*name))
-            .cloned()
-            .collect();
-        let removed: Vec<String> = announced
-            .iter()
-            .filter(|name| !loadable.contains(*name))
-            .cloned()
-            .collect();
-        if added.is_empty() && removed.is_empty() {
+        let live = self
+            .mcp_manager
+            .as_ref()
+            .map(|mcp| mcp.live_definitions_blocking())
+            .unwrap_or_default();
+        let active = self
+            .mcp_manager
+            .as_ref()
+            .map(|mcp| mcp.active_definitions_blocking())
+            .unwrap_or_default();
+        let last_revision = self
+            .announcement_revision
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let announcement = {
+            let mut state = self
+                .tool_select_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.observe_live_updates(&active, &live);
+            if state.initial().is_none() {
+                // v2 `ToolSelectInitialized`: the first turn announces the
+                // whole loadable set as a snapshot, not a delta from an
+                // empty revision ledger.
+                state.initialize(live);
+                let added: Vec<String> = state
+                    .current()
+                    .iter()
+                    .filter(|tool| {
+                        tool.disclosure == crate::tools::registry::ToolDisclosure::Deferred
+                    })
+                    .map(|tool| tool.name.clone())
+                    .collect();
+                self.announcement_revision
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
+                if added.is_empty() {
+                    None
+                } else {
+                    Some((added, Vec::new()))
+                }
+            } else {
+                state.reconcile(live);
+                state
+                    .announcement_since(last_revision)
+                    .map(|(revision, added, removed)| {
+                        self.announcement_revision
+                            .store(revision, std::sync::atomic::Ordering::SeqCst);
+                        (added, removed)
+                    })
+            }
+        };
+        let Some((added, removed)) = announcement else {
             // Upstream #4190: when nothing can be loaded at all, say so once
             // (replacing the usage trailer), then stay silent until a real
             // delta resets the state.
@@ -200,9 +261,13 @@ impl NativeToolset {
                 return None;
             }
             return crate::tools::select_tools::render_loadable_tools_announcement(&[], &[], false);
-        }
+        };
         self.empty_disclosure_announced
             .store(loadable.is_empty(), std::sync::atomic::Ordering::SeqCst);
+        let mut announced = self
+            .announced_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for name in &added {
             announced.insert(name.clone());
         }
@@ -217,6 +282,15 @@ impl NativeToolset {
             &removed,
             !loadable.is_empty(),
         )
+    }
+
+    /// v2 `notifyUpdatedTools`: the next turn's one-shot reminder that a
+    /// same-name tool update is pinned but not applied in this session.
+    pub fn take_pending_update_notice(&self) -> Option<String> {
+        self.tool_select_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_pending_notice()
     }
 
     /// The model-declared capability probe shared by the media and
@@ -496,7 +570,17 @@ impl NativeToolset {
         mut tools: Vec<crate::turn_loop::types::ToolInfo>,
     ) -> Vec<crate::turn_loop::types::ToolInfo> {
         if !self.tool_select_enabled || !self.declares_capability("dynamically_loaded_tools") {
-            return tools;
+            let snapshot = self
+                .initial_tool_names
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            return match snapshot.as_ref() {
+                Some(initial) => tools
+                    .into_iter()
+                    .filter(|tool| initial.contains(&tool.name))
+                    .collect(),
+                None => tools,
+            };
         }
         let deferred = self
             .mcp_manager

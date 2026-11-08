@@ -62,9 +62,14 @@ describe('Session.steer', () => {
 
       // v1 treats an idle steer like a prompt — it launches a fresh turn and
       // updates title/lastPrompt. v2's steer enqueues first (which itself
-      // launches the turn) and converges on the same end state: the launched
-      // turn is returned instead of rejecting.
-      await expect(session.steer('also do this')).resolves.toBeUndefined();
+      // launches the turn) and converges on the same end state; the submission
+      // result is returned so a host can pair its optimistic entry with the
+      // engine-minted prompt id (v2 #4627).
+      const submission = await session.steer('also do this');
+      expect(submission.state).toBe('running');
+      expect(submission.steered).toBe(false);
+      expect(submission.promptId).toMatch(/^prompt-/);
+      expect(submission.turnId).toBe(0);
       const listed = await harness.listSessions({ workDir });
       const steered = listed.find((item) => item.id === 'ses_steer_wire');
       expect(steered?.title).toBe('also do this');

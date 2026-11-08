@@ -15,15 +15,6 @@ pub(super) const SUBAGENT_STOPPED_MESSAGE: &str = "The subagent was stopped befo
 pub(super) const USER_INTERRUPTED_SUBAGENT_MESSAGE: &str =
     "The subagent was stopped before it finished by user.";
 
-/// The v2 timeout resume hint (`formatForegroundAgentFailure`), verbatim.
-pub(super) fn timeout_resume_hint(agent_id: &str) -> String {
-    format!(
-        "resume_hint: Continue with Agent(resume=\"{agent_id}\", prompt=\"continue\"). \
-Use agent_id only; do not set subagent_type. The subagent retains its prior context; \
-redo any unfinished tool call if its result was lost."
-    )
-}
-
 /// The v2 timeout duration rendering (`formatSubagentTimeoutDescription`).
 pub fn format_timeout_description(ms: u64) -> String {
     const HOUR: u64 = 60 * 60 * 1000;
@@ -135,7 +126,6 @@ Usage notes:
 - When the task continues earlier work a subagent already did, prefer resuming that agent (pass its `resume` id) over spawning a fresh instance — the resumed agent keeps its prior context.
 - A subagent's result is only visible to you, not to the user. When the user needs to see what a subagent produced, summarize the relevant parts yourself in your own reply.
 - Subagents use a fixed 2-hour timeout. If one times out, resume the same agent instead of starting over.
-- Context forking: when the task builds on this conversation, pass `fork: true` instead of briefing from scratch — the subagent then starts with a snapshot of your completed history (inheriting your own agent type, tool set, and model), so the prompt only needs the task itself.
 
 Once a subagent is running, leave that scope to it: do not redo its searches or reads in parallel, and do not abandon it midway and finish the job manually.";
 
@@ -330,10 +320,16 @@ pub(super) fn agent_tool_def_impl(
         "{AGENT_TOOL_DESCRIPTION}\n\nAvailable agent types:\n{}",
         available.trim_end()
     );
-    description.insert_str(
-        AGENT_TOOL_DESCRIPTION.len(),
-        &format!("\n\n{background_description}"),
-    );
+    // v2 renders the fork guidance from `agent-fork.md`, and only while the
+    // `subagent_fork` flag is on — the same gate the schema parameter uses
+    // (`stripSubagentForkParameter`). The sentence is v2's, verbatim.
+    let mut extra = format!("\n\n{background_description}");
+    if crate::subagent::fork::subagent_fork_enabled() {
+        extra.push_str(
+            "\n\nContext forking: pass `fork: true` to start with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set.",
+        );
+    }
+    description.insert_str(AGENT_TOOL_DESCRIPTION.len(), &extra);
     // v2 `buildSubagentModelDescriptions`: a pool with a single entry pins
     // every spawn, so the listing and the `model` parameter appear only when
     // a real choice exists (v2 `exposesSubagentModelChoice`).
@@ -368,7 +364,7 @@ pub(super) fn agent_tool_def_impl(
             },
             "fork": {
                 "type": "boolean",
-                "description": "Fork the current context: the subagent starts with a snapshot of this agent's completed conversation history instead of zero context, inheriting this agent's agent type, tool set, and model. A non-empty resume is rejected. If subagent_type is provided, it must match this agent's type."
+                "description": "Start with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set."
             }
         },
         // Only `prompt` is required: `description` is cosmetic (UI label)

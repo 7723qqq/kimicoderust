@@ -19,26 +19,44 @@
 //! activated in the product yet (double reporting until the M1d ownership
 //! flip), and its wire schema only carries the three turn-lifecycle events.
 //!
-//! `KIMI_CODE_REPEAT_BREAKER` (upstream #3995, v2 `REPEAT_BREAKER_ENV`): an
-//! explicit falsy value turns the repeat ladder off — no streak reminders and
-//! no force-stop — while same-step dedup stays active (v2 test
-//! `keeps same-step dedupe active when KIMI_CODE_REPEAT_BREAKER is 0`).
+//! `KIMI_CODE_REPEAT_BREAKER` (upstream #3995, v2 `REPEAT_BREAKER_ENV`): the
+//! ladder is opt-in. v2 shipped it default-on in #3995 and then turned it off
+//! by default (`.changeset/repeat-breaker-off-by-default.md`, v2 commit
+//! `dadd6e4a43`: "Stop interrupting a turn after repeated identical tool calls
+//! by default"): an explicit truthy value arms the streak reminders and the
+//! force-stop, and while it is off the turn is never interrupted — same-step
+//! dedup stays active either way (v2 tests `stays off by default when
+//! KIMI_CODE_REPEAT_BREAKER is unset` and `keeps same-step dedupe active when
+//! KIMI_CODE_REPEAT_BREAKER is 0`).
 
 use crate::turn_loop::types::{ExecutableToolResult, ToolCall};
 
 /// The env switch for the repeat ladder (v2 `REPEAT_BREAKER_ENV`).
 pub const REPEAT_BREAKER_ENV: &str = "KIMI_CODE_REPEAT_BREAKER";
 
-/// Whether the repeat ladder (reminders + force-stop) is on: defaults on,
-/// only an explicit falsy env value disables it.
+/// Whether the repeat ladder (reminders + force-stop) is on: defaults off,
+/// only an explicit truthy env value enables it (v2 `parseBooleanEnv(...)
+/// === true`).
 pub fn repeat_breaker_enabled() -> bool {
-    crate::env::env_switch_default_on(REPEAT_BREAKER_ENV)
+    crate::env::env_switch_default_off(REPEAT_BREAKER_ENV)
 }
 
 const REPEAT_REMINDER_1_START: u32 = 3;
 const REPEAT_REMINDER_2_START: u32 = 5;
 const REPEAT_REMINDER_3_START: u32 = 8;
 const REPEAT_FORCE_STOP_STREAK: u32 = 12;
+
+/// v2 `HANDOFF_VETO_TEXT`: the result a tool call gets in the post-force-stop
+/// handoff step. The call is refused, not executed — the step accepts text
+/// only, and the refusal is what ends the turn.
+pub fn handoff_veto_text() -> String {
+    format!(
+        "This turn was ended by the repeat breaker after the same tool call was issued \
+{REPEAT_FORCE_STOP_STREAK} times in a row. This step accepts a text response only, \
+so the tool call was not executed. Reply in text: the current blocker, what you tried, \
+and what you need next."
+    )
+}
 
 const REMINDER_TEXT_1: &str = "\n\n<system-reminder>\n\
 The same tool call has been repeated several times in a row. \
@@ -79,6 +97,20 @@ pub fn canonical_args(arguments: &serde_json::Value) -> String {
 /// The dedup identity of a call (v2 `makeKey`: `"<tool> <canonical args>"`).
 pub fn make_key(tool_name: &str, arguments: &serde_json::Value) -> String {
     format!("{tool_name} {}", canonical_args(arguments))
+}
+
+/// The identity a step plans a call under — v2 `registerSkipped`'s argument
+/// choice (`toolDedupeService.ts:475-482`).
+///
+/// A payload that did not decode keys on the text the provider sent, not on the
+/// decoded `{}`: decoding collapses every broken payload to the same value, so
+/// keying on it would make two *different* broken calls look like one repeated
+/// call and force-stop a turn that is not stuck at all.
+pub fn dedupe_key(call: &ToolCall) -> String {
+    match call.args_parse_error.as_ref() {
+        Some(failure) => make_key(&call.name, &serde_json::Value::String(failure.raw.clone())),
+        None => make_key(&call.name, &call.arguments),
+    }
 }
 
 /// One step's dedup plan, computed before execution.
@@ -124,7 +156,7 @@ impl DedupeGuard {
     /// same-step half of v2 `checkToolCall`). The guard's exempt-id source
     /// advances, so planning is `&mut`.
     pub fn plan_step(&mut self, calls: &[ToolCall]) -> StepPlan {
-        self.plan_step_by(calls, |call| Some(make_key(&call.name, &call.arguments)))
+        self.plan_step_by(calls, |call| Some(dedupe_key(call)))
     }
 
     /// Like [`Self::plan_step`], with a per-call keying function. Calls
@@ -253,6 +285,28 @@ mod tests {
     }
 
     #[test]
+    fn breaker_defaults_off_when_the_env_is_unset() {
+        // `repeat-breaker-off-by-default` (v2 commit `dadd6e4a43`): with the
+        // switch unset the turn is never interrupted, however long the streak.
+        let _scope = crate::test_support::EnvScope::unset(&[REPEAT_BREAKER_ENV]);
+        assert!(!repeat_breaker_enabled());
+        let mut guard = DedupeGuard::new();
+        for _ in 0..12 {
+            let plan = guard.plan_step(&[read_call("c1", "a.rs")]);
+            let mut results = vec![result("ok")];
+            assert!(!guard.finalize_step(&plan, &mut results));
+            assert_eq!(results[0].content, "ok");
+        }
+    }
+
+    #[test]
+    fn explicit_truthy_env_arms_the_breaker() {
+        let _scope =
+            crate::test_support::EnvScope::set(vec![(REPEAT_BREAKER_ENV, Some("1".into()))]);
+        assert!(repeat_breaker_enabled());
+    }
+
+    #[test]
     fn canonical_args_sorts_object_keys() {
         let a = serde_json::json!({ "b": 1, "a": { "d": 2, "c": 3 } });
         let b = serde_json::json!({ "a": { "c": 3, "d": 2 }, "b": 1 });
@@ -264,6 +318,54 @@ mod tests {
     fn make_key_combines_name_and_args() {
         let key = make_key("Read", &serde_json::json!({ "path": "a.rs" }));
         assert_eq!(key, r#"Read {"path":"a.rs"}"#);
+    }
+
+    fn broken_call(id: &str, raw: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "Bash".into(),
+            arguments: serde_json::json!({}),
+            extras: None,
+            args_parse_error: Some(crate::turn_loop::types::ArgsParseError {
+                raw: raw.into(),
+                error: "EOF while parsing a value".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn identical_broken_payloads_streak() {
+        // v2 `counts identical malformed argument texts as repeats`: the raw
+        // text is the identity, so the same broken payload still earns the
+        // ladder.
+        let mut guard = DedupeGuard::with_repeat_breaker(true);
+        let mut last = String::new();
+        for i in 0..3 {
+            let plan = guard.plan_step(&[broken_call(&format!("c{i}"), r#"{"command":"#)]);
+            let mut results = vec![result("bad")];
+            guard.finalize_step(&plan, &mut results);
+            last = results[0].content.clone();
+        }
+        assert!(last.contains("repeated several times in a row"), "{last}");
+    }
+
+    #[test]
+    fn different_broken_payloads_never_streak() {
+        // v2 `does not treat different malformed argument texts as the same
+        // call`. Every broken payload decodes to the same `{}`, so keying on
+        // the decoded value made twelve *different* calls look like one stuck
+        // call and force-stopped the turn.
+        let mut guard = DedupeGuard::with_repeat_breaker(true);
+        for i in 0..12 {
+            let raw = format!(r#"{{"command":"ls {i}"#);
+            let plan = guard.plan_step(&[broken_call(&format!("c{i}"), &raw)]);
+            let mut results = vec![result("bad")];
+            assert!(
+                !guard.finalize_step(&plan, &mut results),
+                "distinct payload {raw} must not force-stop the turn"
+            );
+            assert_eq!(results[0].content, "bad", "no reminder either");
+        }
     }
 
     #[test]

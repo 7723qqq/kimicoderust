@@ -1938,3 +1938,56 @@ async fn test_subagent_parent_cancel_fires_interrupt_hook() {
     let text = wait_for_marker(&marker).await;
     assert!(text.contains("Interrupt"), "{text:?}");
 }
+
+/// v2 `assertSubagentDepthAllowed` (`session/agentLifecycle/subagentMetadata.ts`):
+/// every spawn stamps caller depth + 1, and a caller already at
+/// `MAX_SUBAGENT_DEPTH` cannot spawn — the chain stops at eight hops.
+#[tokio::test]
+async fn delegation_depth_increments_and_is_refused_at_the_cap() {
+    let manager = SubagentManager::new();
+    manager
+        .register_definition(SubagentDefinition {
+            name: "research".into(),
+            description: String::new(),
+            system_prompt: String::new(),
+            tools: vec![],
+            disallowed_tools: vec![],
+            when_to_use: None,
+            prompt_prefix: None,
+            summary_policy: None,
+            model: None,
+            subagents: Some(vec!["research".into()]),
+        })
+        .await;
+
+    assert_eq!(manager.depth_of(crate::callbacks::MAIN_AGENT_ID).await, 0);
+
+    let mut caller = crate::callbacks::MAIN_AGENT_ID.to_string();
+    for generation in 1..=MAX_SUBAGENT_DEPTH {
+        let id = manager
+            .spawn_child(&caller, "research", "worker")
+            .await
+            .unwrap_or_else(|error| panic!("spawn at depth {generation} failed: {error}"));
+        assert_eq!(
+            manager.depth_of(&id).await,
+            generation,
+            "a child of depth {} is stamped {}",
+            generation - 1,
+            generation
+        );
+        caller = id;
+    }
+
+    let error = manager
+        .spawn_child(&caller, "research", "worker")
+        .await
+        .expect_err("a caller at the cap cannot spawn");
+    assert!(
+        error.contains("delegation depth exceeded"),
+        "v2 SUBAGENT_DEPTH_EXCEEDED text: {error}"
+    );
+    assert!(
+        error.contains(&MAX_SUBAGENT_DEPTH.to_string()),
+        "the refusal names the cap: {error}"
+    );
+}

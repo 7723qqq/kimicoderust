@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
-import type { KimiHarness, PromptPart, Session } from '@moonshot-ai/kimi-code-sdk';
+import type {
+  KimiHarness,
+  PromptPart,
+  PromptSubmissionResult,
+  Session,
+} from '@moonshot-ai/kimi-code-sdk';
 
 import { t } from '#/i18n';
 
@@ -71,6 +76,15 @@ export interface MessageDispatchHost {
   setAppState(patch: Partial<AppState>): void;
   runShellCommandFromInput(command: string): Promise<void>;
   track(event: string, properties?: Parameters<KimiHarness['track']>[1]): void;
+  /** v2 #4627: register a batch of steered entries before it is submitted. */
+  noteSteerDelivery?(entries: readonly TranscriptEntry[]): void;
+  /** Apply the engine's submission result to the batch it belongs to. */
+  applySteerSubmission?(
+    entries: readonly TranscriptEntry[],
+    result: PromptSubmissionResult | undefined,
+  ): void;
+  /** Stop showing the batch as pending after a local dispatch failure. */
+  releaseSteerEntries?(entries: readonly TranscriptEntry[]): void;
 }
 
 function nonEmptyIds(ids: readonly number[] | undefined): readonly number[] | undefined {
@@ -731,16 +745,17 @@ export class MessageDispatchController {
       return;
     }
 
-    for (const item of input) {
-      this.host.appendTranscriptEntry({
-        id: nextTranscriptId(),
-        kind: 'user',
-        turnId: this.host.streamingUI.getTurnContext().turnId,
-        renderMode: 'plain',
-        content: item.text,
-        imageAttachmentIds: nonEmptyIds(item.imageAttachmentIds),
-      });
-    }
+    const steeredEntries: TranscriptEntry[] = input.map((item) => ({
+      id: nextTranscriptId(),
+      kind: 'user',
+      turnId: this.host.streamingUI.getTurnContext().turnId,
+      renderMode: 'plain',
+      content: item.text,
+      imageAttachmentIds: nonEmptyIds(item.imageAttachmentIds),
+      // v2 #4627: shown dimmed until the engine reports the message read.
+      steerPending: true,
+    }));
+    for (const entry of steeredEntries) this.host.appendTranscriptEntry(entry);
 
     // Dedupe per item, not across the batch: each queued message retained a
     // shared medium once, so the batch's id multiplicity is the retain count.
@@ -765,12 +780,13 @@ export class MessageDispatchController {
             ),
           },
     );
-    this.staging.trackDispatch(
-      stagingLease,
-      session.steer(combineSteerInput(resolvedInput)),
-      (error) => {
-        this.host.showError(`Failed to steer: ${formatErrorMessage(error)}`);
-      },
-    );
+    this.host.noteSteerDelivery?.(steeredEntries);
+    const request = session.steer(combineSteerInput(resolvedInput)).then((result) => {
+      this.host.applySteerSubmission?.(steeredEntries, result);
+    });
+    this.staging.trackDispatch(stagingLease, request, (error) => {
+      this.host.releaseSteerEntries?.(steeredEntries);
+      this.host.showError(`Failed to steer: ${formatErrorMessage(error)}`);
+    });
   }
 }

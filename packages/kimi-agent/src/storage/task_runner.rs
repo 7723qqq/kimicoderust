@@ -150,7 +150,8 @@ pub enum TaskStatus {
     /// a `stop()` landed before completion (v2 `AgentTaskStatus.failed`).
     Failed,
     Killed,
-    /// A task the previous process left mid-flight: the entry was persisted
+    TimedOut,
+    /// A task the previous process..." left mid-flight: the entry was persisted
     /// as running when the app exited, so this process has no handle to it
     /// (v2 `AgentTaskStatus`'s `lost`).
     Lost,
@@ -162,19 +163,18 @@ impl TaskStatus {
     /// six values: `running` / `completed` / `failed` / `timed_out` /
     /// `killed` / `lost`.
     ///
-    /// `timed_out` has no arm here on purpose. v2 reaches it through
-    /// `coerceTimeoutSettlement` (`agent/task/taskService.ts:178-186`), which
-    /// rewrites a `killed` settlement when the task had a timeout — and the
-    /// per-task timeout mechanism that sets that flag is not ported yet (it
-    /// rides the same gap as the `keepAliveOnExit` flag). Adding the variant
-    /// before its producer would put a status on the wire that nothing can
-    /// ever emit.
+    /// `timed_out` is now emitted by the TaskRunner's own deadline arm when a
+    /// task was spawned with a `timeout_ms` (the fork's equivalent of v2's
+    /// `coerceTimeoutSettlement`, which rewrote a `killed` settlement when the
+    /// task had a timeout). Background bash tasks feed that deadline from
+    /// `[background].bash_task_timeout_s` / the per-call `timeout` argument.
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskStatus::Running => "running",
             TaskStatus::Completed => "completed",
             TaskStatus::Failed => "failed",
             TaskStatus::Killed => "killed",
+            TaskStatus::TimedOut => "timed_out",
             TaskStatus::Lost => "lost",
         }
     }
@@ -243,6 +243,26 @@ pub struct TaskSpawnMeta<'a> {
     /// previous-session reminder can name the `Agent(resume=…)` that picks the
     /// context back up (v2 `previousSessionTaskLine`'s `agentId`).
     pub agent_id: Option<&'a str>,
+    /// Optional per-task deadline in milliseconds. `None` means no timeout,
+    /// which keeps every existing caller's behavior unchanged (v2's default).
+    pub timeout_ms: Option<u64>,
+}
+
+/// Generate a background task id (v2 `generateTaskId`): `{kind}-{8 chars}`,
+/// where the suffix is drawn from `[0-9a-z]`.
+///
+/// The shape is load-bearing, not cosmetic: v2's persistence layer keys a
+/// task's output as `tasks/<id>/output.log` behind
+/// `VALID_TASK_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-z]{8}$/`, and a reload
+/// skips anything that does not match. `kind` is the task kind the engine
+/// already reports (`bash` / `agent`).
+pub fn generate_task_id(kind: &str) -> String {
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut suffix = String::with_capacity(8);
+    for _ in 0..8 {
+        suffix.push(ALPHABET[fastrand::usize(..ALPHABET.len())] as char);
+    }
+    format!("{kind}-{suffix}")
 }
 
 /// One registered background task.
@@ -299,6 +319,9 @@ pub struct BackgroundLimits {
     /// `bash_task_timeout_s`: default timeout for background Bash tasks;
     /// `Some(0)` means "no timeout".
     pub bash_task_timeout_s: Option<u64>,
+    /// v2 `keepAliveOnExit`: leave background tasks running on session close.
+    /// `None` / false means stop them (default).
+    pub keep_alive_on_exit: Option<bool>,
 }
 
 impl BackgroundLimits {
@@ -312,6 +335,7 @@ impl BackgroundLimits {
         max_running_tasks: Option<u64>,
         bash_auto_background_on_timeout: Option<bool>,
         bash_task_timeout_s: Option<u64>,
+        keep_alive_on_exit: Option<bool>,
     ) -> Self {
         Self {
             kill_grace_period_ms: kill_grace_period_ms.filter(|value| *value > 0),
@@ -320,6 +344,7 @@ impl BackgroundLimits {
                 .and_then(|value| u32::try_from(value).ok()),
             bash_auto_background_on_timeout,
             bash_task_timeout_s,
+            keep_alive_on_exit,
         }
     }
 }
@@ -358,6 +383,8 @@ pub struct TaskRunner {
     /// Mutable so a shared runner can pick the value up after construction
     /// (the daemon receives its config after the runner exists).
     kill_grace: Mutex<Duration>,
+    /// v2 `keepAliveOnExit`: when true, `stop_session` leaves running tasks alone.
+    keep_alive_on_exit: Mutex<bool>,
     /// Cap on concurrently running tasks
     /// (`[background].max_running_tasks`); `0` is unlimited.
     max_running: AtomicUsize,
@@ -408,6 +435,7 @@ impl TaskRunner {
             liveness_check: Mutex::new(None),
             hook_guard: Mutex::new(None),
             kill_grace: Mutex::new(STOP_GRACE),
+            keep_alive_on_exit: Mutex::new(false),
             max_running: AtomicUsize::new(0),
             notification_bell: tokio::sync::watch::channel(0).0,
         }
@@ -421,17 +449,16 @@ impl TaskRunner {
         self,
         kill_grace_period_ms: Option<u64>,
         max_running_tasks: Option<u32>,
+        keep_alive_on_exit: Option<bool>,
     ) -> Self {
-        self.apply_background_limits(kill_grace_period_ms, max_running_tasks);
+        self.apply_background_limits(kill_grace_period_ms, max_running_tasks, keep_alive_on_exit);
         self
     }
-
-    /// [`Self::with_background_limits`] on a shared runner: the daemon
-    /// resolves its config after the runner was built.
     pub fn apply_background_limits(
         &self,
         kill_grace_period_ms: Option<u64>,
         max_running_tasks: Option<u32>,
+        keep_alive_on_exit: Option<bool>,
     ) {
         if let Some(ms) = kill_grace_period_ms.filter(|ms| *ms > 0) {
             *self.kill_grace.lock().unwrap() = Duration::from_millis(ms);
@@ -442,6 +469,14 @@ impl TaskRunner {
         {
             self.max_running.store(cap, Ordering::Relaxed);
         }
+        if let Some(value) = keep_alive_on_exit {
+            *self.keep_alive_on_exit.lock().unwrap() = value;
+        }
+    }
+
+    /// v2 `keepAliveOnExit`: when true, `stop_session` leaves running task alive.
+    pub fn set_keep_alive_on_exit(&self, value: bool) {
+        *self.keep_alive_on_exit.lock().unwrap() = value;
     }
 
     /// Install the lifecycle event sink (the server does this once, fanning
@@ -536,6 +571,7 @@ impl TaskRunner {
                 kind: "tool",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             id,
             description,
@@ -606,23 +642,32 @@ impl TaskRunner {
         let spawn_kind = entry.kind.clone();
         let spawn_subagent_type = entry.subagent_type.clone();
         let spawn_agent_id = entry.agent_id.clone();
+        let spawn_timeout = meta.timeout_ms.map(Duration::from_millis);
         tasks.insert(id.clone(), entry);
         let runner = Arc::clone(self);
         let task_id = id.clone();
         let handle = tokio::spawn(async move {
-            let output = tokio::select! {
-                biased;
-                output = future => Some(output),
-                _ = cancelled(cancel, cancel_notify) => None,
+            let output: Result<TaskOutcome, bool> = if let Some(timeout) = spawn_timeout {
+                tokio::select! {
+                    biased;
+                    output = future => Ok(output),
+                    _ = cancelled(cancel, cancel_notify) => Err(false),
+                    _ = tokio::time::sleep(timeout) => Err(true),
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    output = future => Ok(output),
+                    _ = cancelled(cancel, cancel_notify) => Err(false),
+                }
             };
             let (status, stop_reason, output) = match output {
-                // The work finished and said whether it succeeded. This is the
-                // arm that used to collapse both verdicts into `completed`.
-                Some(outcome) => {
+                Ok(outcome) => {
                     let (status, output) = outcome.settle();
                     (status, None, output)
                 }
-                None => {
+                Err(true) => (TaskStatus::TimedOut, None, None),
+                Err(false) => {
                     // Killed via the cancel flag, which only `stop()` sets —
                     // and `stop()` records the reason on the entry up front —
                     // so the wrapper settles with `None` and never overwrites
@@ -1001,6 +1046,9 @@ impl TaskRunner {
     /// that does not yield stays `running` in the entry until its wrapper
     /// settles it; the flag and the reason are what this guarantees.
     pub async fn stop_session(&self, session_id: &str, reason: Option<&str>) -> Vec<String> {
+        if *self.keep_alive_on_exit.lock().unwrap() {
+            return Vec::new();
+        }
         let reason = reason
             .map(str::trim)
             .filter(|r| !r.is_empty())

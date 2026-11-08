@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createKimiHarness, ErrorCodes, type Event, type KimiError } from '#/index';
 
+import { listenOnEphemeralPort } from './listen-server';
 import { makeTempDir, removeTempDirs } from './session-runtime-helpers';
 import { TEST_IDENTITY } from './test-identity';
 
@@ -119,9 +120,11 @@ describe('Session plan, compact, usage, and resume APIs', () => {
     try {
       const session = await harness.createSession({ id: 'ses_compact_runtime', workDir });
 
-      await expect(session.compact({ instruction: 'Keep important facts.' })).rejects.toMatchObject({
-        code: 'compaction.unable',
-      });
+      await expect(session.compact({ instruction: 'Keep important facts.' })).rejects.toMatchObject(
+        {
+          code: 'compaction.unable',
+        },
+      );
     } finally {
       await harness.close();
     }
@@ -192,9 +195,7 @@ describe('Session plan, compact, usage, and resume APIs', () => {
         res.end();
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const address = server.address();
-    const port = typeof address === 'object' && address !== null ? address.port : 0;
+    const port = await listenOnEphemeralPort(server);
 
     const homeDir = await makeTempDir(tempDirs, 'kimi-sdk-usage-turn-home-');
     const workDir = await makeTempDir(tempDirs, 'kimi-sdk-usage-turn-work-');
@@ -344,7 +345,9 @@ max_context_size = 200000
       expect(forkPlan).toEqual({
         id: sourcePlan.id,
         content: 'source plan',
-        path: toPosix(join(forkSummary!.sessionDir, 'agents', 'main', 'plans', `${sourcePlan.id}.md`)),
+        path: toPosix(
+          join(forkSummary!.sessionDir, 'agents', 'main', 'plans', `${sourcePlan.id}.md`),
+        ),
       });
       expect(forkPlan?.path).not.toBe(sourcePlan.path);
       await expect(fork.getGoal()).resolves.toEqual({ goal: null });

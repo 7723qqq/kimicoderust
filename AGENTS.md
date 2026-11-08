@@ -2,7 +2,7 @@
 
 Reply in the same language as the user.
 
-This is a TypeScript monorepo built for agent-assisted development. This file is the single source of truth for project-wide knowledge. Keep it focused on the project map, hard constraints, and workflow requirements — things every task needs to know.
+This is a TypeScript monorepo built for agent-assisted development. This file is the single source of truth for project-wide knowledge. Keep it focused on the project map, hard constraints, and workflow requirements — things every task needs to know. The project's standing local references (the user's fork at `D:\kimi\kimi-code` and the Bun 1.4.4 source at `D:\kimi\bun`) are recorded in `MEMORY.md`; use them without asking again.
 
 > **Merging, porting, or triaging upstream changes? Read `## Upstream Merge Policy` before judging
 > anything.** `packages/kimi-agent` is a **port of v2 (`agent-core-v2`)**, not an independent
@@ -12,7 +12,7 @@ This is a TypeScript monorepo built for agent-assisted development. This file is
 > irrelevant": deleting `packages/agent-core-v2/**` erased upstream's diff carrier, so `git log` /
 > `git blame` show no link at all. There is a mechanical gate for exactly this: run
 > **`bun run check:upstream-v2-delta`** (allowlist `scripts/upstream-v2-delta-allowlist.json`,
-> verdicts recorded in `packages/kimi-agent/ROADMAP.md` §6). **Refresh the ref before you trust
+> verdicts recorded in the allowlist). **Refresh the ref before you trust
 > it** — a stale `refs/remotes/upstream/main` silently narrows the range and reports a green
 > "all triaged": `git fetch upstream main:refs/remotes/upstream/main --force`.
 > (This pointer sits near the top on purpose — tooling truncates this file when it is injected as
@@ -52,7 +52,7 @@ This is a TypeScript monorepo built for agent-assisted development. This file is
 - **Rust Native Tools** — Performance-critical tools (grep, glob, edit, read, write, bash, token counting, output truncation) rewritten in Rust as a native Node addon, significantly faster than JS.
 - **Windows launchers** — `start-native.bat` builds the native Rust tools if needed and launches the CLI in dev mode (supports `--web` to launch the Web UI powered by native Rust server); `start-web-native.bat` provides one-click launch for the native Web UI; `start-desktop.bat` builds and launches a locally vendored desktop shell when `apps/kimi-desktop` is present (the shell source is not tracked in this fork).
 - **Bun toolchain & packaging** — Bun is both the package manager (hoisted workspace, `bun.lock`) and the sole native-binary packaging engine (`bun build --compile` via `build-bun.mjs`); the former pnpm workspace setup and the Node SEA build chain were retired. Install, build, lint, typecheck, the native build pipeline, and the vitest suites (`bun --bun run test`) all run on Bun; CI installs no Node. Self-update is fully native Bun binary based.
-- **DeepSeek Harness capability fusion** — Selected capabilities ported from [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (MIT), including the `ui-trajectory` / `ui-conversation` / `ui-subagent` / `ui-deliverables` semantics under `apps/kimi-web` and the Normify plugin (see the next bullet). Ported modules carry a source note in their header; capability selection and comparison notes live in the session report. **MCP connection management is *not* part of this fusion**: `packages/kimi-agent/src/mcp/` is a port of v2's `mcpCore/connection-manager.ts`, and like v2 it exposes only explicit on-demand reconnect entry points (`McpManager::reconnect`, `McpManager::reconnect_after_current`, reachable through the server's `:reconnect` / `:restart` control endpoints) — there is no automatic reconnect, no timer, and no backoff anywhere in the engine.
+- **DeepSeek Harness capability fusion** — Selected capabilities ported from [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (MIT), including the `ui-trajectory` / `ui-conversation` / `ui-subagent` / `ui-deliverables` semantics under `apps/kimi-web` and the Normify plugin (see the next bullet). Ported modules carry a source note in their header; capability selection and comparison notes live in the session report. **MCP connection management is *not* part of this fusion**: `packages/kimi-agent/src/mcp/` is a port of v2's `mcpCore/connection-manager.ts`, and it exposes the same explicit on-demand reconnect entry points (`McpManager::reconnect`, `McpManager::reconnect_after_current`, reachable through the server's `:reconnect` / `:restart` control endpoints). **One recorded difference:** v2's workspace host also enables its own startup retry (`reconnectRetryEnabled: true`) — a failed connect whose kind is not `config` / `protocol` / `auth-static` enters `retryWaiting` and is retried on an exponential backoff (5 s initial, 300 s cap, 50–100 % jitter; `connection-manager.ts:687,692-696`). This engine has no such scheduler: a transient startup failure stays `failed` until an explicit reconnect. Implementing it needs a per-failure kind classification (`McpError` does not carry v2's `McpFailureKind`) and an `Arc`-owning scheduler the manager's `&self` methods do not have.
 - **Normify built-in plugin** — The Normify architecture-diagram system (ported from [yan-mc/dsh-normify](https://github.com/yan-mc/dsh-normify) v0.5.4, MIT) ships as a built-in default plugin: `packages/normify` hosts the host-agnostic engine (30 `normify_*` tools, zero-tolerance validation, deterministic compile, single-file interactive HTML renderer), exposed over MCP (`normify-mcp`) and a `normify` CLI. The `plugins/official/normify` copy (normify-gen skill + MCP server) is embedded into the CLI via `?raw` imports and seeded into the engine's plugin registry on the first `ensurePluginStore` call (`packages/node-sdk/src/native/builtin-normify.ts`) — zero install, enabled by default; a user disable is preserved and a removal is remembered via an opt-out marker. Plugin stdio servers declared `command: "node"` run inside the packaged binary via `__plugin_run_node` (`initPluginStore` `nodeRunner` arg), so no system Node.js is required. After changing normify engine source, run `bun run --filter '@moonshot-ai/normify' build:plugin` to refresh the embedded plugin bundle.
 
 > For a user-facing summary of these additions, see `README.md` → "What's Different in This Fork" (and its Chinese mirror `README.zh-CN.md` → "本 Fork 新增特性").
@@ -121,13 +121,15 @@ it from `packages/i18n-catalog/src/locales/en.ts` when you touch the catalog.
 
 ### Known gaps
 
-- **`ToolExecuteResponse.note` has no napi consumer.** The engine emits it on the
-  `tool.native` event, but `sdk-rpc-client-native.ts` forwards only `content` and
-  `is_error`, and the ACP projection ignores it too. It is carried through
-  `tool_result_truncation` unchanged and never appended to `content`. Notes are
-  localized anyway (so they are correct the day a client reads them), but today
-  `engine.tools.readMedia.readVideoFile` is the one converted string a user cannot
-  see. Surfacing it needs a protocol change, tracked separately.
+- **`ToolExecuteResponse.note` reaches napi hosts but not ACP clients.** The engine
+  emits it on the `tool.native` event, and the napi path forwards it: the SDK's
+  `native/sdk-client/build-handle.ts` maps it onto `tool.result.note`, which the
+  host renders after the output (the note is never folded into `content`). The
+  ACP projection (`acp/events_map.rs::tool_call_result`) still drops it, so an
+  editor client does not see the guidance. Notes are localized, so the napi half
+  is visible and correct today — including the converted
+  `engine.tools.readMedia.readVideoFile` string — while the ACP half remains the
+  one surface that needs a protocol change, tracked separately.
 - **Informational footers are still English** — "Total lines in file: N.",
   "Showing matches X–Y of Z.", "Continue with the same search arguments…".
   These live in the Rust engine (`tools/mod.rs` around the Read / Grep result
@@ -148,10 +150,10 @@ it from `packages/i18n-catalog/src/locales/en.ts` when you touch the catalog.
   so the debt is counted rather than merely described. Two separable questions, and only the
   first is settled: whether they are **UI or protocol** is a fork decision
   (see What not to translate), but the *unported-subsystem* framing is not a
-  question at all — v2's `src/runtime/` capability layer that §6.8.2 needs is
-  registered in `packages/kimi-agent/ROADMAP.md` §6.25, and the engine's
-  missing runtime layer is upstream's to match, not a fork preference.
-  **Corrected 2026-10-01 (§6.25's correction box, §6.43.1):** the *layer* is
+  question at all — v2's `src/runtime/` capability layer is an unported
+  subsystem, and the engine's missing runtime layer is upstream's to match, not a
+  fork preference.
+  **Corrected 2026-10-01:** the *layer* is
   a real unported subsystem, but it is **not** a prerequisite for the watcher.
   `RuntimeCapability` is `'fs' | 'process' | 'terminal'` — there is no `watch`
   rung (`runtime/runtime.ts:8`); upstream's watcher is a standalone service
@@ -367,7 +369,7 @@ packages/
 
 #### Key Package Details
 
-**`kimi-agent`** — Next-generation Rust agent engine that drives the entire agent execution. Implements multi-turn execution loops, native LLM wire transport (OpenAI, Anthropic, Google Gemini), concurrent tool scheduling with conflict detection, sandboxed native filesystem/bash tools, SQLite session persistence, ACP stdio protocol, and native HTTP/1.1 + RFC 6455 WebSocket streaming with backpressure event fan-out (`EventHub`). The former `kimi-native-tools` addon (bash, grep, glob, read, write, edit, token counting, output truncation, web fetching, image processing, SSE streaming, SQLite, ULID, i18n translation) was merged into this crate under `src/native/` — one crate, one `.node` binary, one npm package. See `packages/kimi-agent/ROADMAP.md`.
+**`kimi-agent`** — Next-generation Rust agent engine that drives the entire agent execution. Implements multi-turn execution loops, native LLM wire transport (OpenAI, Anthropic, Google Gemini), concurrent tool scheduling with conflict detection, sandboxed native filesystem/bash tools, SQLite session persistence, ACP stdio protocol, and native HTTP/1.1 + RFC 6455 WebSocket streaming with backpressure event fan-out (`EventHub`). The former `kimi-native-tools` addon (bash, grep, glob, read, write, edit, token counting, output truncation, web fetching, image processing, SSE streaming, SQLite, ULID, i18n translation) was merged into this crate under `src/native/` — one crate, one `.node` binary, one npm package. The active v2-port ledger is `reports/runbooks/v2-parity-ledger.md`.
 
 **`kosong`** (v0.5.6) — The LLM / provider abstraction layer — the single shared home for the provider wire contract. Owns the contract types (`Message` / `ChatProvider` / `Tool` / `TokenUsage` / `ModelCapability`), the coded-error infrastructure (`Error2` + provider error taxonomy), and the pure-function layer (`generate()`, token estimation, error classification, provider wire helpers). Supports Anthropic, Google Gemini, and OpenAI-compatible providers. Uses `zod-to-json-schema` for tool schema conversion.
 
@@ -403,14 +405,15 @@ scripts/
   check-upstream-v2-delta.mjs   — Retired-package upstream delta ratchet (`upstream-v2-delta-allowlist.json`)
   check-architecture-drift.mjs  — Architecture drift vs `architecture.json` (layers, acyclicity, exemptions)
   check-rust-module-deps.mjs    — Intra-crate module dependency graph of the Rust engine (two-way ratchet, `rust-module-deps-baseline.json`)
-  check-roadmap-refs.mjs        — Divergence-ledger citation gate
+  check-bun-first.mjs           — Bun-first runtime policy ratchet (`bun-first-allowlist.json`)
   prompt-optimizer/             — Prompt benchmark and optimization tools
 ```
 
 Every gate above has a `package.json` entry (`check:*` / `scan:*`) and runs in CI; `check:architecture`,
-`check:normify`, and `check:rust-module-deps` additionally gate on `architecture.json`, `normify-kimi-code/`,
-and `rust-module-deps-baseline.json` respectively. When adding a gate script, add the `package.json` entry
-in the same commit — an ungated entry point is a gate a developer cannot run from the documented commands.
+`check:normify`, `check:rust-module-deps` and `check:bun-first` additionally gate on `architecture.json`,
+`normify-kimi-code/`, `rust-module-deps-baseline.json` and `bun-first-allowlist.json` respectively. When
+adding a gate script, add the `package.json` entry and its CI step in the same commit — an ungated entry
+point is a gate a developer cannot run from the documented commands.
 
 Two gates fail for environment reasons rather than code defects, and neither failure is a green run:
 
@@ -490,7 +493,6 @@ bun run check:parity && bun run check:architecture
 cd packages/kimi-agent && cargo test --no-default-features --features cli
 bun run typecheck && bun run lint
 bun run check:engine-i18n   # only if engine i18n text moved
-bun run check:roadmap-refs  # only if ROADMAP.md moved
 
 # Tier 4 — delivery.
 cd packages/kimi-agent && cargo test --no-default-features --features cli
@@ -498,8 +500,8 @@ bun run test && bun run typecheck && bun run lint && bun run build
 ```
 
 The `check:*` tier is cheap and catches drift a test suite cannot — `check:architecture`
-and `check:normify` fail on a stale fingerprint, `check:roadmap-refs` on a dangling
-reference, `check:parity` on a v1/v3 protocol divergence. Run the ones whose inputs
+and `check:normify` fail on a stale fingerprint, `check:parity` on a v1/v3
+protocol divergence. Run the ones whose inputs
 your diff actually moved; running all of them is itself the habit this tiering exists
 to avoid.
 
@@ -547,10 +549,10 @@ To run a local build inside `~/.kimi-code/` instead of the released binary (Powe
 GitHub Actions (`ci.yml`) runs on every PR and push to `main`. Every job installs Bun via `oven-sh/setup-bun`; no job installs Node:
 1. **build** — Install, build, smoke test CLI bundle
 2. **test** — `bun --bun run test` (vitest under the Bun runtime) split across 5 parallel shards on Ubuntu
-3. **test-rust** — `cargo fmt --check` + `cargo clippy --all-targets --features cli -- -D warnings` (Ubuntu only), then `cargo test --no-default-features --features cli,workflow-js` on Ubuntu and Windows
+3. **test-rust** — `cargo fmt --check` + `cargo clippy --all-targets --features cli -- -D warnings` (Ubuntu only), then `cargo test --no-default-features --features cli,workflow-js` plus independent `cargo test --all-targets` runs for `kimi-ui-core`, `kimi-tui-app` and `kimi-tui-host` on Ubuntu and Windows
 4. **test-windows** — the full vitest suite on `windows-latest` (napi addon built first), so Windows-only regressions are caught
 5. **test-pi-tui** — `pi-tui` suite (dispatches to `bun test` under Bun and `node --test` under Node; CI runs it via Bun)
-6. **lint** — `bun run lint` (oxlint --type-aware), `bun run sherif`, `check:no-legacy-engine`, `check:nix-workspace`, three structural gates (`check:architecture` = `architecture.json`; `check:normify` = `normify-kimi-code/`; `check:rust-module-deps` = `rust-module-deps-baseline.json`), the divergence-ledger citation gate (`check:roadmap-refs`), Rust ↔ TS interface parity (`check:parity`), no-comment policy (`check:no-comments`), `t()` coverage (`check:t-call-coverage`), engine i18n parity (`check:engine-i18n`), hardcoded-string scans (`scan:hardcoded` for the TypeScript trees, `scan:hardcoded:rust` for `packages/kimi-agent`), retired-package upstream delta ratchet (`check:upstream-v2-delta`), locale key parity (`check:locale-keys`), catalog-wide orphan ratchet (`check:locale-orphans`, both consumers — engine `LocalizedText` and host `t()` — with the accepted debt in `scripts/locale-orphan-allowlist.json`), locale placeholder validity (`check:locale-placeholders`), locale JSON freshness (regenerate via `generate-locale-json.cjs` and fail on any tracked diff)
+6. **lint** — `bun run lint` (oxlint --type-aware), `bun run sherif`, `check:no-legacy-engine`, `check:nix-workspace`, three structural gates (`check:architecture` = `architecture.json`; `check:normify` = `normify-kimi-code/`; `check:rust-module-deps` = `rust-module-deps-baseline.json`), `check:bun-first`, `check:error-codes`, `check:config-registry`, `check:event-coverage`, `check:patch-budget`, Rust ↔ TS interface parity (`check:parity`), no-comment policy (`check:no-comments`), `t()` coverage (`check:t-call-coverage`), engine i18n parity (`check:engine-i18n`), hardcoded-string scans (`scan:hardcoded` for the TypeScript trees, `scan:hardcoded:rust` for `packages/kimi-agent`), retired-package upstream delta ratchet (`check:upstream-v2-delta`), locale key parity (`check:locale-keys`), catalog-wide orphan ratchet (`check:locale-orphans`, both consumers — engine `LocalizedText` and host `t()` — with the accepted debt in `scripts/locale-orphan-allowlist.json`), locale placeholder validity (`check:locale-placeholders`), locale JSON freshness (regenerate via `generate-locale-json.cjs` and fail on any tracked diff)
 7. **typecheck** — TypeScript check across all packages (`tsgo` from `@typescript/native-preview`, run via `bunx --bun`)
 8. **native bundle** — Built by `_native-build.yml` (a `workflow_call` workflow invoked from `release.yml` and `manual-native-bundle.yml`) on a 6-target matrix (linux-x64, linux-arm64, darwin-x64, darwin-arm64, win32-x64, win32-arm64): `(cd packages/kimi-agent && bun run build)` (napi-rs build; no cargo test), then Bun single-file packaging (`build:native:bun`) and a native smoke test.
 9. **codeql** — `codeql.yml` scans js/ts on PRs, pushes to `main`, and weekly. A branch ruleset requires CodeQL results (plus blocks force pushes and branch deletion) for merges into `main`.
@@ -707,14 +709,14 @@ Two dependencies are deliberately removed: `ssh2@1.17.0>cpu-features` and `ssh2@
 
 Standing rules for every `upstream` tag merge (decided 2026-09-03). Upstream is the source of truth for product behavior; the fork keeps only four kinds of delta: i18n, the Rust engine / native-tools gate, `packages/kimi-agent`, and the Bun toolchain. Anything else in the fork's `HEAD` side of a conflict is legacy and should lose.
 
-- **Upstream updates are merged by hand. Do not `git pull` / `git merge` against upstream** (user's standing rule, 2026-09-24; order of operations: sync `cnb` first, upstream second). `packages/kimi-agent` is a hand-port of v2, so an upstream change lands as a manual edit judged against the rules below — TS takes upstream's shape, engine behavior lands in Rust, and every behavior delta gets a verdict in `scripts/upstream-v2-delta-allowlist.json` plus a `packages/kimi-agent/ROADMAP.md` §6 entry. A direct `git merge upstream/main` also proved unsafe in practice: it hung twice on this repo (476k objects) and each time left `.git/refs/` deleted, requiring manual ref reconstruction from `.git/logs/HEAD` and a re-fetch to restore the missing objects.
+- **Upstream updates are merged by hand. Do not `git pull` / `git merge` against upstream** (user's standing rule, 2026-09-24; order of operations: sync `cnb` first, upstream second). `packages/kimi-agent` is a hand-port of v2, so an upstream change lands as a manual edit judged against the rules below — TS takes upstream's shape, engine behavior lands in Rust, and every behavior delta gets a verdict in `scripts/upstream-v2-delta-allowlist.json`. A direct `git merge upstream/main` also proved unsafe in practice: it hung twice on this repo (476k objects) and each time left `.git/refs/` deleted, requiring manual ref reconstruction from `.git/logs/HEAD` and a re-fetch to restore the missing objects.
 
 - **The Rust agent is a port; inventing behavior is forbidden.** `packages/kimi-agent` reimplements existing behavior and must not be a design surface: every behavior it implements has to be traceable to a reference or to an explicit decision by the user, and anything else is a defect rather than a design choice. Two axes of reference — **do not conflate them: v1 / v3 are communication protocol versions, v2 is an engine package** (`agent-core-v2`):
   - **Engine behavior → v2** (`agent-core-v2`): the engine internals this package reimplements — turn loop, tool execution, LLM wire transport, permission, compaction, injection. The Verification Standard's "v2 is the behavioral reference" rule below applies here.
   - **v1 protocol** — REST `/api/v1` (`routes/`, prefix set in `registerApiV1Routes.ts`) and WebSocket `/api/v1/ws` (`WS_PATH` in `transport/ws/v1/registerWsV1.ts`), carried by the transport in `transport/ws/v1/` (`sessionEventBroadcaster`, `sessionEventJournal`, `wsConnectionV1`, `inFlightTurnTracker`, `subagentRosterTracker`). Its op and entity types come from `packages/transcript`; the event → op fold is `services/transcript/` (`coreEventMap`, `transcriptService`).
-  - ~~**v3 protocol**~~ — **retired on both sides.** Upstream reverted it in 2.0.2 (`2502d2157`, reverting `64505e36e` from 0.43.0): it was the first half of a migration whose second half never landed, leaving two protocol stacks while v1 stayed the only surface in use. The fork followed in `packages/kimi-agent/ROADMAP.md` §8.11 (commit `86f30ecc2c`): `/api/v3/ws`, the turn-paged history route, `server/v3/`, and `packages/protocol/src/v3.ts` are gone, and kimi-inspect reads `transcript.reset` / `transcript.ops` over `/api/v1/ws`. **v1 is now the only protocol axis** — do not reintroduce a second one without the user's permission.
+  - ~~**v3 protocol**~~ — **retired on both sides.** Upstream reverted it in 2.0.2 (`2502d2157`, reverting `64505e36e` from 0.43.0): it was the first half of a migration whose second half never landed, leaving two protocol stacks while v1 stayed the only surface in use. The fork followed in commit `86f30ecc2c`: `/api/v3/ws`, the turn-paged history route, `server/v3/`, and `packages/protocol/src/v3.ts` are gone, and kimi-inspect reads `transcript.reset` / `transcript.ops` over `/api/v1/ws`. **v1 is now the only protocol axis** — do not reintroduce a second one without the user's permission.
 
-  A new event name, payload field, state-machine arm, policy step, route, or entity with no counterpart on its own axis requires the user's permission before implementation, and the granted delta is then recorded in `packages/kimi-agent/ROADMAP.md`. Fork-original modules already recorded there (sandbox guard, stale guard, team/memory/knowledge, mode mutex) stand as they are.
+  A new event name, payload field, state-machine arm, policy step, route, or entity with no counterpart on its own axis requires the user's permission before implementation, and the granted delta is then recorded in `scripts/upstream-v2-delta-allowlist.json`. Fork-original modules already in the tree (sandbox guard, stale guard, team/memory/knowledge, mode mutex) stand as they are.
 - **What counts as evidence.** Where a name or shape is defined in the TypeScript references, cite the file. A name the committed `apps/kimi-code/dist-web` bundle consumes is evidence too, even when it is defined nowhere in `upstream`'s source tree — some web-facing vocabulary exists only in that synced bundle. A name only the fork's Rust emits is not evidence, and a consumer's tolerance never justifies extending a vocabulary with names the fork invented.
 - **The audit is symmetric — both directions are obligations, neither is automatic.**
   The rule above governs the *fork-has / v2-lacks* direction. Its mirror governs
@@ -722,8 +724,8 @@ Standing rules for every `upstream` tag merge (decided 2026-09-03). Upstream is 
 
   | | Judgement | Required form |
   |---|---|---|
-  | v2 has it, fork lacks it | A **gap** — port it, or record why not | `tracked` in the ROADMAP ledger, or `ported` / `not-applicable` in the v2-delta allowlist |
-  | fork has it, v2 lacks it | **Not automatically correct.** It is a defect until it carries provenance | A recorded provenance: the user's explicit ruling, or an entry in the ROADMAP ledger (fork-original modules) |
+  | v2 has it, fork lacks it | A **gap** — port it, or record why not | `tracked` / `ported` / `not-applicable` in the v2-delta allowlist |
+  | fork has it, v2 lacks it | **Not automatically correct.** It is a defect until it carries provenance | A recorded provenance: the user's explicit ruling, or a comment in the module saying why it exists |
 
   Two failure modes to avoid, both observed:
   - Asking "should we add X?" for something v2 *has* — that downgrades a porting
@@ -737,16 +739,16 @@ Standing rules for every `upstream` tag merge (decided 2026-09-03). Upstream is 
 
   Beware the naming traps when comparing: v2's `runtime/` (a capability-axis
   execution layer, `fs`/`process`/`terminal` + a six-state lifecycle,
-  ROADMAP §6.25) shares its name with v2's `app/capability/` (a plugin install
+  ) shares its name with v2's `app/capability/` (a plugin install
   service) while `agent/contextMemory/` is fork-covered under different names
   (`native/event_store/loop_fold.rs` + `packages/transcript/src/history/`). Judge
   by real external consumers on the v2 side and behavioural equivalence on the
   fork side, never by directory name.
-- **Upstream engine behavior lands in Rust, not in TS.** Resolve the TS conflict by taking `theirs` so the TS build and tests stay faithful to upstream's shape, then register the behavior delta as a work item in `packages/kimi-agent/ROADMAP.md`. Do not re-implement new upstream engine behavior in TS — that builds the thing being retired.
-- **The retired-package delta ratchet is the mechanical half of this policy.** `bun run check:upstream-v2-delta` requires every upstream commit touching a deleted package since the merge base to carry a recorded verdict in `scripts/upstream-v2-delta-allowlist.json` (`ported` / `tracked` / `not-applicable`; `pending` or absent fails). It is wired into CI, but **fetch the ref first**: it reads `refs/remotes/upstream/main`, and a stale ref silently narrows the range and prints a green "all triaged" — `git fetch upstream main:refs/remotes/upstream/main --force`. Deleting those packages is exactly why the delta is invisible to `git log`; this gate exists because 21 behavior commits once piled up unnoticed (ROADMAP §6.0).
+- **Upstream engine behavior lands in Rust, not in TS.** Resolve the TS conflict by taking `theirs` so the TS build and tests stay faithful to upstream's shape, then record the verdict in `scripts/upstream-v2-delta-allowlist.json`. Do not re-implement new upstream engine behavior in TS — that builds the thing being retired.
+- **The retired-package delta ratchet is the mechanical half of this policy.** `bun run check:upstream-v2-delta` requires every upstream commit touching a deleted package since the merge base to carry a recorded verdict in `scripts/upstream-v2-delta-allowlist.json` (`ported` / `tracked` / `not-applicable`; `pending` or absent fails). It is wired into CI, but **fetch the ref first**: it reads `refs/remotes/upstream/main`, and a stale ref silently narrows the range and prints a green "all triaged" — `git fetch upstream main:refs/remotes/upstream/main --force`. Deleting those packages is exactly why the delta is invisible to `git log`; this gate exists because 21 behavior commits once piled up unnoticed.
   **Its structural blind spot:** the ratchet is keyed on *upstream commits*. A v2
   subsystem that has existed since the export point and was never ported moves no
-  commit, so this gate can never report it — ROADMAP §6.25 (v2's `src/runtime/`
+  commit, so this gate can never report it — v2's `src/runtime/`
   capability layer) is exactly that case, and it was found by comparing subsystem
   trees, not by the ratchet. Treat a green run as "no *new commit* delta", never
   as "the port is complete".
@@ -794,7 +796,7 @@ Standing rules for every `upstream` tag merge (decided 2026-09-03). Upstream is 
 - Treat code, not documentation, as the source of truth. Unless the user explicitly says otherwise, do not read ordinary Markdown just to understand the implementation.
 - Before making code changes, read the relevant code and the most recent constraints, and follow the nearest `AGENTS.md` in the directory tree.
 - Keep changes focused. Do not slip in unrelated refactors along the way.
-- **Ship complete implementations. A stub, a no-op body, a `todo!()`, an empty match arm left only to satisfy a signature, or a test that asserts a behaviour nothing implements are all defects, not placeholders.** The user ruled on 2026-09-29: work is either finished and verified, or not started. If a behaviour is genuinely deferred, do not write the test for it yet, and record the deferral in the nearest ledger (`packages/kimi-agent/ROADMAP.md` for engine work) so the next reader inherits the decision instead of rediscovering it. A function whose doc comment describes what it does while its body does something else is the specific failure this rule exists to prevent — `reclaim_file_history_space` shipped exactly that way and its test failed from the day it landed.
+- **Ship complete implementations. A stub, a no-op body, a `todo!()`, an empty match arm left only to satisfy a signature, or a test that asserts a behaviour nothing implements are all defects, not placeholders.** The user ruled on 2026-09-29: work is either finished and verified, or not started. If a behaviour is genuinely deferred, do not write the test for it yet, and record the deferral on the behaviour itself (a doc comment naming what is missing and why) so the next reader inherits the decision instead of rediscovering it. A function whose doc comment describes what it does while its body does something else is the specific failure this rule exists to prevent — `reclaim_file_history_space` shipped exactly that way and its test failed from the day it landed.
 - When committing, do not add any co-author attribution, and do not reveal the identity of the agent in commit messages, PR descriptions, or any explanatory text.
 - Push every commit to `origin` immediately after `git commit`. Never let local and remote diverge — applies to feature, fix, and experimental branches alike, so local work is never lost and the remote does not fall behind.
 
@@ -811,7 +813,7 @@ Standing rules for every `upstream` tag merge (decided 2026-09-03). Upstream is 
 - **Name what was not verified.** When a path could not be exercised, state it plainly instead of implying coverage.
 - **Scale the verification to the blast radius; do not run the full suite after every edit.** A passing suite is a *possible* outcome, and running the whole thing every time is the most expensive way to get it. Pick the narrowest layer that can actually observe the change, and widen only on a risk signal:
   - **Touched one function / one branch** → that module's tests only (`cargo test --lib <module>`, `bun run vitest <path>`). Seconds.
-  - **Touched a module, service, or route** → that package's tests + the `check:*` gates its own diff can trip (`check:parity`, `check:architecture`, `check:roadmap-refs`, `check:engine-i18n`).
+  - **Touched a module, service, or route** → that package's tests + the `check:*` gates its own diff can trip (`check:parity`, `check:architecture`, `check:engine-i18n`).
   - **Touched a shared type, a public contract, the store schema, or a cross-package seam** → both packages' tests, then the full suite.
   - **Before delivery only** → the full suite, `typecheck`, `lint`, and the build. This layer is not optional, it is *last*.
   The cost is asymmetric: a full `cargo test --no-default-features --features cli` is minutes and grows with the tree, so spending it per edit makes the wall-clock budget go to waiting instead of to the work. Note the Rust side needs its **own** gate names — the `check:*` scripts above are the JS/bun ones; `cargo check` / `cargo clippy --features cli -- -D warnings` / `cargo fmt --check` are the Rust layer's fast tier.

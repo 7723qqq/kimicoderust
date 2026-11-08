@@ -591,7 +591,9 @@ impl<T: Clone + Send + Sync + 'static> AgentRunBatchLauncher<T> for SwarmLaunche
         };
         Box::pin(async move {
             let role = format!("Swarm worker for {}", options.run.description);
-            let agent_id = manager.spawn(&options.profile_name, &role).await?;
+            let agent_id = manager
+                .spawn_child(&caller_agent_id, &options.profile_name, &role)
+                .await?;
             // v2 `subagentLabels(callerAgentId, { swarmItem })`: remember which
             // `{{item}}` this member is, so a later `resume_agent_ids` call can
             // label it again (`getSwarmItem`).

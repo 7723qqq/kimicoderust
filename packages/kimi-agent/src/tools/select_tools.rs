@@ -22,14 +22,17 @@
 //!   (`selectToolsTool.ts` `ctx.remind`); the advertised table is this
 //!   engine's equivalent channel.
 //!
-//! Deliberately unreachable:
-//! - `not_loaded_tool_output` has no call site **by design**. v2 deferred MCP
-//!   schemas out of `tools[]` and refused a call to a deferred-but-unloaded
-//!   tool. This engine advertises every tool it can execute
-//!   (`GET /api/v1/tools` reports all builtins and all MCP tools as
-//!   `active: true`), so no advertised tool is ever "not loaded" — gating a
-//!   call would reject tools the model can see. Keeping the helper here
-//!   documents the v2 wording; it is intentionally not wired.
+//! The two v2 call-time refusals live here and are both wired in
+//! [`crate::tools::dispatch`]: [`not_loaded_tool_output`] for a deferred tool
+//! called before it was loaded (v2 `shouldIntercept`) and
+//! [`missing_tool_output`] for a tool the session loaded that is gone from the
+//! registry (v2 `describeMissingTool`, `toolSelectService.ts:304-318`).
+//!
+//! v2's third refusal, `inactiveLoadedToolOutput` ("was loaded but is no longer
+//! active. Ask the user to enable it"), has no counterpart: the engine's policy
+//! gate runs ahead of every other refusal and answers
+//! `engine.tools.disabled`, which covers the same case with a different
+//! sentence.
 
 use std::collections::HashSet;
 
@@ -41,16 +44,15 @@ use crate::turn_loop::types::ExecutableToolResult;
 pub const SELECT_TOOLS_TOOL_NAME: &str = "select_tools";
 
 pub const SELECT_TOOLS_DESCRIPTION: &str = "\
-Load one or more tools by name so you can call them. \
-The loadable names are listed in the <tools_added>/<tools_removed> announcements \
-in the system context — fold them in order to get the current list. \
-If you have not seen a <tools_added> announcement in this session, no tools are \
-currently loadable — do not call select_tools. \
-Pass the exact tool name(s) you need — plugin, skill, or category names do not work. \
+Load tools by exact name, or search for them by capability when the name is unknown. \
+The loadable names are listed in the <tools_added>/<tools_removed> or <tools_relevant> \
+announcements in the system context — use the latest announcement. \
+If you have not seen a loadable-tools announcement in this session, no tools are currently loadable. \
+Pass names to load them, or pass query to search all loadable tools; a search returns \
+candidates only, so call select_tools again with exact names to load the ones you need. \
 The full definitions become available immediately, so you can call them directly \
-in your next tool call. \
-Only announced names are loadable — tools you already have available are called \
-directly, never passed to select_tools.";
+in your next tool call. Tools you already have available are called directly, \
+never passed to select_tools.";
 
 pub fn select_tools_schema() -> Value {
     json!({
@@ -60,11 +62,72 @@ pub fn select_tools_schema() -> Value {
                 "type": "array",
                 "items": { "type": "string" },
                 "minItems": 1,
-                "description": "Exact tool names to load, taken from the latest announced tool list."
+                "description": "Exact tool names to load, taken from the latest announcement or a prior search result."
+            },
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Capability description to search for when the exact tool name is unknown; returns candidates without loading them."
             }
         },
-        "required": ["names"]
+        "additionalProperties": false
     })
+}
+
+/// v2 `SelectToolsInputSchema`'s `refine` message, reused for the empty-query
+/// branch (`selectToolsTool.ts` rejects both the same way): neither a name nor
+/// a query gives the tool nothing to do.
+pub const SELECT_TOOLS_PROVIDE_NAMES_OR_QUERY: &str = "Provide names to load or a query to search.";
+
+/// v2's guard for a call that reaches the tool after disclosure closed (a
+/// model switch mid-session): the tool is not advertised then, but a queued
+/// call must still say why it did nothing.
+pub const SELECT_TOOLS_UNAVAILABLE: &str = "select_tools is not available for the current model.";
+
+/// The tool's own result shape: one text payload, no delivery, no display.
+pub fn text_result(content: &str, is_error: bool) -> ExecutableToolResult {
+    ExecutableToolResult {
+        delivery: None,
+        stop_turn: false,
+        content: content.to_string(),
+        is_error,
+        note: None,
+        display: None,
+    }
+}
+
+/// Render the capability-search result (v2 `selectToolsTool.ts` query branch).
+///
+/// A hit lists its name and the first 120 characters of the flattened
+/// description; the trailer tells the model the list is candidates only, so it
+/// does not try to call one before loading it.
+pub fn search_output(query: &str, hits: &[crate::tools::tool_retriever::ToolSearchHit]) -> String {
+    if hits.is_empty() {
+        return format!(
+            "No loadable tools matched \"{query}\". Try a different capability description \
+or use a tool you already have."
+        );
+    }
+    let mut lines = vec![format!("Search results for \"{query}\":")];
+    for hit in hits {
+        let description = hit
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let description: String = description.chars().take(120).collect();
+        if description.is_empty() {
+            lines.push(hit.name.clone());
+        } else {
+            lines.push(format!("{} — {}", hit.name, description));
+        }
+    }
+    lines.push(
+        "These are candidates. Tools you already have can be called directly; \
+call select_tools with exact names to load the others."
+            .into(),
+    );
+    lines.join("\n")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,6 +537,86 @@ Call select_tools with [\"{name}\"] first, then call the tool."
     )
 }
 
+/// v2 `describeMissingTool` (`toolSelectService.ts:304-318`): the tool was
+/// loaded by an earlier `select_tools`, and is now gone from the registry.
+///
+/// An MCP tool can disappear only because its server went away, and that is
+/// recoverable — the model must not retry now but may after a reconnect. Any
+/// other tool cannot come back on its own, so retrying is pointless.
+pub fn missing_tool_output(name: &str) -> String {
+    if name.starts_with("mcp__") {
+        return format!(
+            "Tool \"{name}\" was loaded but its MCP server is currently disconnected. \
+It may become available again when the server reconnects; do not retry immediately."
+        );
+    }
+    format!(
+        "Tool \"{name}\" was loaded but is no longer registered. \
+Do not retry it unless it becomes available again."
+    )
+}
+
+/// v2 `inactiveLoadedToolOutput` (`toolSelectService.ts:515-520`): the session
+/// loaded the tool, and the policy no longer allows it. Unlike
+/// [`missing_tool_output`] this is recoverable within the session — the user
+/// can enable it again — so the model is told to ask rather than to give up.
+pub fn inactive_loaded_tool_output(name: &str) -> String {
+    format!(
+        "Tool \"{name}\" was loaded but is no longer active. \
+Ask the user to enable it before calling it again."
+    )
+}
+
+/// What the current registry says about a name a step asked to run — v2
+/// `toolRegistry.resolve(name)` combined with `isDynamicallyLoadable(info)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRegistration {
+    /// Registered and advertised inline: callable as it stands.
+    Inline,
+    /// Registered but behind deferred disclosure (v2 `disclosure: 'deferred'`):
+    /// it has to be loaded through `select_tools` first.
+    Deferred,
+    /// Not in the registry.
+    Missing,
+}
+
+/// v2 `describeMissingTool` at its call site (`toolExecutorService.ts:752-760`):
+/// the registry has no such tool. It is consulted **before** the policy guard,
+/// so a loaded name that left the registry is answered here even when a policy
+/// layer would also deny it.
+pub fn missing_refusal(
+    enabled: bool,
+    tool_name: &str,
+    registration: ToolRegistration,
+    loaded: bool,
+) -> Option<String> {
+    (enabled && loaded && registration == ToolRegistration::Missing)
+        .then(|| missing_tool_output(tool_name))
+}
+
+/// v2 `describeUnavailableTool` (`toolSelectService.ts:298-302`), consulted
+/// only for a name the registry still has (`toolExecutorService.ts:773`).
+///
+/// Two reachable arms. `isInactiveLoadedTool`: the session loaded the tool and
+/// the registry now offers it inline instead of deferred — a policy-denied tool
+/// never reaches this arm because the guard runs first. `shouldIntercept`: the
+/// tool is registered and deferred, and the session never loaded it.
+pub fn unavailable_refusal(
+    enabled: bool,
+    tool_name: &str,
+    registration: ToolRegistration,
+    loaded: bool,
+) -> Option<String> {
+    if !enabled || tool_name == SELECT_TOOLS_TOOL_NAME {
+        return None;
+    }
+    match (registration, loaded) {
+        (ToolRegistration::Inline, true) => Some(inactive_loaded_tool_output(tool_name)),
+        (ToolRegistration::Deferred, false) => Some(not_loaded_tool_output(tool_name)),
+        _ => None,
+    }
+}
+
 pub fn render_loadable_tools_announcement(
     added: &[String],
     removed: &[String],
@@ -531,7 +674,57 @@ mod tests {
         let schema = select_tools_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["names"].is_object());
-        assert_eq!(schema["required"][0], "names");
+        assert!(schema["properties"]["query"].is_object());
+        assert_eq!(schema["properties"]["names"]["minItems"], 1);
+        assert_eq!(schema["properties"]["query"]["minLength"], 1);
+        assert!(
+            schema.get("required").is_none(),
+            "v2 makes both arguments optional and enforces the either/or in code"
+        );
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    /// v2 `selectToolsTool.ts`'s query rendering: the no-hits sentence, the
+    /// header/hit/trailer shape with the description flattened, and the
+    /// 120-character cut.
+    #[test]
+    fn test_search_output_matches_v2_shape() {
+        assert_eq!(
+            search_output("quantum", &[]),
+            "No loadable tools matched \"quantum\". Try a different capability description \
+or use a tool you already have."
+        );
+
+        let hits = vec![crate::tools::tool_retriever::ToolSearchHit {
+            name: "mcp__github__search_issues".into(),
+            description: "Search   issues\nand pull requests".into(),
+            score: 1.0,
+        }];
+        assert_eq!(
+            search_output("issues", &hits),
+            "Search results for \"issues\":\n\
+mcp__github__search_issues — Search issues and pull requests\n\
+These are candidates. Tools you already have can be called directly; \
+call select_tools with exact names to load the others."
+        );
+
+        let long = vec![crate::tools::tool_retriever::ToolSearchHit {
+            name: "mcp__x__y".into(),
+            description: "a".repeat(200),
+            score: 1.0,
+        }];
+        let rendered = search_output("a", &long);
+        let line = rendered.lines().nth(1).expect("the hit line");
+        let description = line.split_once(" — ").expect("name — description").1;
+        assert_eq!(description.chars().count(), 120, "the description is cut");
+
+        // An empty description renders the bare name, not a dangling dash.
+        let bare = vec![crate::tools::tool_retriever::ToolSearchHit {
+            name: "mcp__x__y".into(),
+            description: String::new(),
+            score: 1.0,
+        }];
+        assert_eq!(search_output("y", &bare).lines().nth(1), Some("mcp__x__y"));
     }
 
     #[test]
@@ -880,5 +1073,77 @@ capability is missing."
 
         // Nothing to say: no delta and tools remain loadable.
         assert!(render_loadable_tools_announcement(&[], &[], true).is_none());
+    }
+
+    /// v2's two call-time describers at their real call sites
+    /// (`toolExecutorService.ts:752-782`): the missing-tool describer is asked
+    /// **before** the policy guard, the unavailable one **after** it and only
+    /// for a name the registry still has. Each sentence is checked verbatim.
+    #[test]
+    fn test_refusal_describers_match_v2() {
+        // Missing. Loaded, then gone: answered before anything else runs.
+        assert_eq!(
+            missing_refusal(true, "mcp__gone__x", ToolRegistration::Missing, true).as_deref(),
+            Some(
+                "Tool \"mcp__gone__x\" was loaded but its MCP server is currently disconnected. \
+It may become available again when the server reconnects; do not retry immediately."
+            )
+        );
+        assert_eq!(
+            missing_refusal(true, "plugin_tool", ToolRegistration::Missing, true).as_deref(),
+            Some(
+                "Tool \"plugin_tool\" was loaded but is no longer registered. \
+Do not retry it unless it becomes available again."
+            )
+        );
+        // Never loaded: the host owns that name, so the engine stays out of it.
+        assert!(missing_refusal(true, "mcp__x__y", ToolRegistration::Missing, false).is_none());
+        // Still registered: not the missing describer's business.
+        assert!(missing_refusal(true, "mcp__x__y", ToolRegistration::Deferred, true).is_none());
+        assert!(missing_refusal(false, "mcp__gone__x", ToolRegistration::Missing, true).is_none());
+
+        // Unavailable, registered names only.
+        assert_eq!(
+            unavailable_refusal(
+                true,
+                "mcp__github__search",
+                ToolRegistration::Deferred,
+                false
+            )
+            .as_deref(),
+            Some(
+                "Tool \"mcp__github__search\" is available but not loaded. \
+Call select_tools with [\"mcp__github__search\"] first, then call the tool."
+            )
+        );
+        assert_eq!(
+            unavailable_refusal(true, "mcp__github__search", ToolRegistration::Inline, true)
+                .as_deref(),
+            Some(
+                "Tool \"mcp__github__search\" was loaded but is no longer active. \
+Ask the user to enable it before calling it again."
+            )
+        );
+        assert!(
+            unavailable_refusal(true, "mcp__x__y", ToolRegistration::Deferred, true).is_none(),
+            "a loaded deferred tool is callable"
+        );
+        assert!(
+            unavailable_refusal(true, "mcp__x__y", ToolRegistration::Missing, true).is_none(),
+            "a missing name belongs to the missing describer"
+        );
+        assert!(
+            unavailable_refusal(true, SELECT_TOOLS_TOOL_NAME, ToolRegistration::Inline, true)
+                .is_none()
+        );
+        assert!(
+            unavailable_refusal(
+                false,
+                "mcp__github__search",
+                ToolRegistration::Deferred,
+                false
+            )
+            .is_none()
+        );
     }
 }

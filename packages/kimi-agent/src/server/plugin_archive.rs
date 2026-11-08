@@ -10,12 +10,15 @@
 
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 use crate::native::fetch_url::{PinnedHosts, resolve_redirect, validate_url};
 
 /// A zip larger than this is refused before it is read into memory.
 const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
+const ARCHIVE_CACHE_LIMIT_BYTES: u64 = 500 * 1024 * 1024;
 const MAX_REDIRECTS: u32 = 10;
 /// Connecting is a fast operation, so a stalled connect fails quickly instead
 /// of holding the install for the full body timeout.
@@ -136,6 +139,92 @@ fn download_archive_inner(url: &str, allow_private: bool) -> Result<Vec<u8>, Str
             Err(ureq::Error::Transport(transport)) => {
                 return Err(format!("Download failed: {transport}"));
             }
+        }
+    }
+}
+
+/// Reuse a verified archive from `<home>/plugins/cache/archives`, or download,
+/// verify and cache it. The cache is keyed by the catalog's SHA-256 digest, as
+/// in v2's `PluginPackageCache`.
+pub fn load_verified_archive(
+    home: &Path,
+    url: &str,
+    expected_sha256: &str,
+) -> Result<Vec<u8>, String> {
+    let expected = expected_sha256.to_lowercase();
+    let cache = home.join("plugins").join("cache").join("archives");
+    let path = cache.join(format!("{expected}.zip"));
+    if let Ok(bytes) = std::fs::read(&path) {
+        if archive_sha256(&bytes) == expected {
+            return Ok(bytes);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    let bytes = download_archive_inner(url, cfg!(test))?;
+    let actual = archive_sha256(&bytes);
+    if actual != expected {
+        return Err(format!(
+            "Plugin archive SHA-256 mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    store_verified_archive(&cache, &path, &bytes)?;
+    Ok(bytes)
+}
+
+fn archive_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn store_verified_archive(cache: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() as u64 > ARCHIVE_CACHE_LIMIT_BYTES {
+        return Ok(());
+    }
+    std::fs::create_dir_all(cache)
+        .map_err(|e| format!("Failed to create the plugin archive cache: {e}"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("Failed to name the plugin archive cache file: {e}"))?
+        .as_nanos();
+    let temporary = cache.join(format!(".{}-{nonce}.tmp", std::process::id()));
+    std::fs::write(&temporary, bytes)
+        .map_err(|e| format!("Failed to write the plugin archive cache: {e}"))?;
+    std::fs::rename(&temporary, path)
+        .map_err(|e| format!("Failed to publish the plugin archive cache: {e}"))?;
+    prune_archive_cache(cache);
+    Ok(())
+}
+
+fn prune_archive_cache(cache: &Path) {
+    let Ok(entries) = std::fs::read_dir(cache) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("zip") {
+            continue;
+        }
+        if let Ok(metadata) = entry.metadata()
+            && metadata.is_file()
+        {
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            files.push((path, metadata.len(), modified));
+        }
+    }
+    let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
+    files.sort_by_key(|(_, _, modified)| *modified);
+    for (path, size, _) in files {
+        if total <= ARCHIVE_CACHE_LIMIT_BYTES {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
         }
     }
 }
@@ -423,6 +512,41 @@ mod tests {
         writer.write_all(b"Review it\n").unwrap();
         writer.finish().unwrap();
         buffer
+    }
+
+    #[test]
+    fn a_verified_archive_is_cached_and_reused() {
+        let temp = tempfile::tempdir().unwrap();
+        let bytes = wrapped_plugin_zip();
+        let digest = archive_sha256(&bytes);
+        let cache = temp
+            .path()
+            .join("plugins")
+            .join("cache")
+            .join("archives")
+            .join(format!("{digest}.zip"));
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, &bytes).unwrap();
+
+        let cached = load_verified_archive(temp.path(), "http://127.0.0.1:9/plugin.zip", &digest)
+            .expect("the cached archive must be reused without a download");
+        assert_eq!(cached, bytes);
+
+        std::fs::write(&cache, b"corrupt").unwrap();
+        let server_bytes = bytes.clone();
+        let url = serve_once(server_bytes);
+        let restored =
+            load_verified_archive(temp.path(), &url, &digest).expect("a corrupt entry is replaced");
+        assert_eq!(restored, bytes);
+        assert_eq!(std::fs::read(&cache).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_verified_archive_refuses_a_digest_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let url = serve_once(wrapped_plugin_zip());
+        let error = load_verified_archive(temp.path(), &url, &"0".repeat(64)).unwrap_err();
+        assert!(error.contains("SHA-256 mismatch"), "unexpected: {error}");
     }
 
     #[test]

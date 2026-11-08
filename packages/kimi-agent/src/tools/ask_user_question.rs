@@ -60,7 +60,8 @@ pub async fn execute_ask_user_question(
 
 /// Parse the tool arguments into an [`AskQuestionRequest`]. `None` when the
 /// shape violates the v2 contract: missing or empty `questions`, more than
-/// 4 questions, fewer than 2 or more than 4 options per question, duplicate
+/// 4 questions, fewer than 2 or more than 4 options per question, an empty
+/// question text or option label (v2's schema is `.min(1)` on both), duplicate
 /// question texts, or duplicate option labels within a question.
 fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
     let questions = args.get("questions")?.as_array()?;
@@ -71,6 +72,11 @@ fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
     let mut seen_texts = HashSet::new();
     for q in questions {
         let question = q.get("question")?.as_str()?.to_string();
+        // v2 caps the schema at `.min(1)`: an empty question or label is
+        // rejected before the host is asked, not rendered as a blank card.
+        if question.is_empty() {
+            return None;
+        }
         if !seen_texts.insert(question.clone()) {
             return None;
         }
@@ -82,6 +88,10 @@ fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
         let mut seen_labels = HashSet::new();
         for o in options {
             let label = o.get("label")?.as_str()?.to_string();
+            // v2 schema `.min(1)`, same rule as the question text.
+            if label.is_empty() {
+                return None;
+            }
             if !seen_labels.insert(label.clone()) {
                 return None;
             }
@@ -390,6 +400,18 @@ mod tests {
             serde_json::json!({
                 "questions": [
                     { "question": "q", "options": [{ "label": "a" }, { "label": "a" }] }
+                ]
+            }),
+            // v2 schema `.min(1)`: an empty question or label never reaches the
+            // host as a blank card.
+            serde_json::json!({
+                "questions": [
+                    { "question": "", "options": [{ "label": "a" }, { "label": "b" }] }
+                ]
+            }),
+            serde_json::json!({
+                "questions": [
+                    { "question": "q", "options": [{ "label": "" }, { "label": "b" }] }
                 ]
             }),
         ] {

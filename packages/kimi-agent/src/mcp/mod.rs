@@ -10,6 +10,7 @@ pub mod http;
 pub mod manager;
 pub mod oauth;
 pub mod output;
+pub mod schema_compaction;
 pub mod sse;
 pub mod types;
 

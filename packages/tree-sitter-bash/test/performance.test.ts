@@ -60,7 +60,9 @@ describe('performance smoke', () => {
     const fullElapsed = performance.now() - restart;
     expect(full.ok).toBe(true);
     expect(fullElapsed).toBeLessThan(1000);
-    console.log(`100KB realistic script: default-budget parse ${elapsed.toFixed(1)}ms, unbounded ${fullElapsed.toFixed(1)}ms`);
+    console.log(
+      `100KB realistic script: default-budget parse ${elapsed.toFixed(1)}ms, unbounded ${fullElapsed.toFixed(1)}ms`,
+    );
   });
 
   it('the abort path is prompt (< 100 ms) on a node-budget bomb', () => {
@@ -89,7 +91,21 @@ describe('performance smoke', () => {
   it('a 500KB heredoc body parses within the default budget (few nodes)', () => {
     const source = `cat <<EOF\n${'line of text\n'.repeat(40_000)}EOF`;
     expect(source.length).toBeGreaterThan(500_000);
+    const start = performance.now();
     const result = parse(source);
-    expect(result.ok).toBe(true);
+    const elapsed = performance.now() - start;
+    if (!result.ok) {
+      // The default budget is wall clock *and* node count: on a loaded machine
+      // the abort path is the documented outcome, and it has to stay prompt.
+      // Asserting `ok` unconditionally made this test fail on a busy suite while
+      // the body's node cost — the thing the budget relies on — was fine.
+      expect(result).toEqual({ ok: false, reason: 'aborted' });
+      expect(elapsed).toBeLessThan(100);
+    }
+    // Whatever the wall clock did, the body is cheap: an unbounded parse of the
+    // same source completes and reports no syntax error.
+    const unbounded = parse(source, { timeoutMs: Number.POSITIVE_INFINITY });
+    expect(unbounded.ok).toBe(true);
+    if (unbounded.ok) expect(unbounded.hasError).toBe(false);
   });
 });

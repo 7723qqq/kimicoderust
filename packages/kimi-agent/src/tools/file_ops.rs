@@ -244,10 +244,14 @@ impl NativeToolset {
                 }
             },
         };
+        // v2's `n_lines` is an optional request, not a cap: the page ends on the
+        // `max_chars` budget (`readTool.ts` `finishPage`), so a 5,000-line file
+        // of short lines comes back whole in one call. The fork used to stop at
+        // a 1,000-line ceiling that v2 never had.
         let n_lines = match args.get("n_lines") {
-            None | Some(Value::Null) => READ_MAX_LINES,
+            None | Some(Value::Null) => usize::MAX,
             Some(v) => match parse_integer_arg(v).filter(|n| *n >= 0) {
-                Some(n) => (n as usize).min(READ_MAX_LINES),
+                Some(n) => n as usize,
                 None => {
                     return Some(err_result(
                         LocalizedText::with_params(
@@ -487,20 +491,21 @@ impl NativeToolset {
         let start = 0usize;
         let end = all.len();
         // Line rendering mirrors the host Read tool: `${lineNo}\t${content}`,
-        // CRLF-style trailing CRs stripped, per-line truncation to
-        // READ_MAX_LINE_LENGTH characters with a `...` marker, lone CRs made
-        // visible as `\r` on mixed files, and a READ_MAX_OUTPUT_BYTES / max_chars budget.
+        // CRLF-style trailing CRs stripped, lone CRs made visible as `\r` on
+        // mixed files, and one `max_chars` budget.
+        //
+        // There is deliberately no per-line length cap and no byte budget. v2
+        // returns a long line either whole (when it fits the budget) or as a
+        // fragment with a `column_offset` continuation, and it pages on
+        // characters (`DEFAULT_MAX_CHARS` / `MAX_CHARS_LIMIT`) — a 2000-char
+        // line cap or a 100 KB byte ceiling cut content v2 would return.
         let mut out = String::new();
-        let mut truncated_lines: Vec<usize> = Vec::new();
-        let mut rendered_bytes = 0usize;
-        let mut max_bytes_reached = false;
         let mut max_chars_reached = false;
         let mut rendered_count = 0usize;
         let mut resume_continuation: Option<(usize, usize)> = None;
 
         for (i, raw) in all[start..end].iter().enumerate() {
             let mut rendered: String = (*raw).to_string();
-            let mut was_truncated = false;
             if style == encoding::LineEndingStyle::CrLf && rendered.ends_with('\r') {
                 rendered.pop();
             }
@@ -511,13 +516,6 @@ impl NativeToolset {
                 } else {
                     rendered = rendered.chars().skip(column_offset).collect();
                 }
-            }
-            if rendered.chars().count() > READ_MAX_LINE_LENGTH {
-                const MARKER: &str = "...";
-                let keep = READ_MAX_LINE_LENGTH - MARKER.len();
-                rendered = rendered.chars().take(keep).collect();
-                rendered.push_str(MARKER);
-                was_truncated = true;
             }
             if style == encoding::LineEndingStyle::Mixed {
                 rendered = encoding::make_carriage_returns_visible(&rendered);
@@ -545,28 +543,9 @@ impl NativeToolset {
                 }
                 break;
             }
-            // The separator byte between rendered lines counts toward the
-            // budget (host renderedLineBytes accounting).
-            let line_bytes = rendered_line.len() + usize::from(!out.is_empty());
-            if !out.is_empty() && rendered_bytes + line_bytes > READ_MAX_OUTPUT_BYTES {
-                max_bytes_reached = true;
-                resume_continuation = Some((current_line_num, 0));
-                break;
-            }
-            if was_truncated {
-                truncated_lines.push(current_line_num);
-            }
             out.push_str(&rendered_line);
             out.push('\n');
             rendered_count += 1;
-            rendered_bytes += line_bytes;
-            if rendered_bytes >= READ_MAX_OUTPUT_BYTES {
-                max_bytes_reached = true;
-                if start + i + 1 < end {
-                    resume_continuation = Some((offset + i + 1, 0));
-                }
-                break;
-            }
         }
         // Host-faithful `<system>` note (finishMessage in readTool.ts).
         let mut parts: Vec<String> = Vec::new();
@@ -586,31 +565,27 @@ impl NativeToolset {
             parts.push("No lines read from file.".into());
         }
         parts.push(format!("Total lines in file: {total_lines}."));
-        let max_lines_reached = n_lines >= READ_MAX_LINES
-            && rendered_count == n_lines
-            && offset + all.len() <= total_lines;
-        if max_lines_reached {
-            parts.push(format!("Max {READ_MAX_LINES} lines reached."));
-        } else if max_chars_reached {
-            parts.push(format!("Max {max_chars} characters reached."));
-        } else if max_bytes_reached {
-            parts.push(format!("Max {READ_MAX_OUTPUT_BYTES} bytes reached."));
-        } else if rendered_count < n_lines {
-            parts.push("End of file reached.".into());
+        // v2 `finishPage` (`readTool.ts`): the summary says whether the
+        // requested range was delivered, names the effective character budget,
+        // and only then whether the file ended. The fork's own "Max N lines /
+        // bytes reached" sentences described limits v2 does not have.
+        let range_complete = !max_chars_reached && rendered_count == all.len();
+        parts.push(
+            if range_complete {
+                "Requested range complete."
+            } else {
+                "Character limit reached."
+            }
+            .to_string(),
+        );
+        parts.push(format!("Effective max_chars: {max_chars}."));
+        let last_line = offset + rendered_count.saturating_sub(1);
+        if (rendered_count > 0 && last_line >= total_lines) || offset > total_lines {
+            parts.push("End of file reached.".to_string());
         }
         if let Some((next_line, next_col)) = resume_continuation {
             parts.push(format!(
                 "To resume reading, call Read with line_offset={next_line}, column_offset={next_col}."
-            ));
-        }
-        if !truncated_lines.is_empty() {
-            let list = truncated_lines
-                .iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            parts.push(format!(
-                "Lines [{list}] were truncated to {READ_MAX_LINE_LENGTH} characters; use Bash (e.g. cut or sed) to read the elided content of those lines."
             ));
         }
         if style == encoding::LineEndingStyle::Mixed {

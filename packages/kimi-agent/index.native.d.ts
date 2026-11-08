@@ -730,6 +730,14 @@ export declare function mcpOauthRemove(name: string, url: string, dir: string): 
 /** Reconnect every live MCP manager that knows this server. */
 export declare function mcpOauthReconnect(name: string): Promise<number>;
 
+/**
+ * Close every server the process-wide MCP cache spawned and forget the
+ * managers; how many were shut down. Sessions share those managers (v2's
+ * workspace-scoped service), so this is the host-teardown seam — a test
+ * deleting its temporary home needs the stdio children gone first.
+ */
+export declare function mcpManagersDispose(): Promise<number>;
+
 // ============================================================================
 // Background tasks — the engine pipeline's task runner (process-global)
 // ============================================================================

@@ -50,6 +50,11 @@ pub enum TurnEvent {
     Prompt {
         #[serde(rename = "turnId")]
         turn_id: u64,
+        /// The prompt id the engine minted at admission (v2 #4627
+        /// `TurnPrompt.promptId`). A host that submitted a prompt as a
+        /// potential steer pairs its optimistic message with this echo.
+        #[serde(rename = "promptId", skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
         /// The prompt as a `ContentPart[]` JSON array, echoed back verbatim
         /// from what the host handed the engine.
         input: serde_json::Value,
@@ -62,7 +67,34 @@ pub enum TurnEvent {
     Started {
         #[serde(rename = "turnId")]
         turn_id: u64,
+        /// See `Prompt::prompt_id`: a steer that was queued behind another
+        /// turn keeps its id until its own turn starts.
+        #[serde(rename = "promptId", skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
         origin: serde_json::Value,
+    },
+    /// A steered message has been consumed into the running turn's context
+    /// (v2 #4627 `TurnSteer`, emitted when a steer nudge is consumed rather
+    /// than when it is submitted). Durable.
+    #[serde(rename = "turn.steer")]
+    Steer {
+        /// The turn the message joined. Absent when the drain site cannot
+        /// name it (v2 declares `turnId` optional).
+        #[serde(rename = "turnId", skip_serializing_if = "Option::is_none")]
+        turn_id: Option<u64>,
+        /// The steered message as the model receives it, projected to
+        /// `ContentPart[]`.
+        input: serde_json::Value,
+        origin: serde_json::Value,
+        /// The steered message's id (v2 `TurnSteer.messageId`).
+        #[serde(rename = "messageId", skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        /// The host prompt ids this steer carries (v2 `TurnSteer.promptIds`).
+        /// Always non-empty on an engine-emitted steer: the drain only reports
+        /// messages that carry a prompt id, so a host never needs a text-based
+        /// fallback to match a delivered steer.
+        #[serde(rename = "promptIds", default, skip_serializing_if = "Vec::is_empty")]
+        prompt_ids: Vec<String>,
     },
     /// An active or queued turn was cancelled. Durable. `turn_id = None`
     /// means "cancel whatever is active".
@@ -105,14 +137,32 @@ mod tests {
         round_trip(
             &TurnEvent::Prompt {
                 turn_id: 7,
+                prompt_id: Some("prompt-7-abc".to_string()),
                 input: json!([{"type": "text", "text": "hello"}]),
                 origin: json!({"kind": "user"}),
             },
             json!({
                 "type": "turn.prompt",
                 "turnId": 7,
+                "promptId": "prompt-7-abc",
                 "input": [{"type": "text", "text": "hello"}],
                 "origin": {"kind": "user"},
+            }),
+        );
+        // A turn the engine minted for itself (background notification) has no
+        // host prompt id; the field is omitted rather than sent empty.
+        round_trip(
+            &TurnEvent::Prompt {
+                turn_id: 8,
+                prompt_id: None,
+                input: json!([]),
+                origin: json!({"kind": "task"}),
+            },
+            json!({
+                "type": "turn.prompt",
+                "turnId": 8,
+                "input": [],
+                "origin": {"kind": "task"},
             }),
         );
     }
@@ -122,11 +172,49 @@ mod tests {
         round_trip(
             &TurnEvent::Started {
                 turn_id: 7,
+                prompt_id: Some("prompt-7-abc".to_string()),
                 origin: json!({"kind": "user"}),
             },
             json!({
                 "type": "turn.started",
                 "turnId": 7,
+                "promptId": "prompt-7-abc",
+                "origin": {"kind": "user"},
+            }),
+        );
+    }
+
+    #[test]
+    fn turn_steer_wire_shape() {
+        round_trip(
+            &TurnEvent::Steer {
+                turn_id: Some(7),
+                input: json!([{"type": "text", "text": "steer me"}]),
+                origin: json!({"kind": "user"}),
+                message_id: Some("prompt-8-def".to_string()),
+                prompt_ids: vec!["prompt-8-def".to_string()],
+            },
+            json!({
+                "type": "turn.steer",
+                "turnId": 7,
+                "input": [{"type": "text", "text": "steer me"}],
+                "origin": {"kind": "user"},
+                "messageId": "prompt-8-def",
+                "promptIds": ["prompt-8-def"],
+            }),
+        );
+        // The drain site cannot name the turn; the optional fields disappear.
+        round_trip(
+            &TurnEvent::Steer {
+                turn_id: None,
+                input: json!([{"type": "text", "text": "steer"}]),
+                origin: json!({"kind": "user"}),
+                message_id: None,
+                prompt_ids: Vec::new(),
+            },
+            json!({
+                "type": "turn.steer",
+                "input": [{"type": "text", "text": "steer"}],
                 "origin": {"kind": "user"},
             }),
         );
@@ -198,12 +286,21 @@ mod tests {
         let events = [
             TurnEvent::Prompt {
                 turn_id: 0,
+                prompt_id: None,
                 input: json!([]),
                 origin: json!(null),
             },
             TurnEvent::Started {
                 turn_id: 0,
+                prompt_id: None,
                 origin: json!(null),
+            },
+            TurnEvent::Steer {
+                turn_id: None,
+                input: json!([]),
+                origin: json!(null),
+                message_id: None,
+                prompt_ids: Vec::new(),
             },
             TurnEvent::Cancel {
                 turn_id: None,
@@ -228,7 +325,13 @@ mod tests {
             .collect();
         assert_eq!(
             types,
-            vec!["turn.prompt", "turn.started", "turn.cancel", "turn.ended",]
+            vec![
+                "turn.prompt",
+                "turn.started",
+                "turn.steer",
+                "turn.cancel",
+                "turn.ended",
+            ]
         );
     }
 }

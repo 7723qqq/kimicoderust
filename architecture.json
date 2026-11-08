@@ -26,7 +26,7 @@
           "description": "ACP stdio protocol server"
         }
       ],
-      "fingerprint": "aaf009bf1bf49c21"
+      "fingerprint": "b8a430588cff0ef2"
     },
     {
       "id": "node-sdk",
@@ -49,7 +49,7 @@
           "description": "Public SDK package"
         }
       ],
-      "fingerprint": "5631a5409e64bd09"
+      "fingerprint": "e5210ee907faa853"
     },
     {
       "id": "kimi-code",
@@ -80,7 +80,7 @@
           "description": "Terminal UI"
         }
       ],
-      "fingerprint": "7513971ce3b6d488"
+      "fingerprint": "32c9e43f76761766"
     },
     {
       "id": "kosong",
@@ -109,7 +109,7 @@
       "deps": [
         "transcript"
       ],
-      "fingerprint": "cf9c03c95631bede"
+      "fingerprint": "000d0e0ec490b59d"
     },
     {
       "id": "transcript",
@@ -135,7 +135,7 @@
       "deps": [
         "kosong"
       ],
-      "fingerprint": "6ada19e20b768887"
+      "fingerprint": "0f100628f17cba0c"
     },
     {
       "id": "i18n-catalog",
@@ -143,7 +143,7 @@
       "source": "packages/i18n-catalog/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "68c3d0d0fff81645"
+      "fingerprint": "1fb54f2849f7ed38"
     },
     {
       "id": "i18n-runtime",
@@ -194,7 +194,7 @@
       "source": "packages/kimi-ui-core/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "1471c25bd94c6002"
+      "fingerprint": "8c4570a14c0648ef"
     },
     {
       "id": "kimi-tui-app",
@@ -205,7 +205,20 @@
         "kimi-ui-core"
       ],
       "_depsNote": "Edges are kimi-ui-core only: the EntryOp/EntryStore contract and the entry row policy (gutter, wrap, per-kind dimming). The widget tree, layout engine and terminal come from textual-rs, a third-party dependency rather than a workspace module, so it is not an edge here. The session link is the UiTransport trait, not a crate dependency: the host that owns an engine handle implements it, which is what keeps this crate out of the engine layer.",
-      "fingerprint": "1d9dbe469eed2135"
+      "fingerprint": "347404dbf3b3a16d"
+    },
+    {
+      "id": "kimi-tui-host",
+      "name": "Kimi TUI Host (composition root)",
+      "source": "packages/kimi-tui-host/src",
+      "layer": "app",
+      "deps": [
+        "kimi-agent",
+        "kimi-tui-app",
+        "kimi-ui-core"
+      ],
+      "_depsNote": "The one crate allowed to name both sides: it builds the engine session and hands it to the widget stack, which is why neither kimi-tui-app nor kimi-agent links the other. Its edges are the two crates it composes (kimi-agent for the session, projection and native toolset; kimi-tui-app for UiState, the UiTransport seam and run_terminal) plus kimi-ui-core for the EntryOp vocabulary it applies. A composition root is an app-layer module by the same rule that puts kimi-code there: it may depend on the engine, never the reverse.",
+      "fingerprint": "89dd8b21409cc0ea"
     },
     {
       "id": "vis-server",
@@ -229,7 +242,7 @@
         "telemetry",
         "i18n-shared"
       ],
-      "fingerprint": "e3a8e0f7bc7e4ad1"
+      "fingerprint": "5394e053ac2432cc"
     },
     {
       "id": "kimi-inspect",

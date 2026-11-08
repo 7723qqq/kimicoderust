@@ -841,6 +841,14 @@ export const en = {
   // these keys against that embedded copy; there is no second English copy in
   // Rust source to keep in sync.
   engine: {
+    mcp: {
+      needsAuthHint:
+        'MCP server "{{name}}" needs OAuth — run /mcp-config login {{name}}',
+    },
+    subagent: {
+      depthExceeded:
+        'Subagent delegation depth exceeded (max {{maxDepth}}) — use a persistent subagent or restructure the delegation',
+    },
     background: {
       outputLimitExceeded:
         'Output limit exceeded: the command produced more than {{mib}} MiB and was terminated. Redirect large output to a file (e.g. `command > out.txt`) and inspect it in slices instead.',
@@ -1095,6 +1103,11 @@ export const en = {
       argsNotJson:
         'Invalid {{tool}} arguments: the arguments are not valid JSON ({{detail}}).',
       argsNotObject: 'Invalid {{tool}} arguments: the arguments must be a JSON object.',
+    },
+    tui: {
+      turnStoppedFiltered: 'Turn stopped: provider safety policy blocked the response.',
+      turnStoppedBlocked: 'Turn stopped: prompt hook blocked the request.',
+      interruptedByUser: 'Interrupted by user',
     },
   },
   startup: {

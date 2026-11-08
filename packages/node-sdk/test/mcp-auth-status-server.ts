@@ -12,6 +12,12 @@ export interface McpAuthStatusServer {
   readonly plainUrl: string;
   readonly oauthUrl: string;
   readonly unavailableUrl: string;
+  /**
+   * The `client_name` dynamic client registration announced (v2
+   * `resolveClientName` → `client_name` in the registration body,
+   * `mcpCore/oauth/service.ts:641`), or `undefined` before any registration.
+   */
+  readonly registrationClientName: string | undefined;
   requestCount(pathname: string): number;
   close(): Promise<void>;
 }
@@ -26,13 +32,17 @@ export async function startMcpAuthStatusServer(): Promise<McpAuthStatusServer> {
   // Authorization-code state for the browser flow: the challenge registered by
   // `/authorize`, verified against `code_verifier` at `/token`.
   const flow: { challenge?: string; redirectUri?: string } = {};
+  // What the last dynamic client registration announced (v2 resolveClientName).
+  const registration: { clientName?: string } = {};
   const server = createServer((request, response) => {
     const pathname = new URL(request.url ?? '/', baseUrl).pathname;
     requestCounts.set(pathname, (requestCounts.get(pathname) ?? 0) + 1);
-    void handleRequest(request, response, baseUrl, authToken, flow).catch((error: unknown) => {
-      if (!response.headersSent) response.writeHead(500);
-      response.end(String(error));
-    });
+    void handleRequest(request, response, baseUrl, authToken, flow, registration).catch(
+      (error: unknown) => {
+        if (!response.headersSent) response.writeHead(500);
+        response.end(String(error));
+      },
+    );
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -46,6 +56,9 @@ export async function startMcpAuthStatusServer(): Promise<McpAuthStatusServer> {
     plainUrl: `${baseUrl}/plain`,
     oauthUrl: `${baseUrl}/oauth`,
     unavailableUrl: `${baseUrl}/unavailable`,
+    get registrationClientName() {
+      return registration.clientName;
+    },
     requestCount: (pathname) => requestCounts.get(pathname) ?? 0,
     close: () =>
       new Promise<void>((resolve, reject) => {
@@ -63,6 +76,7 @@ async function handleRequest(
   baseUrl: string,
   authToken: string,
   flow: { challenge?: string; redirectUri?: string },
+  registration: { clientName?: string },
 ): Promise<void> {
   const url = new URL(request.url ?? '/', baseUrl);
   if (url.pathname === '/unavailable') {
@@ -157,6 +171,9 @@ async function handleRequest(
   }
   if (url.pathname === '/register' && request.method === 'POST') {
     const metadata = await readJson(request);
+    if (typeof metadata['client_name'] === 'string') {
+      registration.clientName = metadata['client_name'];
+    }
     sendJson(response, { client_id: 'test-client', ...metadata }, 201);
     return;
   }

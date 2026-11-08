@@ -5,16 +5,24 @@
 //!
 //! v2 keys the reminder off `TurnEnded { reason: 'cancelled',
 //! interruptReason: 'user_cancelled' }` and dedupes by inspecting whether the
-//! last comparable message is already this variant. The engine's turn loop is
-//! stateless and cannot distinguish a user cancellation from a host-side
-//! abort (the reason does not travel with the cancel request — see the
-//! `telemetry_interrupt_reason` note), so the caller reports the aborted
-//! outcome through [`RunTurnInput::previous_turn_aborted`] and the
-//! history-scan baseline keeps a resumed session from re-announcing a
-//! reminder that is already in the transcript.
+//! last comparable message is already this variant. The engine's stop reason
+//! alone cannot tell a user cancellation from a teardown or a host-side abort
+//! (both flip the same cancel flag), so each host records whether *the user*
+//! asked for the stop and arms the reminder through [`arms_reminder`]. The
+//! caller reports the aborted outcome through
+//! [`RunTurnInput::previous_turn_aborted`], and the history-scan baseline keeps
+//! a resumed session from re-announcing a reminder already in the transcript.
 
 use crate::injection::InjectionRegistry;
 use crate::turn_loop::types::LLMMessage;
+
+/// v2 `TurnEnded` filter (`interruptionReminderService.ts:34-36`): only an
+/// abort the *user* asked for arms the reminder. A session teardown or a host
+/// abort flips the same cancel flag, and telling the model "the user
+/// interrupted" after one of those is false.
+pub fn arms_reminder(turn_aborted: bool, user_cancelled: bool) -> bool {
+    turn_aborted && user_cancelled
+}
 
 /// The reminder injected after a user-cancelled turn (v2
 /// `interruptionReminderService.ts:15-19`, joined verbatim).
@@ -75,6 +83,16 @@ mod tests {
         assert!(
             INTERRUPTION_REMINDER.contains("The user's next message continues the conversation.")
         );
+    }
+
+    #[test]
+    fn test_reminder_arms_only_for_a_user_cancel() {
+        // v2 `TurnEnded` filter: a cancelled turn that nobody asked for (a
+        // teardown, a host abort) must not tell the model the user interrupted.
+        assert!(arms_reminder(true, true));
+        assert!(!arms_reminder(true, false));
+        assert!(!arms_reminder(false, true));
+        assert!(!arms_reminder(false, false));
     }
 
     #[test]

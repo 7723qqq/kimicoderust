@@ -25,6 +25,7 @@ fn folds_a_full_turn_into_transcript_ops() {
         agent_id: "main".into(),
         turn_id: "turn-0".into(),
         delta: "Hello".into(),
+        block: None,
     });
     assert_eq!(ops.len(), 2);
     assert!(matches!(ops[0], TranscriptOperation::FrameUpsert { .. }));
@@ -40,6 +41,7 @@ fn folds_a_full_turn_into_transcript_ops() {
         agent_id: "main".into(),
         turn_id: "turn-0".into(),
         delta: " world".into(),
+        block: None,
     });
     assert_eq!(ops.len(), 1);
     match &ops[0] {
@@ -1151,6 +1153,7 @@ fn turn_steer_buffers_until_the_next_step_begin() {
         agent_id: "main".into(),
         turn_id: "turn-4".into(),
         delta: "on it".into(),
+        block: None,
     });
     let snapshot = projector.snapshot();
     let turn = snapshot

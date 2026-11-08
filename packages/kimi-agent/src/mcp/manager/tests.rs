@@ -46,6 +46,52 @@ async fn test_mcp_manager_discovery_and_call() {
     assert!(res_missing.is_none());
 }
 
+/// v2 #4719 / #4733: a same-name MCP tool whose definition changed is held
+/// pending. The running session keeps the active definition it was shown;
+/// a new session (list_live) would see the replacement.
+#[tokio::test]
+async fn a_changed_same_name_mcp_tool_stays_pinned_for_this_session() {
+    let manager = McpManager::new();
+    let old = vec![McpTool {
+        name: "search".into(),
+        description: Some("old search".into()),
+        input_schema: json!({ "type": "object" }),
+    }];
+    manager
+        .add_client(McpClient::mock_with_tools("srv", old))
+        .await;
+    let first = manager.list_tool_infos().await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].description, "old search");
+
+    let updated = vec![McpTool {
+        name: "search".into(),
+        description: Some("updated search".into()),
+        input_schema: json!({ "type": "object" }),
+    }];
+    manager
+        .add_client(McpClient::mock_with_tools("srv", updated))
+        .await;
+    let pinned = manager.list_tool_infos().await;
+    assert_eq!(pinned.len(), 1, "no duplicate declaration");
+    assert_eq!(
+        pinned[0].description, "old search",
+        "active schema stays pinned"
+    );
+    assert!(
+        manager.has_pending_tool("mcp__srv__search").await,
+        "the replacement is registered as pending"
+    );
+    assert_eq!(
+        manager.list_live_tool_infos().await[0].description,
+        "updated search",
+        "a new session would see the update"
+    );
+
+    assert!(manager.remove_server("srv").await);
+    assert!(manager.list_tool_infos().await.is_empty());
+}
+
 #[tokio::test]
 async fn test_mcp_manager_list_tool_infos() {
     let manager = McpManager::new();
@@ -106,7 +152,7 @@ async fn test_mcp_manager_server_entries() {
 async fn test_mcp_manager_with_sse_client_and_call_tool() {
     let (sse_url, _shutdown) = spawn_mock_mcp_sse_server(None, None, None).await;
 
-    let client = McpClient::connect_sse("calc_server", &sse_url, HashMap::new())
+    let client = McpClient::connect_sse("calc_server", &sse_url, HashMap::new(), None)
         .await
         .expect("SSE client connect failed");
 
@@ -188,9 +234,15 @@ async fn test_mcp_manager_spawn_from_config() {
         },
     );
 
-    let manager = McpManager::new();
+    let manager = std::sync::Arc::new(McpManager::new());
     let config = crate::config::KimiConfig {
         mcp_servers: configs,
+        // This test is about the connect-failure status; the startup retry
+        // has its own tests.
+        mcp: crate::config::McpConfig {
+            reconnect_retry_enabled: Some(false),
+            ..Default::default()
+        },
         ..Default::default()
     };
     manager.spawn_from_config(&config).await;
@@ -252,9 +304,15 @@ async fn test_spawn_from_config_parallel() {
         },
     );
 
-    let manager = McpManager::new();
+    let manager = std::sync::Arc::new(McpManager::new());
     let config = crate::config::KimiConfig {
         mcp_servers: configs,
+        // This test is about the connect-failure status; the startup retry
+        // has its own tests.
+        mcp: crate::config::McpConfig {
+            reconnect_retry_enabled: Some(false),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let start = std::time::Instant::now();
@@ -359,9 +417,15 @@ async fn test_reconnect_marks_failed_when_endpoint_dies() {
             ..Default::default()
         },
     );
-    let manager = McpManager::new();
+    let manager = std::sync::Arc::new(McpManager::new());
     let config = crate::config::KimiConfig {
         mcp_servers: configs,
+        // This test is about the connect-failure status; the startup retry
+        // has its own tests.
+        mcp: crate::config::McpConfig {
+            reconnect_retry_enabled: Some(false),
+            ..Default::default()
+        },
         ..Default::default()
     };
     manager.spawn_from_config(&config).await;
@@ -550,7 +614,7 @@ async fn test_tool_filter_limits_model_visibility() {
         )
         .await;
 
-    let client = McpClient::connect_sse("filtered", &sse_url, HashMap::new())
+    let client = McpClient::connect_sse("filtered", &sse_url, HashMap::new(), None)
         .await
         .expect("SSE client connect failed");
     manager.add_client(client).await;
@@ -693,7 +757,7 @@ async fn test_disabled_server_is_listed_without_connecting() {
         },
     );
 
-    let manager = McpManager::new();
+    let manager = std::sync::Arc::new(McpManager::new());
     let config = crate::config::KimiConfig {
         mcp_servers: configs,
         ..Default::default()
@@ -851,7 +915,7 @@ async fn test_global_defaults_apply_to_servers_without_timeouts() {
     manager.set_defaults(crate::config::McpConfig {
         startup_timeout_ms: Some(2_000),
         tool_timeout_ms: Some(3_000),
-        default_deferred: None,
+        ..Default::default()
     });
     manager
         .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
@@ -937,6 +1001,12 @@ async fn test_startup_timeout_marks_failed() {
     });
 
     let manager = McpManager::new();
+    // This test is about the connect-failure status; the startup retry has its
+    // own tests.
+    manager.set_defaults(crate::config::McpConfig {
+        reconnect_retry_enabled: Some(false),
+        ..Default::default()
+    });
     let err = manager
         .configure(
             "hanging",
@@ -959,6 +1029,229 @@ async fn test_startup_timeout_marks_failed() {
     assert_eq!(entries[0].status, "failed");
     assert_eq!(entries[0].error.as_deref(), Some("Timed out after 150ms"));
     assert_eq!(entries[0].tool_count, 0);
+}
+
+/// v2 `rescheduleRetries` (connection-manager.ts:501-505): a policy change
+/// moves the due time of a pending retry and keeps its streak, so tightening
+/// the knob takes effect instead of waiting out the old schedule.
+#[tokio::test]
+async fn rescheduling_retries_moves_the_due_time_and_keeps_the_streak() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager.set_defaults(crate::config::McpConfig {
+        reconnect_retry_enabled: Some(true),
+        reconnect_initial_delay_ms: Some(60_000),
+        reconnect_max_delay_ms: Some(60_000),
+        ..Default::default()
+    });
+    manager.start_retry_ticker();
+    manager
+        .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock connects");
+    manager
+        .mark_connect_failure("mock", &McpError::transport("boom"), "boom")
+        .await;
+    let before = manager
+        .server_entries()
+        .await
+        .into_iter()
+        .find(|entry| entry.name == "mock")
+        .and_then(|entry| entry.next_retry_at);
+    assert!(before.is_some(), "a transient failure schedules a retry");
+
+    // The host tightens the knobs; the already-scheduled wait moves with it.
+    manager.set_defaults(crate::config::McpConfig {
+        reconnect_retry_enabled: Some(true),
+        reconnect_initial_delay_ms: Some(1),
+        reconnect_max_delay_ms: Some(1),
+        ..Default::default()
+    });
+    manager.reschedule_retries().await;
+    let after = manager
+        .server_entries()
+        .await
+        .into_iter()
+        .find(|entry| entry.name == "mock")
+        .and_then(|entry| entry.next_retry_at);
+    assert!(
+        after.is_some_and(|after| before.is_some_and(|before| after < before)),
+        "the rescheduled retry must be due earlier: {before:?} -> {after:?}"
+    );
+    manager.shutdown().await;
+}
+
+/// v2 "isolates permanent startup and discovery failures without retry or
+/// blocking the rest": a server that can never start lands `failed` with no
+/// retry, and its neighbour still connects in the same load.
+#[tokio::test]
+async fn a_permanent_failure_does_not_block_the_other_servers() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    let handle = manager.connect_all(vec![
+        (
+            "broken".to_string(),
+            McpServerRecipe::Stdio {
+                command: "definitely_nonexistent_command_9999".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+            },
+            McpServerOptions::default(),
+        ),
+        (
+            "good".to_string(),
+            McpServerRecipe::Mock,
+            McpServerOptions::default(),
+        ),
+    ]);
+    handle.await.expect("connect_all joins its tasks");
+
+    let entries = manager.server_entries().await;
+    let good = entries
+        .iter()
+        .find(|entry| entry.name == "good")
+        .expect("the healthy server is listed");
+    assert_eq!(good.status, "connected");
+    assert_eq!(good.tool_count, 1);
+    let broken = entries
+        .iter()
+        .find(|entry| entry.name == "broken")
+        .expect("the failing server is listed");
+    assert_eq!(broken.status, "failed");
+    assert!(
+        broken.next_retry_at.is_none(),
+        "a command that cannot spawn is permanent — retrying repeats the error"
+    );
+    manager.shutdown().await;
+}
+
+/// v2 "markRemoved tombstones the entry" (connection-manager.test.ts:195-241):
+/// the entry stays listed as `removed` with no tools, `reconnect` refuses it
+/// (it resolves through the live view, hence "Unknown MCP server"), a missing
+/// name reports `false`, and a fresh `configure` revives it.
+#[tokio::test]
+async fn mark_removed_tombstones_the_entry_until_a_fresh_connect() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager
+        .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock connects");
+    assert_eq!(status_of(&manager, "mock").await, "connected");
+    assert!(!manager.server_entries().await[0].tools.is_empty());
+
+    assert!(manager.mark_removed("mock").await);
+    let entries = manager.server_entries().await;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.name == "mock")
+        .expect("a tombstone stays listed");
+    assert_eq!(entry.status, "removed");
+    assert_eq!(entry.tool_count, 0);
+    assert!(manager.clients.read().await.get("mock").is_none());
+
+    let err = manager
+        .reconnect("mock")
+        .await
+        .expect_err("a tombstone is not reconnectable");
+    assert_eq!(err, "Unknown MCP server: mock");
+    assert_eq!(status_of(&manager, "mock").await, "removed");
+    assert!(!manager.mark_removed("missing").await);
+
+    // A fresh configuration is what revives it (v2 `connect`/`upsert`).
+    manager
+        .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("a fresh connect revives the server");
+    assert_eq!(status_of(&manager, "mock").await, "connected");
+    manager.shutdown().await;
+}
+
+/// v2 "markRemoved … in-flight connects invalidated": a handshake that lands
+/// after the removal is discarded — the entry keeps its tombstone and no
+/// client is registered.
+#[tokio::test]
+async fn a_handshake_that_lands_after_removal_does_not_revive_the_entry() {
+    let (url, _seen, _shutdown) =
+        crate::mcp::http::test_helpers::spawn_mock_http_server("slow-initialize").await;
+    let manager = std::sync::Arc::new(McpManager::new());
+    let connecting = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            manager
+                .configure(
+                    "slow",
+                    McpServerRecipe::Http {
+                        url,
+                        headers: HashMap::new(),
+                        bearer_token_env_var: None,
+                    },
+                    McpServerOptions {
+                        startup_timeout_ms: Some(5_000),
+                        ..Default::default()
+                    },
+                )
+                .await
+        })
+    };
+    // The mock holds `initialize` for 300 ms; the removal lands inside it.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    assert!(manager.mark_removed("slow").await);
+
+    let outcome = connecting.await.expect("the connect task joins");
+    assert!(
+        outcome.is_err(),
+        "the discarded attempt reports why it did not register"
+    );
+    assert_eq!(status_of(&manager, "slow").await, "removed");
+    assert!(
+        manager.clients.read().await.get("slow").is_none(),
+        "the late handshake must not register a client for a tombstone"
+    );
+    manager.shutdown().await;
+}
+
+/// v2 `withTimeout` wraps connect **and** discovery
+/// (connection-manager.ts:594-611): a server that answers `initialize` but
+/// never returns `tools/list` must fail on the startup budget instead of
+/// hanging until the caller gives up.
+#[tokio::test]
+async fn a_hanging_tools_list_fails_on_the_startup_budget() {
+    let (url, seen, _shutdown) =
+        crate::mcp::http::test_helpers::spawn_mock_http_server("hang-tools").await;
+    let manager = McpManager::new();
+    manager.set_defaults(crate::config::McpConfig {
+        reconnect_retry_enabled: Some(false),
+        ..Default::default()
+    });
+    let started = std::time::Instant::now();
+    let err = manager
+        .configure(
+            "slow-tools",
+            McpServerRecipe::Http {
+                url,
+                headers: HashMap::new(),
+                bearer_token_env_var: None,
+            },
+            McpServerOptions {
+                startup_timeout_ms: Some(150),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("discovery must not outlive the startup budget");
+    assert_eq!(err, "Timed out after 150ms");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the startup budget, not the caller's patience, must end the connect"
+    );
+    // The handshake itself succeeded — discovery is the half that timed out.
+    let methods: Vec<String> = seen
+        .lock()
+        .await
+        .iter()
+        .map(|request| request.method.clone())
+        .collect();
+    assert!(methods.iter().any(|method| method == "initialize"));
+    assert!(methods.iter().any(|method| method == "tools/list"));
 }
 
 /// A Streamable HTTP server is discovered through the `http` recipe
@@ -1249,6 +1542,137 @@ async fn test_oauth_token_injection_and_needs_auth_status() {
     );
 }
 
+/// v2's two remaining `needs-auth` edges (`shouldMarkNeedsAuth` +
+/// `peekRejectedGrant`):
+///
+/// - without an OAuth service a 401 is `failed`, not `needs-auth` — no login
+///   could supply a token, so "run /mcp-config login" would be a lie;
+/// - a stored grant the server rejects flips the entry to `needs-auth` **and**
+///   drops the stale record, so the next connect does not replay it
+///   (v2 "flips cached OAuth credentials that require reauth into needs-auth").
+#[tokio::test]
+async fn a_401_without_oauth_fails_and_a_rejected_grant_flips_to_needs_auth() {
+    // 1. No OAuth service installed: the 401 stays a plain failure.
+    let (url, _seen, _shutdown) =
+        crate::mcp::http::test_helpers::spawn_mock_http_server("401").await;
+    let manager = McpManager::new();
+    manager
+        .configure(
+            "plain",
+            McpServerRecipe::Http {
+                url,
+                headers: HashMap::new(),
+                bearer_token_env_var: None,
+            },
+            McpServerOptions::default(),
+        )
+        .await
+        .expect_err("401 must fail the connect");
+    assert_eq!(
+        status_of(&manager, "plain").await,
+        "failed",
+        "without an OAuth service the 401 cannot be repaired by logging in"
+    );
+
+    // 2. A stored grant the server rejects: the startup path lands needs-auth
+    //    with the login hint. v2's startup transition (`failureTarget` →
+    //    `needsAuth`, connection-manager.ts:594) does **not** invalidate the
+    //    stored grant — only the runtime `markNeedsAuth` path does, through
+    //    `peekRejectedGrant` + `invalidateTokensIfCurrent` (:452-473). The
+    //    fork keeps the same asymmetry; the tool-call test below covers the
+    //    invalidating path.
+    let (url, _seen, _shutdown) =
+        crate::mcp::http::test_helpers::spawn_mock_http_server("401").await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::mcp::oauth::McpOAuthFileStore::new(dir.path()));
+    let key = crate::mcp::oauth::mcp_oauth_store_key("stale", &url).unwrap();
+    store
+        .write(
+            &key,
+            &crate::mcp::oauth::McpOAuthTokens {
+                access_token: "stale-token".into(),
+                refresh_token: Some("stale-refresh".into()),
+                expires_at_ms: None,
+                token_endpoint: None,
+                client_id: None,
+                client_secret: None,
+                resource: None,
+                obtained_at_ms: Some(chrono::Utc::now().timestamp_millis() - 60_000),
+            },
+        )
+        .unwrap();
+    manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(
+        store.clone(),
+    )));
+    manager
+        .configure(
+            "stale",
+            McpServerRecipe::Http {
+                url,
+                headers: HashMap::new(),
+                bearer_token_env_var: None,
+            },
+            McpServerOptions::default(),
+        )
+        .await
+        .expect_err("a rejected grant fails the connect");
+    let entries = manager.server_entries().await;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.name == "stale")
+        .expect("the entry is listed");
+    assert_eq!(entry.status, "needs-auth");
+    assert!(
+        entry
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("run /mcp-config login stale")),
+        "the hint names the server: {:?}",
+        entry.error
+    );
+    assert!(
+        store
+            .read::<crate::mcp::oauth::McpOAuthTokens>(&key)
+            .is_some(),
+        "v2 keeps the rejectable grant on the startup path; only markNeedsAuth clears it"
+    );
+}
+
+/// v2 client-http.test.ts "strips case-variant authorization headers before
+/// injecting the bearer": HTTP header names are case-insensitive, so a static
+/// `authorization` must not survive next to the injected `Authorization`.
+#[test]
+fn a_bearer_env_token_strips_case_variant_authorization_headers() {
+    let var = format!("KIMI_TEST_MCP_BEARER_CASE_{}", std::process::id());
+    // SAFETY: the variable name is unique to this test process and no other
+    // test reads it.
+    unsafe { std::env::set_var(&var, "s3cret") };
+    let headers = HashMap::from([
+        ("Authorization".to_string(), "Bearer upper".to_string()),
+        ("authorization".to_string(), "Bearer lower".to_string()),
+        ("X-Api-Key".to_string(), "kept".to_string()),
+    ]);
+    let resolved = resolve_bearer_headers("HTTP", &headers, Some(var.as_str()))
+        .expect("a set env var resolves");
+    let authorizations: Vec<&String> = resolved
+        .keys()
+        .filter(|key| key.eq_ignore_ascii_case("authorization"))
+        .collect();
+    assert_eq!(
+        authorizations.len(),
+        1,
+        "exactly one Authorization header survives"
+    );
+    assert_eq!(authorizations[0].as_str(), "Authorization");
+    assert_eq!(
+        resolved.get("Authorization").map(String::as_str),
+        Some("Bearer s3cret")
+    );
+    assert_eq!(resolved.get("X-Api-Key").map(String::as_str), Some("kept"));
+    // SAFETY: see above.
+    unsafe { std::env::remove_var(&var) };
+}
+
 /// A 401 on a *tool call* — the handshake already succeeded — flips the
 /// server to `needs-auth`, drops its tools, clears the rejected grant and
 /// hands the caller an actionable message (v2 `markNeedsAuth` from the
@@ -1489,17 +1913,23 @@ fn test_should_mark_needs_auth_matrix() {
     };
 
     // No OAuth service installed → never needs-auth.
-    assert!(!should_mark_needs_auth(&http, false, true));
+    assert!(!should_mark_needs_auth(&http, false, false, true));
     // stdio servers never participate in the OAuth flow.
-    assert!(!should_mark_needs_auth(&stdio, true, true));
+    assert!(!should_mark_needs_auth(&stdio, false, true, true));
     // A pinned static credential means the 401 is a bad header.
-    assert!(!should_mark_needs_auth(&with_headers, true, true));
-    assert!(!should_mark_needs_auth(&with_bearer, true, true));
+    assert!(!should_mark_needs_auth(&with_headers, false, true, true));
+    assert!(!should_mark_needs_auth(&with_bearer, false, true, true));
     // Remote without credentials + a classified 401 → needs-auth.
-    assert!(should_mark_needs_auth(&http, true, true));
+    assert!(should_mark_needs_auth(&http, false, true, true));
     // Non-401 failures (500, connection refused, timeout, …) stay failed,
     // even if their text happens to contain "401" or "Unauthorized".
-    assert!(!should_mark_needs_auth(&http, true, false));
+    assert!(!should_mark_needs_auth(&http, false, true, false));
+    // v2 `config.headers !== undefined && config.auth !== 'oauth'`: an
+    // explicit `auth = "oauth"` says the extra headers are unrelated to the
+    // credential, so the 401 still means "log in".
+    assert!(should_mark_needs_auth(&with_headers, true, true, true));
+    // A bearer env var is a static credential either way — no flip.
+    assert!(!should_mark_needs_auth(&with_bearer, true, true, true));
 }
 
 /// A static `headers` block on a 401 server must surface `failed`, not
@@ -1607,4 +2037,506 @@ async fn test_default_deferred_applies_and_a_per_server_value_wins() {
             .any(|name| name.starts_with("mcp__explicit__")),
         "an explicit per-server false must beat the section default: {deferred:?}"
     );
+}
+
+/// v2 `McpConnectionManagerOptions.stdioCwd`: a stdio server whose config omits
+/// `cwd` starts in the manager's default — the workspace — and an explicit
+/// `cwd` still wins over it.
+#[test]
+fn the_default_stdio_cwd_fills_a_missing_one() {
+    let manager = McpManager::new();
+    assert_eq!(manager.stdio_cwd_for(None), None, "no default, no cwd");
+    manager.set_default_stdio_cwd("workspace-root");
+    assert_eq!(
+        manager.stdio_cwd_for(None).as_deref(),
+        Some("workspace-root")
+    );
+    assert_eq!(
+        manager.stdio_cwd_for(Some("explicit-dir")).as_deref(),
+        Some("explicit-dir"),
+        "an explicit cwd always wins"
+    );
+}
+
+async fn status_of(manager: &McpManager, name: &str) -> String {
+    manager
+        .server_entries()
+        .await
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.status)
+        .unwrap_or_default()
+}
+
+/// v2 `failureTarget` + `retryOrFailed`: a transient startup failure schedules
+/// a retry and a due retry walks the entry back through the connect attempt
+/// into `connected`, clearing the streak; a configuration failure never
+/// retries. The scheduled entry is public `failed` plus `nextRetryAt`
+/// (v2 `publicStatusByState`), never a status of its own.
+#[tokio::test]
+async fn a_transient_startup_failure_schedules_a_retry() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager.set_defaults(crate::config::McpConfig {
+        reconnect_initial_delay_ms: Some(1),
+        reconnect_max_delay_ms: Some(1),
+        ..Default::default()
+    });
+    // A retrying entry needs the scheduler that acts on its due time: without
+    // it the policy reports `failed` on purpose.
+    manager.start_retry_ticker();
+    manager
+        .configure("flaky", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock server connects");
+    assert_eq!(status_of(&manager, "flaky").await, "connected");
+
+    manager
+        .mark_connect_failure(
+            "flaky",
+            &McpError::timeout("Timed out after 100ms"),
+            "Timed out after 100ms",
+        )
+        .await;
+    let entry = manager
+        .server_entries()
+        .await
+        .into_iter()
+        .find(|entry| entry.name == "flaky")
+        .expect("the entry is resident");
+    assert_eq!(entry.status, "failed");
+    assert!(entry.next_retry_at.is_some(), "a retry time is public");
+    {
+        let servers = manager.servers.read().await;
+        let state = servers.get("flaky").expect("the entry is resident");
+        assert_eq!(state.status, "retry-waiting");
+        assert!(state.retry_at_ms.is_some(), "a retry time is scheduled");
+        assert_eq!(state.retry_streak, 1);
+    }
+
+    // The 1 ms delay jitters down to 0, so the entry is already due.
+    manager.retry_due_servers().await;
+    let entry = manager
+        .server_entries()
+        .await
+        .into_iter()
+        .find(|entry| entry.name == "flaky")
+        .expect("the entry is resident");
+    assert_eq!(entry.status, "connected");
+    assert!(
+        entry.next_retry_at.is_none(),
+        "a live entry has no retry time"
+    );
+    {
+        let servers = manager.servers.read().await;
+        let state = servers.get("flaky").expect("the entry is resident");
+        assert_eq!(state.retry_streak, 0, "a successful connect resets it");
+        assert!(state.retry_at_ms.is_none());
+    }
+    manager.shutdown().await;
+}
+
+/// v2 suppresses the status events of the retry cycle itself: a due retry does
+/// not flash `pending` (`retryDue`, connection-manager.ts:600-601) and a retry
+/// that fails again does not re-emit `failed` — the public entry was already
+/// failed. A listener sees `pending, connected, failed, connected`, which is
+/// exactly what the v2 weak-evidence test asserts.
+#[tokio::test]
+async fn an_automatic_retry_does_not_re_emit_pending_or_failed() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager.set_defaults(crate::config::McpConfig {
+        reconnect_initial_delay_ms: Some(1),
+        reconnect_max_delay_ms: Some(1),
+        ..Default::default()
+    });
+    manager.start_retry_ticker();
+    manager
+        .configure("flaky", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock server connects");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _subscription = manager.on_status_change(Box::new(move |entry| {
+        let _ = tx.send(entry);
+    }));
+
+    let failure = McpError::timeout("Timed out after 100ms");
+    manager
+        .mark_connect_failure("flaky", &failure, "Timed out after 100ms")
+        .await;
+    let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the first failure is reported")
+        .expect("a status event");
+    assert_eq!(first.status, "failed");
+
+    // A second failure lands in retry-waiting again; the public entry stays
+    // `failed`, so v2 emits nothing.
+    manager
+        .mark_connect_failure("flaky", &failure, "Timed out after 100ms")
+        .await;
+    // The 1 ms delay jitters down to 0: the retry is due now. Its transition
+    // to `pending` is suppressed as well, so only the connect outcome shows.
+    manager.retry_due_servers().await;
+    let second = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the recovery is reported")
+        .expect("a status event");
+    assert_eq!(second.status, "connected");
+    assert!(
+        rx.try_recv().is_err(),
+        "no other transition may be reported"
+    );
+    manager.shutdown().await;
+}
+
+/// A command that cannot be spawned is a configuration failure (v2
+/// `McpFailureKind` `config`): retrying it would only repeat the same error.
+#[tokio::test]
+async fn a_config_failure_does_not_schedule_a_retry() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager
+        .configure("bad", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock server connects");
+
+    manager
+        .mark_connect_failure(
+            "bad",
+            &McpError::Config("Failed to spawn MCP server 'nope': not found".into()),
+            "Failed to spawn MCP server 'nope': not found",
+        )
+        .await;
+
+    assert_eq!(status_of(&manager, "bad").await, "failed");
+    let servers = manager.servers.read().await;
+    assert!(
+        servers
+            .get("bad")
+            .expect("the entry is resident")
+            .retry_at_ms
+            .is_none(),
+        "a permanent failure must not schedule a retry"
+    );
+}
+
+/// v2 `retryOrFailed` + `nextRetryDelayMs`: a transient failure retries only
+/// when the host enabled the retry **and** a scheduler exists to act on the
+/// due time; otherwise it fails outright. The streak grows by one per failure.
+#[test]
+fn the_retry_policy_decides_between_retry_waiting_and_failed() {
+    let policy = |enabled, ticker| RetryPolicy {
+        enabled,
+        ticker,
+        initial_delay_ms: 5_000,
+        max_delay_ms: 300_000,
+    };
+    let now = 1_000_000;
+
+    let (status, due, streak) = next_failure_state(policy(true, true), 0, now);
+    assert_eq!(status, "retry-waiting");
+    assert_eq!(streak, 1);
+    let delay = due.expect("a due time") - now;
+    assert!(
+        (2_500..=5_000).contains(&delay),
+        "the first retry waits 5 s with 50-100 % jitter, got {delay}"
+    );
+
+    // A second failure doubles the nominal delay and keeps counting.
+    let (_, due, streak) = next_failure_state(policy(true, true), 1, now);
+    assert_eq!(streak, 2);
+    let delay = due.expect("a due time") - now;
+    assert!(
+        (5_000..=10_000).contains(&delay),
+        "the second retry doubles, got {delay}"
+    );
+
+    // Disabled, or no scheduler: failed, no due time, streak reset.
+    assert_eq!(
+        next_failure_state(policy(false, true), 3, now),
+        ("failed", None, 0)
+    );
+    assert_eq!(
+        next_failure_state(policy(true, false), 3, now),
+        ("failed", None, 0)
+    );
+}
+
+/// v2 `sessionEvidence` / `probeSucceeded`: weak evidence on a healthy session
+/// is silent — the entry keeps its client, tools and streak, and no status
+/// event is emitted because the public entry (`probing` → `connected`) never
+/// changed.
+#[tokio::test]
+async fn weak_evidence_on_a_live_client_keeps_it_connected_silently() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager
+        .configure("remote", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock server connects");
+    let connected = manager.server_entries().await;
+    assert_eq!(connected[0].status, "connected");
+    assert_eq!(connected[0].tool_count, 1);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _subscription = manager.on_status_change(Box::new(move |entry| {
+        let _ = tx.send(entry);
+    }));
+
+    let client = manager
+        .clients
+        .read()
+        .await
+        .get("remote")
+        .cloned()
+        .expect("the client is registered");
+    manager
+        .evidence_context("remote", client)
+        .probe("Maximum reconnection attempts (2) exceeded.".into())
+        .await;
+
+    let after = manager.server_entries().await;
+    assert_eq!(
+        after[0].status, "connected",
+        "a live probe restores connected"
+    );
+    assert_eq!(after[0].tool_count, 1, "the tools are untouched");
+    let servers = manager.servers.read().await;
+    assert_eq!(
+        servers.get("remote").expect("entry").retry_streak,
+        0,
+        "a successful probe does not start a retry streak"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a healthy probe must not emit a status change"
+    );
+}
+
+/// v2 `probeFailed`: a probe that cannot reach the session fails the entry on
+/// the same ladder a dead transport uses, with `formatUnexpectedCloseError`'s
+/// text, no tools and a scheduled retry exposed as `failed` + `nextRetryAt`.
+#[tokio::test]
+async fn weak_evidence_on_a_dead_client_fails_the_entry_and_schedules_a_retry() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager.set_defaults(crate::config::McpConfig {
+        reconnect_initial_delay_ms: Some(1),
+        reconnect_max_delay_ms: Some(1),
+        ..Default::default()
+    });
+    manager.start_retry_ticker();
+    manager
+        .configure("remote", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock server connects");
+
+    let client = manager
+        .clients
+        .read()
+        .await
+        .get("remote")
+        .cloned()
+        .expect("the client is registered");
+    // A closed client cannot answer the ping: this is the "session is dead"
+    // half of v2's weak-evidence branch, reached through `probeMcpLiveness`.
+    client.close().await;
+
+    manager
+        .evidence_context("remote", client)
+        .probe("Maximum reconnection attempts (2) exceeded.".into())
+        .await;
+
+    let entry = manager
+        .server_entries()
+        .await
+        .into_iter()
+        .find(|entry| entry.name == "remote")
+        .expect("the entry is resident");
+    assert_eq!(entry.status, "failed");
+    assert_eq!(entry.tool_count, 0, "a dead session exposes no tools");
+    assert!(
+        entry.next_retry_at.is_some(),
+        "the retry is scheduled and public"
+    );
+    let error = entry.error.expect("the failure reason is recorded");
+    assert!(
+        error.contains("MCP server \"remote\" closed unexpectedly"),
+        "the reason names the server, got {error}"
+    );
+    assert!(
+        error.contains("Maximum reconnection attempts (2) exceeded."),
+        "the reason carries the transport's detail, got {error}"
+    );
+    {
+        let servers = manager.servers.read().await;
+        let state = servers.get("remote").expect("the entry is resident");
+        assert_eq!(state.status, "retry-waiting");
+        assert!(state.raw_tools.is_empty());
+    }
+}
+
+/// v2 `shutdown` awaits the entry's operation tail, so a probe still running
+/// when teardown starts is drained before the roster is cleared.
+#[tokio::test]
+async fn shutdown_waits_for_an_in_flight_probe() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let probe = tokio::spawn(async move {
+        let _ = released.await;
+    });
+    manager
+        .probe_tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(probe);
+
+    let mut shutdown = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            manager.shutdown().await;
+        })
+    };
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown must not return while a probe is in flight"
+    );
+    let _ = release.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
+        .await
+        .expect("shutdown settles once the probe ends")
+        .expect("shutdown does not panic");
+}
+
+/// v2 `resolveClientName` (connection-manager.ts:834): the identity the host
+/// sets is what every connected client announces, not the builtin name.
+#[tokio::test]
+async fn a_connected_client_announces_the_managers_identity() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager.set_client_name(Some("kimi-code-cli".to_string()));
+    manager
+        .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock connects");
+    let client = manager
+        .clients
+        .read()
+        .await
+        .get("mock")
+        .cloned()
+        .expect("the mock client is registered");
+    assert_eq!(
+        client.client_info()["name"],
+        serde_json::Value::from("kimi-code-cli"),
+        "the manager's identity must reach the client that initializes"
+    );
+    manager.shutdown().await;
+}
+
+/// v2 `upsert` (connection-manager.ts:334-353): a live entry whose
+/// configuration is unchanged is returned as it is, so running the same
+/// configuration twice must not retire a connected client.
+#[tokio::test]
+async fn configuring_a_live_server_with_the_same_config_is_a_no_op() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    manager
+        .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("mock connects");
+    let first = manager
+        .clients
+        .read()
+        .await
+        .get("mock")
+        .cloned()
+        .expect("the mock client is registered");
+
+    manager
+        .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .expect("the second configure succeeds");
+    let second = manager
+        .clients
+        .read()
+        .await
+        .get("mock")
+        .cloned()
+        .expect("the mock client is still registered");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "an unchanged config must keep the live client instead of reconnecting"
+    );
+
+    // A changed config is not a no-op: the filter differs, so the entry is
+    // rebuilt and the old client replaced.
+    manager
+        .configure(
+            "mock",
+            McpServerRecipe::Mock,
+            McpServerOptions {
+                enabled_tools: Some(vec!["nothing".to_string()]),
+                ..McpServerOptions::default()
+            },
+        )
+        .await
+        .expect("a changed config reconnects");
+    let third = manager
+        .clients
+        .read()
+        .await
+        .get("mock")
+        .cloned()
+        .expect("the mock client is registered after the change");
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &third),
+        "a changed config must reconfigure instead of returning the old entry"
+    );
+    manager.shutdown().await;
+}
+
+/// v2 `shutdown` cancels in-flight startup ("serializes replacement close and
+/// tracks disabled or removed clients through shutdown"): a connect that is
+/// still handshaking is not in `clients` yet, so draining `clients` would leave
+/// its child running until the startup timeout. The abort has to drop the
+/// connect future — and `kill_on_drop` takes the child with it — which shows up
+/// as `connect_all`'s task settling immediately instead of at the timeout.
+#[tokio::test]
+async fn shutdown_aborts_an_in_flight_startup() {
+    let manager = std::sync::Arc::new(McpManager::new());
+    // A server that never speaks the protocol: it stays alive and silent, so
+    // the handshake can only end through the startup timeout or an abort. One
+    // process, not a shell wrapper — a surviving grandchild would keep the
+    // runtime's child reaper alive and hide how fast the abort settles.
+    let (command, args): (String, Vec<String>) = if cfg!(windows) {
+        (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Start-Sleep -Seconds 30".to_string(),
+            ],
+        )
+    } else {
+        ("sleep".to_string(), vec!["30".to_string()])
+    };
+    let handle = manager.connect_all(vec![(
+        "slow".to_string(),
+        McpServerRecipe::Stdio {
+            command,
+            args,
+            env: std::collections::HashMap::new(),
+            cwd: None,
+        },
+        McpServerOptions::default(),
+    )]);
+    // Let the child spawn and the handshake begin before the teardown.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    manager.shutdown().await;
+
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        .await
+        .expect(
+            "connect_all must settle once shutdown aborts the startup, not at the 30 s timeout",
+        );
+    settled.expect("connect_all's task must not panic when aborted");
 }

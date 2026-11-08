@@ -19,6 +19,8 @@ import type {
 } from '@moonshot-ai/kimi-code-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import chalk from 'chalk';
+
 import { ApprovalPanelComponent } from '#/tui/components/dialogs/approval-panel';
 import { EffortSelectorComponent } from '#/tui/components/dialogs/effort-selector';
 import { kimiCodePluginMarketplaceUrl } from '#/constant/app';
@@ -30,6 +32,7 @@ import {
 import { AssistantMessageComponent } from '#/tui/components/messages/assistant-message';
 import { StepSummaryComponent } from '#/tui/components/messages/step-summary';
 import { ToolCallComponent } from '#/tui/components/messages/tool-call';
+import { UserMessageComponent } from '#/tui/components/messages/user-message';
 import {
   groupTurns,
   TRANSCRIPT_KEEP_RECENT_ASSISTANT,
@@ -130,6 +133,7 @@ interface MessageDriver {
   };
   init(): Promise<boolean>;
   handleUserInput(text: string): void;
+  steerMessage(session: unknown, input: readonly { text: string }[]): void;
   toggleToolOutputExpansion(): void;
   appendTranscriptEntry(entry: TranscriptEntry): void;
   persistInputHistory(text: string): Promise<void>;
@@ -3907,6 +3911,97 @@ command = "vim"
       expect(session.prompt).toHaveBeenCalledWith('after the turn', { promptId: undefined });
     });
     expect(session.steer).not.toHaveBeenCalled();
+  });
+
+  it('keeps a steered message dimmed until turn.steer reports it read', async () => {
+    const previousChalkLevel = chalk.level;
+    chalk.level = 3;
+    try {
+      const session = makeSession({
+        steer: vi.fn(async () => ({
+          turnId: 1,
+          promptId: 'prompt-1-test',
+          createdAt: '2026-11-07T00:00:00.000Z',
+          state: 'running',
+          steered: true,
+        })),
+      });
+      const { driver } = await makeDriver(session);
+      driver.state.appState.streamingPhase = 'waiting';
+
+      const steerComponent = (): UserMessageComponent | undefined => {
+        const child = driver.state.transcriptContainer.children.find(
+          (candidate) => candidate instanceof UserMessageComponent,
+        );
+        return child instanceof UserMessageComponent ? child : undefined;
+      };
+      // The rendered row, not just the component flag: dimming is the whole
+      // user-visible behavior.
+      const steerLine = (): string | undefined =>
+        renderTranscript(driver)
+          .split('\n')
+          .find((line) => stripSgr(line).includes('steer me'));
+
+      driver.steerMessage(session, [{ text: 'steer me' }]);
+      await vi.waitFor(() => expect(steerComponent()?.isSteerPending()).toBe(true));
+      expect(steerLine()).toContain('\u001b[2m');
+
+      driver.sessionEventHandler.handleEvent(
+        {
+          type: 'turn.steer',
+          agentId: 'main',
+          sessionId: 'ses-1',
+          turnId: 1,
+          input: [{ type: 'text', text: 'steer me' }],
+          origin: { kind: 'user' },
+          promptIds: ['prompt-1-test'],
+        } as Event,
+        () => {},
+      );
+
+      await vi.waitFor(() => expect(steerComponent()?.isSteerPending()).toBe(false));
+      expect(steerLine()).not.toContain('\u001b[2m');
+    } finally {
+      chalk.level = previousChalkLevel;
+    }
+  });
+
+  it('clears a queued steer when its own turn starts', async () => {
+    const session = makeSession({
+      steer: vi.fn(async () => ({
+        turnId: 1,
+        promptId: 'prompt-2-test',
+        createdAt: '2026-11-07T00:00:00.000Z',
+        state: 'queued',
+        steered: false,
+      })),
+    });
+    const { driver } = await makeDriver(session);
+    driver.state.appState.streamingPhase = 'waiting';
+
+    const steerComponent = (): UserMessageComponent | undefined => {
+      const child = driver.state.transcriptContainer.children.find(
+        (candidate) => candidate instanceof UserMessageComponent,
+      );
+      return child instanceof UserMessageComponent ? child : undefined;
+    };
+
+    driver.steerMessage(session, [{ text: 'queued steer' }]);
+    await vi.waitFor(() => expect(steerComponent()?.isSteerPending()).toBe(true));
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'turn.started',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 2,
+        promptId: 'prompt-2-test',
+        origin: { kind: 'user' },
+      } as Event,
+      () => {},
+    );
+
+    await vi.waitFor(() => expect(steerComponent()?.isSteerPending()).toBe(false));
   });
 
   it('cancels active streaming from Escape and Ctrl-C editor shortcuts', async () => {

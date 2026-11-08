@@ -1028,6 +1028,19 @@ async function mcpOauthReconnect(name) {
   return binding.mcpOauthReconnect(name);
 }
 
+/**
+ * Close every server the process-wide MCP cache spawned and forget the
+ * managers. Sessions share those managers on purpose (v2's workspace-scoped
+ * service: `/new` reuses the live connections), so this is the host-teardown
+ * seam rather than something a session close may do. A test deleting its
+ * temporary home needs it: a plugin's stdio server runs inside the plugin's
+ * directory, and Windows keeps that directory busy until the child exits.
+ * @returns {Promise<number>} Managers shut down.
+ */
+async function mcpManagersDispose() {
+  return binding.mcpManagersDispose();
+}
+
 // ============================================================================
 // Background tasks — the engine pipeline's task runner (process-global)
 // ============================================================================
@@ -1178,6 +1191,7 @@ module.exports = {
   mcpOauthTokenState,
   mcpOauthRemove,
   mcpOauthReconnect,
+  mcpManagersDispose,
 
   // Background tasks
   backgroundTaskList,

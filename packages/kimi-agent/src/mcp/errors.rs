@@ -21,6 +21,16 @@ pub enum McpError {
     /// Spawn failure, I/O failure, malformed wire data, or any other
     /// transport-level problem without a more specific classification.
     Transport(String),
+    /// The server cannot start at all because its own configuration is wrong
+    /// (a command that does not exist, an unreadable stdio program). v2
+    /// `McpFailureKind` `config`: the startup retry must not keep re-running a
+    /// failure only the user can fix.
+    Config(String),
+    /// The server started but broke the MCP lifecycle while starting (a
+    /// discovery response that is not a tool list, an `initialize` answer with
+    /// no protocol version). v2 `McpFailureKind` `protocol`: permanent, for
+    /// the same reason as [`Self::Config`].
+    Protocol(String),
 }
 
 impl McpError {
@@ -55,6 +65,37 @@ impl McpError {
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, McpError::HttpStatus { status: 401, .. })
     }
+
+    /// Whether a *startup* failure is an auth rejection (v2
+    /// `isAuthRejectionStatus`, `client-remote.ts:60-65`): 401 **or** 403.
+    ///
+    /// The runtime flip stays narrower — v2's `isUnauthorizedLikeError` there
+    /// is 401 only — because a 403 on a live call is as likely a scope
+    /// problem as a missing grant.
+    pub fn is_auth_rejection(&self) -> bool {
+        matches!(
+            self,
+            McpError::HttpStatus {
+                status: 401 | 403,
+                ..
+            }
+        )
+    }
+
+    /// Whether the startup retry must give up (v2 `failureTarget` +
+    /// `classifyRemoteStartupError`): `config` and `protocol` failures are
+    /// permanent, and an auth rejection is permanent only when OAuth cannot
+    /// supply the credential — the manager decides that case from
+    /// [`Self::is_auth_rejection`] before asking this.
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            McpError::Config(_) | McpError::Protocol(_) | McpError::JsonRpc { .. } => true,
+            McpError::HttpStatus { status, .. } => {
+                matches!(status, 401 | 403)
+            }
+            McpError::Timeout(_) | McpError::Closed(_) | McpError::Transport(_) => false,
+        }
+    }
 }
 
 impl fmt::Display for McpError {
@@ -64,7 +105,9 @@ impl fmt::Display for McpError {
             | McpError::JsonRpc { message }
             | McpError::Timeout(message)
             | McpError::Closed(message)
-            | McpError::Transport(message) => f.write_str(message),
+            | McpError::Transport(message)
+            | McpError::Config(message)
+            | McpError::Protocol(message) => f.write_str(message),
         }
     }
 }

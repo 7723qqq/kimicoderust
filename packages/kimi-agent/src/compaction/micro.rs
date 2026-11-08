@@ -114,6 +114,47 @@ impl DetectOutcome {
     }
 }
 
+/// The persisted cutoff (v2 `microCompaction.cutoff`, agent state): messages
+/// at index `i < cutoff` are truncated in the outgoing request.
+///
+/// v2 advances it **only** on a detected prompt-cache miss, so a warm cache
+/// keeps sending the same truncated prefix; recomputing the cutoff from the
+/// history on every request would blank more results as the transcript grows
+/// and re-break the cache each time. It shrinks only through
+/// [`Self::clamp`] (undo) and [`Self::reset`] (clear / compaction), so an
+/// index never outlives the messages it describes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MicroCompactionState {
+    #[serde(default)]
+    pub cutoff: usize,
+}
+
+impl MicroCompactionState {
+    /// v2 `advance`: on a cache miss the cutoff becomes
+    /// `len - keep_recent_messages`. Returns whether it moved; a warm pass
+    /// leaves the stored value alone.
+    pub fn advance(&mut self, history_len: usize, keep_recent_messages: usize) -> bool {
+        let next = history_len.saturating_sub(keep_recent_messages);
+        if next <= self.cutoff {
+            return false;
+        }
+        self.cutoff = next;
+        true
+    }
+
+    /// v2 `clamp`: a truncation (undo) shortened the history, so an index
+    /// beyond it no longer describes a message. Never grows the cutoff.
+    pub fn clamp(&mut self, history_len: usize) {
+        self.cutoff = self.cutoff.min(history_len);
+    }
+
+    /// v2 `context.clear` / `context.applyCompaction`: the transcript was
+    /// replaced, so none of the old results are "old" any more.
+    pub fn reset(&mut self) {
+        self.cutoff = 0;
+    }
+}
+
 /// Decide whether a micro-compaction pass should run — the two gates v2's
 /// `detect()` applies before it will truncate anything.
 ///
@@ -202,7 +243,23 @@ pub fn apply_micro_compaction(
     messages: &[LLMMessage],
     config: &MicroCompactionConfig,
 ) -> MicroCompactionOutcome {
-    let cutoff = messages.len().saturating_sub(config.keep_recent_messages);
+    apply_micro_compaction_at(
+        messages,
+        messages.len().saturating_sub(config.keep_recent_messages),
+        config,
+    )
+}
+
+/// [`apply_micro_compaction`] with the cutoff supplied by the caller — the
+/// persisted [`MicroCompactionState`] in production, where a warm cache must
+/// keep truncating exactly the same prefix instead of re-deriving a larger
+/// cutoff from the grown history.
+pub fn apply_micro_compaction_at(
+    messages: &[LLMMessage],
+    cutoff: usize,
+    config: &MicroCompactionConfig,
+) -> MicroCompactionOutcome {
+    let cutoff = cutoff.min(messages.len());
     let marker_tokens = estimate_tokens(&config.truncated_marker);
 
     let mut out: Vec<LLMMessage> = Vec::with_capacity(messages.len());
@@ -502,5 +559,75 @@ mod tests {
         let out = apply_micro_compaction(&msgs, &config());
         assert!(!out.changed, "only tool messages are eligible");
         assert_eq!(out.replaced.len(), 0);
+    }
+
+    /// v2 `advance`: the cutoff only moves forward, and a short history never
+    /// rewinds it.
+    #[test]
+    fn the_cutoff_advances_only_forward() {
+        let mut state = MicroCompactionState::default();
+        assert!(state.advance(40, 20), "the first miss sets len - keep");
+        assert_eq!(state.cutoff, 20);
+        assert!(!state.advance(30, 20), "a shorter history never rewinds it");
+        assert_eq!(state.cutoff, 20);
+        assert!(state.advance(45, 20));
+        assert_eq!(state.cutoff, 25);
+    }
+
+    /// Undo clamps the stored cutoff to the surviving length; clear and
+    /// compaction drop it to zero.
+    #[test]
+    fn truncation_clamps_and_clear_resets_the_cutoff() {
+        let mut state = MicroCompactionState { cutoff: 12 };
+        state.clamp(5);
+        assert_eq!(state.cutoff, 5);
+        state.clamp(50);
+        assert_eq!(state.cutoff, 5, "clamp never grows the index");
+        state.reset();
+        assert_eq!(state.cutoff, 0);
+    }
+
+    /// A warm pass applies the stored cutoff verbatim: the prefix it blanks is
+    /// exactly what the last miss blanked, even though the history has grown.
+    /// Re-deriving `len - keep` instead would blank a newer result mid-warm and
+    /// re-break the cache the cutoff exists to protect.
+    #[test]
+    fn a_stored_cutoff_truncates_the_same_prefix_as_the_history_grows() {
+        let cfg = MicroCompactionConfig {
+            keep_recent_messages: 2,
+            ..config()
+        };
+        let big = "x".repeat(800);
+        let mut history = vec![
+            LLMMessage::user("go"),
+            LLMMessage::tool_result("call-1", big.clone()),
+            LLMMessage::assistant("ok"),
+            LLMMessage::tool_result("call-2", big.clone()),
+        ];
+
+        // A miss at length 4 blanks index 0..2, i.e. call-1 only.
+        let first = apply_micro_compaction_at(&history, 2, &cfg);
+        assert_eq!(first.cutoff, 2);
+        assert_eq!(first.replaced.len(), 1);
+        assert_eq!(first.replaced[0].tool_call_id, "call-1");
+
+        history.push(LLMMessage::assistant("more"));
+        history.push(LLMMessage::tool_result("call-3", big.clone()));
+        // Warm: the same cutoff, so call-2 (now inside the window) is intact.
+        let warm = apply_micro_compaction_at(&history, 2, &cfg);
+        assert_eq!(warm.replaced.len(), 1);
+        assert_eq!(warm.replaced[0].tool_call_id, "call-1");
+        assert_eq!(warm.messages[3].content, big, "call-2 stays intact");
+
+        // The next miss advances to len - keep = 4 and blanks call-2 as well.
+        let mut state = MicroCompactionState { cutoff: 2 };
+        assert!(state.advance(history.len(), 2));
+        let next = apply_micro_compaction_at(&history, state.cutoff, &cfg);
+        let ids: Vec<&str> = next
+            .replaced
+            .iter()
+            .map(|replaced| replaced.tool_call_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["call-1", "call-2"]);
     }
 }

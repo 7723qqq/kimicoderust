@@ -26,6 +26,8 @@ pub struct PluginMarketplaceEntry {
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(rename = "sha256sum", skip_serializing_if = "Option::is_none")]
+    pub sha256sum: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installed: Option<InstalledPluginInfo>,
 }
@@ -1259,6 +1261,20 @@ fn parse_marketplace(catalog_str: &str) -> Vec<PluginMarketplaceEntry> {
                 .get("version")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let sha256sum = item
+                .get("sha256sum")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase())
+                .filter(|s| {
+                    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        true
+                    } else {
+                        eprintln!(
+                            "Plugin marketplace entry {id} has an invalid sha256sum; ignoring it"
+                        );
+                        false
+                    }
+                });
 
             entries.push(PluginMarketplaceEntry {
                 id,
@@ -1269,6 +1285,7 @@ fn parse_marketplace(catalog_str: &str) -> Vec<PluginMarketplaceEntry> {
                 keywords,
                 source,
                 version,
+                sha256sum,
                 installed: None,
             });
         }
@@ -1650,9 +1667,11 @@ impl PluginManager {
         let id = match remote_source {
             // The catalog names the id when it knows the source; otherwise the
             // archive's own manifest does.
-            Some(source) => {
-                self.fetch_into_managed_root(known.as_ref().map(|entry| entry.id.as_str()), source)?
-            }
+            Some(source) => self.fetch_into_managed_root(
+                known.as_ref().map(|entry| entry.id.as_str()),
+                source,
+                known.as_ref().and_then(|entry| entry.sha256sum.as_deref()),
+            )?,
             None => match &known {
                 Some(entry) => entry.id.clone(),
                 None => {
@@ -1722,6 +1741,7 @@ impl PluginManager {
         &self,
         catalog_id: Option<&str>,
         source: &str,
+        expected_sha256: Option<&str>,
     ) -> Result<String, String> {
         use crate::server::plugin_archive as archive;
 
@@ -1729,7 +1749,10 @@ impl PluginManager {
             "This process has no Kimi home, so a remote plugin cannot be installed.".to_string()
         })?;
         let url = archive::archive_url_for(source);
-        let bytes = archive::download_archive(&url)?;
+        let bytes = match expected_sha256 {
+            Some(expected) => archive::load_verified_archive(home, &url, expected)?,
+            None => archive::download_archive(&url)?,
+        };
 
         let staging = home.join("plugins").join(".download");
         let _ = std::fs::remove_dir_all(&staging);

@@ -113,6 +113,12 @@ pub(crate) struct SessionEntry {
     /// cancelled reason). Written when a turn settles, read and cleared by
     /// the next `run_turn`.
     pub(crate) last_turn_aborted: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the *user* asked for the running turn to stop (v2
+    /// `TurnEnded.interruptReason === 'user_cancelled'`). Set by the
+    /// `cancel_turn` binding and consumed when the turn settles: a teardown or
+    /// a parent abort flips the same cancel flag but must not arm the
+    /// "interrupted by the user" reminder.
+    pub(crate) user_cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) fn session_entry(session_id: &str) -> napi::Result<SessionEntry> {
@@ -280,6 +286,7 @@ pub fn create_engine_session(
                 .unwrap_or_default();
             let session = EngineSession::new_seeded(
                 SessionConfig {
+                    steer_trace: None,
                     llm: pipeline.llm.clone(),
                     callbacks: pipeline.callbacks.clone(),
                     max_steps: params.max_steps.unwrap_or(u32::MAX),
@@ -377,12 +384,26 @@ pub fn create_engine_session(
                         callbacks: pipeline.callbacks.clone(),
                         mcp_status,
                         last_turn_aborted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        user_cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     },
                 );
             Ok(session_id)
         }),
         |env, id: String| env.create_string(&id),
     )
+}
+
+/// v2 #4627 `SteerResult`: what a submitted prompt got at admission — the
+/// prompt id the engine minted, the state observed, and whether the prompt
+/// joined the running turn (a steer) instead of opening or queueing a turn.
+#[napi(object)]
+#[derive(Clone)]
+pub struct TurnSubmission {
+    pub turn_id: f64,
+    pub prompt_id: String,
+    pub created_at: String,
+    pub state: String,
+    pub steered: bool,
 }
 
 /// Enqueue a prompt. The turn id is assigned synchronously (monotonic, never
@@ -394,7 +415,7 @@ pub fn session_enqueue_turn(
     session_id: String,
     prompt: String,
     admission: String,
-) -> napi::Result<f64> {
+) -> napi::Result<TurnSubmission> {
     guard_sync_panic(|| {
         let entry = session_entry(&session_id)?;
         // The host may nest a prompt origin (v2 `PromptOrigin` JSON — the
@@ -437,12 +458,20 @@ pub fn session_enqueue_turn(
             .session
             .enqueue_turn(request)
             .map_err(napi::Error::from_reason)?;
-        let (turn_id, outcome) = receipt.into_parts();
+        let turn_id = receipt.turn_id;
+        let submission = TurnSubmission {
+            turn_id: turn_id as f64,
+            prompt_id: receipt.prompt_id.clone(),
+            created_at: receipt.created_at.clone(),
+            state: receipt.state.as_str().to_string(),
+            steered: receipt.steered,
+        };
+        let (_, outcome) = receipt.into_parts();
         SESSION_OUTCOMES
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert((session_id, turn_id), outcome);
-        Ok(turn_id as f64)
+        Ok(submission)
     })
 }
 
@@ -1274,21 +1303,30 @@ pub fn session_btw_cancel(agent_id: String) -> napi::Result<bool> {
 /// the managed platform through the `chat_title` tool, which needs an
 /// OAuth-managed model — a session on a static API key rejects that source
 /// rather than silently falling back to the deterministic title. Resolves
-/// null when the history cannot supply an input.
+/// null when the history cannot supply an input. `force` marks a host-forced
+/// regeneration in the title-generation telemetry event.
 #[napi]
 pub fn session_generate_title(
     env: Env,
     session_id: String,
     source: Option<String>,
+    force: Option<bool>,
 ) -> napi::Result<JsObject> {
     let entry = session_entry(&session_id)?;
     let history = entry.session.snapshot_history();
     let llm = entry.llm.clone();
+    let callbacks = entry.callbacks.clone();
     env.execute_tokio_future(
         async move {
-            crate::session::title::generate_session_title(&history, source.as_deref(), llm.as_ref())
-                .await
-                .map_err(napi::Error::from_reason)
+            crate::session::title::generate_session_title_with_telemetry(
+                &history,
+                source.as_deref(),
+                llm.as_ref(),
+                force.unwrap_or(false),
+                &crate::callbacks::TitleTelemetry(callbacks.as_ref()),
+            )
+            .await
+            .map_err(napi::Error::from_reason)
         },
         |env, title: Option<String>| match title {
             Some(title) => env.create_string(&title).map(|value| value.into_unknown()),

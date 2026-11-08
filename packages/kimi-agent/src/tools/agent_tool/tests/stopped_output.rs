@@ -296,3 +296,114 @@ async fn stopped_resume_returns_partial_output() {
     );
     assert_stopped_with_partial_output(&result.content);
 }
+
+/// v2 `formatForegroundAgentSuccess` / `formatForegroundAgentFailure`: the
+/// handoff the parent reads names the stop reason, carries the resume hint, and
+/// — for a repeat-breaker handoff — the notice that the summary is not a
+/// finished result. A failure names its reason too, prints the partial-output
+/// placeholder when there is nothing to show, and skips the resume hint on a
+/// cancelled turn. The fork's report had none of those lines.
+#[test]
+fn foreground_reports_match_the_v2_shape() {
+    use super::super::format::{
+        NO_PARTIAL_OUTPUT, REPEAT_BREAKER_NOTICE, format_failure, format_success,
+    };
+
+    let success = format_success("agent-child", "coder", "child result", "completed");
+    assert!(success.contains("status: completed"), "{success}");
+    assert!(success.contains("stop_reason: completed"), "{success}");
+    assert!(success.contains("[summary]\nchild result"), "{success}");
+    assert!(
+        success
+            .contains("resume_hint: Continue with Agent(resume=\"agent-child\", prompt=\"...\")"),
+        "{success}"
+    );
+    assert!(!success.contains("notice:"), "{success}");
+    assert!(!success.contains("next_step:"), "{success}");
+
+    let breaker = format_success("agent-child", "coder", "handoff", "repeat_breaker");
+    assert!(breaker.contains("stop_reason: repeat_breaker"), "{breaker}");
+    assert!(breaker.contains(REPEAT_BREAKER_NOTICE), "{breaker}");
+    assert!(
+        breaker.contains("next_step: The subagent was stuck on one tool call."),
+        "{breaker}"
+    );
+
+    let failure = format_failure("agent-child", "coder", "boom", "no_final_message", None);
+    assert!(failure.contains("status: failed"), "{failure}");
+    assert!(
+        failure.contains("stop_reason: no_final_message"),
+        "{failure}"
+    );
+    assert!(failure.contains(NO_PARTIAL_OUTPUT), "{failure}");
+    assert!(
+        failure.contains(
+            "resume_hint: Continue with Agent(resume=\"agent-child\", prompt=\"continue\")"
+        ),
+        "{failure}"
+    );
+    assert!(
+        failure.contains("next_step: Resume to continue where it stopped"),
+        "{failure}"
+    );
+
+    let cancelled = format_failure(
+        "agent-child",
+        "coder",
+        "stopped",
+        "cancelled",
+        Some("[partial output] half a thought"),
+    );
+    assert!(
+        cancelled.contains("[partial output] half a thought"),
+        "{cancelled}"
+    );
+    assert!(
+        !cancelled.contains("resume_hint:"),
+        "a cancelled turn is not resumable next: {cancelled}"
+    );
+    assert!(
+        cancelled.contains("next_step: The user stopped this subagent."),
+        "{cancelled}"
+    );
+}
+
+/// v2 throws a typed error per failure, and the failure shape prints *that*
+/// error's message: the step cap names the budget it spent (and carries no
+/// config advice, unlike the main-turn message), a filtered response keeps the
+/// provider sentence, a token cap names its reason, and anything longer than
+/// 2,000 UTF-16 code units is cut with v2's `… [truncated]` marker.
+#[test]
+fn failure_messages_carry_the_v2_reason_text() {
+    use super::super::format::{failure_message, truncate_reason};
+    use crate::turn_loop::types::LoopTurnStopReason as Stop;
+
+    let steps = failure_message(&Stop::MaxSteps, 5, false);
+    assert!(steps.contains("maxSteps=5"), "{steps}");
+    assert!(
+        !steps.contains("config.toml"),
+        "the subagent step-cap message carries no config advice: {steps}"
+    );
+
+    let filtered = failure_message(&Stop::Filtered, 1, false);
+    assert_eq!(filtered, "Provider safety policy blocked the response.");
+
+    let tokens = failure_message(&Stop::MaxTokens, 1, false);
+    assert!(tokens.contains("reason=max_tokens"), "{tokens}");
+
+    let interrupted = failure_message(&Stop::Aborted, 1, true);
+    assert_eq!(
+        interrupted,
+        "The subagent was stopped before it finished by user."
+    );
+
+    let long = "x".repeat(5000);
+    let truncated = truncate_reason(&long);
+    assert!(truncated.ends_with("… [truncated]"), "{truncated}");
+    assert_eq!(
+        truncated.encode_utf16().count(),
+        2000 + "… [truncated]".encode_utf16().count(),
+        "the cut is 2,000 UTF-16 units plus the marker"
+    );
+    assert_eq!(truncate_reason("short"), "short");
+}

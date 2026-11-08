@@ -10,9 +10,9 @@ description:
   en: >
       Folds state, modes and skills into <system-reminder> at each step head. The registry is the single entry point, and DomainValueSource the one contract it reads domain values through.
       
-revision: 28f4b101d79bba811d53e53662341c0bb0fe93c0
-updated_at: "2026-11-06T04:54:04.155Z"
-fingerprint: a25813db8a7f3f81f3ae9f23da57d53f67aec02146fd8b0dbe93440ed99f93eb
+revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
+updated_at: "2026-11-06T22:57:55.011Z"
+fingerprint: df3bbecde0917df4fdc0f180ec50eb058a460d4efbf00d8f426f6179a3e9ab7a
 source:
   - path: "packages/kimi-agent/src/injection/mod.rs"
   - path: "packages/kimi-agent/src/injection/state.rs"

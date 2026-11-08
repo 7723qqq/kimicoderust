@@ -16,7 +16,7 @@
 //! upload is the other caller of that seam; the name is media-shaped but the
 //! gate and the payload are the same.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::turn_loop::types::{LLM, LLMMessage};
 
@@ -213,6 +213,49 @@ pub async fn generate_session_title(
         .map(Some)
 }
 
+/// The telemetry sink for one title generation attempt (v2 `ITelemetryService`).
+pub trait TitleTelemetrySink: Send + Sync {
+    fn track(&self, event: serde_json::Value);
+}
+
+/// A title attempt's terminal outcome, in v2's `SessionTitleGenerationFinishedEvent`
+/// vocabulary. `Ok` carries the applied title and whether it was truncated;
+/// `Unavailable` carries the bounded reason; `Error` is an unexpected failure.
+enum TitleAttemptOutcome {
+    Success {
+        title_chars: usize,
+        title_outcome: &'static str,
+    },
+    Unavailable(&'static str),
+    Error,
+}
+
+/// Generate a title and report the attempt once, at its terminal result (v2
+/// `SessionTitleService.trackGeneration`). Skipped calls for an existing title
+/// never reach here, so every call emits one event. `force` names the trigger:
+/// a host-forced regeneration is `manual`, an ordinary one is `auto`.
+pub async fn generate_session_title_with_telemetry(
+    history: &[LLMMessage],
+    source: Option<&str>,
+    llm: &dyn LLM,
+    force: bool,
+    telemetry: &dyn TitleTelemetrySink,
+) -> Result<Option<String>, String> {
+    let started = Instant::now();
+    let source = source.unwrap_or("user_prompts");
+    let result = generate_session_title(history, Some(source), llm).await;
+    let outcome = match &result {
+        Ok(Some(title)) => TitleAttemptOutcome::Success {
+            title_chars: title.encode_utf16().count(),
+            title_outcome: "ok",
+        },
+        Ok(None) => TitleAttemptOutcome::Unavailable("no_input"),
+        Err(_) => TitleAttemptOutcome::Error,
+    };
+    report_generation_event(telemetry, source, force, started, outcome);
+    result
+}
+
 /// Ask the managed platform for a title (v2 `fetchChatTitle`).
 pub async fn fetch_chat_title(
     base_url: &str,
@@ -253,9 +296,47 @@ pub async fn fetch_chat_title(
     Ok(truncate_chars(title, MAX_GENERATED_TITLE_LENGTH))
 }
 
+/// Build the terminal event and hand it to the sink, separated from the async
+/// call so the error arm is testable without a failing provider.
+fn report_generation_event(
+    telemetry: &dyn TitleTelemetrySink,
+    source: &str,
+    force: bool,
+    started: Instant,
+    outcome: TitleAttemptOutcome,
+) {
+    let mut event = serde_json::json!({
+        "event": "session_title_generation_finished",
+        "trigger": if force { "manual" } else { "auto" },
+        "source": source,
+        "duration_ms": started.elapsed().as_millis() as u64,
+    });
+    match outcome {
+        TitleAttemptOutcome::Success {
+            title_chars,
+            title_outcome,
+        } => {
+            event["outcome"] = "success".into();
+            event["title_chars"] = title_chars.into();
+            event["title_outcome"] = title_outcome.into();
+        }
+        TitleAttemptOutcome::Unavailable(reason) => {
+            event["outcome"] = "unavailable".into();
+            event["reason"] = reason.into();
+        }
+        TitleAttemptOutcome::Error => {
+            event["outcome"] = "error".into();
+            event["reason"] = "unexpected".into();
+            event["error_type"] = "unexpected".into();
+        }
+    }
+    telemetry.track(event);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn history(pairs: &[(&str, &str)]) -> Vec<LLMMessage> {
         let mut messages = Vec::new();
@@ -458,5 +539,100 @@ mod tests {
                 .as_deref(),
             Some("hello")
         );
+    }
+
+    struct RecordingTelemetry {
+        events: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl TitleTelemetrySink for RecordingTelemetry {
+        fn track(&self, event: serde_json::Value) {
+            self.events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_generation_reports_the_v2_finished_event() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingTelemetry {
+            events: Arc::clone(&events),
+        };
+        let messages = history(&[("hello", "hi there")]);
+        let title = generate_session_title_with_telemetry(
+            &messages,
+            Some("first_turn"),
+            &StaticLlm,
+            false,
+            &sink,
+        )
+        .await
+        .expect("first_turn is deterministic");
+        assert_eq!(title.as_deref(), Some("hello"));
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "one attempt reports exactly one terminal event"
+        );
+        let event = &events[0];
+        assert_eq!(event["event"], "session_title_generation_finished");
+        assert_eq!(event["trigger"], "auto");
+        assert_eq!(event["source"], "first_turn");
+        assert_eq!(event["outcome"], "success");
+        assert_eq!(event["title_chars"], 5);
+        assert_eq!(event["title_outcome"], "ok");
+        assert!(event["duration_ms"].is_u64());
+        assert!(event.get("reason").is_none());
+        assert!(
+            !event.to_string().contains("hello"),
+            "the title text is not recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_manual_attempt_without_input_reports_unavailable() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingTelemetry {
+            events: Arc::clone(&events),
+        };
+        let result =
+            generate_session_title_with_telemetry(&[], Some("first_turn"), &StaticLlm, true, &sink)
+                .await
+                .expect("an empty history is an outcome, not a failure");
+        assert_eq!(result, None);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["trigger"], "manual");
+        assert_eq!(events[0]["source"], "first_turn");
+        assert_eq!(events[0]["outcome"], "unavailable");
+        assert_eq!(events[0]["reason"], "no_input");
+        assert!(events[0]["duration_ms"].is_u64());
+        assert!(events[0].get("title_chars").is_none());
+    }
+
+    #[test]
+    fn an_error_reports_unexpected_without_the_error_text() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingTelemetry {
+            events: Arc::clone(&events),
+        };
+        report_generation_event(
+            &sink,
+            "user_prompts",
+            true,
+            Instant::now(),
+            TitleAttemptOutcome::Error,
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["outcome"], "error");
+        assert_eq!(events[0]["reason"], "unexpected");
+        assert_eq!(events[0]["error_type"], "unexpected");
+        assert_eq!(events[0]["trigger"], "manual");
+        assert!(events[0]["duration_ms"].is_u64());
+        assert!(!events[0].to_string().contains("unexpected failure"));
     }
 }

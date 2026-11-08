@@ -937,6 +937,18 @@
       "text": "Blocked after goal budget reached",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/goal/mod.rs:Cannot edit a goal in status \"{}\"": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Cannot edit a goal in status \"{}\"",
+      "reason": "deferred",
+      "note": "v2 goal-status refusal surfaced through the PATCH route; kept English with the other deferred engine diagnostics until localized."
+    },
+    "packages/kimi-agent/src/goal/mod.rs:Goal objective cannot be empty": {
+      "file": "packages/kimi-agent/src/goal/mod.rs",
+      "text": "Goal objective cannot be empty",
+      "reason": "deferred",
+      "note": "v2 validateObjective refusal; user-facing but deferred with the rest of the engine goal prose."
+    },
     "packages/kimi-agent/src/goal/mod.rs:LLM not set, send \"/login\" to login": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "LLM not set, send \"/login\" to login",
@@ -2145,6 +2157,18 @@
       "text": "Failed to write to MCP stdin: {e}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/client.rs:Invalid MCP server URL: {sse_url}": {
+      "file": "packages/kimi-agent/src/mcp/client.rs",
+      "text": "Invalid MCP server URL: {sse_url}",
+      "reason": "deferred",
+      "note": "v2 classifyRemoteStartupError config-kind message; user-facing config error, translation pending with the rest of the MCP status text"
+    },
+    "packages/kimi-agent/src/mcp/client.rs:Invalid MCP server URL: {url}": {
+      "file": "packages/kimi-agent/src/mcp/client.rs",
+      "text": "Invalid MCP server URL: {url}",
+      "reason": "deferred",
+      "note": "v2 classifyRemoteStartupError config-kind message; user-facing config error, translation pending with the rest of the MCP status text"
+    },
     "packages/kimi-agent/src/mcp/client.rs:MCP child closed stdout prematurely": {
       "file": "packages/kimi-agent/src/mcp/client.rs",
       "text": "MCP child closed stdout prematurely",
@@ -2235,6 +2259,18 @@
       "text": "MCP notification failed with status HTTP {status}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/http.rs:Maximum reconnection attempts ({STREAM_MAX_RETRIES}) exceeded.": {
+      "file": "packages/kimi-agent/src/mcp/http.rs",
+      "text": "Maximum reconnection attempts ({STREAM_MAX_RETRIES}) exceeded.",
+      "reason": "wire-token",
+      "note": "v2 SDK StreamableHTTPClientTransport text; v2 matches it verbatim (isSseReconnectionExhaustedError) to classify weak session evidence."
+    },
+    "packages/kimi-agent/src/mcp/http.rs:Method not found": {
+      "file": "packages/kimi-agent/src/mcp/http.rs",
+      "text": "Method not found",
+      "reason": "wire-token",
+      "note": "JSON-RPC error message for a server-initiated method the engine has no handler for (SDK Client default)."
+    },
     "packages/kimi-agent/src/mcp/http.rs:application/json, text/event-stream": {
       "file": "packages/kimi-agent/src/mcp/http.rs",
       "text": "application/json, text/event-stream",
@@ -2270,6 +2306,18 @@
       "text": "MCP execution error: {e}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/manager.rs:MCP server \"{name}\" closed unexpectedly": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "MCP server \"{name}\" closed unexpectedly",
+      "reason": "diagnostic",
+      "note": "v2 formatUnexpectedCloseError (connection-manager.ts:1057); shown on the failed MCP entry."
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:MCP server \"{name}\" closed unexpectedly {detail}": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "MCP server \"{name}\" closed unexpectedly {detail}",
+      "reason": "diagnostic",
+      "note": "v2 formatUnexpectedCloseError with the transport reason appended; shown on the failed MCP entry."
+    },
     "packages/kimi-agent/src/mcp/manager.rs:MCP server \"{}\" failed to connect": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "MCP server \"{}\" failed to connect",
@@ -2289,6 +2337,11 @@
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "MCP server '{name}' is not configured",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:MCP server '{name}' was removed during startup": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "MCP server '{name}' was removed during startup",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/mcp/manager.rs:MCP server closed during the handshake": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
@@ -2315,6 +2368,11 @@
       "text": "Timed out after {}ms",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/manager.rs:Unknown MCP server: {name}": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "Unknown MCP server: {name}",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/mcp/manager.rs:mcp oauth token invalidation failed": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "mcp oauth token invalidation failed",
@@ -2333,11 +2391,6 @@
     "packages/kimi-agent/src/mcp/manager.rs:{error} stderr: {}": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "{error} stderr: {}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/mcp/manager.rs:{name} requires OAuth — run /mcp-config login {name}": {
-      "file": "packages/kimi-agent/src/mcp/manager.rs",
-      "text": "{name} requires OAuth — run /mcp-config login {name}",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/mcp/oauth/auth_code.rs:Invalid MCP server url: {error}": {
@@ -2960,6 +3013,12 @@
       "text": "Serialization error: {0}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/native/event_store/mod.rs:This session requires a newer version of Kimi Code. Upgrade Kimi Code to the latest version to read this session.": {
+      "file": "packages/kimi-agent/src/native/event_store/mod.rs",
+      "text": "This session requires a newer version of Kimi Code. Upgrade Kimi Code to the latest version to read this session.",
+      "reason": "deferred",
+      "note": "User-facing wire-version refusal; kept English with the other deferred engine diagnostics until localized."
+    },
     "packages/kimi-agent/src/native/event_store/mod.rs:Tool execution was interrupted before its result was recorded. Do not assume the tool completed successfully.": {
       "file": "packages/kimi-agent/src/native/event_store/mod.rs",
       "text": "Tool execution was interrupted before its result was recorded. Do not assume the tool completed successfully.",
@@ -2973,11 +3032,6 @@
     "packages/kimi-agent/src/native/event_store/mod.rs:Undo violation: Cannot undo across compaction boundary": {
       "file": "packages/kimi-agent/src/native/event_store/mod.rs",
       "text": "Undo violation: Cannot undo across compaction boundary",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/native/event_store/mod.rs:Wire protocol {found} is newer than this engine supports ({supported})": {
-      "file": "packages/kimi-agent/src/native/event_store/mod.rs",
-      "text": "Wire protocol {found} is newer than this engine supports ({supported})",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/native/event_store/mod.rs:[Image (stripped):": {
@@ -2994,6 +3048,12 @@
       "file": "packages/kimi-agent/src/native/event_store/mod.rs",
       "text": "skipping a wire event whose payload is not valid JSON",
       "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/native/event_store/mod.rs:unknown wire record type skipped while restoring the session projection": {
+      "file": "packages/kimi-agent/src/native/event_store/mod.rs",
+      "text": "unknown wire record type skipped while restoring the session projection",
+      "reason": "diagnostic",
+      "note": "v2 restore reports wire.unknown_record for a record type the fold does not know; the warning keeps a skipped record visible instead of losing it silently."
     },
     "packages/kimi-agent/src/native/fetch_url.rs:Cannot resolve host \"{host}\": no addresses": {
       "file": "packages/kimi-agent/src/native/fetch_url.rs",
@@ -3930,6 +3990,12 @@
       "text": "Conversation history cleared.",
       "reason": "dev-surface"
     },
+    "packages/kimi-agent/src/repl/mod.rs:Goal paused after resume: {} (resume it with /goal)": {
+      "file": "packages/kimi-agent/src/repl/mod.rs",
+      "text": "Goal paused after resume: {} (resume it with /goal)",
+      "reason": "dev-surface",
+      "note": "Standalone REPL startup notice: the goal was paused on resume so offline time is never charged (v2 resume rule)."
+    },
     "packages/kimi-agent/src/repl/mod.rs:Host proxy not supported in standalone REPL": {
       "file": "packages/kimi-agent/src/repl/mod.rs",
       "text": "Host proxy not supported in standalone REPL",
@@ -4449,6 +4515,12 @@
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "Interaction channel closed",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/engine.rs:could not persist the micro-compaction cutoff": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "could not persist the micro-compaction cutoff",
+      "reason": "diagnostic",
+      "note": "tracing::warn for a failed session-metadata write; same class as the token-counting sibling"
     },
     "packages/kimi-agent/src/server/engine.rs:could not persist the token-counting state": {
       "file": "packages/kimi-agent/src/server/engine.rs",
@@ -5216,15 +5288,45 @@
       "text": "Download failed: {transport}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/plugin_archive.rs:Failed to create the plugin archive cache: {e}": {
+      "file": "packages/kimi-agent/src/server/plugin_archive.rs",
+      "text": "Failed to create the plugin archive cache: {e}",
+      "reason": "diagnostic",
+      "note": "Operator-facing plugin install/cache failure; not a rendered product dialog."
+    },
+    "packages/kimi-agent/src/server/plugin_archive.rs:Failed to name the plugin archive cache file: {e}": {
+      "file": "packages/kimi-agent/src/server/plugin_archive.rs",
+      "text": "Failed to name the plugin archive cache file: {e}",
+      "reason": "diagnostic",
+      "note": "Operator-facing plugin install/cache failure; not a rendered product dialog."
+    },
+    "packages/kimi-agent/src/server/plugin_archive.rs:Failed to publish the plugin archive cache: {e}": {
+      "file": "packages/kimi-agent/src/server/plugin_archive.rs",
+      "text": "Failed to publish the plugin archive cache: {e}",
+      "reason": "diagnostic",
+      "note": "Operator-facing plugin install/cache failure; not a rendered product dialog."
+    },
     "packages/kimi-agent/src/server/plugin_archive.rs:Failed to read the archive: {e}": {
       "file": "packages/kimi-agent/src/server/plugin_archive.rs",
       "text": "Failed to read the archive: {e}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/server/plugin_archive.rs:Failed to write the plugin archive cache: {e}": {
+      "file": "packages/kimi-agent/src/server/plugin_archive.rs",
+      "text": "Failed to write the plugin archive cache: {e}",
+      "reason": "diagnostic",
+      "note": "Operator-facing plugin install/cache failure; not a rendered product dialog."
+    },
     "packages/kimi-agent/src/server/plugin_archive.rs:Not a zip archive ({e}); {} bytes, first bytes: {head}": {
       "file": "packages/kimi-agent/src/server/plugin_archive.rs",
       "text": "Not a zip archive ({e}); {} bytes, first bytes: {head}",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugin_archive.rs:Plugin archive SHA-256 mismatch: expected {expected}, got {actual}": {
+      "file": "packages/kimi-agent/src/server/plugin_archive.rs",
+      "text": "Plugin archive SHA-256 mismatch: expected {expected}, got {actual}",
+      "reason": "diagnostic",
+      "note": "Operator-facing plugin install/cache failure; not a rendered product dialog."
     },
     "packages/kimi-agent/src/server/plugin_archive.rs:Redirect without a Location header.": {
       "file": "packages/kimi-agent/src/server/plugin_archive.rs",
@@ -5470,6 +5572,12 @@
       "file": "packages/kimi-agent/src/server/plugins.rs",
       "text": "Planning, TDD, debugging, and delivery workflows for coding agents.",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/plugins.rs:Plugin marketplace entry {id} has an invalid sha256sum; ignoring it": {
+      "file": "packages/kimi-agent/src/server/plugins.rs",
+      "text": "Plugin marketplace entry {id} has an invalid sha256sum; ignoring it",
+      "reason": "diagnostic",
+      "note": "Operator-facing plugin install/cache failure; not a rendered product dialog."
     },
     "packages/kimi-agent/src/server/plugins.rs:Stocks and financials from Wind, S&P Capital IQ, SEC EDGAR, etc.; news from Caixin, Xinhua Finance; macro from World Bank, IMF, NBS; corporate, academic, legal data, and more": {
       "file": "packages/kimi-agent/src/server/plugins.rs",
@@ -6082,15 +6190,17 @@
       "text": "no engine configured for this server",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/server/route_sessions.rs:no model is bound to this session; compact requires a model to write the summary": {
+    "packages/kimi-agent/src/server/route_sessions.rs:objective must be a string": {
       "file": "packages/kimi-agent/src/server/route_sessions.rs",
-      "text": "no model is bound to this session; compact requires a model to write the summary",
-      "reason": "deferred"
+      "text": "objective must be a string",
+      "reason": "deferred",
+      "note": "REST bad-request text for an invalid PATCH goal body; deferred with the other engine diagnostics."
     },
-    "packages/kimi-agent/src/server/route_sessions.rs:turn {turn_number}: {e}": {
+    "packages/kimi-agent/src/server/route_sessions.rs:turn {turn_number}: {error}": {
       "file": "packages/kimi-agent/src/server/route_sessions.rs",
-      "text": "turn {turn_number}: {e}",
-      "reason": "deferred"
+      "text": "turn {turn_number}: {error}",
+      "reason": "diagnostic",
+      "note": "Undo reports which turn failed to revert; the message is user-facing and must stay specific."
     },
     "packages/kimi-agent/src/server/route_sessions.rs:undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session.": {
       "file": "packages/kimi-agent/src/server/route_sessions.rs",
@@ -6673,6 +6783,24 @@
       "text": "AND m.session_id = ?{}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/session/sqlite_store.rs:Failed to create {}: {e}": {
+      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
+      "text": "Failed to create {}: {e}",
+      "reason": "diagnostic",
+      "note": "Undo file revert could not create the parent directory; reported instead of silently skipping the file."
+    },
+    "packages/kimi-agent/src/session/sqlite_store.rs:Failed to read {}: {error}": {
+      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
+      "text": "Failed to read {}: {error}",
+      "reason": "diagnostic",
+      "note": "Undo file revert could not read the file it is about to restore; reported as an I/O failure."
+    },
+    "packages/kimi-agent/src/session/sqlite_store.rs:Failed to remove {}: {e}": {
+      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
+      "text": "Failed to remove {}: {e}",
+      "reason": "diagnostic",
+      "note": "Undo file revert could not delete a file the turn added; reported as an I/O failure."
+    },
     "packages/kimi-agent/src/session/sqlite_store.rs:Failed to restore {}: {e}": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
       "text": "Failed to restore {}: {e}",
@@ -6693,6 +6821,12 @@
       "text": "cannot revert a file change without a stored pre-image; leaving the file untouched",
       "reason": "diagnostic"
     },
+    "packages/kimi-agent/src/session/sqlite_store.rs:cannot revert {path}: {reason}; restoring would overwrite that change": {
+      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
+      "text": "cannot revert {path}: {reason}; restoring would overwrite that change",
+      "reason": "diagnostic",
+      "note": "v2 manual_edit/deleted conflict text: the user edited or removed the file after the tool wrote it, so undo refuses rather than clobbering it."
+    },
     "packages/kimi-agent/src/session/sqlite_store.rs:failed to apply patch to {domain}/{key}: {e}": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
       "text": "failed to apply patch to {domain}/{key}: {e}",
@@ -6707,6 +6841,18 @@
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
       "text": "forkSession turnIndex must be a non-negative safe integer",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/session/sqlite_store.rs:it was deleted after the tool wrote it": {
+      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
+      "text": "it was deleted after the tool wrote it",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/session/sqlite_store.rs:it was edited after the tool wrote it": {
+      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
+      "text": "it was edited after the tool wrote it",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/session/sqlite_store.rs:source=digest is the managed chat_title call; use session::title::generate_session_title": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
@@ -6837,6 +6983,12 @@
       "file": "packages/kimi-agent/src/storage/state_store.rs",
       "text": "State write error: [-32003] invalid goal lifecycle value: expected { action: \"lifecycle\", status: string, reason?: string }",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/storage/state_store.rs:State write error: [-32003] invalid goal objective value: expected { action: \"objective\", objective: string }": {
+      "file": "packages/kimi-agent/src/storage/state_store.rs",
+      "text": "State write error: [-32003] invalid goal objective value: expected { action: \"objective\", objective: string }",
+      "reason": "diagnostic",
+      "note": "Internal state-write validation message, never rendered to the user."
     },
     "packages/kimi-agent/src/storage/state_store.rs:State write error: [-32003] invalid goal set_budget value: expected { action: \"set_budget\", value: number, unit: string }": {
       "file": "packages/kimi-agent/src/storage/state_store.rs",
@@ -6972,6 +7124,12 @@
       "file": "packages/kimi-agent/src/storage/state_store.rs",
       "text": "could not fsync the state directory after a rename",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/storage/state_store.rs:could not persist the goal paused on resume": {
+      "file": "packages/kimi-agent/src/storage/state_store.rs",
+      "text": "could not persist the goal paused on resume",
+      "reason": "diagnostic",
+      "note": "The resume pause could not be written; the goal stays as stored rather than being silently dropped."
     },
     "packages/kimi-agent/src/storage/state_store.rs:failed to apply patch to domain '{domain}': {e}": {
       "file": "packages/kimi-agent/src/storage/state_store.rs",
@@ -7184,6 +7342,12 @@
       "text": "Subagent '{}' finished in {} steps (Tokens: {}).",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/subagent/manager.rs:Subagent turn ended without a final message": {
+      "file": "packages/kimi-agent/src/subagent/manager.rs",
+      "text": "Subagent turn ended without a final message",
+      "reason": "deferred",
+      "note": "v2 AGENT_NO_FINAL_MESSAGE text (runAgentTurn.ts noFinalMessageError); user-facing failure sentence, translation pending with the rest of the subagent report surface"
+    },
     "packages/kimi-agent/src/subagent/manager.rs:Subagent turn failed before completing its final summary: reason=max_tokens": {
       "file": "packages/kimi-agent/src/subagent/manager.rs",
       "text": "Subagent turn failed before completing its final summary: reason=max_tokens",
@@ -7243,6 +7407,12 @@
       "file": "packages/kimi-agent/src/subagent/manager.rs",
       "text": "no subagent runtime injected",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/subagent/manager.rs:{NO_FINAL_MESSAGE_PREFIX} (stop reason: repeat_breaker).": {
+      "file": "packages/kimi-agent/src/subagent/manager.rs",
+      "text": "{NO_FINAL_MESSAGE_PREFIX} (stop reason: repeat_breaker).",
+      "reason": "deferred",
+      "note": "v2 noFinalMessageError parenthetical for the loop forced stop reason; same user-facing sentence, translation pending"
     },
     "packages/kimi-agent/src/subagent/manager.rs:{SUBAGENT_SCOPE_CACHE_SIZE_ENV} must be an integer, got {raw:?}.": {
       "file": "packages/kimi-agent/src/subagent/manager.rs",
@@ -7912,10 +8082,11 @@
       "text": "Background agent execution is not available for this agent because TaskList, TaskOutput, and TaskStop are not enabled.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/agent_tool/defs.rs:Fork the current context: the subagent starts with a snapshot of this agent's completed conversation history instead of zero context, inheriting this agent's agent type, tool set, and model. A non-empty resume is rejected. If subagent_type is provided, it must match this agent's type.": {
+    "packages/kimi-agent/src/tools/agent_tool/defs.rs:Context forking: pass `fork: true` to start with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set.": {
       "file": "packages/kimi-agent/src/tools/agent_tool/defs.rs",
-      "text": "Fork the current context: the subagent starts with a snapshot of this agent's completed conversation history instead of zero context, inheriting this agent's agent type, tool set, and model. A non-empty resume is rejected. If subagent_type is provided, it must match this agent's type.",
-      "reason": "model-input"
+      "text": "Context forking: pass `fork: true` to start with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set.",
+      "reason": "model-input",
+      "note": "model-facing Agent tool text, ported verbatim from v2 agent-fork.md / agent.ts"
     },
     "packages/kimi-agent/src/tools/agent_tool/defs.rs:Full task prompt for the subagent": {
       "file": "packages/kimi-agent/src/tools/agent_tool/defs.rs",
@@ -7946,6 +8117,12 @@
       "file": "packages/kimi-agent/src/tools/agent_tool/defs.rs",
       "text": "Short task description (3-5 words) for UI display. Optional: only feeds the UI label, so omitting it never fails the call.",
       "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/defs.rs:Start with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set.": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/defs.rs",
+      "text": "Start with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set.",
+      "reason": "model-input",
+      "note": "model-facing Agent tool text, ported verbatim from v2 agent-fork.md / agent.ts"
     },
     "packages/kimi-agent/src/tools/agent_tool/defs.rs:The subagent was stopped before it finished by user.": {
       "file": "packages/kimi-agent/src/tools/agent_tool/defs.rs",
@@ -7997,6 +8174,12 @@
       "text": "automatic_notification: true",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/agent_tool/execute.rs:backend is disabled: the subagent_backends experimental flag is off.": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/execute.rs",
+      "text": "backend is disabled: the subagent_backends experimental flag is off.",
+      "reason": "model-input",
+      "note": "v2 BACKENDS_EXPERIMENTAL_UNAVAILABLE (backend/configSection.ts:57): the tool-result text a backend argument receives while the feature is off."
+    },
     "packages/kimi-agent/src/tools/agent_tool/execute.rs:description: {description}": {
       "file": "packages/kimi-agent/src/tools/agent_tool/execute.rs",
       "text": "description: {description}",
@@ -8012,30 +8195,88 @@
       "text": "status: running",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/agent_tool/execute.rs:task_id: {agent_id}": {
+    "packages/kimi-agent/src/tools/agent_tool/execute.rs:task_id: {task_id}": {
       "file": "packages/kimi-agent/src/tools/agent_tool/execute.rs",
-      "text": "task_id: {agent_id}",
-      "reason": "deferred"
+      "text": "task_id: {task_id}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
-    "packages/kimi-agent/src/tools/agent_tool/execute.rs:{agent_id}\"), NOT task_id.": {
-      "file": "packages/kimi-agent/src/tools/agent_tool/execute.rs",
-      "text": "{agent_id}\"), NOT task_id.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/agent_tool/format.rs:agent_id: {agent_id} actual_subagent_type: {profile} status: completed [summary] {summary}": {
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:Provider safety policy blocked the response.": {
       "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
-      "text": "agent_id: {agent_id} actual_subagent_type: {profile} status: completed [summary] {summary}",
-      "reason": "deferred"
+      "text": "Provider safety policy blocked the response.",
+      "reason": "model-input",
+      "note": "model-facing subagent failure text, ported verbatim from v2 runAgentTurn.ts / agentTool.ts"
     },
-    "packages/kimi-agent/src/tools/agent_tool/format.rs:agent_id: {agent_id} actual_subagent_type: {profile} status: failed subagent error: {message}": {
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:Subagent hit the per-turn step cap (maxSteps={steps}) before finishing its handoff.": {
       "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
-      "text": "agent_id: {agent_id} actual_subagent_type: {profile} status: failed subagent error: {message}",
-      "reason": "deferred"
+      "text": "Subagent hit the per-turn step cap (maxSteps={steps}) before finishing its handoff.",
+      "reason": "model-input",
+      "note": "model-facing subagent failure text, ported verbatim from v2 runAgentTurn.ts / agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:Subagent turn failed before completing its final summary: reason=max_tokens": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "Subagent turn failed before completing its final summary: reason=max_tokens",
+      "reason": "model-input",
+      "note": "model-facing subagent failure text, ported verbatim from v2 runAgentTurn.ts / agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:[summary] {summary} {}": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "[summary] {summary} {}",
+      "reason": "model-input",
+      "note": "model-facing subagent handoff text, ported verbatim from v2 agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:agent_id: {agent_id} actual_subagent_type: {profile} status: completed stop_reason: {reason}": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "agent_id: {agent_id} actual_subagent_type: {profile} status: completed stop_reason: {reason}",
+      "reason": "model-input",
+      "note": "model-facing subagent handoff text, ported verbatim from v2 agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:agent_id: {agent_id} actual_subagent_type: {profile} status: failed stop_reason: {reason} subagent error: {message} {}": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "agent_id: {agent_id} actual_subagent_type: {profile} status: failed stop_reason: {reason} subagent error: {message} {}",
+      "reason": "model-input",
+      "note": "model-facing subagent handoff text, ported verbatim from v2 agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:next_step: Resume to continue where it stopped, or take over the task yourself; if neither works, report the failure to the user.": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "next_step: Resume to continue where it stopped, or take over the task yourself; if neither works, report the failure to the user.",
+      "reason": "model-input",
+      "note": "model-facing subagent handoff text, ported verbatim from v2 agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:next_step: Resuming is unlikely to help; rephrase or split the task before trying again.": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "next_step: Resuming is unlikely to help; rephrase or split the task before trying again.",
+      "reason": "model-input",
+      "note": "model-facing subagent handoff text, ported verbatim from v2 agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:next_step: The subagent was stuck on one tool call. If you resume it, change the instructions or supply the missing input; otherwise continue the work yourself.": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "next_step: The subagent was stuck on one tool call. If you resume it, change the instructions or supply the missing input; otherwise continue the work yourself.",
+      "reason": "model-input",
+      "note": "model-facing subagent handoff text, ported verbatim from v2 agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:next_step: The user stopped this subagent. Do not restart it unless the user asks.": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "next_step: The user stopped this subagent. Do not restart it unless the user asks.",
+      "reason": "model-input",
+      "note": "model-facing subagent handoff text, ported verbatim from v2 agentTool.ts"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/format.rs:notice: The subagent was stopped by the repeat breaker after issuing the same tool call repeatedly. The summary below is its handoff, not a finished result.": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
+      "text": "notice: The subagent was stopped by the repeat breaker after issuing the same tool call repeatedly. The summary below is its handoff, not a finished result.",
+      "reason": "model-input",
+      "note": "model-facing subagent handoff text, ported verbatim from v2 agentTool.ts"
     },
     "packages/kimi-agent/src/tools/agent_tool/format.rs:swarm ({count} subagents)": {
       "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
       "text": "swarm ({count} subagents)",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/agent_tool/resume.rs:Cannot set subagent_type when resuming an existing agent. Resume by agent id only.": {
+      "file": "packages/kimi-agent/src/tools/agent_tool/resume.rs",
+      "text": "Cannot set subagent_type when resuming an existing agent. Resume by agent id only.",
+      "reason": "model-input",
+      "note": "model-facing resume refusal, ported verbatim from v2 agentTool.ts"
     },
     "packages/kimi-agent/src/tools/agent_tool/resume.rs:Error: {message}": {
       "file": "packages/kimi-agent/src/tools/agent_tool/resume.rs",
@@ -8157,20 +8398,23 @@
       "text": "Background task started (task_id: {task_id}). command: {command} description: {desc} Use TaskList or TaskOutput to inspect progress.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/bash_exec.rs:Command executed successfully (no output).": {
+    "packages/kimi-agent/src/tools/bash_exec.rs:Command executed successfully.": {
       "file": "packages/kimi-agent/src/tools/bash_exec.rs",
-      "text": "Command executed successfully (no output).",
-      "reason": "deferred"
+      "text": "Command executed successfully.",
+      "reason": "model-input",
+      "note": "model-facing tool-result wording, ported verbatim from v2 shellToolResults.ts"
     },
-    "packages/kimi-agent/src/tools/bash_exec.rs:[output truncated]": {
+    "packages/kimi-agent/src/tools/bash_exec.rs:Command failed with exit code: {exit_code}.": {
       "file": "packages/kimi-agent/src/tools/bash_exec.rs",
-      "text": "[output truncated]",
-      "reason": "deferred"
+      "text": "Command failed with exit code: {exit_code}.",
+      "reason": "model-input",
+      "note": "model-facing tool-result wording, ported verbatim from v2 shellToolResults.ts"
     },
-    "packages/kimi-agent/src/tools/bash_exec.rs:{text} Command failed with exit code: {exit_code}.": {
+    "packages/kimi-agent/src/tools/bash_exec.rs:Process exited with code {exit_code}": {
       "file": "packages/kimi-agent/src/tools/bash_exec.rs",
-      "text": "{text} Command failed with exit code: {exit_code}.",
-      "reason": "deferred"
+      "text": "Process exited with code {exit_code}",
+      "reason": "model-input",
+      "note": "model-facing tool-result wording, ported verbatim from v2 shellToolResults.ts"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:**Commands available:**": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -8227,10 +8471,11 @@
       "text": "- **Images and videos** (max 100MB) are sent to the model as multimodal media instead of text; this requires a model with the matching vision capability (`image_in` / `video_in`). `region` and `full_resolution` apply only to images; `line_offset` and `n_lines` apply only to text files.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line and byte counts, truncation, line-ending notes) and is not part of the file itself.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line count, range completeness, truncation, line-ending notes) and is not part of the file itself.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line and byte counts, truncation, line-ending notes) and is not part of the file itself.",
-      "reason": "model-input"
+      "text": "- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line count, range completeness, truncation, line-ending notes) and is not part of the file itself.",
+      "reason": "model-input",
+      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- A write lock serializes same-file edits in response order, but serialization does not make stale `old_string` valid.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -8272,11 +8517,6 @@
       "text": "- Compose multi-step logic in a single call with `if` / `case` / `for` / `while` control flows.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- DO NOT issue consecutive Edit calls on the same file. A previous Edit can invalidate a later Edit's `old_string`, causing `old_string not found`. Read the file again before the next Edit.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- DO NOT issue consecutive Edit calls on the same file. A previous Edit can invalidate a later Edit's `old_string`, causing `old_string not found`. Read the file again before the next Edit.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Do not add an agent name or source prefix; the UI supplies it.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Do not add an agent name or source prefix; the UI supplies it.",
@@ -8300,11 +8540,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls. To run a command in a particular directory, pass the `cwd` argument (or use absolute paths) rather than relying on a `cd` from an earlier call.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls. To run a command in a particular directory, pass the `cwd` argument (or use absolute paths) rather than relying on a `cd` from an earlier call.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Edit is mandatory for every incremental change, especially small edits. DO NOT use Write or Bash `sed`.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Edit is mandatory for every incremental change, especially small edits. DO NOT use Write or Bash `sed`.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- File and directory management: `cp`, `mv`, `rm`, `mkdir`, `touch`, `ln`, `chmod`, `chown`": {
@@ -8357,20 +8592,16 @@
       "text": "- Mode defaults to overwrite; append adds content at EOF without adding a newline.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Multiple Edit calls may run in one response only when they do not target the same file.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Multiple Edit calls may run in one response only when they do not target the same file.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Navigation and inspection: `ls`, `pwd`, `cd`, `stat`, `file`, `du`, `df`, `tree`": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Navigation and inspection: `ls`, `pwd`, `cd`, `stat`, `file`, `du`, `df`, `tree`",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines); the absolute value cannot exceed 1000.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines); the absolute value cannot exceed 1000.",
-      "reason": "model-input"
+      "text": "- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).",
+      "reason": "model-input",
+      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Networking and transfer: `curl`, `wget`, `ping`, `ssh`, `scp`": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -8387,10 +8618,11 @@
       "text": "- Output format: `<line-number>\\t<content>` per line.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read up to the 1000-line cap.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read toward the end of the file; the page still ends on the `max_chars` budget.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read up to the 1000-line cap.",
-      "reason": "model-input"
+      "text": "- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read toward the end of the file; the page still ends on the `max_chars` budget.",
+      "reason": "model-input",
+      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Prefer `run_in_background=true` for long-running builds, tests, watchers, or servers when you need the conversation to continue before the command finishes.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -8422,10 +8654,11 @@
       "text": "- Relative paths resolve against the working directory; a path outside the working directory must be absolute.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Returns up to 1000 lines or 100 KB per call, whichever comes first; lines longer than 2000 chars are truncated mid-line (recover the elided content with Bash, e.g. `cut` or `sed`).": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Results are bounded by `max_chars`: 100 000 by default, up to 500 000. A page that hits the budget says so in the status block and returns the arguments to continue from.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Returns up to 1000 lines or 100 KB per call, whichever comes first; lines longer than 2000 chars are truncated mid-line (recover the elided content with Bash, e.g. `cut` or `sed`).",
-      "reason": "model-input"
+      "text": "- Results are bounded by `max_chars`: 100 000 by default, up to 500 000. A page that hits the budget says so in the status block and returns the arguments to continue from.",
+      "reason": "model-input",
+      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused to protect secrets; do not attempt to read them. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public SSH keys such as `id_rsa.pub` read normally.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -8492,11 +8725,6 @@
       "text": "- Write ignores the Read/Edit line-number view. NEVER include line prefixes.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Write is NOT ALLOWED for incremental changes to existing files, including trivial, one-line, quick, or cosmetic edits. Use Edit instead.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Write is NOT ALLOWED for incremental changes to existing files, including trivial, one-line, quick, or cosmetic edits. Use Edit instead.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Write one or two sentences of light Markdown in the end user's language. Avoid repeating unchanged status or narrating individual tool calls.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Write one or two sentences of light Markdown in the end user's language. Avoid repeating unchanged status or narrating individual tool calls.",
@@ -8555,11 +8783,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `old_string` must be unique unless `replace_all` is set.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- `old_string` must be unique unless `replace_all` is set.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `sed` / `awk` (in-place edit) → `Edit`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `sed` / `awk` (in-place edit) → `Edit`",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `src/**/*.ts` — recursive walk with a subdirectory anchor and extension": {
@@ -9037,20 +9260,22 @@
       "text": "The following common command categories are usually available. Availability still depends on the host, so when in doubt run `which <command>` first to confirm a command exists before relying on it.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:The line number to start reading from. Omit to start at line 1. Negative values read from the end of the file; the absolute value cannot exceed 1000.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:The line number to start reading from. Omit to start at line 1. Negative values read from the end of the file (for example, -100 reads the last 100 lines).": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "The line number to start reading from. Omit to start at line 1. Negative values read from the end of the file; the absolute value cannot exceed 1000.",
-      "reason": "model-input"
+      "text": "The line number to start reading from. Omit to start at line 1. Negative values read from the end of the file (for example, -100 reads the last 100 lines).",
+      "reason": "model-input",
+      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:The line to add at the end of the file.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "The line to add at the end of the file.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:The number of lines to read; the tool also applies its internal cap. Omit to read up to the internal cap of 1000 lines. Text files only.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:The number of lines to read. Omit to read toward the end of the file. Results are bounded by max_chars, with continuation arguments when the requested range is incomplete. Text files only.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "The number of lines to read; the tool also applies its internal cap. Omit to read up to the internal cap of 1000 lines. Text files only.",
-      "reason": "model-input"
+      "text": "The number of lines to read. Omit to read toward the end of the file. Results are bounded by max_chars, with continuation arguments when the requested range is incomplete. Text files only.",
+      "reason": "model-input",
+      "note": "tool description text, ported verbatim from v2 read.md / zod describe"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:The query text to search for.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -9567,34 +9792,26 @@
       "text": "\"{path}\" is {} text but too large to transcode ({} bytes > {}). Convert it to UTF-8 first (e.g. with `iconv`).",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/file_ops.rs:Character limit reached.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Character limit reached.",
+      "reason": "deferred",
+      "note": "v2 finishPage status-block wording, kept verbatim like the other read footers"
+    },
     "packages/kimi-agent/src/tools/file_ops.rs:Detected file encoding: {}; content transcoded to UTF-8 for display. Edit and Write expect UTF-8 — convert the file's encoding first (e.g. `iconv` via Bash).": {
       "file": "packages/kimi-agent/src/tools/file_ops.rs",
       "text": "Detected file encoding: {}; content transcoded to UTF-8 for display. Edit and Write expect UTF-8 — convert the file's encoding first (e.g. `iconv` via Bash).",
       "reason": "tool-protocol"
     },
+    "packages/kimi-agent/src/tools/file_ops.rs:Effective max_chars: {max_chars}.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Effective max_chars: {max_chars}.",
+      "reason": "deferred",
+      "note": "v2 finishPage status-block wording, kept verbatim like the other read footers"
+    },
     "packages/kimi-agent/src/tools/file_ops.rs:End of file reached.": {
       "file": "packages/kimi-agent/src/tools/file_ops.rs",
       "text": "End of file reached.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/file_ops.rs:Lines [{list}] were truncated to {READ_MAX_LINE_LENGTH} characters; use Bash (e.g. cut or sed) to read the elided content of those lines.": {
-      "file": "packages/kimi-agent/src/tools/file_ops.rs",
-      "text": "Lines [{list}] were truncated to {READ_MAX_LINE_LENGTH} characters; use Bash (e.g. cut or sed) to read the elided content of those lines.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/file_ops.rs:Max {READ_MAX_LINES} lines reached.": {
-      "file": "packages/kimi-agent/src/tools/file_ops.rs",
-      "text": "Max {READ_MAX_LINES} lines reached.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/file_ops.rs:Max {READ_MAX_OUTPUT_BYTES} bytes reached.": {
-      "file": "packages/kimi-agent/src/tools/file_ops.rs",
-      "text": "Max {READ_MAX_OUTPUT_BYTES} bytes reached.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/file_ops.rs:Max {max_chars} characters reached.": {
-      "file": "packages/kimi-agent/src/tools/file_ops.rs",
-      "text": "Max {max_chars} characters reached.",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/file_ops.rs:Mixed or lone carriage-return line endings are shown as \\\\r. Use exact \\\\r\\ or \\\\r escapes in Edit.old_string for those lines.": {
@@ -9606,6 +9823,12 @@
       "file": "packages/kimi-agent/src/tools/file_ops.rs",
       "text": "No lines read from file.",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/file_ops.rs:Requested range complete.": {
+      "file": "packages/kimi-agent/src/tools/file_ops.rs",
+      "text": "Requested range complete.",
+      "reason": "deferred",
+      "note": "v2 finishPage status-block wording, kept verbatim like the other read footers"
     },
     "packages/kimi-agent/src/tools/file_ops.rs:To resume reading, call Read with line_offset={next_line}, column_offset={next_col}.": {
       "file": "packages/kimi-agent/src/tools/file_ops.rs",
@@ -10952,10 +11175,17 @@
       "text": "Already available: {}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/select_tools.rs:Exact tool names to load, taken from the latest announced tool list.": {
+    "packages/kimi-agent/src/tools/select_tools.rs:Capability description to search for when the exact tool name is unknown; returns candidates without loading them.": {
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
-      "text": "Exact tool names to load, taken from the latest announced tool list.",
-      "reason": "model-input"
+      "text": "Capability description to search for when the exact tool name is unknown; returns candidates without loading them.",
+      "reason": "tool-protocol",
+      "note": "v2 SelectToolsInputSchema query description; tool manual, kept English"
+    },
+    "packages/kimi-agent/src/tools/select_tools.rs:Exact tool names to load, taken from the latest announcement or a prior search result.": {
+      "file": "packages/kimi-agent/src/tools/select_tools.rs",
+      "text": "Exact tool names to load, taken from the latest announcement or a prior search result.",
+      "reason": "tool-protocol",
+      "note": "v2 SelectToolsInputSchema names description; this is the tool manual the model reads, kept English like every other tool schema"
     },
     "packages/kimi-agent/src/tools/select_tools.rs:Invalid arguments: 'names' array is required.": {
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
@@ -10976,6 +11206,24 @@
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
       "text": "No additional tools can be loaded right now; use the tools you already have.",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/select_tools.rs:Provide names to load or a query to search.": {
+      "file": "packages/kimi-agent/src/tools/select_tools.rs",
+      "text": "Provide names to load or a query to search.",
+      "reason": "tool-protocol",
+      "note": "v2 SelectToolsInputSchema refine message; tells the model how to drive the tool"
+    },
+    "packages/kimi-agent/src/tools/select_tools.rs:Search results for \"{query}\":": {
+      "file": "packages/kimi-agent/src/tools/select_tools.rs",
+      "text": "Search results for \"{query}\":",
+      "reason": "deferred",
+      "note": "v2 selectToolsTool query-branch header; model-facing result sentence, translation pending with the rest of the tool output"
+    },
+    "packages/kimi-agent/src/tools/select_tools.rs:select_tools is not available for the current model.": {
+      "file": "packages/kimi-agent/src/tools/select_tools.rs",
+      "text": "select_tools is not available for the current model.",
+      "reason": "deferred",
+      "note": "v2 selectToolsTool disclosure-closed refusal; model-facing result sentence, translation pending"
     },
     "packages/kimi-agent/src/tools/select_tools.rs:{name}\"] first, then call the tool.": {
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
@@ -11201,6 +11449,12 @@
       "file": "packages/kimi-agent/src/tools/swarm_tool.rs",
       "text": "mode=\"resume\"",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/swarm_tool.rs:resume_agent_ids key": {
+      "file": "packages/kimi-agent/src/tools/swarm_tool.rs",
+      "text": "resume_agent_ids key",
+      "reason": "model-input",
+      "note": "model-facing AgentSwarm argument name, unchanged from the wire vocabulary"
     },
     "packages/kimi-agent/src/tools/swarm_tool.rs:state=\"not_started\"": {
       "file": "packages/kimi-agent/src/tools/swarm_tool.rs",
@@ -11706,6 +11960,18 @@
       "file": "packages/kimi-agent/src/tools/todo_list.rs",
       "text": "When \"{}\" is finished, mark it done and set the next item in_progress; that update can go in the same response as your next tool call.",
       "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:<tools_added> {} </tools_added>": {
+      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
+      "text": "<tools_added> {} </tools_added>",
+      "reason": "format-scaffolding",
+      "note": "XML tag template for the v2 tools_added/tools_removed announcement blocks."
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:<tools_removed> {} </tools_removed>": {
+      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
+      "text": "<tools_removed> {} </tools_removed>",
+      "reason": "format-scaffolding",
+      "note": "XML tag template for the v2 tools_added/tools_removed announcement blocks."
     },
     "packages/kimi-agent/src/tools/tower/bash_guard.rs:`git clean` with force and -x/-X is not allowed when its scope covers the tower main checkout — it would delete .tower/comms, the tower protocol state, which git does not track and cannot restore. Run the clean inside your own tower worktree or a temporary `git worktree add` checkout instead; {TOWER_GUARD_ESCAPE}": {
       "file": "packages/kimi-agent/src/tools/tower/bash_guard.rs",
@@ -13477,6 +13743,24 @@
       "text": "run_id: {}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/turn_loop/progress_track.rs:You have made 3 or more changes since the last time a test or check was run, and none of your recent commands could have verified them. Run a verification command (tests, typecheck, linter) before making further changes, so failures are caught while they are still attributable.": {
+      "file": "packages/kimi-agent/src/turn_loop/progress_track.rs",
+      "text": "You have made 3 or more changes since the last time a test or check was run, and none of your recent commands could have verified them. Run a verification command (tests, typecheck, linter) before making further changes, so failures are caught while they are still attributable.",
+      "reason": "model-input",
+      "note": "v2 EBM_REMINDER (progressTrackerService.ts:19-24), injected verbatim into the model conversation."
+    },
+    "packages/kimi-agent/src/turn_loop/progress_track.rs:the verification keyword pattern is static": {
+      "file": "packages/kimi-agent/src/turn_loop/progress_track.rs",
+      "text": "the verification keyword pattern is static",
+      "reason": "diagnostic",
+      "note": "expect() message on a static regex compile; never user-facing."
+    },
+    "packages/kimi-agent/src/turn_loop/progress_track.rs:the verification pattern is static": {
+      "file": "packages/kimi-agent/src/turn_loop/progress_track.rs",
+      "text": "the verification pattern is static",
+      "reason": "diagnostic",
+      "note": "expect() message on a static regex compile; never user-facing."
+    },
     "packages/kimi-agent/src/turn_loop/run_turn.rs:Progress: {} continuation turns, {} tokens consumed, {} elapsed.": {
       "file": "packages/kimi-agent/src/turn_loop/run_turn.rs",
       "text": "Progress: {} continuation turns, {} tokens consumed, {} elapsed.",
@@ -13516,6 +13800,12 @@
       "file": "packages/kimi-agent/src/turn_loop/run_turn.rs",
       "text": "recovered from context overflow via emergency compaction",
       "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/turn_loop/run_turn.rs:the scheduler answers every scheduled call": {
+      "file": "packages/kimi-agent/src/turn_loop/run_turn.rs",
+      "text": "the scheduler answers every scheduled call",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/turn_loop/run_turn.rs:time {}/{} (remaining {})": {
       "file": "packages/kimi-agent/src/turn_loop/run_turn.rs",

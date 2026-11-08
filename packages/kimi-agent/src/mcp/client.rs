@@ -10,7 +10,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
 
-use crate::mcp::client_shared::DEFAULT_REQUEST_TIMEOUT;
+use crate::mcp::client_shared::{
+    DEFAULT_REQUEST_TIMEOUT, WeakEvidenceListener, fire_or_buffer_weak_evidence,
+};
 use crate::mcp::errors::McpError;
 use crate::mcp::http::McpHttpTransport;
 use crate::mcp::sse::McpSseTransport;
@@ -39,15 +41,61 @@ enum McpTransport {
 /// child's stderr are kept for error reporting.
 const STDERR_BUFFER_CAPACITY: usize = 4 * 1024;
 
+/// Keep the tail inside `STDERR_BUFFER_CAPACITY` without cutting a UTF-8
+/// character in half (v2 `BoundedTail` "does not split a surrogate pair at the
+/// cut boundary", client-stdio.test.ts). The retained window therefore starts up
+/// to three bytes early; the alternative is a replacement character at the head
+/// of every CJK/emoji diagnostic, which is what `String::from_utf8_lossy` would
+/// render.
+fn trim_stderr_tail(buf: &mut Vec<u8>) {
+    if buf.len() <= STDERR_BUFFER_CAPACITY {
+        return;
+    }
+    let mut excess = buf.len() - STDERR_BUFFER_CAPACITY;
+    while excess < buf.len() && (buf[excess] & 0xC0) == 0x80 {
+        excess += 1;
+    }
+    buf.drain(..excess);
+}
+
+/// v2 `MCP_LIVENESS_PROBE_TIMEOUT_MS` (client-shared.ts:65): the ping that
+/// decides whether weak session evidence means a dead session.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// v2 `KIMI_MCP_CLIENT_NAME` (`mcpCore/client-shared.ts:7`): the client name
+/// every transport announces when the host supplies no identity.
+pub const KIMI_MCP_CLIENT_NAME: &str = "kimi-code";
+
+/// The name a client will announce: the host's resolved identity, or the
+/// builtin when it supplied none (v2 `clientName ?? KIMI_MCP_CLIENT_NAME`).
+fn resolve_client_name(client_name: Option<&str>) -> String {
+    client_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(KIMI_MCP_CLIENT_NAME)
+        .to_string()
+}
+
 /// Unexpected-close listener slot (v2 `unexpectedCloseListener`): at most one
 /// `Fn(String)` listener, later registrations replace earlier ones.
 pub(crate) type UnexpectedCloseListener = Arc<Mutex<Option<Box<dyn Fn(String) + Send + Sync>>>>;
 
 pub struct McpClient {
     server_name: String,
+    /// What this client announces in `initialize.clientInfo.name` (v2
+    /// `resolveClientName`, `mcpCore/connection-manager.ts:834`): the host's
+    /// identity slug when it supplied one, otherwise the builtin
+    /// [`KIMI_MCP_CLIENT_NAME`]. Servers key behaviour on this string, so it is
+    /// the product name, not this crate's.
+    client_name: String,
     transport: McpTransport,
     next_id: AtomicU64,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the explicit close path before the transport is torn down: an
+    /// intentional close must not surface as "closed unexpectedly" (v2
+    /// client-stdio.ts `close()`, connection-manager.test.ts "does not fire
+    /// session evidence when the caller closes the client itself").
+    intentionally_closed: Arc<std::sync::atomic::AtomicBool>,
     /// Per-request timeout resolved from `toolTimeoutMs` (v2
     /// `toolCallTimeoutMs`); `None` keeps the transport built-in.
     tool_timeout: Option<Duration>,
@@ -59,6 +107,11 @@ pub struct McpClient {
     /// installed; replayed on registration so the close is never dropped
     /// (v2 `pendingUnexpectedClose`, client-stdio.ts:51).
     pending_close_reason: Arc<Mutex<Option<String>>>,
+    /// Weak-evidence listener (v2 `SessionEvidenceListener`); at most one.
+    weak_evidence: WeakEvidenceListener,
+    /// Weak evidence buffered before a listener registers, replayed on
+    /// registration (v2 `pendingSessionEvidence`, client-http.ts:43).
+    pending_weak_evidence: Arc<Mutex<Option<String>>>,
 }
 
 /// Fire the unexpected-close listener with `reason`, or buffer it for replay
@@ -153,13 +206,36 @@ impl McpClient {
     pub fn mock_with_tools(server_name: &str, tools: Vec<McpTool>) -> Self {
         Self {
             server_name: server_name.to_string(),
+            client_name: KIMI_MCP_CLIENT_NAME.to_string(),
             transport: McpTransport::Mock { tools },
             next_id: AtomicU64::new(1),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            intentionally_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_timeout: None,
             unexpected_close: Arc::new(Mutex::new(None)),
             pending_close_reason: Arc::new(Mutex::new(None)),
+            weak_evidence: Arc::new(Mutex::new(None)),
+            pending_weak_evidence: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Override what this client announces as `clientInfo.name` (v2
+    /// `resolveClientName`). Only meaningful before the handshake, so the
+    /// transports that initialize in their constructor take the name as an
+    /// argument; a mock has no wire and can be adjusted here.
+    pub fn with_client_name(mut self, client_name: Option<&str>) -> Self {
+        if let Some(name) = client_name.map(str::trim).filter(|name| !name.is_empty()) {
+            self.client_name = name.to_string();
+        }
+        self
+    }
+
+    /// The `clientInfo` block `initialize` sends (v2 `client-stdio.ts:61`).
+    pub fn client_info(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.client_name,
+            "version": env!("CARGO_PKG_VERSION")
+        })
     }
 
     /// Apply the resolved per-server tool-call timeout (v2
@@ -178,16 +254,42 @@ impl McpClient {
         server_name: &str,
         url: &str,
         headers: HashMap<String, String>,
+        client_name: Option<&str>,
     ) -> Result<Self, McpError> {
+        // A URL that does not parse is a configuration failure (v2 `config`):
+        // retrying it would only repeat the same parse error.
+        if url::Url::parse(url).is_err() {
+            return Err(McpError::Config(format!("Invalid MCP server URL: {url}")));
+        }
         let transport = McpHttpTransport::connect(url, headers).await?;
+        // Bridge the transport's abandoned-resumable-stream signal into the
+        // client-level slot (v2 `HttpMcpClient.onSessionEvidence` with the
+        // `weak` kind), the same way the SSE client bridges its close signal.
+        let weak_evidence: WeakEvidenceListener = Arc::new(Mutex::new(None));
+        let pending_weak: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let client_weak = weak_evidence.clone();
+        let client_pending_weak = pending_weak.clone();
+        transport
+            .on_weak_evidence(Box::new(move |reason| {
+                let client_weak = client_weak.clone();
+                let client_pending_weak = client_pending_weak.clone();
+                tokio::spawn(async move {
+                    fire_or_buffer_weak_evidence(&client_weak, &client_pending_weak, reason).await;
+                });
+            }))
+            .await;
         let client = Self {
             server_name: server_name.to_string(),
+            client_name: resolve_client_name(client_name),
             transport: McpTransport::Http(transport),
             next_id: AtomicU64::new(1),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            intentionally_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_timeout: None,
             unexpected_close: Arc::new(Mutex::new(None)),
             pending_close_reason: Arc::new(Mutex::new(None)),
+            weak_evidence,
+            pending_weak_evidence: pending_weak,
         };
         client.initialize().await?;
         Ok(client)
@@ -198,7 +300,15 @@ impl McpClient {
         server_name: &str,
         sse_url: &str,
         headers: HashMap<String, String>,
+        client_name: Option<&str>,
     ) -> Result<Self, McpError> {
+        // A URL that does not parse is a configuration failure (v2 `config`):
+        // retrying it would only repeat the same parse error.
+        if url::Url::parse(sse_url).is_err() {
+            return Err(McpError::Config(format!(
+                "Invalid MCP server URL: {sse_url}"
+            )));
+        }
         let sse_transport = McpSseTransport::connect(sse_url, headers).await?;
 
         // Bridge the transport's unexpected-close signal into the client-level
@@ -221,12 +331,16 @@ impl McpClient {
 
         let client = Self {
             server_name: server_name.to_string(),
+            client_name: resolve_client_name(client_name),
             transport: McpTransport::Sse(sse_transport),
             next_id: AtomicU64::new(1),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            intentionally_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_timeout: None,
             unexpected_close,
             pending_close_reason,
+            weak_evidence: Arc::new(Mutex::new(None)),
+            pending_weak_evidence: Arc::new(Mutex::new(None)),
         };
 
         // Handshake
@@ -243,11 +357,15 @@ impl McpClient {
         args: &[&str],
         env: &HashMap<String, String>,
         cwd: Option<&str>,
+        client_name: Option<&str>,
     ) -> Result<Self, McpError> {
         let mut cmd = stdio_command(command, args, env, cwd, &std::env::vars().collect());
 
         let mut child = cmd.spawn().map_err(|e| {
-            McpError::transport(format!("Failed to spawn MCP server '{command}': {e}"))
+            // A command that cannot be spawned at all is a configuration
+            // failure, not a transient one (v2 `McpFailureKind` `config`):
+            // retrying it would only repeat the same error every backoff.
+            McpError::Config(format!("Failed to spawn MCP server '{command}': {e}"))
         })?;
 
         let stdin = child
@@ -270,6 +388,8 @@ impl McpClient {
         let stream_pending = pending.clone();
         let closed_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let client_flag = closed_flag.clone();
+        let intentional_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let intentional_for_drain = intentional_flag.clone();
 
         // Unexpected-close callback slots, shared with the stdout task below
         // (v2 `unexpectedCloseListener` / `pendingUnexpectedClose`).
@@ -289,10 +409,7 @@ impl McpClient {
                     Ok(n) => {
                         let mut buf = stderr_sink.lock().await;
                         buf.extend_from_slice(&chunk[..n]);
-                        if buf.len() > STDERR_BUFFER_CAPACITY {
-                            let excess = buf.len() - STDERR_BUFFER_CAPACITY;
-                            buf.drain(..excess);
-                        }
+                        trim_stderr_tail(&mut buf);
                     }
                 }
             }
@@ -336,14 +453,20 @@ impl McpClient {
                 parts.push(format!("stderr: {}", stderr_tail.trim_end()));
             }
             let reason = parts.join("\n");
-            fire_or_buffer_unexpected_close(&close_listener, &close_pending, reason).await;
+            // An intentional `close()` is not "closed unexpectedly": the host
+            // asked for it (v2 client-stdio.ts `close()` suppresses the hook).
+            if !intentional_for_drain.load(std::sync::atomic::Ordering::SeqCst) {
+                fire_or_buffer_unexpected_close(&close_listener, &close_pending, reason).await;
+            }
             let mut lock = stream_pending.lock().await;
             lock.clear();
         });
 
         let client = Self {
             server_name: server_name.to_string(),
+            client_name: resolve_client_name(client_name),
             closed: client_flag,
+            intentionally_closed: intentional_flag,
             transport: McpTransport::Stdio {
                 _process: Arc::new(Mutex::new(child)),
                 stdin: Arc::new(Mutex::new(stdin)),
@@ -354,6 +477,8 @@ impl McpClient {
             tool_timeout: None,
             unexpected_close,
             pending_close_reason,
+            weak_evidence: Arc::new(Mutex::new(None)),
+            pending_weak_evidence: Arc::new(Mutex::new(None)),
         };
 
         // Initialize handshake. On failure, capture the child's stderr so the
@@ -410,6 +535,42 @@ impl McpClient {
         *self.unexpected_close.lock().await = Some(listener);
     }
 
+    /// Register the weak-evidence listener (v2 `onSessionEvidence` for the
+    /// `weak` kind, client-http.ts:92-99). At most one listener; a signal that
+    /// arrived before registration is replayed so it is never dropped.
+    pub async fn on_weak_evidence(&self, listener: Box<dyn Fn(String) + Send + Sync>) {
+        let pending = self.pending_weak_evidence.lock().await.take();
+        if let Some(reason) = pending {
+            listener(reason);
+            return;
+        }
+        *self.weak_evidence.lock().await = Some(listener);
+    }
+
+    /// MCP `ping`, bounded by v2's liveness budget (v2 `ping()` passing
+    /// `MCP_LIVENESS_PROBE_TIMEOUT_MS`, client-http.ts:119-121).
+    pub async fn ping(&self) -> Result<(), McpError> {
+        let request = self.send_request("ping", serde_json::json!({}));
+        match tokio::time::timeout(LIVENESS_PROBE_TIMEOUT, request).await {
+            Ok(result) => result.map(|_| ()),
+            Err(_) => Err(McpError::timeout(format!(
+                "MCP liveness probe timed out after {}ms",
+                LIVENESS_PROBE_TIMEOUT.as_millis()
+            ))),
+        }
+    }
+
+    /// v2 `probeMcpLiveness` (client-shared.ts:71-83): an answer — including a
+    /// JSON-RPC error — proves the session is alive; a closed connection, a
+    /// timeout or a transport-level failure does not.
+    pub async fn probe_liveness(&self) -> bool {
+        match self.ping().await {
+            Ok(()) => true,
+            Err(McpError::JsonRpc { .. }) => true,
+            Err(_) => false,
+        }
+    }
+
     /// The captured tail of the child's stderr (v2 `stderrSnapshot`,
     /// client-stdio.ts). Empty for non-stdio transports. Non-blocking: the
     /// drain task may hold the buffer mid-write, and `blocking_lock` would
@@ -436,6 +597,8 @@ impl McpClient {
     /// eventually; an explicit close makes reconnect bookkeeping
     /// deterministic.
     pub async fn close(&self) {
+        self.intentionally_closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         match &self.transport {
             McpTransport::Stdio { _process, .. } => {
                 let mut child = _process.lock().await;
@@ -564,10 +727,9 @@ impl McpClient {
             "capabilities": {
                 "tools": {}
             },
-            "clientInfo": {
-                "name": "kimi-agent-native",
-                "version": env!("CARGO_PKG_VERSION")
-            }
+            // v2 `KIMI_MCP_CLIENT_NAME` (`mcpCore/client-shared.ts:7`) unless
+            // the host resolved an identity (`resolveClientName`).
+            "clientInfo": self.client_info()
         });
 
         self.send_request("initialize", params).await?;
@@ -677,7 +839,7 @@ mod tests {
     async fn test_sse_mcp_client_handshake_tools_and_call() {
         let (sse_url, _shutdown) = spawn_mock_mcp_sse_server(None, None, None).await;
 
-        let client = McpClient::connect_sse("remote-server", &sse_url, HashMap::new())
+        let client = McpClient::connect_sse("remote-server", &sse_url, HashMap::new(), None)
             .await
             .expect("connect_sse failed");
 
@@ -729,6 +891,29 @@ mod tests {
         assert!(matches!(rpc_err, McpError::JsonRpc { .. }));
     }
 
+    /// v2 `resolveClientName` (connection-manager.ts:834) with the builtin
+    /// fallback (`client-shared.ts:7`): the host identity wins, a blank one
+    /// does not shadow the builtin.
+    #[test]
+    fn a_client_announces_the_host_identity_or_the_builtin_name() {
+        assert_eq!(
+            McpClient::mock("s").client_info()["name"],
+            serde_json::Value::from(KIMI_MCP_CLIENT_NAME)
+        );
+        assert_eq!(
+            McpClient::mock("s")
+                .with_client_name(Some("  kimi-code-cli  "))
+                .client_info()["name"],
+            serde_json::Value::from("kimi-code-cli")
+        );
+        assert_eq!(
+            McpClient::mock("s")
+                .with_client_name(Some("   "))
+                .client_info()["name"],
+            serde_json::Value::from(KIMI_MCP_CLIENT_NAME)
+        );
+    }
+
     #[tokio::test]
     async fn test_stdio_spawn_nonexistent_command() {
         let res = McpClient::spawn_stdio(
@@ -736,6 +921,7 @@ mod tests {
             "definitely_nonexistent_command_9999",
             &[],
             &HashMap::new(),
+            None,
             None,
         )
         .await;
@@ -756,11 +942,42 @@ mod tests {
             ("sh", vec!["-c", "exit 0"])
         };
 
-        let res = McpClient::spawn_stdio("exit_early", cmd, &args, &HashMap::new(), None).await;
+        let res =
+            McpClient::spawn_stdio("exit_early", cmd, &args, &HashMap::new(), None, None).await;
         assert!(res.is_err());
         assert_eq!(
             res.err().unwrap().to_string(),
             "MCP child closed stdout prematurely"
+        );
+    }
+
+    /// v2 "does not split a surrogate pair at the cut boundary"
+    /// (client-stdio.test.ts): the retained window starts on a character
+    /// boundary, so a CJK/emoji diagnostic never opens with U+FFFD.
+    #[test]
+    fn the_stderr_tail_never_cuts_a_character_in_half() {
+        // "诊" is three bytes, so a 4 KiB cut lands inside one character for
+        // most offsets; odd-sized feeds make the boundary move every time.
+        let text = "诊".repeat(2000);
+        let mut buf = Vec::new();
+        for piece in text.as_bytes().chunks(997) {
+            buf.extend_from_slice(piece);
+            trim_stderr_tail(&mut buf);
+        }
+        assert!(
+            buf.len() <= STDERR_BUFFER_CAPACITY
+                && buf.len() >= STDERR_BUFFER_CAPACITY.saturating_sub(3),
+            "the tail stays within one character of the capacity: {}",
+            buf.len()
+        );
+        let snapshot = String::from_utf8_lossy(&buf);
+        assert!(
+            !snapshot.starts_with('\u{FFFD}'),
+            "the retained tail must start on a character boundary"
+        );
+        assert!(
+            text.ends_with(snapshot.as_ref()),
+            "the tail is the end of the stream"
         );
     }
 
@@ -772,7 +989,8 @@ mod tests {
             ("sh", vec!["-c", "echo 'invalid_raw_line'; exit 0"])
         };
 
-        let res = McpClient::spawn_stdio("junk_stdout", cmd, &args, &HashMap::new(), None).await;
+        let res =
+            McpClient::spawn_stdio("junk_stdout", cmd, &args, &HashMap::new(), None, None).await;
         assert!(res.is_err());
         // The child prints one invalid line and exits immediately: the engine
         // may lose the race either way — the stdout read loop sees EOF
@@ -820,9 +1038,10 @@ mod tests {
         };
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-        let mut client = McpClient::spawn_stdio("slow", cmd, &arg_refs, &HashMap::new(), None)
-            .await
-            .expect("initialize handshake should succeed");
+        let mut client =
+            McpClient::spawn_stdio("slow", cmd, &arg_refs, &HashMap::new(), None, None)
+                .await
+                .expect("initialize handshake should succeed");
         client.set_tool_timeout(Some(Duration::from_millis(150)));
 
         let err = client
@@ -862,7 +1081,7 @@ mod tests {
         };
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-        let client = McpClient::spawn_stdio("closing", cmd, &arg_refs, &HashMap::new(), None)
+        let client = McpClient::spawn_stdio("closing", cmd, &arg_refs, &HashMap::new(), None, None)
             .await
             .expect("initialize handshake should succeed");
         client.close().await;
@@ -910,10 +1129,16 @@ mod tests {
         };
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-        let client =
-            McpClient::spawn_stdio("die_after_handshake", cmd, &arg_refs, &HashMap::new(), None)
-                .await
-                .expect("initialize handshake should succeed");
+        let client = McpClient::spawn_stdio(
+            "die_after_handshake",
+            cmd,
+            &arg_refs,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("initialize handshake should succeed");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let tx = std::sync::Mutex::new(Some(tx));
@@ -932,6 +1157,67 @@ mod tests {
         assert!(
             reason.contains("closed unexpectedly"),
             "unexpected reason: {reason}"
+        );
+
+        let _ = std::fs::remove_file(script);
+    }
+
+    /// v2 "does not fire session evidence when the caller closes the client
+    /// itself" (client-stdio.test.ts): an intentional `close()` tears the child
+    /// down, but the resulting stdout EOF must not be reported as an unexpected
+    /// close — the manager would otherwise flip a server the host just stopped.
+    #[tokio::test]
+    async fn an_intentional_close_does_not_fire_the_unexpected_close_listener() {
+        let reply = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let dir = std::env::temp_dir();
+        let (cmd, args, script) = if cfg!(windows) {
+            let path = dir.join(format!("kimi_mcp_stay_{}.bat", std::process::id()));
+            // Answer the handshake, then stay alive until the client kills it.
+            std::fs::write(
+                &path,
+                format!("@echo {reply}\r\n@ping -n 30 127.0.0.1 >nul\r\n"),
+            )
+            .expect("write stay script");
+            (
+                "cmd",
+                vec!["/c".to_string(), path.to_string_lossy().into_owned()],
+                path,
+            )
+        } else {
+            let path = dir.join(format!("kimi_mcp_stay_{}.sh", std::process::id()));
+            std::fs::write(&path, format!("echo '{reply}'\nsleep 30\n"))
+                .expect("write stay script");
+            ("sh", vec![path.to_string_lossy().into_owned()], path)
+        };
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+        let client = McpClient::spawn_stdio(
+            "closed_on_purpose",
+            cmd,
+            &arg_refs,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("initialize handshake should succeed");
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Mutex::new(Some(tx));
+        client
+            .on_unexpected_close(Box::new(move |reason| {
+                if let Some(tx) = tx.lock().unwrap().take() {
+                    let _ = tx.send(reason);
+                }
+            }))
+            .await;
+
+        client.close().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), rx)
+                .await
+                .is_err(),
+            "an intentional close must not fire the unexpected-close listener"
         );
 
         let _ = std::fs::remove_file(script);
@@ -993,6 +1279,7 @@ mod tests {
             &arg_refs,
             &HashMap::new(),
             Some(dir.to_string_lossy().as_ref()),
+            None,
         )
         .await
         .expect("a script that resolves a sibling file from the configured cwd must start");

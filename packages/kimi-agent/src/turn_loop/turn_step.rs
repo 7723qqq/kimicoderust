@@ -320,7 +320,11 @@ pub fn execute_loop_step_with_retry<'a>(
     Box::pin(async move {
         // Snapshot the borrowed slice/tool table into shared buffers once, then
         // every attempt (success and retry alike) clones only the `Arc`.
-        let messages: std::sync::Arc<[LLMMessage]> = std::sync::Arc::from(messages);
+        // v2 `contextProjector`: the provider sees the messages minus vacuous
+        // content parts (and minus a message that held nothing else). The
+        // stored history keeps them — this projection exists only on the wire.
+        let messages: std::sync::Arc<[LLMMessage]> =
+            std::sync::Arc::from(crate::llm::wire::project_vacuous_messages(messages));
         let tools: std::sync::Arc<[ToolInfo]> = std::sync::Arc::from(tool_defs);
         let build_params = || LLMChatParams {
             messages: std::sync::Arc::clone(&messages),

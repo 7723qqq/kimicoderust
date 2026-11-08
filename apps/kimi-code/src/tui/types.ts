@@ -298,6 +298,8 @@ export interface TranscriptEntry {
   /** Entry renders a UserPromptSubmit hook result (sits inside its prompt's group window). */
   hookResult?: boolean;
   pluginCommandData?: PluginCommandTranscriptData;
+  /** v2 #4627: a live steer the engine has not read yet. Cleared on delivery, failure, or replay. */
+  steerPending?: true;
 }
 
 export type LivePaneMode = 'idle' | 'waiting' | 'thinking' | 'tool' | 'session';

@@ -1468,3 +1468,197 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
              2 older media item(s) were omitted."
     );
 }
+
+/// v2 `compaction_finished` (`fullCompactionService.ts:768-795`): a successful
+/// compaction reports the round's telemetry — the summarization request's
+/// usage included — and not only the failure event. Before this, a successful
+/// compaction produced no telemetry at all, so the cost of the summarizer call
+/// was invisible.
+#[tokio::test]
+async fn a_successful_overflow_compaction_reports_compaction_finished() {
+    struct UsageSummarizerLlm {
+        calls: AtomicU32,
+    }
+    impl LLM for UsageSummarizerLlm {
+        fn system_prompt(&self) -> &str {
+            "sys"
+        }
+        fn model_name(&self) -> &str {
+            "finished-model"
+        }
+        fn is_retryable_error(&self, _: &str) -> bool {
+            false
+        }
+        fn transport(&self) -> &'static str {
+            "native-http"
+        }
+        fn chat(
+            &self,
+            _params: LLMChatParams,
+        ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                match call {
+                    0 => Err(Box::new(std::io::Error::other(
+                        "llm http status 400 Bad Request: context_length_exceeded",
+                    ))
+                        as Box<dyn std::error::Error + Send + Sync>),
+                    1 => Ok(LLMChatResponse {
+                        content: "Summary of the omitted prefix.".into(),
+                        thinking: vec![],
+                        tool_calls: vec![],
+                        finish_reason: Some("stop".into()),
+                        usage: TokenUsage {
+                            input_tokens: 7,
+                            output_tokens: 3,
+                            total_tokens: 10,
+                            input_cache_read: 2,
+                            input_cache_creation: 1,
+                        },
+                        timing: None,
+                    }),
+                    _ => Ok(LLMChatResponse {
+                        content: "Recovered".into(),
+                        thinking: vec![],
+                        tool_calls: vec![],
+                        finish_reason: Some("stop".into()),
+                        usage: TokenUsage::default(),
+                        timing: None,
+                    }),
+                }
+            })
+        }
+    }
+
+    let llm = UsageSummarizerLlm {
+        calls: AtomicU32::new(0),
+    };
+    // A history with a split point, so the emergency path actually asks the
+    // summarizer instead of flooring the count to zero.
+    let mut messages = vec![LLMMessage {
+        role: "system".into(),
+        content: "sys".into(),
+        ..Default::default()
+    }];
+    for index in 0..12 {
+        messages.push(LLMMessage {
+            role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+            content: format!("turn {index} with enough text to be worth compacting"),
+            ..Default::default()
+        });
+    }
+
+    let server = Arc::new(RpcServer::new());
+    let (capturing, events) = EventCapturingCallbacks::new(rpc_callbacks(server.clone()));
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
+    let input = RunTurnInput {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: "test-compaction-finished".into(),
+        llm: &llm,
+        messages,
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: Some(100_000),
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: None,
+        media_dropped: None,
+        media_recovery: None,
+        toolset: None,
+    };
+
+    let result = run_turn(input, &callbacks)
+        .await
+        .expect("the turn recovers");
+    assert_eq!(result.stop_reason, LoopTurnStopReason::EndTurn);
+
+    let recorded = events.lock().unwrap().clone();
+    let finished: Vec<&serde_json::Value> = recorded
+        .iter()
+        .filter(|event| {
+            event.get("event").and_then(|name| name.as_str()) == Some("compaction_finished")
+        })
+        .collect();
+    assert_eq!(
+        finished.len(),
+        1,
+        "one compaction completed; saw {recorded:?}"
+    );
+    let payload = finished[0];
+    assert_eq!(payload["source"], "auto");
+    assert_eq!(payload["round"], 1);
+    assert_eq!(payload["retry_count"], 0);
+    // v2 reports the measured pair; it does not promise the projection
+    // shrinks (a short history plus a long summary can grow).
+    assert!(payload["tokens_before"].as_u64().unwrap() > 0);
+    assert!(payload["tokens_after"].as_u64().unwrap() > 0);
+    assert!(payload["compacted_count"].as_u64().unwrap() > 0);
+    assert!(payload["duration_ms"].is_u64());
+    assert_eq!(payload["thinking_effort"], "none");
+    // v2 `usageTelemetry`: input_tokens is the *total* input (uncached plus
+    // both cache buckets), and the request that succeeded is the one reported.
+    assert_eq!(payload["input_tokens"], 10);
+    assert_eq!(payload["output_tokens"], 3);
+    assert_eq!(payload["input_cache_read"], 2);
+    assert_eq!(payload["input_cache_creation"], 1);
+}
+
+/// v2 `applyCompaction`'s `tokensAfter` in the turn loop's own gauge: after a
+/// compaction the gauge takes the summary's measured output instead of
+/// re-estimating its text, so the next threshold decision is not driven by a
+/// guess. A later `sync` with no new messages keeps the measured figure.
+#[test]
+fn the_in_turn_gauge_rebases_on_the_measured_summary_output() {
+    let summary = LLMMessage {
+        role: "user".into(),
+        content: format!(
+            "{} the summary body",
+            crate::compaction::COMPACTION_SUMMARY_PREFIX
+        ),
+        ..Default::default()
+    };
+    let history = vec![
+        LLMMessage {
+            role: "system".into(),
+            content: "system prompt".into(),
+            ..Default::default()
+        },
+        summary,
+        LLMMessage {
+            role: "assistant".into(),
+            content: "kept reply".into(),
+            ..Default::default()
+        },
+    ];
+    let estimate = crate::compaction::estimate_messages_tokens(&history);
+    let summary_estimate = crate::compaction::estimate_message_tokens(&history[1]);
+
+    let mut gauge = ContextTokens::default();
+    gauge.rebase_with_summary(&history, None);
+    assert_eq!(
+        gauge.tokens(),
+        estimate,
+        "without a measurement the estimate stands"
+    );
+
+    gauge.rebase_with_summary(&history, Some(1));
+    assert_eq!(
+        gauge.tokens(),
+        estimate - summary_estimate + 1,
+        "the measured output replaces the summary's estimated size"
+    );
+
+    gauge.sync(&history);
+    assert_eq!(
+        gauge.tokens(),
+        estimate - summary_estimate + 1,
+        "a sync with no new messages keeps the measured figure"
+    );
+}

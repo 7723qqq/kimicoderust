@@ -134,6 +134,12 @@ export interface SessionEventHost {
   noteCompactionFinished(): void;
   handleTurnStarted?(event: Extract<Event, { type: 'turn.started' }>): void;
   handleTurnEnded?(event: Extract<Event, { type: 'turn.ended' }>): void;
+  /** v2 #4627: clear a pending steer whose own turn has started. */
+  acknowledgeSteerTurnStarted?(promptId?: string): void;
+  /** v2 #4627: clear pending steers the engine has consumed (`turn.steer`). */
+  acknowledgeSteerDelivery?(promptIds?: readonly string[]): void;
+  /** v2 #4627: stop showing a pending steer after its prompt failed. */
+  releaseSteerDelivery?(promptId: string): void;
   mountEditorReplacement(panel: Component & Focusable): void;
   restoreEditor(): void;
   restoreInputText(text: string): void;
@@ -317,6 +323,13 @@ export class SessionEventHandler {
       this.host.streamingUI.setTurnId(String(event.turnId));
     }
 
+    // v2 #4627: a `turn.steer` is the engine's read acknowledgement for a
+    // steered message. It is not part of the turn lifecycle switch below.
+    if (event.type === 'turn.steer') {
+      this.host.acknowledgeSteerDelivery?.(event.promptIds);
+      return;
+    }
+
     switch (event.type) {
       case 'turn.started':
         this.handleTurnBegin(event);
@@ -443,6 +456,7 @@ export class SessionEventHandler {
   // ---------------------------------------------------------------------------
 
   private handleTurnBegin(event: TurnStartedEvent): void {
+    this.host.acknowledgeSteerTurnStarted?.(event.promptId);
     this.host.handleTurnStarted?.(event);
     this.currentTurnHasAssistantText = false;
     if (event.origin?.kind === 'plugin_command') {

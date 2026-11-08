@@ -9,6 +9,7 @@ import type {
   KimiHarness,
   PermissionMode,
   PluginCommandDef,
+  PromptSubmissionResult,
   Session,
   SkillSummary,
   TokenUsage,
@@ -78,6 +79,8 @@ import {
   NoticeMessageComponent,
   StatusMessageComponent,
 } from './components/messages/status-message';
+import { SkillActivationComponent } from './components/messages/skill-activation';
+import { UserMessageComponent } from './components/messages/user-message';
 import { QueuePaneComponent } from './components/panes/queue-pane';
 import type { TuiConfig } from './config';
 import {
@@ -111,6 +114,7 @@ import { createApprovalRequestHandler } from './reverse-rpc/approval/handler';
 import { registerReverseRPCHandlers } from './reverse-rpc/index';
 import { QuestionController } from './reverse-rpc/question/controller';
 import { createQuestionAskHandler } from './reverse-rpc/question/handler';
+import { SteerTraceLog, type SteerStageName, type SteerTraceEntry } from './steer-trace';
 import { currentTheme, getColorPalette, getBuiltInPalette, isBuiltInTheme } from './theme';
 import type { ColorToken, ResolvedTheme, ThemeName } from './theme';
 import { createTUIState, type TUIState } from './tui-state';
@@ -156,7 +160,7 @@ import { installTerminalThemeTracking } from './utils/terminal-theme';
 import { thinkingEffortFromConfig } from './utils/thinking-config';
 import { detectTmuxKeyboardWarning } from './utils/tmux-keyboard';
 import { computeSmoothedTokenSpeed, pickDecodeMs } from './utils/token-speed';
-import { markTranscriptComponent } from './utils/transcript-component-metadata';
+import { markTranscriptComponent, getTranscriptComponentEntry } from './utils/transcript-component-metadata';
 import { nextTranscriptId } from './utils/transcript-id';
 import { expandCutoffIndex, TRANSCRIPT_EXPAND_TURNS } from './utils/transcript-window';
 
@@ -264,6 +268,14 @@ function isUserSubmittedTurnOrigin(origin: TurnStartedEvent['origin'] | undefine
   }
 }
 
+/** A steer submitted from the TUI and not yet read or released. */
+interface PendingSteerDelivery {
+  entries: readonly TranscriptEntry[];
+  promptId?: string;
+  /** The hops logged before the receipt named the prompt. */
+  trace: SteerTraceEntry[];
+}
+
 export class KimiTUI {
   readonly harness: KimiHarness;
   readonly options: KimiTUIOptions;
@@ -302,6 +314,14 @@ export class KimiTUI {
   private readonly telemetryDisabled: boolean;
   private startupNotice: string | undefined;
   private lastHistoryContent: string | undefined;
+  // v2 #4627: steered entries are dimmed until the engine reports them read.
+  // A batch carries its prompt id only after the submission resolves; an
+  // acknowledgement can arrive first, so consumed ids are remembered.
+  private pendingSteerDeliveries: PendingSteerDelivery[] = [];
+  private readonly consumedSteerPromptIds = new Set<string>();
+  // The hop log behind `steerStagesOf` / `steerCurrentStage`. The engine keeps
+  // its own (kimi_ui_core::steer::SteerJournal); the two meet on the prompt id.
+  private readonly steerTrace = new SteerTraceLog();
   // Live `!` shell output entries, keyed by commandId so concurrent commands
   // each update their own card and stale events are dropped. Mutated in place
   // as `shell.output` events arrive; removed when the command completes.
@@ -1420,10 +1440,183 @@ export class KimiTUI {
     this.messageDispatch.steerMessage(session, input);
   }
 
+  /**
+   * v2 #4627 on the skill path: the activation renders as a card (not a user
+   * row), so `activateSkill` returns the activation id together with the steer
+   * receipt, and the card is dimmed by the same `turn.steer` acknowledgement
+   * that clears a steered user row.
+   */
   steerSkillActivation(session: Session, skillName: string, skillArgs: string): void {
-    void session.activateSkill(skillName, skillArgs).catch((error: unknown) => {
-      this.showError(`Skill "${skillName}" failed: ${formatErrorMessage(error)}`);
-    });
+    void session
+      .activateSkill(skillName, skillArgs)
+      .then((result) => {
+        // An older adapter (or a mock) resolves void; there is nothing to pair.
+        const submission = result?.submission;
+        const activationId = result?.activationId;
+        if (submission === undefined || !submission.steered || activationId === undefined) {
+          return;
+        }
+        const entry = this.state.transcriptEntries.find(
+          (candidate) =>
+            candidate.kind === 'skill_activation' &&
+            candidate.skillActivationId === activationId,
+        );
+        // The card is created by `skill.activated`, which the SDK emits before
+        // it submits; a missing card means this activation was not rendered
+        // (replay/tombstone), so there is nothing to dim.
+        if (entry === undefined) return;
+        this.noteSteerDelivery([entry]);
+        this.applySteerSubmission([entry], submission);
+      })
+      .catch((error: unknown) => {
+        this.showError(`Skill "${skillName}" failed: ${formatErrorMessage(error)}`);
+      });
+  }
+
+  /** v2 #4627: the entries of a steer that has been submitted but not read. */
+  noteSteerDelivery(entries: readonly TranscriptEntry[]): void {
+    const trace = [this.steerTrace.append('accepted'), this.steerTrace.append('pending')];
+    this.pendingSteerDeliveries.push({ entries, trace });
+  }
+
+  /**
+   * Apply the engine's submission result to the batch it belongs to. A prompt
+   * that did not join a turn (it launched its own, or was blocked) is not a
+   * steer: nothing will report it read, so it stops showing as pending.
+   */
+  applySteerSubmission(
+    entries: readonly TranscriptEntry[],
+    result: PromptSubmissionResult | undefined,
+  ): void {
+    if (result === undefined) return;
+    const batch = this.pendingSteerDeliveries.find((item) =>
+      item.entries.some((entry) => entries.includes(entry)),
+    );
+    if (batch === undefined) return;
+    // The receipt names the prompt: the hops already logged under this batch
+    // adopt the id, so the whole sequence answers one query.
+    for (const record of batch.trace) record.promptId = result.promptId;
+    batch.promptId = result.promptId;
+    if (this.consumedSteerPromptIds.delete(result.promptId)) {
+      // The engine reported this steer read before the submission resolved. The
+      // receipt adds no hop: `acknowledged` is where this prompt ended, and
+      // recording `submitted` after it would answer "where is it" wrongly.
+      this.dropSteerBatch(entries);
+      return;
+    }
+    this.steerTrace.append('submitted', result.promptId);
+    if (result.state === 'blocked' || (result.state === 'running' && !result.steered)) {
+      this.releaseSteerEntries(entries);
+      return;
+    }
+    this.setSteerEntriesPending(entries, true);
+  }
+
+  /** v2 #4627: a queued steer's own turn has started — it has been read. */
+  acknowledgeSteerTurnStarted(promptId?: string): void {
+    if (promptId !== undefined) this.acknowledgeSteerPromptIds([promptId]);
+  }
+
+  /** v2 #4627: the engine consumed these steers into the running turn. */
+  acknowledgeSteerDelivery(promptIds?: readonly string[]): void {
+    // promptIds are always present on this engine's `turn.steer` (the drain
+    // only reports messages carrying one), so there is no text-matching
+    // fallback. Pending state is deliberately not reset on `turn.ended`: a
+    // steer its turn did not reach is read by the next one (engine test
+    // `a_steer_that_missed_its_turn_is_read_by_the_next_one`).
+    if (promptIds !== undefined && promptIds.length > 0) {
+      this.acknowledgeSteerPromptIds(promptIds);
+    }
+  }
+
+  /** v2 #4627: a pending steer stopped without being read. */
+  releaseSteerDelivery(promptId: string): void {
+    const batch = this.pendingSteerDeliveries.find((item) => item.promptId === promptId);
+    if (batch !== undefined) this.releaseSteerEntries(batch.entries);
+  }
+
+  /** Stop showing a batch as pending after a local dispatch failure. */
+  releaseSteerEntries(entries: readonly TranscriptEntry[]): void {
+    for (const batch of this.dropSteerBatch(entries)) {
+      this.steerTrace.append('released', batch.promptId ?? batch.trace[0]?.promptId);
+    }
+  }
+
+  private dropSteerBatch(entries: readonly TranscriptEntry[]): PendingSteerDelivery[] {
+    const released = new Set(entries);
+    const dropped = this.pendingSteerDeliveries.filter((item) =>
+      item.entries.some((entry) => released.has(entry)),
+    );
+    this.pendingSteerDeliveries = this.pendingSteerDeliveries.filter(
+      (item) => !dropped.includes(item),
+    );
+    this.setSteerEntriesPending(entries, false);
+    if (this.pendingSteerDeliveries.length === 0) this.consumedSteerPromptIds.clear();
+    return dropped;
+  }
+
+  /** v2 #4627: every hop this prompt took inside the TUI, in order. */
+  steerStagesOf(promptId: string): SteerStageName[] {
+    return this.steerTrace.stagesOf(promptId);
+  }
+
+  /** Where this prompt is now, or undefined if the TUI never issued it. */
+  steerCurrentStage(promptId: string): SteerStageName | undefined {
+    return this.steerTrace.current(promptId);
+  }
+
+  /** The raw hop log, including batches that never got a prompt id. */
+  steerTraceSnapshot(): readonly SteerTraceEntry[] {
+    return this.steerTrace.snapshot();
+  }
+
+  private acknowledgeSteerPromptIds(promptIds: readonly string[]): void {
+    const ids = new Set(promptIds);
+    const delivered = this.pendingSteerDeliveries.filter(
+      (item) => item.promptId !== undefined && ids.has(item.promptId),
+    );
+    this.pendingSteerDeliveries = this.pendingSteerDeliveries.filter(
+      (item) => !delivered.includes(item),
+    );
+    // The engine can report a steer read before the submission promise
+    // resolves; remember its id so the later result still acknowledges it. A
+    // turn.started for an ordinary prompt must not accumulate here, hence the
+    // pending-batch guard.
+    if (this.pendingSteerDeliveries.length > 0) {
+      const deliveredIds = new Set(delivered.map((item) => item.promptId));
+      for (const id of promptIds) {
+        if (deliveredIds.has(id)) continue;
+        this.consumedSteerPromptIds.add(id);
+        this.steerTrace.append('acknowledged', id);
+      }
+    }
+    for (const item of delivered) {
+      if (item.promptId !== undefined) this.steerTrace.append('acknowledged', item.promptId);
+      this.setSteerEntriesPending(item.entries, false);
+    }
+    if (this.pendingSteerDeliveries.length === 0) this.consumedSteerPromptIds.clear();
+  }
+
+  private setSteerEntriesPending(
+    entries: readonly TranscriptEntry[],
+    pending: boolean,
+  ): void {
+    const targets = new Set(entries);
+    for (const entry of entries) {
+      if (pending) entry.steerPending = true;
+      else delete entry.steerPending;
+    }
+    for (const child of this.state.transcriptContainer.children) {
+      const entry = getTranscriptComponentEntry(child);
+      if (entry === undefined || !targets.has(entry)) continue;
+      if (child instanceof UserMessageComponent) child.setSteerPending(pending);
+      if (child instanceof SkillActivationComponent) child.setSteerPending(pending);
+    }
+    this.state.ui.requestRender();
+  }
+
+  private resetSteerDeliveries(): void {
+    this.releaseSteerEntries(this.pendingSteerDeliveries.flatMap((item) => item.entries));
   }
 
   handleTurnStarted(event: TurnStartedEvent): void {
@@ -1835,6 +2028,7 @@ export class KimiTUI {
     previous?.setQuestionHandler(undefined);
     this.approvalController.cancelAll(reason);
     this.questionController.cancelAll(reason);
+    this.resetSteerDeliveries();
     this.session = undefined;
     this.state.swarmModeEntry = undefined;
     this.harness.setTelemetryContext({ sessionId: null });

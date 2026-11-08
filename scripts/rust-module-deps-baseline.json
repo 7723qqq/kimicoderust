@@ -1,6 +1,6 @@
 {
   "note": "Intra-crate module dependency graph of packages/kimi-agent, keyed `from -> to` at top-level-module granularity. Two-way ratchet: a new unrecorded pair fails, and so does a recorded one that is gone. Re-record with `bun run check:rust-module-deps -- --update`; see the script header for the extraction rules and the blind spots.",
-  "generatedAt": "2026-11-06",
+  "generatedAt": "2026-11-07",
   "source": "packages/kimi-agent/src",
   "extraction": {
     "granularity": "top-level module: first path segment under src/ (directory name or .rs file stem)",
@@ -15,9 +15,9 @@
       "the crate boundary: main.rs reaches the library through kimi_agent::… and contributes no edges today"
     ],
     "includesTestCode": true,
-    "files": 373,
+    "files": 383,
     "modules": 42,
-    "sites": 3092
+    "sites": 3242
   },
   "edges": [
     "acp -> callbacks",
@@ -74,6 +74,7 @@
     "injection -> env",
     "injection -> goal",
     "injection -> permission",
+    "injection -> prompt",
     "injection -> swarm",
     "injection -> tools",
     "injection -> turn_loop",
@@ -95,10 +96,12 @@
     "llm -> session",
     "llm -> turn_loop",
     "mcp -> config",
+    "mcp -> i18n",
     "mcp -> llm",
     "mcp -> native",
     "mcp -> rpc",
     "mcp -> server",
+    "mcp -> tools",
     "mcp -> turn_loop",
     "napi_bindings -> callbacks",
     "napi_bindings -> compaction",
@@ -146,6 +149,7 @@
     "project_local_config -> native",
     "project_local_config -> tools",
     "prompt -> native",
+    "prompt -> permission",
     "prompt -> skills",
     "prompt -> tools",
     "region -> config",
@@ -224,6 +228,7 @@
     "storage -> turn_loop",
     "subagent -> callbacks",
     "subagent -> env",
+    "subagent -> i18n",
     "subagent -> injection",
     "subagent -> llm",
     "subagent -> native",
@@ -276,6 +281,7 @@
     "turn_loop -> i18n",
     "turn_loop -> injection",
     "turn_loop -> llm",
+    "turn_loop -> mcp",
     "turn_loop -> permission",
     "turn_loop -> rpc",
     "turn_loop -> server",

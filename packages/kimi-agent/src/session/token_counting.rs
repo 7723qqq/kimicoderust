@@ -49,17 +49,17 @@ impl TokenCountingState {
     }
 
     /// Record a turn-end anchor when the turn produced no measurement (v2
-    /// `TokenCountingTurnRecorded`). The size is the current status figure;
-    /// the next measurement or truncation replaces it.
+    /// `TokenCountingTurnRecorded`). The size is the current status figure.
+    ///
+    /// v2's rule is narrower than "record a point": when *any* anchor already
+    /// covers this length — a measurement or an earlier pin — the turn end
+    /// only advances the reported total and leaves the anchor alone.
+    /// Overwriting it would downgrade a measurement into an estimate and drop
+    /// the [`Self::latest_measured`] floor the status gauge relies on.
     pub fn record_turn(&mut self, history: &[LLMMessage]) {
         let length = history.len();
         let tokens = self.status_size(history);
-        if let Some(existing) = self
-            .anchors
-            .iter_mut()
-            .find(|anchor| anchor.length == length && !anchor.measured)
-        {
-            existing.tokens = tokens;
+        if self.anchors.iter().any(|anchor| anchor.length == length) {
             self.tokens = tokens;
             return;
         }
@@ -248,5 +248,30 @@ mod tests {
         state.record_turn(&history);
         assert_eq!(state.tokens, first);
         assert_eq!(state.anchors.len(), 1);
+    }
+
+    /// v2 `TokenCountingTurnRecorded`: a turn end at a length an anchor already
+    /// covers only advances the reported total. In particular it must not
+    /// rewrite a measured anchor into an estimate — that would zero
+    /// `latest_measured` and let the gauge drift below the real size.
+    #[test]
+    fn a_turn_end_never_downgrades_a_measurement() {
+        let history: Vec<LLMMessage> = (0..6)
+            .map(|index| message("user", &format!("m{index}")))
+            .collect();
+        let mut state = TokenCountingState::default();
+        state.measured(6, 200);
+
+        state.record_turn(&history);
+
+        assert_eq!(state.anchors.len(), 1);
+        assert!(
+            state.anchors[0].measured,
+            "the anchor keeps its measurement"
+        );
+        assert_eq!(state.anchors[0].tokens, 200);
+        assert_eq!(state.latest_measured(), 200);
+        assert_eq!(state.status_size(&history), 200);
+        assert_eq!(state.tokens, 200);
     }
 }

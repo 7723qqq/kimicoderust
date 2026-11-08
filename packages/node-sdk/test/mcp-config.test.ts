@@ -484,6 +484,10 @@ describe('MCP OAuth facade (host-controlled browser flow)', () => {
       });
 
       expect(urls).toHaveLength(1);
+      // v2 announces the host identity as the OAuth client name
+      // (`oauthService.ts:21` → `service.ts:641`); the SDK used to send the
+      // literal 'Kimi Code'.
+      expect(statusServer.registrationClientName).toBe(TEST_IDENTITY.productName);
       const authorizationUrl = new URL(urls[0]!);
       expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe('S256');
       expect(authorizationUrl.searchParams.get('code_challenge')).toBeTruthy();

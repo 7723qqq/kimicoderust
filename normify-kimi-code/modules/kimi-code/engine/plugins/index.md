@@ -10,9 +10,9 @@ description:
   en: >
       Plugin install state and contributed content: the SQLite registry, skill dirs, MCP configs and the built-in plugin seeding seam.
       
-revision: 439e47d648d552c4d83e813f40676b4c7f078617
-updated_at: "2026-11-06T14:31:46.543Z"
-fingerprint: 16116240fde2bb681b805530f125e24c35eb00d05ac6f068379828badaa0f302
+revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
+updated_at: "2026-11-07T18:30:37.927Z"
+fingerprint: 99c718865e0b5299de79ebed032cb6327e6911a67a7580dd19ccd0266d2f991d
 source:
   - path: "packages/kimi-agent/src/server/plugins.rs"
   - path: "packages/kimi-agent/src/server/plugin_archive.rs"

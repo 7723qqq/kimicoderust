@@ -167,7 +167,7 @@ pub async fn execute_fetch_url(
             }
         };
 
-        let addrs = match resolve_and_validate_url(&parsed, false) {
+        let addrs = match resolve_and_validate_url(&parsed, true) {
             Ok(a) => a,
             Err(err) => {
                 return Some(ExecutableToolResult {

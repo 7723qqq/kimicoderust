@@ -298,6 +298,11 @@ pub struct ServerEngine {
     /// interruption reminder's trigger, v2 `TurnEnded` reason filter). Read
     /// and cleared when the next turn's spec is built.
     last_turn_aborted: Mutex<HashMap<String, bool>>,
+    /// Whether the *user* asked for the running turn to stop (v2
+    /// `TurnEnded.interruptReason === 'user_cancelled'`). Set by [`Self::cancel_turn`]
+    /// and consumed at turn end: a teardown or a host-side abort flips the same
+    /// cancel flag but must not arm the "interrupted by the user" reminder.
+    last_cancel_user: Mutex<HashMap<String, bool>>,
     /// When this session last produced assistant output, in epoch millis.
     /// Micro compaction's cache-miss gate is *idle time since that moment*
     /// (v2 `AgentMicroCompactionService.lastAssistantAt`, stamped on
@@ -363,7 +368,7 @@ impl ServerEngine {
             )),
             hub,
             store: store.clone(),
-            max_steps: 32,
+            max_steps: 0,
             max_attempts: None,
             compaction_max_attempts: None,
             active_turns: Mutex::new(HashMap::new()),
@@ -378,6 +383,7 @@ impl ServerEngine {
             host_factory: Mutex::new(None),
             status_hashes: Mutex::new(HashMap::new()),
             last_turn_aborted: Mutex::new(HashMap::new()),
+            last_cancel_user: Mutex::new(HashMap::new()),
             last_assistant_at: Mutex::new(HashMap::new()),
             media: crate::llm::media_resolver::MediaResolver::new()
                 .with_upload_cache(store.clone()),
@@ -968,8 +974,11 @@ impl ServerEngine {
             .clone()
     }
 
+    /// Host `loopControl.maxStepsPerTurn` override. `0` means "no cap" — the
+    /// same spelling v2's `maxSteps > 0` check gives it — and a positive value
+    /// bounds one turn's steps.
     pub fn with_max_steps(mut self, max_steps: u32) -> Self {
-        self.max_steps = max_steps.max(1);
+        self.max_steps = max_steps;
         self
     }
 
@@ -1037,6 +1046,13 @@ impl ServerEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(flag) = turns.get(session_id) {
             flag.store(true, Ordering::SeqCst);
+            // This is the user's stop, not a teardown (v2 `interruptReason`):
+            // only the former arms the interruption reminder.
+            drop(turns);
+            self.last_cancel_user
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session_id.to_string(), true);
             true
         } else {
             false
@@ -1088,9 +1104,21 @@ impl ServerEngine {
     /// client that gates its busy indicator on the last turn's state must
     /// see the turn closed before the session says idle.
     fn publish_turn_ended(&self, session_id: &str, turn_number: u32, reason: &str) {
-        // Record the interruption-reminder trigger for the next turn's spec
-        // (v2 filters `TurnEnded` on reason `cancelled`).
-        let aborted = reason == "cancelled";
+        // Record the interruption-reminder trigger for the next turn's spec.
+        // v2 filters `TurnEnded` on `reason === 'cancelled'` **and**
+        // `interruptReason === 'user_cancelled'`: `Aborted` is also what a
+        // session teardown produces, and telling the model "the user
+        // interrupted" after a shutdown is simply false.
+        let user_cancelled = self
+            .last_cancel_user
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id)
+            .unwrap_or(false);
+        let aborted = crate::injection::interruption_reminder::arms_reminder(
+            reason == "cancelled",
+            user_cancelled,
+        );
         self.last_turn_aborted
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1359,6 +1387,31 @@ impl ServerEngine {
         store.goal_snapshot()
     }
 
+    /// Edit the current goal's objective in place (v2 #4568
+    /// `editGoalObjective`). Returns the same goal snapshot shape as the read
+    /// route, or an error string for a missing goal / invalid objective.
+    pub fn edit_session_goal_objective(
+        &self,
+        session_id: &str,
+        objective: &str,
+    ) -> Option<Result<Value, String>> {
+        let store = self.session_state_store(session_id)?;
+        let outcome = store
+            .apply_write(
+                "goal",
+                &serde_json::json!({ "action": "objective", "objective": objective }),
+            )
+            .map_err(|error| error.to_string());
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        if let Err(error) = store.write_domain("goal", &outcome.stored) {
+            return Some(Err(error));
+        }
+        Some(Ok(outcome.response["goal"].clone()))
+    }
+
     /// The goal-continuation prompt the session's next autonomous turn owes,
     /// or `None` when the goal is inactive or its budget is spent.
     ///
@@ -1542,6 +1595,47 @@ impl ServerEngine {
         }
     }
 
+    /// The session's persisted micro-compaction cutoff (v2
+    /// `microCompaction.cutoff`), stored beside the token-counting state.
+    fn micro_compaction_state(
+        &self,
+        session_id: &str,
+    ) -> crate::compaction::micro::MicroCompactionState {
+        self.store
+            .get_state("metadata", session_id)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.get("micro_compaction").cloned())
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_micro_compaction_state(
+        &self,
+        session_id: &str,
+        state: &crate::compaction::micro::MicroCompactionState,
+    ) {
+        let mut metadata = self
+            .store
+            .get_state("metadata", session_id)
+            .ok()
+            .flatten()
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "micro_compaction".into(),
+                serde_json::to_value(state).unwrap_or_default(),
+            );
+        }
+        if let Err(error) = self
+            .store
+            .put_session_state("metadata", session_id, session_id, &metadata)
+        {
+            tracing::warn!(%session_id, %error, "could not persist the micro-compaction cutoff");
+        }
+    }
+
     /// Fold the finished turn into the counting state: a measured request
     /// anchors the conversation exactly, a turn without an LLM call — or one
     /// whose provider reported no usage (v2 skips `measured` when the response
@@ -1579,6 +1673,11 @@ impl ServerEngine {
         let mut state = self.token_counting(session_id);
         state.truncate(&history, history.len());
         self.save_token_counting(session_id, &state);
+        // v2 `clamp`: an index past the shortened history no longer describes a
+        // message, and a truncation never grows the cutoff.
+        let mut micro = self.micro_compaction_state(session_id);
+        micro.clamp(history.len());
+        self.save_micro_compaction_state(session_id, &micro);
         // v2 #4413: a history rewrite (undo) invalidates the session's media
         // recovery — the media it captured may no longer be where they were.
         if let Some(cell) = self
@@ -1597,17 +1696,37 @@ impl ServerEngine {
     /// Replace the counting state after a compaction: the transcript is now
     /// the summary prefix (v2 `rebase`).
     pub fn record_context_rebase(&self, session_id: &str) {
+        self.record_context_rebase_with_summary(session_id, None);
+    }
+
+    /// [`Self::record_context_rebase`] that knows the summarization request's
+    /// output token count.
+    ///
+    /// v2 `buildContextCompactionShape` (`compactionHandoff.ts:107-111`) sets
+    /// the post-compaction total to `requestOverhead + (summaryOutputTokens ??
+    /// estimate(contextSummary)) + estimate(kept messages)`: the summary's size
+    /// is the **measured** count of the request that wrote it, not an estimate
+    /// of its text. The engine has no per-request overhead in its counting
+    /// model, so only the measured substitution applies here.
+    pub fn record_context_rebase_with_summary(
+        &self,
+        session_id: &str,
+        summary_output_tokens: Option<u32>,
+    ) {
         let history = self
             .store
             .load_session_history(session_id)
             .unwrap_or_default();
+        let tokens = rebased_tokens(&history, summary_output_tokens);
         let mut state = self.token_counting(session_id);
-        state.rebase(
-            history.len(),
-            crate::session::token_counting::estimate_messages(&history),
-            false,
-        );
+        state.rebase(history.len(), tokens, false);
         self.save_token_counting(session_id, &state);
+        // v2 `context.applyCompaction`: the transcript was replaced, so nothing
+        // in the new one is "old" — the cutoff drops to zero and re-advances
+        // only on the next detected miss.
+        let mut micro = self.micro_compaction_state(session_id);
+        micro.reset();
+        self.save_micro_compaction_state(session_id, &micro);
     }
 
     /// The LLM one session's turns run on, without building a pipeline.
@@ -1616,6 +1735,15 @@ impl ServerEngine {
     /// the caller falls back to whatever it does without an LLM.
     pub async fn session_llm(&self, session_id: &str) -> Option<Arc<dyn LLM>> {
         let spec = self.session_spec(session_id).await;
+        let callbacks = self.session_callbacks_for(session_id);
+        let sections = self.plugin_contributions().sections;
+        crate::pipeline::build_llm_for_spec(&spec, &callbacks, sections.as_deref()).ok()
+    }
+
+    /// The host callbacks one session's operations run with. Manual compaction
+    /// runs outside a turn, but its telemetry still has to reach the same sink
+    /// the turn loop uses (v2 `compaction_finished` with `source: 'manual'`).
+    pub fn session_callbacks_for(&self, session_id: &str) -> Arc<dyn HostCallbacks> {
         let ws_root = match self.store.get_session(session_id) {
             Ok(Some(s)) if s.workspace_id.is_some() => {
                 let wid = s.workspace_id.unwrap();
@@ -1628,9 +1756,7 @@ impl ServerEngine {
             _ => None,
         };
         let ws_ref = ws_root.as_deref().unwrap_or(std::path::Path::new("."));
-        let callbacks = self.session_callbacks(session_id, ws_ref);
-        let sections = self.plugin_contributions().sections;
-        crate::pipeline::build_llm_for_spec(&spec, &callbacks, sections.as_deref()).ok()
+        self.session_callbacks(session_id, ws_ref)
     }
 
     /// Manual compaction (the REST `:compact` route and ACP `/compact`):
@@ -1664,6 +1790,9 @@ impl ServerEngine {
             ..crate::compaction::CompactionConfig::default()
         };
         let count = crate::compaction::compute_compact_count_manual(&history, &config);
+        let started = std::time::Instant::now();
+        let mut summary_usage = None;
+        let mut summary_retry_count = 0;
         let summary = if count == 0 {
             None
         } else {
@@ -1693,20 +1822,48 @@ impl ServerEngine {
             )
             .await
             .map_err(|error| EngineError::Turn(error.to_string()))?;
+            summary_usage = summary.usage.clone();
+            summary_retry_count = summary.retry_count;
             Some(crate::compaction::post_process_summary(
-                summary,
+                summary.summary,
                 self.session_todo_summary(session_id),
             ))
         };
+        let duration_ms = started.elapsed().as_millis() as u64;
         let report = self
             .store
             .compact_session_with_summary(session_id, instruction, summary)
             .map_err(EngineError::Turn)?;
+        let summary_output_tokens = summary_usage.as_ref().map(|usage| usage.output_tokens);
         if report.removed > 0 {
             // The transcript is now the summary prefix: re-baseline the
             // counting state so the gauge does not keep the pre-compaction
-            // measurement (v2 `rebase`).
-            self.record_context_rebase(session_id);
+            // measurement (v2 `rebase`). The summary's size is the measured
+            // output of the request that wrote it, not an estimate of its text.
+            self.record_context_rebase_with_summary(session_id, summary_output_tokens);
+        }
+        // v2 `compaction_finished` with `source: 'manual'`: a manual /compact
+        // reports the same round telemetry the automatic paths do, usage
+        // included. `turn_id` is omitted — this runs between turns.
+        if count > 0 {
+            let callbacks = self.session_callbacks_for(session_id);
+            callbacks.telemetry(
+                crate::compaction::CompactionReport {
+                    summary: String::new(),
+                    compacted_count: report.compacted_count,
+                    tokens_before: report.tokens_before,
+                    tokens_after: report.tokens_after,
+                    usage: summary_usage,
+                    retry_count: summary_retry_count,
+                    duration_ms,
+                }
+                .finished_payload(
+                    "manual",
+                    1,
+                    llm.thinking_effort().unwrap_or("none"),
+                    None,
+                ),
+            );
         }
         self.hub
             .bus_for(session_id)
@@ -1993,16 +2150,30 @@ impl ServerEngine {
                 self.model_context_window(session_id).await,
                 &config,
             );
-            if outcome_gate.triggered() {
-                let outcome = crate::compaction::micro::apply_micro_compaction(&history, &config);
+            // v2 advances the cutoff only on a detected miss; every other
+            // request re-applies the *stored* value. Re-deriving it from the
+            // history each time would blank a newer result as the transcript
+            // grows, changing the prefix the cutoff exists to keep stable.
+            let mut micro = self.micro_compaction_state(session_id);
+            let advanced = outcome_gate.triggered()
+                && micro.advance(history.len(), config.keep_recent_messages);
+            if advanced {
+                self.save_micro_compaction_state(session_id, &micro);
+                self.hub
+                    .bus_for(session_id)
+                    .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
+                        "type": "micro_compaction.apply",
+                        "sessionId": session_id,
+                        "cutoff": micro.cutoff,
+                    })));
+            }
+            if micro.cutoff > 0 {
+                let outcome = crate::compaction::micro::apply_micro_compaction_at(
+                    &history,
+                    micro.cutoff,
+                    &config,
+                );
                 if outcome.changed {
-                    self.hub
-                        .bus_for(session_id)
-                        .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
-                            "type": "micro_compaction.apply",
-                            "sessionId": session_id,
-                            "cutoff": outcome.cutoff,
-                        })));
                     history = outcome.messages;
                 }
             }
@@ -2152,6 +2323,7 @@ impl ServerEngine {
             crate::session::SteerQueueCallbacks::new(
                 callbacks.clone(),
                 self.steer_queue(session_id),
+                None,
             )
             .with_steer_slot(Some(self.steer_slot(session_id))),
         );
@@ -2439,6 +2611,34 @@ fn work_turn_reason(reason: &crate::turn_loop::types::LoopTurnStopReason) -> &'s
         MaxSteps | Filtered => "failed",
         EndTurn | MaxTokens | Paused | Unknown | BudgetLimited | RepeatBreaker => "completed",
     }
+}
+
+/// The post-compaction token total (v2 `buildContextCompactionShape`'s
+/// `tokensAfter`, `compactionHandoff.ts:107-111`): the rebuilt history's
+/// estimate with the summary message's own size replaced by the summarization
+/// request's measured output tokens. Falling back to the estimate when either
+/// side is unavailable keeps the counter honest rather than guessing.
+///
+/// The same rule lives in [`crate::compaction::rebased_tokens`] for the turn
+/// loop's live gauge; this one runs on the session counter's text-only
+/// estimator, which is what that state has always used.
+fn rebased_tokens(
+    history: &[crate::turn_loop::types::LLMMessage],
+    summary_output_tokens: Option<u32>,
+) -> u64 {
+    let estimate = crate::session::token_counting::estimate_messages(history);
+    let Some(measured) = summary_output_tokens else {
+        return estimate;
+    };
+    let Some(summary) = history.iter().find(|message| {
+        message
+            .content
+            .starts_with(crate::compaction::COMPACTION_SUMMARY_PREFIX)
+    }) else {
+        return estimate;
+    };
+    let summary_estimate = crate::session::token_counting::estimate_message(summary);
+    estimate.saturating_sub(summary_estimate) + u64::from(measured)
 }
 
 /// Overlay a session's persisted profile (`agent_config`) onto the engine's

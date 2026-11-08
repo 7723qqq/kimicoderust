@@ -66,6 +66,8 @@ import type {
   PromptPart,
   PromptFileAttachment,
   PromptSkillActivation,
+  PromptSubmissionResult,
+  SkillActivationResult,
   ClientPromptMetadata,
   RenameSessionInput,
   ResumeSessionInput,
@@ -634,7 +636,7 @@ export abstract class SDKRpcClientBase {
     });
   }
 
-  async steer(input: SessionPromptRpcInput): Promise<void> {
+  async steer(input: SessionPromptRpcInput): Promise<PromptSubmissionResult> {
     const agentId = this.interactiveAgentId;
     const rpc = await this.getRpc();
     return rpc.steer({
@@ -1123,7 +1125,7 @@ export abstract class SDKRpcClientBase {
     return rpc.getPluginInfo({ id });
   }
 
-  async activateSkill(input: ActivateSkillRpcInput): Promise<void> {
+  async activateSkill(input: ActivateSkillRpcInput): Promise<SkillActivationResult> {
     const rpc = await this.getRpc();
     return rpc.activateSkill({
       sessionId: input.sessionId,

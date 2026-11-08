@@ -12,3 +12,9 @@ kimi-ui-core = { path = "../kimi-ui-core" }
 # `Buffer` and `Rect` are one type, not two copies of it.
 ratatui = "0.30"
 textual-rs = "0.3"
+serde_json = "1"
+
+[features]
+# Records every applied EntryOp and the last steer receipt, so an integration
+# test can assert on the projection seam itself rather than inferring it.
+ops-trace = []

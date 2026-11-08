@@ -800,6 +800,10 @@ impl TranscriptProjector {
                 }],
                 _ => Vec::new(),
             },
+            // v2 #4663: a stream reset discards the step's partial deltas.
+            // There is no text to append and no frame to open; the next delta
+            // continues the same turn's already-open step.
+            EngineEvent::StepStreamReset { .. } => Vec::new(),
             _ => Vec::new(),
         }
     }

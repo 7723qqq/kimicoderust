@@ -61,6 +61,28 @@ describe('discoverSubagentsFromToolResult', () => {
     expect(discoverSubagentsFromToolResult('Command output\nok\n')).toEqual([]);
   });
 
+  // The engine appends `resume_hint` (and `next_step` on failures) after the
+  // summary, as guidance for the *parent*. Only the answer belongs to the
+  // child's transcript: folding the trailer in made a resumed child appear to
+  // have written its own resume hint.
+  it('stops the summary at the trailing resume / next-step paragraphs', () => {
+    const withTrailer = [
+      'Wall time: 0.004 seconds',
+      'agent_id: subagent-solo',
+      'actual_subagent_type: coder',
+      'status: completed',
+      '',
+      '[summary]',
+      'solo result',
+      '',
+      'resume_hint: Continue with Agent(resume="subagent-solo", prompt="...").',
+      'next_step: Resume to continue where it stopped.',
+    ].join('\n');
+    expect(discoverSubagentsFromToolResult(withTrailer)).toEqual([
+      { agentId: 'subagent-solo', summary: 'solo result' },
+    ]);
+  });
+
   it('handles a resumed member (no body) and an id-bearing error', () => {
     const mixed = [
       '<agent_swarm_result>',

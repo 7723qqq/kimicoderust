@@ -171,7 +171,10 @@ async fn a_call_with_unusable_arguments_is_answered_not_executed() {
                         name: "Bash".into(),
                         arguments: serde_json::json!({}),
                         extras: None,
-                        args_parse_error: Some("EOF while parsing a string".into()),
+                        args_parse_error: Some(crate::turn_loop::types::ArgsParseError {
+                            raw: r#"{"command": "ech"#.into(),
+                            error: "EOF while parsing a string".into(),
+                        }),
                     },
                     ToolCall {
                         id: "not-an-object".into(),
@@ -414,7 +417,8 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
     };
 
     let server = Arc::new(RpcServer::new());
-    let callbacks = rpc_callbacks(server.clone());
+    let (capturing, events) = EventCapturingCallbacks::new(rpc_callbacks(server.clone()));
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
         agent_id: agent_id.to_string(),
@@ -451,7 +455,114 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
         LoopTurnStopReason::MaxSteps,
         "a model that never complies fails the turn, it does not fake success"
     );
+    // v2 closes the step it began (loopService.ts:2201 emitStepInterrupted →
+    // failMachineStep): the budget ran out with a step in flight.
+    let interruptions: Vec<serde_json::Value> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            event.get("type").and_then(|value| value.as_str()) == Some("llm.step.interrupted")
+        })
+        .cloned()
+        .collect();
+    assert_eq!(interruptions.len(), 1, "exactly one step is closed");
+    assert_eq!(interruptions[0]["reason"], "max_steps");
+    assert_eq!(interruptions[0]["step"], 3);
     registry.exit(agent_id);
+}
+
+/// A provider failure closes the step it opened (v2 `failMachineStep`,
+/// loopService.ts:2160-2171): the turn fails, and exactly one
+/// `llm.step.interrupted{reason:"error"}` names the step and the message so
+/// the host's step display does not keep a dead step "streaming".
+#[tokio::test]
+async fn an_llm_error_closes_the_step_it_began() {
+    struct FailingLlm;
+    impl LLM for FailingLlm {
+        fn system_prompt(&self) -> &str {
+            "You are helpful."
+        }
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+        fn is_retryable_error(&self, _: &str) -> bool {
+            false
+        }
+        fn chat(
+            &self,
+            _params: LLMChatParams,
+        ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            Box::pin(async move {
+                Err(Box::new(std::io::Error::other("provider exploded"))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            })
+        }
+    }
+
+    let server = Arc::new(RpcServer::new());
+    let (capturing, events) = EventCapturingCallbacks::new(rpc_callbacks(server.clone()));
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
+
+    let input = RunTurnInput {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: "test-turn-llm-error".into(),
+        llm: &FailingLlm,
+        messages: vec![LLMMessage {
+            role: "user".into(),
+            content: "hello".into(),
+            ..Default::default()
+        }],
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 3,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: None,
+        media_dropped: None,
+        media_recovery: None,
+        toolset: None,
+    };
+
+    let error = run_turn(input, &callbacks)
+        .await
+        .expect_err("a provider failure fails the turn");
+    assert!(
+        error.to_string().contains("provider exploded"),
+        "the provider text reaches the caller: {error}"
+    );
+
+    let captured = events.lock().unwrap().clone();
+    let interruptions: Vec<&serde_json::Value> = captured
+        .iter()
+        .filter(|event| {
+            event.get("type").and_then(|value| value.as_str()) == Some("llm.step.interrupted")
+        })
+        .collect();
+    assert_eq!(
+        interruptions.len(),
+        1,
+        "one begun step is closed exactly once: {captured:?}"
+    );
+    assert_eq!(interruptions[0]["reason"], "error");
+    assert_eq!(
+        interruptions[0]["step"], 1,
+        "the same one-based ordinal as llm.step.begin"
+    );
+    assert!(
+        interruptions[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("provider exploded")),
+        "the message carries the provider text: {}",
+        interruptions[0]["message"]
+    );
 }
 
 /// The interruption reminder must survive the `run_turn_continued`
@@ -1406,4 +1517,74 @@ async fn test_max_steps_exhaustion_reports_max_steps() {
     let turn = run_turn(input, &callbacks).await.unwrap();
     assert!(matches!(turn.stop_reason, LoopTurnStopReason::MaxSteps));
     assert_eq!(turn.steps, 2);
+}
+
+/// v2 `loopService.ts:1047-1050`: the step cap applies only when it is a
+/// positive number. An explicit `0` — and an unset cap, which the engine
+/// spells the same way — means "no cap". Clamping it to one step (the old
+/// `max(1)`) failed every tool-bearing turn at the first call.
+#[tokio::test]
+async fn a_zero_step_cap_does_not_limit_the_turn() {
+    fn call(id: &str, path: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "read".into(),
+            arguments: serde_json::json!({ "path": path }),
+            extras: None,
+            args_parse_error: None,
+        }
+    }
+    let llm = SequencedLlm {
+        system_prompt: "You are helpful.".into(),
+        model_name: "test-model".into(),
+        steps: vec![
+            (vec![call("a", "/a.txt")], "tool_calls"),
+            (vec![call("b", "/b.txt")], "tool_calls"),
+            (Vec::new(), "stop"),
+        ],
+    };
+    let server = Arc::new(RpcServer::new());
+    RpcServer::register_arc(&server, types::methods::HOST_EXECUTE_TOOL, |_params| {
+        Box::pin(async move {
+            let resp = ToolExecuteResponse {
+                delivery: None,
+                stop_turn: false,
+                content: "stub".into(),
+                is_error: false,
+                note: None,
+            };
+            serde_json::to_value(&resp).map_err(|e| JsonRpcError::internal_error(e.to_string()))
+        })
+    });
+    let callbacks = rpc_callbacks(server.clone());
+
+    let input = RunTurnInput {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: "test-zero-step-cap".into(),
+        llm: &llm,
+        messages: vec![LLMMessage {
+            role: "user".into(),
+            content: "go".into(),
+            ..Default::default()
+        }],
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 0,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: None,
+        media_dropped: None,
+        media_recovery: None,
+        toolset: None,
+    };
+
+    let turn = run_turn(input, &callbacks).await.unwrap();
+    assert_eq!(turn.steps, 3, "0 must not cap the turn at one step");
+    assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
 }

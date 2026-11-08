@@ -143,6 +143,11 @@ pub struct JsRunTurnParams {
     /// Host-resolved `[mcp]` defaults (v2 `resolveDefaults`). Per-server
     /// values win; `None` keeps the engine's built-in defaults.
     pub mcp_defaults: Option<JsMcpDefaults>,
+    /// The host's identity as an MCP client name (v2 `resolveClientName`,
+    /// wired from the host identity slug in `workspaceMcpService.ts:42`).
+    /// Announced as `initialize.clientInfo.name`; `None` announces the
+    /// builtin `kimi-code`.
+    pub mcp_client_name: Option<String>,
     /// Host-resolved `[services.moonshot_search]` / `KIMI_WEB_SEARCH_*`
     /// backend (v2 `configSection.ts`). When set, the native WebSearch tool
     /// calls this endpoint instead of scraping DuckDuckGo.
@@ -173,6 +178,9 @@ pub struct JsRunTurnParams {
     pub max_running_tasks: Option<i64>,
     pub bash_auto_background_on_timeout: Option<bool>,
     pub bash_task_timeout_s: Option<i64>,
+    /// `[background].keepAliveOnExit` (v2): leave background tasks running on
+    /// session close. Absent keeps the engine's stop-on-exit default.
+    pub keep_alive_on_exit: Option<bool>,
     /// `[background].print_background_mode` — what a print-mode (`kimi -p`)
     /// session does once its main turn ends with background tasks still
     /// running: `exit` resolves the turn receipt at once, `drain` / `steer`
@@ -238,6 +246,9 @@ pub struct JsMcpServerConfig {
     /// Env var holding a bearer token for a remote server (v2
     /// `bearerTokenEnvVar`).
     pub bearer_token_env_var: Option<String>,
+    /// The server's authentication mode (v2 `config.auth`); `"oauth"` keeps a
+    /// 401 flipping to `needs-auth` even when extra headers are set.
+    pub auth: Option<String>,
     /// `false` keeps the server listed as `disabled` and skips connecting it.
     pub enabled: Option<bool>,
     /// Allowlist of tool names exposed to the model (v2 `enabledTools`).

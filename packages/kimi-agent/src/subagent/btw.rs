@@ -47,9 +47,17 @@ pub async fn start_btw(
         .register_definition(SubagentDefinition {
             name: "btw".into(),
             description: "Side-channel conversation without tool capabilities".into(),
-            system_prompt: SIDE_QUESTION_SYSTEM_REMINDER.into(),
+            // v2 keeps the side channel on the caller's own system prompt, so
+            // the request prefix — and with it the provider's prompt cache —
+            // survives the fork. The side-channel instruction rides the seeded
+            // conversation instead (`SIDE_QUESTION_SYSTEM_REMINDER`).
+            system_prompt: String::new(),
+            // v2 `BTW_READONLY_TOOLS` is an execute-time veto
+            // (`check_btw_tool_denial` in `tools/dispatch.rs`), not a table
+            // filter: the definitions stay visible in the request for the same
+            // cache reason, and a non-read-only call is refused when made.
             tools: Vec::new(),
-            disallowed_tools: vec!["*".into()],
+            disallowed_tools: Vec::new(),
             when_to_use: None,
             prompt_prefix: None,
             summary_policy: None,

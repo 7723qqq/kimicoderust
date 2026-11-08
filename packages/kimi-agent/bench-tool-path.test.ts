@@ -83,7 +83,9 @@ function hostRead(path: string): string {
 function syntheticFile(lines: number): string {
   const out: string[] = [];
   for (let i = 1; i <= lines; i += 1) {
-    out.push(`line ${String(i)}: ${'x'.repeat(50)}`);
+    // 30 padding characters keep a 1,000-line page under the 50,000-character
+    // tool-result cap, so neither arm measures truncation.
+    out.push(`line ${String(i)}: ${'x'.repeat(30)}`);
   }
   return `${out.join('\n')}\n`;
 }
@@ -147,7 +149,16 @@ async function runTurn(
         });
       }
       return JSON.stringify({
-        tool_calls: [{ id: `c${requests}`, name: 'read', arguments: { path: file } }],
+        // Read a fixed page: without `n_lines` the native arm returns as many
+        // lines as its character budget allows, which is more work (and more
+        // output) than the host arm's 1,000 lines.
+        tool_calls: [
+          {
+            id: `c${requests}`,
+            name: 'read',
+            arguments: { path: file, n_lines: READ_CAP_LINES },
+          },
+        ],
         finish_reason: 'tool_calls',
         usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       });

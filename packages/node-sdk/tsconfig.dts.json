@@ -15,9 +15,12 @@
     "../i18n-runtime/src/**/*.ts",
     "../i18n-shared/src/**/*.ts",
     "../kaos/src/**/*.ts",
+    "../kimi-agent/session-handle.ts",
+    "../kimi-agent/wire-schema.ts",
     "../kosong/src/**/*.ts",
     "../oauth/src/**/*.ts",
-    "../protocol/src/**/*.ts"
+    "../protocol/src/**/*.ts",
+    "../tree-sitter-bash/src/**/*.ts"
   ],
   "exclude": ["dist", ".tmp-api-extractor", "examples", "test", "../*/dist", "../*/test"]
 }

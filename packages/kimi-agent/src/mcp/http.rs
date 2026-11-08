@@ -16,7 +16,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::client_shared;
-use super::client_shared::Budget;
+use super::client_shared::{Budget, WeakEvidenceListener, fire_or_buffer_weak_evidence};
 use super::errors::McpError;
 
 /// Protocol version that introduced the Streamable HTTP transport.
@@ -28,14 +28,27 @@ pub struct McpHttpTransport {
     headers: HashMap<String, String>,
     client: reqwest::Client,
     /// `Mcp-Session-Id` returned by the server, echoed on every later request.
-    session_id: Mutex<Option<String>>,
+    /// Shared with the standalone GET stream task.
+    session_id: Arc<Mutex<Option<String>>>,
     next_id: AtomicU64,
     /// Per-request timeout resolved from `toolTimeoutMs`; `None` keeps the
     /// shared built-in default (`client_shared::DEFAULT_REQUEST_TIMEOUT`).
     request_timeout: Option<Duration>,
-    /// Set by an explicit `shutdown`; the stateless POST transport has no
-    /// stream to abort, but callers after close must fail fast.
+    /// Set by an explicit `shutdown`; no new request or stream may start
+    /// afterwards, and the open stream is aborted.
     closed: Arc<AtomicBool>,
+    /// Weak session-evidence listener, at most one (v2
+    /// `SessionEvidenceListener`). Weak evidence means the resumable stream
+    /// gave up: the session may still answer, so the manager probes it.
+    weak_evidence: WeakEvidenceListener,
+    /// Signal buffered before a listener registers, replayed on registration
+    /// (v2 `pendingSessionEvidence`, client-http.ts:43).
+    pending_weak_evidence: Arc<Mutex<Option<String>>>,
+    /// The standalone GET SSE stream (v2 `_startOrAuthSse`). Spawned only when
+    /// the server answers `notifications/initialized` with 202.
+    stream: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Stops the stream task when the transport shuts down.
+    stream_stop: tokio::sync::watch::Sender<()>,
 }
 
 impl McpHttpTransport {
@@ -44,15 +57,31 @@ impl McpHttpTransport {
         // at first call.
         client_shared::validate_http_url(url).map_err(McpError::transport)?;
         let client = client_shared::build_http_client(false).map_err(McpError::transport)?;
+        let (stream_stop, _) = tokio::sync::watch::channel(());
         Ok(Self {
             url: url.to_string(),
             headers,
             client,
-            session_id: Mutex::new(None),
+            session_id: Arc::new(Mutex::new(None)),
             next_id: AtomicU64::new(1),
             request_timeout: None,
             closed: Arc::new(AtomicBool::new(false)),
+            weak_evidence: Arc::new(Mutex::new(None)),
+            pending_weak_evidence: Arc::new(Mutex::new(None)),
+            stream: Mutex::new(None),
+            stream_stop,
         })
+    }
+
+    /// Register the weak-evidence listener; a signal buffered before
+    /// registration is replayed so it is never dropped.
+    pub async fn on_weak_evidence(&self, listener: Box<dyn Fn(String) + Send + Sync>) {
+        let pending = self.pending_weak_evidence.lock().await.take();
+        if let Some(reason) = pending {
+            listener(reason);
+            return;
+        }
+        *self.weak_evidence.lock().await = Some(listener);
     }
 
     /// Apply a per-request timeout (v2 `buildRequestOptions(toolCallTimeoutMs)`).
@@ -61,9 +90,32 @@ impl McpHttpTransport {
     }
 
     /// Mark the transport closed. In-flight POSTs finish their own round trip;
-    /// no new request may start afterwards.
+    /// the standalone GET stream is aborted and no new request may start.
     pub async fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        let _ = self.stream_stop.send(());
+        if let Some(handle) = self.stream.lock().await.take() {
+            handle.abort();
+        }
+    }
+
+    /// Open the standalone GET SSE stream (v2 `_startOrAuthSse`,
+    /// streamableHttp.js:78-112), at most once per transport.
+    async fn start_stream(&self) {
+        let mut slot = self.stream.lock().await;
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(tokio::spawn(run_sse_stream(StreamContext {
+            url: self.url.clone(),
+            headers: self.headers.clone(),
+            http: self.client.clone(),
+            session_id: self.session_id.clone(),
+            closed: self.closed.clone(),
+            stop: self.stream_stop.subscribe(),
+            weak_evidence: self.weak_evidence.clone(),
+            pending: self.pending_weak_evidence.clone(),
+        })));
     }
 
     fn ensure_open(&self) -> Result<(), McpError> {
@@ -168,8 +220,170 @@ impl McpHttpTransport {
                 format!("MCP notification failed with status HTTP {status}"),
             ));
         }
+        // v2 starts the standalone stream only when the server accepts the
+        // `initialized` notification with 202 Accepted
+        // (streamableHttp.js:370-377); any other 2xx means no server stream.
+        if method == "notifications/initialized" && status.as_u16() == 202 {
+            self.start_stream().await;
+        }
         Ok(())
     }
+}
+
+/// v2 SDK `StreamableHTTPClientTransport` reconnection defaults
+/// (streamableHttp.js:6-11): 1 s initial, ×1.5 per attempt, 30 s cap, 2
+/// retries. Exhausting them is what the manager sees as weak evidence
+/// (`Maximum reconnection attempts (N) exceeded.`).
+const STREAM_INITIAL_DELAY_MS: u64 = 1_000;
+const STREAM_DELAY_GROW_FACTOR: f64 = 1.5;
+const STREAM_MAX_DELAY_MS: u64 = 30_000;
+const STREAM_MAX_RETRIES: u32 = 2;
+
+fn stream_retry_delay(attempt: u32) -> Duration {
+    let delay = STREAM_INITIAL_DELAY_MS as f64 * STREAM_DELAY_GROW_FACTOR.powi(attempt as i32);
+    Duration::from_millis((delay.min(STREAM_MAX_DELAY_MS as f64)) as u64)
+}
+
+/// Everything the stream task needs, cloned out of the transport when the
+/// stream starts.
+struct StreamContext {
+    url: String,
+    headers: HashMap<String, String>,
+    http: reqwest::Client,
+    session_id: Arc<Mutex<Option<String>>>,
+    closed: Arc<AtomicBool>,
+    stop: tokio::sync::watch::Receiver<()>,
+    weak_evidence: WeakEvidenceListener,
+    pending: Arc<Mutex<Option<String>>>,
+}
+
+/// Read the standalone GET SSE stream, reconnecting on a drop with the SDK's
+/// backoff and giving up with weak evidence once the attempts are exhausted
+/// (v2 `_handleSseStream` + `_scheduleReconnection`,
+/// streamableHttp.js:120-245). A 405 means the server does not offer the
+/// optional stream at all, which is not an error.
+async fn run_sse_stream(mut context: StreamContext) {
+    let mut attempts: u32 = 0;
+    let mut last_event_id: Option<String> = None;
+    loop {
+        let mut request = context
+            .http
+            .get(&context.url)
+            .header("Accept", "text/event-stream")
+            .header("mcp-protocol-version", STREAMABLE_HTTP_PROTOCOL_VERSION);
+        for (key, value) in &context.headers {
+            request = request.header(key, value);
+        }
+        if let Some(session) = context.session_id.lock().await.clone() {
+            request = request.header(SESSION_ID_HEADER, session);
+        }
+        if let Some(id) = last_event_id.as_deref() {
+            request = request.header("last-event-id", id);
+        }
+
+        match request.send().await {
+            Ok(resp) if resp.status().as_u16() == 405 => return,
+            Ok(resp) if resp.status().is_success() => {
+                // A live stream resets the counter, exactly as the SDK does by
+                // restarting at attempt 0 after every successful open.
+                attempts = 0;
+                let mut stream = resp.bytes_stream().eventsource();
+                loop {
+                    let item = tokio::select! {
+                        _ = context.stop.changed() => return,
+                        item = stream.next() => item,
+                    };
+                    match item {
+                        Some(Ok(event)) => {
+                            if !event.id.is_empty() {
+                                last_event_id = Some(event.id.clone());
+                            }
+                            if event.data.is_empty() {
+                                continue;
+                            }
+                            if !event.event.is_empty() && event.event != "message" {
+                                continue;
+                            }
+                            reply_to_server_message(
+                                &context.http,
+                                &context.url,
+                                &context.headers,
+                                &context.session_id,
+                                &event.data,
+                            )
+                            .await;
+                        }
+                        Some(Err(_)) | None => break,
+                    }
+                }
+            }
+            Ok(_) | Err(_) => {}
+        }
+
+        if context.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        if attempts >= STREAM_MAX_RETRIES {
+            fire_or_buffer_weak_evidence(
+                &context.weak_evidence,
+                &context.pending,
+                format!("Maximum reconnection attempts ({STREAM_MAX_RETRIES}) exceeded."),
+            )
+            .await;
+            return;
+        }
+        tokio::select! {
+            _ = context.stop.changed() => return,
+            _ = tokio::time::sleep(stream_retry_delay(attempts)) => {}
+        }
+        attempts += 1;
+    }
+}
+
+/// Answer a server-initiated request on the GET stream: `ping` with an empty
+/// result, anything else with JSON-RPC "method not found" — the same answers
+/// the SDK client gives when no handler is registered for the method.
+async fn reply_to_server_message(
+    http: &reqwest::Client,
+    url: &str,
+    headers: &HashMap<String, String>,
+    session_id: &Arc<Mutex<Option<String>>>,
+    data: &str,
+) {
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    let (Some(id), Some(method)) = (
+        value.get("id").cloned(),
+        value.get("method").and_then(|m| m.as_str()),
+    ) else {
+        return;
+    };
+    let payload = if method == "ping" {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": {} })
+    } else {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": "Method not found" },
+        })
+    };
+    let mut request = http
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream");
+    for (key, value) in headers {
+        request = request.header(key, value);
+    }
+    if let Some(session) = session_id.lock().await.clone() {
+        request = request.header(SESSION_ID_HEADER, session);
+    }
+    // Fire and forget: a slow reply must not stall reading the stream.
+    tokio::spawn(async move {
+        if let Ok(resp) = request.json(&payload).send().await {
+            let _ = resp.bytes().await;
+        }
+    });
 }
 
 fn timeout_message(wait: Duration) -> String {
@@ -318,6 +532,46 @@ pub(crate) mod test_helpers {
                                     .await;
                                 return;
                             }
+                            // The standalone GET SSE stream (`_startOrAuthSse`):
+                            // a server that does not offer it answers 405, which
+                            // the transport treats as "no stream" rather than as
+                            // evidence. `sse-500` refuses it repeatedly so the
+                            // reconnection ladder runs out; `sse-open` keeps a
+                            // live, empty stream open.
+                            if head.starts_with("GET ") {
+                                match mode {
+                                    "sse-500" => {
+                                        let _ = socket
+                                            .write_all(
+                                                b"HTTP/1.1 500 Error\r\nContent-Length: 0\r\n\r\n",
+                                            )
+                                            .await;
+                                    }
+                                    "sse-open" => {
+                                        let _ = socket
+                                            .write_all(
+                                                b"HTTP/1.1 200 OK\r\n\
+                                                  Content-Type: text/event-stream\r\n\r\n",
+                                            )
+                                            .await;
+                                        let mut discard = [0u8; 256];
+                                        while let Ok(n) = socket.read(&mut discard).await {
+                                            if n == 0 {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        let _ = socket
+                                            .write_all(
+                                                b"HTTP/1.1 405 Method Not Allowed\r\n\
+                                                  Content-Length: 0\r\n\r\n",
+                                            )
+                                            .await;
+                                    }
+                                }
+                                return;
+                            }
                             if mode == "401" {
                                 let _ = socket
                                     .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
@@ -353,6 +607,14 @@ pub(crate) mod test_helpers {
                                         b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
                                     )
                                     .await;
+                                return;
+                            }
+                            // v2 `withTimeout` wraps connect **and** discovery
+                            // (connection-manager.ts:594-611): a handshake that
+                            // answers but never lists tools must still hit the
+                            // startup budget.
+                            if mode == "hang-tools" && method == "tools/list" {
+                                tokio::time::sleep(Duration::from_secs(30)).await;
                                 return;
                             }
                             let result = match method {
@@ -408,6 +670,12 @@ pub(crate) mod test_helpers {
                             };
                             let payload =
                                 json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string();
+                            // A handshake slow enough that a removal can land
+                            // between "attempt started" and "handshake done"
+                            // (v2's in-flight-invalidation case).
+                            if mode == "slow-initialize" && method == "initialize" {
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                            }
                             let session_header = if method == "initialize" {
                                 "Mcp-Session-Id: sess-1\r\n"
                             } else {
@@ -450,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_transport_json_roundtrip() {
         let (url, seen, _shutdown) = spawn_mock_http_server("json").await;
-        let client = McpClient::connect_http("http-srv", &url, HashMap::new())
+        let client = McpClient::connect_http("http-srv", &url, HashMap::new(), None)
             .await
             .expect("HTTP connect failed");
         assert_eq!(client.transport_type(), "http");
@@ -503,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_transport_sse_roundtrip() {
         let (url, _seen, _shutdown) = spawn_mock_http_server("sse").await;
-        let client = McpClient::connect_http("http-sse", &url, HashMap::new())
+        let client = McpClient::connect_http("http-sse", &url, HashMap::new(), None)
             .await
             .expect("HTTP connect failed");
 
@@ -520,7 +788,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_transport_status_error() {
         let (url, _seen, _shutdown) = spawn_mock_http_server("status").await;
-        let err = match McpClient::connect_http("http-fail", &url, HashMap::new()).await {
+        let err = match McpClient::connect_http("http-fail", &url, HashMap::new(), None).await {
             Ok(_) => panic!("500 must fail the handshake"),
             Err(e) => e,
         };
@@ -573,7 +841,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_handshake_sends_initialized_notification() {
         let (url, seen, _shutdown) = spawn_mock_http_server("json").await;
-        let _client = McpClient::connect_http("http-srv", &url, HashMap::new())
+        let _client = McpClient::connect_http("http-srv", &url, HashMap::new(), None)
             .await
             .expect("HTTP connect failed");
 
@@ -598,5 +866,81 @@ mod tests {
                     .position(|r| r.method == "notifications/initialized"),
             "initialize must precede the initialized notification"
         );
+    }
+
+    /// v2 `_scheduleReconnection` (streamableHttp.js:139-160): the standalone
+    /// GET stream reconnects twice (1 s, then 1.5 s) and, when it still cannot
+    /// get through, reports weak evidence — the signal that parks the entry in
+    /// `probing` instead of failing it outright.
+    #[tokio::test]
+    async fn test_http_stream_reports_weak_evidence_when_reconnection_gives_up() {
+        let (url, _seen, _shutdown) = spawn_mock_http_server("sse-500").await;
+        let client = McpClient::connect_http("weak", &url, HashMap::new(), None)
+            .await
+            .expect("HTTP connect failed");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client
+            .on_weak_evidence(Box::new(move |reason| {
+                let _ = tx.send(reason);
+            }))
+            .await;
+
+        let reason = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the reconnection ladder gives up")
+            .expect("a reason is reported");
+        assert_eq!(reason, "Maximum reconnection attempts (2) exceeded.");
+        client.close().await;
+    }
+
+    /// A server that does not offer the optional stream answers 405, which is
+    /// not evidence of a dead session: no weak signal, no retries.
+    #[tokio::test]
+    async fn test_http_stream_absent_is_not_weak_evidence() {
+        let (url, _seen, _shutdown) = spawn_mock_http_server("json").await;
+        let client = McpClient::connect_http("no-stream", &url, HashMap::new(), None)
+            .await
+            .expect("HTTP connect failed");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client
+            .on_weak_evidence(Box::new(move |reason| {
+                let _ = tx.send(reason);
+            }))
+            .await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(700), rx.recv())
+                .await
+                .is_err(),
+            "a 405 must not be reported as weak evidence"
+        );
+        client.close().await;
+    }
+
+    /// While the GET stream is open the session is healthy: no weak signal is
+    /// reported, and closing the client ends the stream task silently.
+    #[tokio::test]
+    async fn test_http_stream_keeps_a_live_session_silent() {
+        let (url, _seen, _shutdown) = spawn_mock_http_server("sse-open").await;
+        let client = McpClient::connect_http("streaming", &url, HashMap::new(), None)
+            .await
+            .expect("HTTP connect failed");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client
+            .on_weak_evidence(Box::new(move |reason| {
+                let _ = tx.send(reason);
+            }))
+            .await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1200), rx.recv())
+                .await
+                .is_err(),
+            "an open stream is not evidence of a dead session"
+        );
+        client.close().await;
     }
 }

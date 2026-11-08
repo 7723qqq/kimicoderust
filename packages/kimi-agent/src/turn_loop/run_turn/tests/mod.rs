@@ -19,7 +19,11 @@ mod injection_telemetry_tools;
 #[cfg(test)]
 mod overflow_compaction;
 #[cfg(test)]
+mod progress_reminder;
+#[cfg(test)]
 mod steering_compaction;
+#[cfg(test)]
+mod tool_select_history;
 
 pub(super) use crate::callbacks::RpcHostCallbacks;
 pub(super) use crate::rpc::server::RpcServer;

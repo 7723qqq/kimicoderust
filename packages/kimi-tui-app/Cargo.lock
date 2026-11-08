@@ -811,6 +811,7 @@ dependencies = [
  "crossterm",
  "kimi-ui-core",
  "ratatui",
+ "serde_json",
  "textual-rs",
 ]
 

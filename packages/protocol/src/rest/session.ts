@@ -12,6 +12,8 @@
  *   GET     /v1/sessions/{id}/history     query: HistoryQuery   data: HistoryResponse
  *   GET     /v1/sessions/{id}/warnings    -                     data: SessionWarningsResponse
  *   GET     /v1/sessions/{id}/goal        -                     data: GetSessionGoalResponse
+ *   PATCH   /v1/sessions/{id}/goal        body: EditSessionGoalRequest
+ *                                         data: EditSessionGoalResponse
  *   POST    /v1/sessions/{id}:compact     body: CompactSession  data: {}
  *   POST    /v1/sessions/{id}:undo        body: UndoSession     data: UndoSession
  *   POST    /v1/sessions/{id}:takeover    -                     data: { taken_over: true }
@@ -161,6 +163,15 @@ export type SessionStatusResponse = z.infer<typeof sessionStatusResponseSchema>;
 // active.
 export const getSessionGoalResponseSchema = goalSnapshotSchema.nullable();
 export type GetSessionGoalResponse = z.infer<typeof getSessionGoalResponseSchema>;
+
+// PATCH /sessions/{id}/goal — edit the objective of the current goal in place.
+// v2 #4568: the goal id, counters and budget survive; only objective changes.
+export const editSessionGoalRequestSchema = z.object({
+  objective: z.string(),
+});
+export type EditSessionGoalRequest = z.infer<typeof editSessionGoalRequestSchema>;
+export const editSessionGoalResponseSchema = goalSnapshotSchema;
+export type EditSessionGoalResponse = z.infer<typeof editSessionGoalResponseSchema>;
 
 export const sessionWarningSchema = z.object({
   code: z.string(),

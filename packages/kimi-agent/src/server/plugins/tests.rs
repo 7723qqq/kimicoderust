@@ -63,6 +63,7 @@ fn test_load_marketplace_from_custom_repo_root() {
     let plugins_dir = temp_dir.path().join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
 
+    let sha256sum = "A".repeat(64);
     let custom_catalog = serde_json::json!({
         "version": "1",
         "plugins": [
@@ -72,7 +73,8 @@ fn test_load_marketplace_from_custom_repo_root() {
                 "displayName": "Custom Tool",
                 "version": "2.0.0",
                 "description": "A custom tool",
-                "source": "https://example.test/custom"
+                "source": "https://example.test/custom",
+                "sha256sum": sha256sum
             }
         ]
     });
@@ -88,6 +90,7 @@ fn test_load_marketplace_from_custom_repo_root() {
     assert_eq!(entries[0].tier, "community");
     assert_eq!(entries[0].display_name, "Custom Tool");
     assert_eq!(entries[0].version.as_deref(), Some("2.0.0"));
+    assert_eq!(entries[0].sha256sum.as_deref(), Some(&"a".repeat(64)[..]));
 }
 
 /// v2 #3963 `enabled_plugins`: the sorted, comma-joined enabled set —

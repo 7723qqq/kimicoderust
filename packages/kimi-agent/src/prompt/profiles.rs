@@ -101,6 +101,7 @@ impl ProfileCatalog {
             ),
             role_additional: format!("{}\n\n{}", TASK_AGENT_ROLE_PREFIX, CODER_ROLE_SUFFIX),
             tools: vec![
+                "NotifyUser".into(),
                 "Bash".into(),
                 "CronCreate".into(),
                 "CronDelete".into(),
@@ -138,6 +139,7 @@ impl ProfileCatalog {
             ),
             role_additional: format!("{}\n\n{}", TASK_AGENT_ROLE_PREFIX, EXPLORE_ROLE_SUFFIX),
             tools: vec![
+                "NotifyUser".into(),
                 "Bash".into(),
                 "Read".into(),
                 "Glob".into(),
@@ -266,9 +268,12 @@ mod tests {
                 .contains("Your final message is the entire handoff")
         );
 
-        // Allowed tools: exact 20 tools
-        assert_eq!(coder.tools.len(), 20);
+        // Allowed tools: exact 21 tools. `NotifyUser` is v2's first entry in
+        // `CODER_TOOLS`; the runtime listing filters it out when the host cannot
+        // show updates, but the profile must declare it.
+        assert_eq!(coder.tools.len(), 21);
         let expected_tools = [
+            "NotifyUser",
             "Bash",
             "CronCreate",
             "CronDelete",
@@ -330,8 +335,10 @@ mod tests {
                 .contains("Fast agent specialized for exploring codebases.")
         );
 
-        // Explore tools must be strictly read-only + Bash
+        // Explore tools must be strictly read-only + Bash. `NotifyUser` is in
+        // v2's `EXPLORE_TOOLS`; it updates the user rather than touching files.
         let expected_tools: Vec<String> = vec![
+            "NotifyUser".into(),
             "Bash".into(),
             "Read".into(),
             "Glob".into(),

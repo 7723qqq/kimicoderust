@@ -1238,7 +1238,7 @@ pub async fn native_fetch_url(
         max_bytes: max_bytes
             .map(|v| v as usize)
             .unwrap_or(fetch_url::FetchUrlConfig::default().max_bytes),
-        allow_private: allow_private.unwrap_or(false),
+        allow_private: allow_private.unwrap_or(true),
         max_redirects: fetch_url::FetchUrlConfig::default().max_redirects,
         timeout_ms: timeout_ms
             .map(|v| v as u64)

@@ -513,3 +513,129 @@ fn agent_def_advertises_the_pool_only_when_a_choice_is_offered() {
             .is_none()
     );
 }
+
+/// v2 gates the fork guidance and the `fork` parameter on the same flag: the
+/// guidance comes from `agent-fork.md` and the parameter from
+/// `stripSubagentForkParameter`. The fork sentence used to be baked into
+/// `AGENT_TOOL_DESCRIPTION`, so a flag-off session still advertised a feature it
+/// had removed from the schema.
+#[test]
+fn agent_def_gates_fork_guidance_on_the_flag() {
+    use crate::subagent::fork::test_override::Scoped;
+
+    {
+        let _off = Scoped::set(false);
+        let def = agent_tool_def(None);
+        assert!(
+            !def.description.contains("Context forking"),
+            "flag off must not advertise the guidance: {}",
+            def.description
+        );
+        assert!(
+            def.input_schema
+                .get("properties")
+                .and_then(|properties| properties.get("fork"))
+                .is_none(),
+            "flag off hides the parameter"
+        );
+    }
+
+    let _on = Scoped::set(true);
+    let def = agent_tool_def(None);
+    assert!(
+        def.description.contains(
+            "Context forking: pass `fork: true` to start with a snapshot of your completed \
+             conversation history, inheriting your current agent type, model, and tool set."
+        ),
+        "flag on advertises the v2 sentence: {}",
+        def.description
+    );
+    assert_eq!(
+        def.input_schema
+            .get("properties")
+            .and_then(|properties| properties.get("fork"))
+            .and_then(|fork| fork.get("description"))
+            .and_then(|description| description.as_str()),
+        Some(
+            "Start with a snapshot of your completed conversation history, inheriting your \
+             current agent type, model, and tool set."
+        ),
+        "the parameter description is v2's, verbatim"
+    );
+}
+
+/// v2 declares `NotifyUser` in both builtin subagent profiles (`CODER_TOOLS` /
+/// `EXPLORE_TOOLS`) and lets the runtime availability filter drop it from the
+/// listing when the host cannot show updates. The fork left it out of the
+/// declarations entirely, so even a capable host's subagents could never use it.
+#[test]
+fn subagent_profiles_declare_notify_user_and_filter_it_at_runtime() {
+    let unavailable = agent_tool_def_filtered(None, &|name| name != "NotifyUser", None);
+    assert!(
+        !unavailable.description.contains("NotifyUser"),
+        "an unavailable tool is filtered out of the listing: {}",
+        unavailable.description
+    );
+
+    let available = agent_tool_def_filtered(None, &|_| true, None);
+    assert!(
+        available.description.contains("NotifyUser"),
+        "a capable host keeps it: {}",
+        available.description
+    );
+}
+
+/// The depth refusal reaches the model as a tool error. Returning `None`
+/// instead would hand the same request to the host fallback, which runs it
+/// outside the engine's depth accounting.
+#[tokio::test]
+async fn the_agent_tool_refuses_a_spawn_at_the_depth_cap() {
+    let llm = Arc::new(RecordingPromptLlm::new(vec!["unused".into()]));
+    let manager = manager_with(llm.clone()).await;
+    manager
+        .register_discovered_definition(crate::subagent::types::SubagentDefinition {
+            name: "research".into(),
+            description: "d".into(),
+            system_prompt: "You research.".into(),
+            tools: vec![],
+            disallowed_tools: vec![],
+            when_to_use: None,
+            prompt_prefix: None,
+            summary_policy: None,
+            model: None,
+            subagents: Some(vec!["research".into()]),
+        })
+        .await;
+
+    let mut caller = crate::callbacks::MAIN_AGENT_ID.to_string();
+    for _ in 0..crate::subagent::types::MAX_SUBAGENT_DEPTH {
+        caller = manager
+            .spawn_child(&caller, "research", "worker")
+            .await
+            .expect("the chain is admitted up to the cap");
+    }
+
+    let result = crate::tools::CALLER_AGENT_ID
+        .scope(caller, async {
+            execute_agent(
+                &manager,
+                None,
+                &serde_json::json!({ "subagent_type": "research", "prompt": "go" }),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        })
+        .await
+        .expect("a refused spawn is a native outcome, not a host fallback");
+
+    assert!(result.is_error, "the depth refusal must be an error result");
+    assert!(
+        result.content.contains("delegation depth exceeded"),
+        "v2 SUBAGENT_DEPTH_EXCEEDED text: {}",
+        result.content
+    );
+    assert_eq!(llm.call_count(), 0, "nothing may run past the refusal");
+}

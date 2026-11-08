@@ -167,6 +167,34 @@ fn a_control_chord_never_inserts_a_character() {
     assert_eq!(state.prompt(), "", "Alt-b is a chord, not text");
 }
 
+#[test]
+fn a_status_message_owns_the_row_above_the_prompt() {
+    let (state, _log) = state();
+    state.apply(upsert(EntryKind::UserMsg, "explain the build"));
+    state.set_status(Some("Interrupted by user".to_string()));
+
+    let mut app = mount(&state);
+    app.process_event(AppEvent::RenderRequest);
+
+    let painted = rows(app.buffer());
+    assert_eq!(
+        painted[HEIGHT as usize - 2],
+        " Interrupted by user",
+        "the status sits one row above the prompt: {painted:?}"
+    );
+    assert_eq!(
+        painted[HEIGHT as usize - 1],
+        ">",
+        "the status never displaces the prompt: {painted:?}"
+    );
+
+    // The host clears it when the next turn starts; the row goes blank and the
+    // transcript keeps its own rows.
+    state.set_status(None);
+    app.process_event(AppEvent::RenderRequest);
+    assert_eq!(rows(app.buffer())[HEIGHT as usize - 2], "");
+}
+
 /// The same content at two widths: wrapping moves words onto other rows, it
 /// never loses them, and no row exceeds the terminal.
 #[test]

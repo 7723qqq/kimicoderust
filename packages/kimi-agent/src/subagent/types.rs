@@ -138,6 +138,11 @@ impl SubagentState {
     }
 }
 
+/// How many delegation hops a subagent chain may have before a spawn is
+/// refused (v2 `MAX_SUBAGENT_DEPTH`). Main is depth 0, so a chain rooted at
+/// the main agent admits at most this many nested subagents.
+pub const MAX_SUBAGENT_DEPTH: u32 = 8;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentInstance {
     pub id: String,
@@ -146,6 +151,9 @@ pub struct SubagentInstance {
     pub state: SubagentState,
     pub created_at_ms: u64,
     pub last_result: Option<String>,
+    /// How many delegation hops separate this agent from the main agent
+    /// (v2's `subagentDepth` label; main is 0, a direct child is 1).
+    pub depth: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

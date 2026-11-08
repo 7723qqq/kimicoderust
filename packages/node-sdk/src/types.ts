@@ -618,7 +618,16 @@ export interface CapabilityStatus {
 export interface McpServerEntry {
   readonly id?: string;
   readonly name: string;
-  readonly status: 'running' | 'stopped' | 'failed' | 'connecting' | 'connected' | 'pending' | 'needs-auth' | 'disabled' | 'removed';
+  readonly status:
+    | 'running'
+    | 'stopped'
+    | 'failed'
+    | 'connecting'
+    | 'connected'
+    | 'pending'
+    | 'needs-auth'
+    | 'disabled'
+    | 'removed';
   readonly transport: string;
   readonly tools?: readonly unknown[];
   readonly source?: string;
@@ -627,6 +636,10 @@ export interface McpServerEntry {
   readonly plugin?: unknown;
   readonly toolCount?: number;
   readonly error?: string | null;
+  /** v2 `McpServerEntry.nextRetryAt`: when the automatic retry is due. Present
+   * only while the engine has one scheduled; a retrying server reports
+   * `failed`, not a status of its own. */
+  readonly nextRetryAt?: number;
   readonly [key: string]: any;
 }
 
@@ -1117,6 +1130,29 @@ export interface SessionStatus {
   readonly maxContextTokens: number;
   readonly contextUsage: number;
   readonly usage?: SessionUsage;
+}
+
+/**
+ * What a submitted prompt got at admission (v2 #4627 `SteerResult`). A host
+ * pairs its optimistic entry with `promptId` and clears the entry's
+ * "not read yet" state when the engine later echoes that id.
+ */
+export interface PromptSubmissionResult {
+  readonly promptId: string;
+  readonly createdAt: string;
+  readonly state: 'running' | 'queued' | 'blocked';
+  readonly turnId?: number | undefined;
+  readonly steered: boolean;
+}
+/**
+ * What a `/skill:` activation did. v2 #4627: a busy session steers the
+ * activation into the running turn, and the activation id pairs the result with
+ * the card the host already rendered.
+ */
+export interface SkillActivationResult {
+  readonly activationId: string;
+  /** Present only when the activation was submitted as a steer. */
+  readonly submission?: PromptSubmissionResult;
 }
 
 /**

@@ -34,7 +34,7 @@ Both were red on `main` before this work and are unrelated to it:
   the default budget" is a **time budget** test, so it fails on a loaded runner and
   passes in ~7 ms locally. Not a parser regression; do not chase it.
 
-**A third, on the Rust side** (2026-10-02, recorded in ROADMAP §10.24):
+**A third, on the Rust side** (2026-10-02):
 `kimi_agent::storage::state_store::tests::read_workspace_state_resolves_the_workspace_directory`
 (`state_store.rs:1183`) — passes alone, fails intermittently in a full
 `cargo test --no-default-features --features cli` run. Parallel-run resource contention,
@@ -202,6 +202,28 @@ Two Windows details worth remembering:
 
 
 
+## `await a().field` is `await (a().field)`, and cargo does not test the addon
+
+Two traps from porting #4627 (2026-11-07), both of which produced a wrong
+diagnosis before the right one.
+
+- **`const id = await handle.enqueue().turnId;`** parses the property access on
+  the *promise*, so `turnId` is `undefined` and the await returns it. It only
+  surfaced inside Rust as `Failed to convert napi value Undefined into rust
+  type f64` — a message about the callee, not the caller. When a napi argument
+  is unexpectedly undefined, parenthesise (`(await call()).field`) before
+  suspecting the binding.
+- **`cargo test --lib` never loads the addon.** A changed napi return type
+  (number → object) leaves every `napi-integration.test.ts` call site broken
+  while the Rust suite is green; the addon must also be rebuilt with
+  `cd packages/kimi-agent && bun run build` (release, ~4 min) before those
+  tests mean anything. The rebuild also regenerates `napi-contract.d.ts`, so a
+  hand-edited declaration is a temporary lie until then.
+- The same suite caught a stale assertion the batch had left behind: #4650
+  allows private addresses in the local FetchURL, and the SSRF test still
+  expected a refusal. A behavior port that flips a default must update the
+  tests that assert the old default — `cargo test --lib` cannot see them.
+
 ## `packages/node-sdk` tests cannot observe model-facing turn content
 
 The `@moonshot-ai/kosong` fake-provider mock in `packages/node-sdk/test/*` is never consumed by
@@ -298,3 +320,21 @@ observable and are asserted there.
 不跑它的自测就不知道它还在工作——而这些自测全绿，说明检查本身是活的。
 
 **提交边界应包含两项**：`bun run test scripts`（门禁自测）+ 15 道门禁（规则在树上通过）。
+
+## 本项目使用的用户 fork 与 Bun 1.4.4 源码（2026-11-08）
+
+用户明确指定的参照路径，后续不要重复询问：
+
+- **用户的 fork**：`D:\kimi\kimi-code`（Git Bash `/d/kimi/kimi-code`），GitHub 仓库
+  `https://github.com/7723qqq/kimi-code.git`（`origin`），`upstream` 是
+  `https://github.com/MoonshotAI/kimi-code.git`。记录时 `main` 为
+  `b729f20161f59ffb61f66d1dd2b864fddde88660`，工作区有 5 项未提交状态，读取前先
+  看 `git status`。用户说“我的 fork”时默认指这个 checkout。
+- **本工作区**：`G:\kimirust` 是 Rust 引擎实验仓库，`origin` 是
+  `https://github.com/7723qqq/kimicoderust.git`，不是用户上面指定的 fork。核对 Rust
+  引擎行为时以 `D:\kimi\kimi-code` 的 v2 源码为行为参照；不要拿 `G:\kimirust` 的
+  `origin/main` 冒充用户 fork。
+- **Bun 1.4.4 源码**：`D:\kimi\bun`（Git Bash `/d/kimi/bun`）；`package.json`
+  version `1.4.4`，git describe `bun-v1.4.4-5-g5c6d4e24cd1`，HEAD `5c6d4e24cd1`，
+  `origin` 为 `https://github.com/oven-sh/bun.git`。涉及 Bun 运行时语义时读这个
+  checkout，不再询问源码位置。

@@ -55,22 +55,22 @@ pub fn subagent_fork_enabled() -> bool {
 /// is process-global and this flag gates the Agent / Swarm control flow, so a
 /// test writing it would flip the path every concurrently running test takes.
 #[cfg(test)]
-mod test_override {
+pub(crate) mod test_override {
     use std::cell::RefCell;
 
     thread_local! {
         static SLOT: RefCell<Option<bool>> = const { RefCell::new(None) };
     }
 
-    pub(super) fn fork_flag() -> Option<bool> {
+    pub(crate) fn fork_flag() -> Option<bool> {
         SLOT.with(|slot| *slot.borrow())
     }
 
     /// Scoped override: clears itself on drop, even on panic.
-    pub(super) struct Scoped;
+    pub(crate) struct Scoped;
 
     impl Scoped {
-        pub(super) fn set(value: bool) -> Self {
+        pub(crate) fn set(value: bool) -> Self {
             SLOT.with(|slot| *slot.borrow_mut() = Some(value));
             Self
         }
@@ -90,6 +90,12 @@ pub const FORK_CONTEXT_NOTICE: &str = "The conversation above is not your own hi
 /// Validate arguments for a fork-enabled subagent invocation against caller's profile.
 ///
 /// Mirrors `forkIncompatibility` in `upstream/main:packages/agent-core-v2/src/session/subagent/spawn.ts`.
+///
+/// v2 compares the requested values **verbatim**: only `resume` is trimmed (a
+/// whitespace-only resume is absent). A `subagent_type` or `model` is an
+/// override attempt unless it is byte-identical to the caller's own, so a
+/// differently-cased type is a different type and a whitespace-only value is
+/// still a value.
 pub fn fork_incompatibility(
     resume: Option<&str>,
     subagent_type: Option<&str>,
@@ -102,21 +108,16 @@ pub fn fork_incompatibility(
     {
         return Some(FORK_WITH_RESUME_UNAVAILABLE);
     }
-    if let Some(st) = subagent_type {
-        let trimmed = st.trim();
-        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case(caller_profile) {
-            return Some(FORK_WITH_TYPE_UNAVAILABLE);
-        }
+    if let Some(st) = subagent_type
+        && !st.is_empty()
+        && st != caller_profile
+    {
+        return Some(FORK_WITH_TYPE_UNAVAILABLE);
     }
-    if let Some(m) = model {
-        let trimmed = m.trim();
-        // v2 #4418 removed the implicit `primary` choice, so it is no longer
-        // an inherit synonym here — any explicit model is an override
-        // attempt unless it names the caller's own model (v2
-        // `forkIncompatibility`: `args.model !== own.modelAlias`).
-        if !trimmed.is_empty() && caller_model.map(|cm| cm != trimmed).unwrap_or(true) {
-            return Some(FORK_WITH_MODEL_UNAVAILABLE);
-        }
+    if let Some(m) = model
+        && Some(m) != caller_model
+    {
+        return Some(FORK_WITH_MODEL_UNAVAILABLE);
     }
     None
 }
@@ -340,9 +341,25 @@ mod tests {
             fork_incompatibility(None, Some("plan"), None, "coder", None),
             Some(FORK_WITH_TYPE_UNAVAILABLE)
         );
-        // Matching subagent_type passes (case-insensitive)
+        // v2 compares verbatim: a differently-cased type is a different type.
         assert_eq!(
             fork_incompatibility(None, Some("Coder"), None, "coder", None),
+            Some(FORK_WITH_TYPE_UNAVAILABLE)
+        );
+        // Only `resume` is trimmed; a whitespace-only type is still a value,
+        // but a zero-length one is absent.
+        assert_eq!(
+            fork_incompatibility(None, Some("   "), None, "coder", None),
+            Some(FORK_WITH_TYPE_UNAVAILABLE)
+        );
+        assert_eq!(
+            fork_incompatibility(None, Some(""), None, "coder", None),
+            None
+        );
+        // The caller's own type is what a fork inherits, so naming it is a
+        // no-op rather than an override.
+        assert_eq!(
+            fork_incompatibility(None, Some("coder"), None, "coder", None),
             None
         );
 
@@ -357,6 +374,13 @@ mod tests {
             fork_incompatibility(None, None, Some("primary"), "coder", Some("my-model")),
             Some(FORK_WITH_MODEL_UNAVAILABLE)
         );
+        // A zero-length model is still a value `!== own.modelAlias`.
+        assert_eq!(
+            fork_incompatibility(None, None, Some(""), "coder", Some("my-model")),
+            Some(FORK_WITH_MODEL_UNAVAILABLE)
+        );
+        // No model at all is the inherit path.
+        assert_eq!(fork_incompatibility(None, None, None, "coder", None), None);
         // Matching caller_model passes
         assert_eq!(
             fork_incompatibility(None, None, Some("my-model"), "coder", Some("my-model")),

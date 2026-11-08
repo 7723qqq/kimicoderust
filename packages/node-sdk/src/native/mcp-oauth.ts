@@ -11,7 +11,6 @@
  * No dependency on the MCP SDK: discovery follows RFC 8414 / RFC 9728,
  * registration RFC 7591, resource indicators RFC 8707, and PKCE S256.
  */
-import { createServer, type Server } from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { ErrorCodes, KimiError } from '#/error-protocol';
@@ -110,10 +109,7 @@ async function discoverAuthorizationServer(
   serverUrl: string,
 ): Promise<{ metadata: AuthorizationServerMetadata; resource: string; scope?: string }> {
   const resourceUrl = new URL(serverUrl);
-  const resource = `${resourceUrl.origin}${trimSlashes(resourceUrl.pathname)}`.replace(
-    /\/+$/,
-    '',
-  );
+  const resource = `${resourceUrl.origin}${trimSlashes(resourceUrl.pathname)}`.replace(/\/+$/, '');
 
   let protectedResource: Record<string, unknown> | undefined;
   for (const candidate of [
@@ -135,9 +131,7 @@ async function discoverAuthorizationServer(
   issuers.push(resourceUrl.origin);
 
   const scope =
-    typeof protectedResource?.['scope'] === 'string'
-      ? protectedResource['scope']
-      : undefined;
+    typeof protectedResource?.['scope'] === 'string' ? protectedResource['scope'] : undefined;
 
   for (const issuer of new Set(issuers)) {
     let base: URL;
@@ -217,96 +211,126 @@ function htmlPage(title: string, message: string): string {
 <h1>${title}</h1><p>${message}</p></body></html>`;
 }
 
+function htmlResponse(title: string, message: string, status: number): Response {
+  return new Response(htmlPage(title, message), {
+    status,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+  });
+}
+
+/**
+ * The Bun server surface this module uses.
+ *
+ * The repo types TypeScript against `node` only — installing `bun-types` to
+ * name one loopback listener would replace the global `fetch` / timer types for
+ * every package. The declaration is module-local on purpose: a `declare global`
+ * merges with the app's own Bun surface, and the two disagree (`apps/kimi-code`
+ * needs `Bun.file`, this module needs `Bun.serve`).
+ *
+ * `Bun.serve` is not the Node compatibility layer either: it accepts on Bun's
+ * own socket code, so a callback still arrives while the JavaScript loop is busy
+ * with engine work, which is exactly when this listener has to answer.
+ */
+declare const Bun: {
+  serve(options: {
+    readonly hostname: string;
+    readonly port: number;
+    readonly development?: boolean;
+    fetch(request: Request): Response | Promise<Response>;
+  }): { readonly port: number; stop(closeActiveConnections?: boolean): void | Promise<void> };
+};
+
 function startCallbackServer(): Promise<CallbackServer> {
   return new Promise((resolve, reject) => {
     let settle:
-      | { resolve: (value: { code: string; state: string }) => void; reject: (error: Error) => void }
+      | {
+          resolve: (value: { code: string; state: string }) => void;
+          reject: (error: Error) => void;
+        }
       | undefined;
     let received: { code: string; state: string } | undefined;
     let closed = false;
 
-    const server: Server = createServer((request, response) => {
-      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-      if (url.pathname !== '/callback') {
-        response.writeHead(404, { 'content-type': 'text/plain' });
-        response.end('not found');
-        return;
-      }
-      const error = url.searchParams.get('error');
-      const code = url.searchParams.get('code');
-      const state = url.searchParams.get('state') ?? '';
-      if (error !== null) {
-        response.writeHead(400, { 'content-type': 'text/html' });
-        response.end(htmlPage('Authorization failed', `The provider returned: ${error}`));
-        settle?.reject(oauthError(`MCP OAuth provider returned "${error}"`));
-        settle = undefined;
-        return;
-      }
-      if (code === null || code.length === 0) {
-        response.writeHead(400, { 'content-type': 'text/html' });
-        response.end(htmlPage('Authorization failed', 'The callback carried no code.'));
-        settle?.reject(oauthError('MCP OAuth callback carried no authorization code'));
-        settle = undefined;
-        return;
-      }
-      response.writeHead(200, { 'content-type': 'text/html' });
-      response.end(
-        htmlPage('Authorization complete', 'You can close this window and return to Kimi Code.'),
-      );
-      received = { code, state };
-      settle?.resolve(received);
-      settle = undefined;
-    });
-
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (address === null || typeof address === 'string') {
-        server.close();
-        reject(oauthError('MCP OAuth callback listener has no address'));
-        return;
-      }
-      resolve({
-        redirectUri: `http://127.0.0.1:${String(address.port)}/callback`,
-        waitForCode(options = {}) {
-          if (received !== undefined) return Promise.resolve(received);
-          if (closed) return Promise.reject(oauthError('MCP OAuth callback listener closed'));
-          const timeoutMs = options.timeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS;
-          return new Promise((resolveCode, rejectCode) => {
-            const onAbort = (): void => {
-              settle = undefined;
-              clearTimeout(timer);
-              rejectCode(oauthError('MCP OAuth authorization was cancelled'));
-            };
-            const timer = setTimeout(() => {
-              settle = undefined;
-              options.signal?.removeEventListener('abort', onAbort);
-              rejectCode(oauthError('MCP OAuth callback timed out'));
-            }, timeoutMs);
-            timer.unref?.();
-            options.signal?.addEventListener('abort', onAbort, { once: true });
-            settle = {
-              resolve: (value) => {
-                clearTimeout(timer);
-                options.signal?.removeEventListener('abort', onAbort);
-                resolveCode(value);
-              },
-              reject: (error) => {
-                clearTimeout(timer);
-                options.signal?.removeEventListener('abort', onAbort);
-                rejectCode(error);
-              },
-            };
-          });
-        },
-        close() {
-          if (closed) return Promise.resolve();
-          closed = true;
-          return new Promise((resolveClose) => {
-            server.close(() => resolveClose());
-          });
+    let server: ReturnType<typeof Bun.serve>;
+    try {
+      server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        development: false,
+        fetch(request) {
+          const url = new URL(request.url);
+          if (url.pathname !== '/callback') {
+            return new Response('not found', {
+              status: 404,
+              headers: { 'content-type': 'text/plain' },
+            });
+          }
+          const error = url.searchParams.get('error');
+          const code = url.searchParams.get('code');
+          const state = url.searchParams.get('state') ?? '';
+          if (error !== null) {
+            settle?.reject(oauthError(`MCP OAuth provider returned "${error}"`));
+            settle = undefined;
+            return htmlResponse('Authorization failed', `The provider returned: ${error}`, 400);
+          }
+          if (code === null || code.length === 0) {
+            settle?.reject(oauthError('MCP OAuth callback carried no authorization code'));
+            settle = undefined;
+            return htmlResponse('Authorization failed', 'The callback carried no code.', 400);
+          }
+          received = { code, state };
+          settle?.resolve(received);
+          settle = undefined;
+          return htmlResponse(
+            'Authorization complete',
+            'You can close this window and return to Kimi Code.',
+            200,
+          );
         },
       });
+    } catch (error) {
+      reject(oauthError('MCP OAuth callback listener could not start', error));
+      return;
+    }
+
+    resolve({
+      redirectUri: `http://127.0.0.1:${String(server.port)}/callback`,
+      waitForCode(options = {}) {
+        if (received !== undefined) return Promise.resolve(received);
+        if (closed) return Promise.reject(oauthError('MCP OAuth callback listener closed'));
+        const timeoutMs = options.timeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS;
+        return new Promise((resolveCode, rejectCode) => {
+          const onAbort = (): void => {
+            settle = undefined;
+            clearTimeout(timer);
+            rejectCode(oauthError('MCP OAuth authorization was cancelled'));
+          };
+          const timer = setTimeout(() => {
+            settle = undefined;
+            options.signal?.removeEventListener('abort', onAbort);
+            rejectCode(oauthError('MCP OAuth callback timed out'));
+          }, timeoutMs);
+          timer.unref?.();
+          options.signal?.addEventListener('abort', onAbort, { once: true });
+          settle = {
+            resolve: (value) => {
+              clearTimeout(timer);
+              options.signal?.removeEventListener('abort', onAbort);
+              resolveCode(value);
+            },
+            reject: (error) => {
+              clearTimeout(timer);
+              options.signal?.removeEventListener('abort', onAbort);
+              rejectCode(error);
+            },
+          };
+        });
+      },
+      close() {
+        if (closed) return Promise.resolve();
+        closed = true;
+        return Promise.resolve(server.stop(true)).then(() => undefined);
+      },
     });
   });
 }
@@ -326,9 +350,7 @@ export async function beginMcpOAuthFlow(input: McpOAuthBeginInput): Promise<McpO
             input.clientName ?? 'Kimi Code',
           );
     if (registration === undefined) {
-      throw oauthError(
-        'MCP OAuth authorization server offers no dynamic client registration',
-      );
+      throw oauthError('MCP OAuth authorization server offers no dynamic client registration');
     }
 
     const codeVerifier = base64Url(randomBytes(64));

@@ -13,8 +13,13 @@ pub mod app;
 pub mod input;
 pub mod prompt;
 pub mod screen;
+pub mod status;
 pub mod transcript;
 
-pub use app::{RecordingTransport, UiCommand, UiState, UiTransport, run_terminal};
+pub use app::{
+    ApprovalResponse, PendingApproval, PendingQuestion, QuestionResponse, RecordingTransport,
+    UiCommand, UiState, UiTransport, run_terminal,
+};
 pub use input::to_input_event;
 pub use screen::AppScreen;
+pub use status::StatusLine;

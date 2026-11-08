@@ -6,6 +6,7 @@ import { findKimiAgentAddon } from '@moonshot-ai/kimi-agent/session-handle';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createKimiHarnessNative, type KimiHarness } from '../src/index';
+import { listenOnEphemeralPort } from './listen-server';
 import { TEST_IDENTITY } from './test-identity';
 
 declare global {
@@ -25,7 +26,6 @@ const hasNativeAddon = findKimiAgentAddon() !== null;
  * prompt reaches the user, which is the behaviour under test here.
  */
 describe('permission acceptance (real engine, real filesystem)', () => {
-
   let homeDir: string;
   let port = 0;
   let server: ReturnType<typeof import('node:http').createServer> | undefined;
@@ -83,8 +83,7 @@ describe('permission acceptance (real engine, real filesystem)', () => {
         res.end();
       });
     });
-    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
-    port = (server.address() as { port: number }).port;
+    if (server !== undefined) port = await listenOnEphemeralPort(server);
   });
 
   afterAll(() => {
@@ -159,9 +158,7 @@ describe('permission acceptance (real engine, real filesystem)', () => {
       permission: options.mode,
       ...(options.additionalDirs !== undefined && options.additionalDirs.length > 0
         ? {
-            additionalDirs: options.additionalDirs.map((dir) =>
-              dir.replaceAll('GRANTED', granted),
-            ),
+            additionalDirs: options.additionalDirs.map((dir) => dir.replaceAll('GRANTED', granted)),
           }
         : undefined),
     });
@@ -177,15 +174,13 @@ describe('permission acceptance (real engine, real filesystem)', () => {
 
     const seen: string[] = [];
     const ended = new Promise<void>((resolve) => {
-      session.onEvent(
-        (event) => {
-          seen.push(event.type);
-          if (event.type === 'error') {
-            console.log(`[accept][error] ${JSON.stringify(event).slice(0, 500)}`);
-          }
-          if (event.type === 'turn.ended' || event.type === 'turn.cancel') resolve();
-        },
-      );
+      session.onEvent((event) => {
+        seen.push(event.type);
+        if (event.type === 'error') {
+          console.log(`[accept][error] ${JSON.stringify(event).slice(0, 500)}`);
+        }
+        if (event.type === 'turn.ended' || event.type === 'turn.cancel') resolve();
+      });
     });
     await session.prompt('run the tool');
     await Promise.race([ended, new Promise<void>((r) => setTimeout(r, 30_000))]);

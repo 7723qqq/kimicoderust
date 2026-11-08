@@ -188,7 +188,7 @@ export class SessionRuntime {
 
   async runTurnAction(
     input: string | LegacyContentPart[],
-    action: () => Promise<void>,
+    action: () => Promise<unknown>,
   ): Promise<PromptResult> {
     this.ensureOpen();
     if (this.isBusy) {

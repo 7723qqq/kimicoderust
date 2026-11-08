@@ -265,6 +265,7 @@ async fn test_acp_prompt_drains_background_task_notifications() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "t-wake".into(),
             "wake job".into(),

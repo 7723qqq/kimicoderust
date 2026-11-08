@@ -102,13 +102,19 @@ export class TranscriptRendererController {
         const images = entry.imageAttachmentIds
           ?.map((id) => this.imageStore.get(id))
           .filter((a): a is ImageAttachment => a?.kind === 'image');
-        return new UserMessageComponent(entry.content, images, entry.bullet);
+        return new UserMessageComponent(
+          entry.content,
+          images,
+          entry.bullet,
+          entry.steerPending === true,
+        );
       }
       case 'skill_activation':
         return new SkillActivationComponent(
           entry.skillName ?? entry.content,
           entry.skillArgs,
           entry.skillTrigger,
+          entry.steerPending === true,
         );
       case 'plugin_command': {
         const data = entry.pluginCommandData;

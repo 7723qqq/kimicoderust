@@ -2261,6 +2261,63 @@ async fn test_native_tool_callbacks_list_tools_merges_mcp_tools() {
     );
 }
 
+/// v2 #4720 / #4719: once the initial registry snapshot is pinned, a runtime
+/// MCP addition must not join the model's top-level table when progressive
+/// disclosure is off. The snapshot is taken before MCP tools are merged, so
+/// host-registered tools stay in it.
+#[tokio::test]
+async fn test_initial_tool_snapshot_filters_late_mcp_additions_without_disclosure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mcp_mgr = Arc::new(crate::mcp::McpManager::new());
+    let toolset = Arc::new(
+        NativeToolset::new(tmp.path().to_str().unwrap(), None)
+            .unwrap()
+            .with_mcp(mcp_mgr.clone()),
+    );
+    let inner = Arc::new(HostWithToolsCallbacks {
+        tools: vec![crate::turn_loop::types::ToolInfo {
+            name: "host_custom_tool".into(),
+            description: "host tool description".into(),
+            input_schema: serde_json::json!({}),
+        }],
+    });
+    let callbacks = NativeToolCallbacks {
+        inner,
+        toolset,
+        native_count: Arc::new(AtomicU32::new(0)),
+        truncator: None,
+        permission_engine: None,
+        plan_guard: None,
+        stale_guard: None,
+        goal_guard: None,
+        hook_guard: None,
+        agent_tool_veto: None,
+        tools_veto: None,
+        todo_tool_veto: None,
+        tower_worktree_root: None,
+        tower_enabled: false,
+        notify_user_enabled: true,
+        sandbox_policy: None,
+    };
+
+    let first = callbacks.list_tools().await.unwrap();
+    assert!(first.tools.iter().any(|t| t.name == "host_custom_tool"));
+    assert!(!first.tools.iter().any(|t| t.name == "mcp__late__tool"));
+
+    mcp_mgr
+        .add_client(crate::mcp::McpClient::mock("late"))
+        .await;
+    let second = callbacks.list_tools().await.unwrap();
+    assert!(
+        second.tools.iter().any(|t| t.name == "host_custom_tool"),
+        "the initial host tool must stay in the reconciled table"
+    );
+    assert!(
+        !second.tools.iter().any(|t| t.name == "mcp__late__tool"),
+        "a runtime-only addition must stay out without dynamic loading"
+    );
+}
+
 /// The model-facing seam must re-advertise a loaded deferred tool with its
 /// real schema. Merely delivering the `<tools_added>` text leaves the model
 /// without a definition (the audit's gap: "activates, but only text arrives").

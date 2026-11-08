@@ -575,41 +575,113 @@ mod tests {
         );
     }
 
+    /// The case list is v2's `test/tool/path-access.test.ts`, copied whole so a
+    /// Rust-side narrowing shows up as a failing assertion instead of staying
+    /// invisible. Every string here is one the TypeScript suite asserts on.
     #[test]
     fn test_is_sensitive_file_basenames() {
-        assert!(is_sensitive_file("/repo/.env"));
-        assert!(is_sensitive_file("/repo/.env.local"));
-        assert!(is_sensitive_file("/repo/.env.production"));
-        assert!(is_sensitive_file("/home/user/.ssh/id_rsa"));
-        assert!(is_sensitive_file("/home/user/.ssh/id_ed25519"));
-        assert!(is_sensitive_file("/home/user/.aws/credentials"));
-        assert!(is_sensitive_file("/some/path/.gcp/credentials"));
-        assert!(is_sensitive_file("C:\\Users\\foo\\.aws\\credentials"));
+        for path in [
+            ".env",
+            "/app/.env",
+            "project/.env",
+            "/repo/.env",
+            ".env.local",
+            "/app/.env.staging",
+            "/repo/.env.production",
+            "/home/user/.ssh/id_rsa",
+            "/home/user/.ssh/id_ed25519",
+            "/home/user/.ssh/id_ecdsa",
+            "/home/user/.ssh/id_ed25519_sk",
+            "/home/user/.ssh/id_ecdsa_sk",
+            ".ssh/id_rsa",
+            "/home/user/.ssh/id_rsa-backup",
+            ".ssh/id_rsa.old",
+            "/home/user/.aws/credentials",
+            "/home/user/.gcp/credentials",
+            ".aws/credentials",
+            ".gcp/credentials",
+            "credentials",
+            "/some/path/.gcp/credentials",
+            "C:\\Users\\foo\\.aws\\credentials",
+        ] {
+            assert!(is_sensitive_file(path), "expected sensitive: {path}");
+        }
     }
 
     #[test]
     fn test_is_sensitive_file_exemptions() {
-        assert!(!is_sensitive_file("/repo/.env.example"));
-        assert!(!is_sensitive_file("/repo/.env.sample"));
-        assert!(!is_sensitive_file("/repo/.env.template"));
-        assert!(!is_sensitive_file("/home/user/.ssh/id_rsa.pub"));
-        assert!(!is_sensitive_file("/home/user/.ssh/id_ed25519.pub"));
+        for path in [
+            "/repo/.env.example",
+            "/repo/.ENV.EXAMPLE",
+            "/repo/.env.sample",
+            "/repo/.ENV.SAMPLE",
+            "/repo/.env.template",
+            "/app/.env.example",
+            "/home/user/.ssh/id_rsa.pub",
+            "/home/user/.ssh/id_ed25519.pub",
+            "/home/user/.ssh/authorized_keys",
+            "/home/user/.ssh/known_hosts",
+            "/repo/.gitignore",
+            "/repo/.gitattributes",
+            "/repo/.envrc",
+            "/repo/environment.py",
+            "/repo/.env_example",
+            "app.py",
+            "config.yml",
+            "README.md",
+            "package.json",
+            "server.key.example",
+            "credentials.json",
+            "/home/user/project (copy)/config.yml",
+        ] {
+            assert!(!is_sensitive_file(path), "expected inert: {path}");
+        }
     }
 
     #[test]
     fn test_is_sensitive_file_variants() {
-        assert!(is_sensitive_file("/secrets/id_rsa.bak"));
-        assert!(is_sensitive_file("/secrets/id_rsa.old"));
-        assert!(is_sensitive_file("/secrets/id_rsa-backup"));
-        assert!(is_sensitive_file("/secrets/id_rsa_disabled"));
-        assert!(!is_sensitive_file("/code/id_rsafoo.txt"));
-        assert!(!is_sensitive_file("/code/credentials.json"));
+        for path in [
+            "/secrets/id_rsa.bak",
+            "/secrets/id_rsa.old",
+            "/secrets/id_rsa-backup",
+            "/secrets/id_rsa_disabled",
+            "/home/user/.aws/credentials_backup",
+            "/home/user/.aws/credentials.bak",
+        ] {
+            assert!(is_sensitive_file(path), "expected sensitive: {path}");
+        }
+        for path in ["/code/id_rsafoo.txt", "/code/credentials.json"] {
+            assert!(!is_sensitive_file(path), "expected inert: {path}");
+        }
     }
 
     #[test]
     fn test_is_sensitive_file_case_insensitive() {
-        assert!(is_sensitive_file("/repo/.ENV"));
-        assert!(is_sensitive_file("/home/User/.SSH/ID_RSA"));
+        for path in [
+            "/repo/.ENV",
+            "/app/.Env.Local",
+            "/app/.Env.Production",
+            "/home/User/.SSH/ID_RSA",
+            "/home/user/.Ssh/Id_Ed25519",
+            "/home/user/.ssh/ID_ED25519.OLD",
+            "/home/user/.AWS/Credentials",
+            "/home/user/.GCP/CREDENTIALS",
+        ] {
+            assert!(is_sensitive_file(path), "expected sensitive: {path}");
+        }
+    }
+
+    /// v2 also pins two shapes the matcher could plausibly trip over: a
+    /// ten-thousand-separator path (the matcher must not recurse or blow up on
+    /// it) and a directory with spaces and parentheses.
+    #[test]
+    fn test_is_sensitive_file_long_and_special_paths() {
+        let long_sensitive = format!("{}.env", "/".repeat(10_000));
+        assert!(is_sensitive_file(&long_sensitive));
+        let long_safe = format!("{}README.md", "/".repeat(10_000));
+        assert!(!is_sensitive_file(&long_safe));
+        assert!(is_sensitive_file("/home/user/my project/.env"));
+        assert!(!is_sensitive_file("/home/user/project (copy)/config.yml"));
     }
 
     // ============================================================================

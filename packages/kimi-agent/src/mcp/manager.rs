@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+use crate::i18n::{LocalizedText, i18n_params};
 use crate::mcp::client::McpClient;
 use crate::mcp::errors::McpError;
 use crate::mcp::types::McpTool;
 use crate::native::tool_naming::qualify_mcp_tool_name;
 use crate::server::files::FileStore;
-use crate::turn_loop::types::{ExecutableToolResult, ToolDelivery};
+use crate::tools::registry::{ToolDefinition, ToolDisclosure, ToolRegistry, ToolSource};
+use crate::turn_loop::types::{ExecutableToolResult, ToolDelivery, ToolInfo};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct McpToolSummary {
@@ -27,7 +29,161 @@ pub struct McpServerEntry {
     pub tool_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// When the next automatic retry is due, epoch ms (v2
+    /// `McpServerEntry.nextRetryAt`, connection-manager.ts:39). Only set while
+    /// a retry is scheduled; a connected entry clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<i64>,
     pub tools: Vec<McpToolSummary>,
+}
+
+/// v2 `publicStatusByState` (connection-manager.ts:966-975): the internal
+/// `retryWaiting` state is surfaced as `failed` plus `nextRetryAt`, and
+/// `probing` is surfaced as `connected`. The two extra internal states are
+/// scheduling details, not a wider public vocabulary.
+fn public_status(internal: &str) -> &str {
+    match internal {
+        "retry-waiting" => "failed",
+        "probing" => "connected",
+        other => other,
+    }
+}
+
+/// The internal states whose tools are live: `probing` keeps its client,
+/// tools and streak while the liveness probe runs (v2 `isLiveState`,
+/// connection-manager.ts:962-964).
+fn is_live_status(internal: &str) -> bool {
+    matches!(internal, "connected" | "probing")
+}
+
+/// What a session-evidence callback needs, cloned out of the manager so the
+/// callback can outlive the borrow that registered it (the manager's own
+/// closure, in v2 terms).
+#[derive(Clone)]
+struct EvidenceContext {
+    name: String,
+    client: Arc<McpClient>,
+    clients: Arc<RwLock<HashMap<String, Arc<McpClient>>>>,
+    servers: Arc<RwLock<HashMap<String, ServerState>>>,
+    cached_tools: Arc<RwLock<HashMap<String, (String, McpTool)>>>,
+    registry: Arc<RwLock<ToolRegistry>>,
+    status_listeners: Arc<Mutex<Vec<(McpStatusSubscription, McpStatusListener)>>>,
+    probe_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    policy: RetryPolicy,
+}
+
+impl EvidenceContext {
+    /// v2 `isCurrent`: a callback for a client the entry no longer holds
+    /// (reconnect, removal, shutdown) is ignored.
+    async fn is_current(&self) -> bool {
+        let clients = self.clients.read().await;
+        matches!(clients.get(&self.name), Some(client) if Arc::ptr_eq(client, &self.client))
+    }
+
+    /// Fail the entry on hard evidence or a failed probe (v2
+    /// `sessionEvidence` hard / `probeFailed`): leave the live family, drop the
+    /// tools, and let the retry policy decide between a scheduled retry and
+    /// `failed`.
+    async fn fail(&self, reason: String) {
+        if !self.is_current().await {
+            return;
+        }
+        {
+            let now = chrono::Utc::now().timestamp_millis();
+            let mut servers = self.servers.write().await;
+            let Some(state) = servers.get_mut(&self.name) else {
+                return;
+            };
+            // Only a live entry flips; a stale close event for an entry that
+            // already retried (or was removed) must not bump the streak again.
+            if !is_live_status(&state.status) {
+                return;
+            }
+            let (status, retry_at, streak) =
+                next_failure_state(self.policy, state.retry_streak, now);
+            state.status = status.into();
+            state.retry_at_ms = retry_at;
+            state.retry_streak = streak;
+            state.error = Some(reason);
+            state.raw_tools.clear();
+        }
+        let removed: Vec<String> = {
+            let mut cached = self.cached_tools.write().await;
+            let names = cached
+                .iter()
+                .filter(|(_, (server, _))| *server == self.name)
+                .map(|(qualified, _)| qualified.clone())
+                .collect();
+            cached.retain(|_, (server, _)| *server != self.name);
+            names
+        };
+        let mut registry = self.registry.write().await;
+        for qualified in removed {
+            registry.unregister(&qualified);
+        }
+        self.emit().await;
+    }
+
+    /// v2 `sessionEvidence` with `{ kind: 'weak' }`: park the entry in
+    /// `probing` and ask the server whether the session is still there.
+    ///
+    /// A ping that answers restores `connected` with the client, tools and
+    /// streak untouched and emits nothing — the public entry never changed
+    /// (`probing` maps to `connected`). A ping that fails is a dead session and
+    /// takes the hard path. Weak evidence that arrives while a probe is already
+    /// running is ignored, exactly as v2's `probing` arm ignores it.
+    async fn probe(&self, reason: String) {
+        if !self.is_current().await {
+            return;
+        }
+        {
+            let mut servers = self.servers.write().await;
+            let Some(state) = servers.get_mut(&self.name) else {
+                return;
+            };
+            if state.status != "connected" {
+                return;
+            }
+            state.status = "probing".into();
+        }
+
+        if self.client.probe_liveness().await {
+            let mut servers = self.servers.write().await;
+            if let Some(state) = servers.get_mut(&self.name)
+                && state.status == "probing"
+            {
+                state.status = "connected".into();
+            }
+            return;
+        }
+        self.fail(format_unexpected_close_error(&self.name, &reason))
+            .await;
+    }
+
+    async fn emit(&self) {
+        let entry = {
+            let servers = self.servers.read().await;
+            let Some(state) = servers.get(&self.name) else {
+                return;
+            };
+            to_public_entry(&self.name, state)
+        };
+        let listeners = self
+            .status_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        fan_out_status(&listeners, &entry);
+    }
+}
+
+/// v2 `formatUnexpectedCloseError` (connection-manager.ts:1057-1066): the
+/// entry-level message names the server, then the transport's own reason.
+fn format_unexpected_close_error(name: &str, detail: &str) -> String {
+    if detail.is_empty() {
+        format!("MCP server \"{name}\" closed unexpectedly")
+    } else {
+        format!("MCP server \"{name}\" closed unexpectedly\n{detail}")
+    }
 }
 
 /// One thing a session should tell the user at startup. The wire shape the
@@ -44,7 +200,7 @@ pub struct McpSessionWarning {
 /// The spawn recipe for a configured server, kept so `reconnect` can
 /// re-derive the client (the TS connection-manager keeps `entry.config` for
 /// the same reason, connection-manager.ts:33-41).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum McpServerRecipe {
     Sse {
         url: String,
@@ -96,10 +252,19 @@ struct ServerState {
     /// connection-manager.ts:37). Compared against a stored grant's obtain
     /// time to tell a concurrent login from the credential a 401 rejected.
     connected_at_ms: Option<i64>,
+    /// The user's explicit `auth = "oauth"` opt-in (v2 `config.auth`), which
+    /// only affects the 401 → `needs-auth` decision.
+    oauth: bool,
+    /// When the next automatic startup retry is due, epoch ms (v2
+    /// `retryWaiting` + `nextRetryDueAt`). `None` means no retry scheduled.
+    retry_at_ms: Option<i64>,
+    /// Consecutive failed startup attempts, the exponent in the backoff
+    /// (v2 `retryStreak`). Reset by a successful connect.
+    retry_streak: u32,
 }
 
 /// Per-server tool visibility (v2 `computeEnabledNames` plus `config.enabled`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ToolFilter {
     enabled: bool,
     enabled_tools: Option<HashSet<String>>,
@@ -160,6 +325,14 @@ pub struct McpServerOptions {
     /// capability — before setting it; the manager only records the disclosure
     /// this server was registered with.
     pub deferred: Option<bool>,
+    /// The server's explicit `auth = "oauth"` opt-in (v2 `config.auth`).
+    ///
+    /// It only changes one decision: a 401 on a remote server that also
+    /// carries extra headers keeps flipping to `needs-auth` when the user asked
+    /// for OAuth, instead of being reported as a failed server with a bad
+    /// header (v2 `shouldMarkNeedsAuth`: `headers !== undefined && auth !==
+    /// 'oauth'`).
+    pub oauth: Option<bool>,
 }
 
 impl Default for McpServerOptions {
@@ -171,13 +344,14 @@ impl Default for McpServerOptions {
             startup_timeout_ms: None,
             tool_timeout_ms: None,
             deferred: None,
+            oauth: None,
         }
     }
 }
 
 /// Resolved timeouts for one server (v2 `startupTimeoutMs` wrapping
 /// connect + discovery, `toolCallTimeoutMs` for a single request).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct McpTimeouts {
     startup: Duration,
     tool: Option<Duration>,
@@ -214,6 +388,9 @@ fn resolve_tool_timeout(
 pub struct McpManager {
     clients: Arc<RwLock<HashMap<String, Arc<McpClient>>>>,
     cached_tools: Arc<RwLock<HashMap<String, (String, McpTool)>>>,
+    /// v2 #4719 / #4733: active tool definitions for this session and the
+    /// pending same-name replacements a mid-session MCP update registered.
+    registry: Arc<RwLock<ToolRegistry>>,
     servers: Arc<RwLock<HashMap<String, ServerState>>>,
     filters: Arc<RwLock<HashMap<String, ToolFilter>>>,
     timeouts: Arc<RwLock<HashMap<String, McpTimeouts>>>,
@@ -244,6 +421,29 @@ pub struct McpManager {
     /// be lost, and the wait is usually entered after the load already ended.
     ready_tx: tokio::sync::watch::Sender<bool>,
     ready_rx: tokio::sync::watch::Receiver<bool>,
+    /// Working directory for a stdio server whose config omits `cwd` (v2
+    /// `McpConnectionManagerOptions.stdioCwd`, which the host sets to the
+    /// workspace cwd). Without it a server resolving a relative path would
+    /// run in whatever directory the engine process happened to start in.
+    default_stdio_cwd: std::sync::RwLock<Option<std::path::PathBuf>>,
+    /// Whether the startup-retry ticker has been started (one per manager).
+    retry_ticker_started: std::sync::atomic::AtomicBool,
+    /// Cleared by [`Self::shutdown`], which ends the ticker.
+    retry_ticker_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Probe tasks started by weak session evidence (v2's per-entry
+    /// `operationTails`). [`Self::shutdown`] waits for them so a probe cannot
+    /// rewrite an entry after teardown.
+    probe_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Startup tasks [`Self::connect_all`] spawned, by abort handle.
+    /// [`Self::shutdown`] aborts them: an aborted connect drops the child it
+    /// was handshaking with (`kill_on_drop`), instead of leaving the process —
+    /// and its working directory — alive until the startup timeout.
+    connect_tasks: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
+    /// The identity every client announces in `initialize.clientInfo.name`
+    /// (v2 `resolveClientName`, wired from the host identity in
+    /// `workspaceMcpService.ts:42`). `None` announces the builtin
+    /// `kimi-code`.
+    client_name: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl Default for McpManager {
@@ -258,6 +458,7 @@ impl McpManager {
         Self {
             clients: Arc::new(RwLock::new(HashMap::new())),
             cached_tools: Arc::new(RwLock::new(HashMap::new())),
+            registry: Arc::new(RwLock::new(ToolRegistry::new())),
             servers: Arc::new(RwLock::new(HashMap::new())),
             filters: Arc::new(RwLock::new(HashMap::new())),
             timeouts: Arc::new(RwLock::new(HashMap::new())),
@@ -269,7 +470,52 @@ impl McpManager {
             next_status_id: std::sync::atomic::AtomicU64::new(1),
             ready_tx,
             ready_rx,
+            default_stdio_cwd: std::sync::RwLock::new(None),
+            retry_ticker_started: std::sync::atomic::AtomicBool::new(false),
+            retry_ticker_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            probe_tasks: Arc::new(Mutex::new(Vec::new())),
+            connect_tasks: Arc::new(Mutex::new(Vec::new())),
+            client_name: Arc::new(std::sync::RwLock::new(None)),
         }
+    }
+
+    /// Set the working directory for stdio servers whose config omits `cwd`
+    /// (v2 `stdioCwd`, which the workspace-backed host sets to the workspace
+    /// cwd). Call before connecting; a later change only affects servers that
+    /// connect afterwards.
+    pub fn set_default_stdio_cwd(&self, cwd: impl Into<std::path::PathBuf>) {
+        *self
+            .default_stdio_cwd
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(cwd.into());
+    }
+
+    /// The identity every client announces as `clientInfo.name` (v2
+    /// `resolveClientName`). Call before connecting; `None` announces the
+    /// builtin `kimi-code`.
+    pub fn set_client_name(&self, name: Option<String>) {
+        *self.client_name.write().unwrap_or_else(|e| e.into_inner()) =
+            name.filter(|name| !name.trim().is_empty());
+    }
+
+    fn client_name(&self) -> Option<String> {
+        self.client_name
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The cwd a stdio server runs in: its own `cwd`, else the manager's
+    /// default. `None` leaves the child in the engine process's directory.
+    fn stdio_cwd_for(&self, declared: Option<&str>) -> Option<String> {
+        if let Some(cwd) = declared {
+            return Some(cwd.to_string());
+        }
+        self.default_stdio_cwd
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|cwd| cwd.to_string_lossy().into_owned())
     }
 
     /// Start connecting every server and return immediately (v2 `connectAll`,
@@ -286,15 +532,37 @@ impl McpManager {
         // Cleared before the spawn so a consumer that reads readiness between
         // the two cannot observe "ready" while the connects are still running.
         self.ready_tx.send_replace(false);
+        // The same retry scheduler `spawn_from_config` starts: a failure that
+        // lands `retry-waiting` needs something to act on its due time.
+        self.start_retry_ticker();
         let manager = self.clone();
         tokio::spawn(async move {
-            let tasks = servers.into_iter().map(|(name, recipe, options)| {
-                let manager = manager.clone();
-                async move {
-                    let _ = manager.configure(&name, recipe, options).await;
-                }
-            });
-            futures_util::future::join_all(tasks).await;
+            // One task per server, so [`Self::shutdown`] can abort a startup
+            // that is still handshaking: an aborted future drops the spawned
+            // child (`kill_on_drop`), which is what stops a server the
+            // teardown never saw register itself (v2 `shutdown` cancels
+            // in-flight startup, connection-manager.test.ts "serializes
+            // replacement close and tracks disabled or removed clients
+            // through shutdown").
+            let handles: Vec<tokio::task::JoinHandle<()>> = servers
+                .into_iter()
+                .map(|(name, recipe, options)| {
+                    let manager = manager.clone();
+                    tokio::spawn(async move {
+                        let _ = manager.configure(&name, recipe, options).await;
+                    })
+                })
+                .collect();
+            {
+                let mut tracked = manager
+                    .connect_tasks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                tracked.extend(handles.iter().map(tokio::task::JoinHandle::abort_handle));
+            }
+            for handle in handles {
+                let _ = handle.await;
+            }
             manager.ready_tx.send_replace(true);
         })
     }
@@ -410,7 +678,7 @@ impl McpManager {
         client: Option<&Arc<McpClient>>,
     ) -> bool {
         let oauth = self.oauth_service();
-        let (recipe, status, connected_at_ms) = {
+        let (recipe, status, connected_at_ms, explicit_oauth) = {
             let servers = self.servers.read().await;
             let Some(state) = servers.get(name) else {
                 return false;
@@ -419,12 +687,18 @@ impl McpManager {
                 state.recipe.clone(),
                 state.status.clone(),
                 state.connected_at_ms,
+                state.oauth,
             )
         };
         if status != "connected" && status != "needs-auth" {
             return false;
         }
-        if !should_mark_needs_auth(&recipe, oauth.is_some(), error.is_unauthorized()) {
+        if !should_mark_needs_auth(
+            &recipe,
+            explicit_oauth,
+            oauth.is_some(),
+            error.is_unauthorized(),
+        ) {
             return false;
         }
         if status == "needs-auth" {
@@ -454,15 +728,10 @@ impl McpManager {
         if let Some(dead) = self.clients.write().await.remove(name) {
             dead.close().await;
         }
-        {
-            let mut cached = self.cached_tools.write().await;
-            cached.retain(|_, (srv, _)| srv != name);
-        }
+        self.drop_server_tools(name).await;
         if let Some(state) = self.servers.write().await.get_mut(name) {
             state.status = "needs-auth".into();
-            state.error = Some(format!(
-                "{name} requires OAuth — run /mcp-config login {name}"
-            ));
+            state.error = Some(needs_auth_hint(name));
             state.raw_tools.clear();
         }
         // The rejected credential must not be replayed on the next connect,
@@ -550,7 +819,9 @@ impl McpManager {
         // server (v2 `assertMcpInputSchema`, mcpCore/types.ts:44-55).
         for tool in &tools {
             if !tool.input_schema.is_object() {
-                return Err(McpError::transport(format!(
+                // A protocol violation, not a transport blip: v2 classifies it
+                // `protocol`, which the startup retry treats as permanent.
+                return Err(McpError::Protocol(format!(
                     "Invalid inputSchema for MCP tool \"{}\": schema must be a JSON object",
                     tool.name
                 )));
@@ -599,7 +870,30 @@ impl McpManager {
                 // alias across servers was last-writer-wins — the model could
                 // have its call routed to the wrong server. The model tool
                 // table only ever advertises qualified names.
-                cached.insert(qualified_name, (name.clone(), tool.clone()));
+                cached.insert(qualified_name.clone(), (name.clone(), tool.clone()));
+                // v2 #4719: register into the session's active/pending
+                // registry. A changed same-name definition stays pending so
+                // `list_tool_infos` keeps serving the pinned schema.
+                let deferred = self
+                    .servers
+                    .read()
+                    .await
+                    .get(&name)
+                    .is_some_and(|state| state.deferred);
+                let definition = ToolDefinition {
+                    name: qualified_name,
+                    description: tool.description.clone().unwrap_or_default(),
+                    input_schema: crate::mcp::schema_compaction::compact_mcp_input_schema(
+                        &tool.input_schema,
+                    ),
+                    source: ToolSource::Mcp,
+                    disclosure: if deferred {
+                        ToolDisclosure::Deferred
+                    } else {
+                        ToolDisclosure::Inline
+                    },
+                };
+                self.registry.write().await.register(definition);
             }
             if !collisions.is_empty() {
                 tracing::warn!(
@@ -630,6 +924,23 @@ impl McpManager {
         cached.contains_key(tool_name)
     }
 
+    /// Whether a discovered tool is currently callable: its server's client is
+    /// alive. [`Self::handles`] answers "was ever discovered" — a closed
+    /// client still matches — so it cannot tell a live tool from one whose
+    /// server went away. This applies the same rule [`Self::list_tool_infos`]
+    /// uses when it withholds a dead server's tools, without building their
+    /// definitions for a name-only answer.
+    pub async fn is_tool_available(&self, tool_name: &str) -> bool {
+        let clients = self.clients.read().await;
+        let cached = self.cached_tools.read().await;
+        match cached.get(tool_name) {
+            Some((server, _)) => clients
+                .get(server)
+                .is_some_and(|client| !client.is_closed()),
+            None => false,
+        }
+    }
+
     /// All discovered MCP tools as engine tool definitions (for the model).
     /// Tools of a server whose connection died are withheld (v2 `resolved()`
     /// returns `undefined` unless the entry is `connected`,
@@ -637,25 +948,71 @@ impl McpManager {
     pub async fn list_tool_infos(&self) -> Vec<crate::turn_loop::types::ToolInfo> {
         let clients = self.clients.read().await;
         let cached = self.cached_tools.read().await;
-        let mut seen = HashSet::new();
-        let mut infos = Vec::new();
-        for (name, (server, tool)) in cached.iter() {
-            // The index holds qualified names only; the prefix test is the
-            // invariant that keeps a plain name from ever reaching the model.
-            if !name.starts_with("mcp__") || !seen.insert(name.clone()) {
-                continue;
-            }
-            match clients.get(server) {
-                Some(client) if !client.is_closed() => {}
-                _ => continue,
-            }
-            infos.push(crate::turn_loop::types::ToolInfo {
-                name: name.clone(),
-                description: tool.description.clone().unwrap_or_default(),
-                input_schema: tool.input_schema.clone(),
-            });
-        }
-        infos
+        let live_servers: HashSet<String> = cached
+            .values()
+            .filter(|(server, _)| {
+                clients
+                    .get(server)
+                    .is_some_and(|client| !client.is_closed())
+            })
+            .map(|(server, _)| server.clone())
+            .collect();
+        self.registry
+            .read()
+            .await
+            .list()
+            .into_iter()
+            .filter(|tool| {
+                cached
+                    .get(&tool.name)
+                    .is_some_and(|(server, _)| live_servers.contains(server))
+            })
+            .map(|tool| ToolInfo {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+            })
+            .collect()
+    }
+
+    /// What a freshly constructed session would advertise: the active table
+    /// with pending same-name replacements applied (v2 `listLive`).
+    pub async fn list_live_tool_infos(&self) -> Vec<ToolInfo> {
+        self.registry
+            .read()
+            .await
+            .list_live()
+            .into_iter()
+            .map(|tool| ToolInfo {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+            })
+            .collect()
+    }
+
+    /// Whether a same-name MCP update is pinned as pending for this session.
+    pub async fn has_pending_tool(&self, name: &str) -> bool {
+        self.registry.read().await.has_pending(name)
+    }
+
+    /// The live tool definitions (active + pending) for the disclosure
+    /// reconciler. `try_read` keeps the synchronous tool-table path from
+    /// awaiting a contended registry write; a miss yields an empty snapshot,
+    /// which the next turn's reconcile sees as a full re-announcement.
+    pub fn live_definitions_blocking(&self) -> Vec<ToolDefinition> {
+        self.registry
+            .try_read()
+            .map(|registry| registry.list_live())
+            .unwrap_or_default()
+    }
+
+    /// The definitions this session keeps pinned (v2 `registry.list()`).
+    pub fn active_definitions_blocking(&self) -> Vec<ToolDefinition> {
+        self.registry
+            .try_read()
+            .map(|registry| registry.list())
+            .unwrap_or_default()
     }
 
     /// The names of the tools whose server was registered as deferred (v2
@@ -695,26 +1052,110 @@ impl McpManager {
         }
     }
 
-    /// Return the list of connected MCP servers, their transport types and discovered tools.
+    /// The deferred tools with the descriptions `select_tools`' capability
+    /// search ranks (v2 `loadableEntries`): the same set
+    /// [`Self::deferred_tool_names_blocking`] returns, plus what the model
+    /// needs to choose between them. Sorted by name so a blank query lists a
+    /// deterministic catalogue.
+    pub fn deferred_tool_infos_blocking(&self) -> Vec<(String, String, serde_json::Value)> {
+        let servers = self.servers.try_read();
+        let cached = self.cached_tools.try_read();
+        let mut infos: Vec<(String, String, serde_json::Value)> = match (servers, cached) {
+            (Ok(servers), Ok(cached)) => cached
+                .iter()
+                .filter(|(name, (server, _))| {
+                    name.starts_with("mcp__") && servers.get(server).is_some_and(|s| s.deferred)
+                })
+                .map(|(name, (_, tool))| {
+                    (
+                        name.clone(),
+                        tool.description.clone().unwrap_or_default(),
+                        tool.input_schema.clone(),
+                    )
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        infos.sort_by(|left, right| left.0.cmp(&right.0));
+        infos
+    }
+
+    /// Return the list of MCP servers, their transport types and discovered
+    /// tools.
+    ///
+    /// The entry's state machine is the single source of truth (v2
+    /// `resolved()`): a live client only contributes its transport and tool
+    /// list. Deriving the status from the client map instead made an entry the
+    /// state machine had already moved on from — `retry-waiting`, `needs-auth`
+    /// — read back as `connected` just because the old client object was still
+    /// in the map.
     pub async fn server_entries(&self) -> Vec<McpServerEntry> {
         let clients = self.clients.read().await;
         let cached = self.cached_tools.read().await;
+        let servers = self.servers.read().await;
 
-        let mut entries = Vec::new();
+        let mut entries: Vec<McpServerEntry> = servers
+            .iter()
+            .map(|(name, state)| {
+                let client = clients.get(name);
+                let live = client.is_some_and(|client| !client.is_closed());
+                // `toolCount` is 0 unless the entry is connected
+                // (connection-manager.ts:507-518).
+                let mut tools = Vec::new();
+                if is_live_status(&state.status) && live {
+                    for (qual_name, (srv, tool)) in cached.iter() {
+                        if srv == name && qual_name.starts_with("mcp__") {
+                            tools.push(McpToolSummary {
+                                name: tool.name.clone(),
+                                description: tool.description.clone().unwrap_or_default(),
+                            });
+                        }
+                    }
+                    tools.sort_by(|a, b| a.name.cmp(&b.name));
+                }
+                // A closed client under a `connected` entry died mid-session;
+                // `watch_unexpected_close` rewrites the state shortly after.
+                let (status, error) = if is_live_status(&state.status) && !live {
+                    (
+                        "failed".to_string(),
+                        Some("server closed unexpectedly".to_string()),
+                    )
+                } else {
+                    (
+                        public_status(&state.status).to_string(),
+                        state.error.clone(),
+                    )
+                };
+                McpServerEntry {
+                    name: name.clone(),
+                    transport: client.map_or_else(
+                        || state.recipe.transport_label(),
+                        |client| client.transport_type().to_string(),
+                    ),
+                    status,
+                    tool_count: tools.len(),
+                    error,
+                    next_retry_at: (state.status == "retry-waiting")
+                        .then_some(state.retry_at_ms)
+                        .flatten(),
+                    tools,
+                }
+            })
+            .collect();
+        // A client registered without `configure` (`add_client`, the REST
+        // probe path and tests) has no state entry; it still belongs in the
+        // roster, and its liveness is the only status available for it.
         for (name, client) in clients.iter() {
-            // A client whose process died mid-session must not advertise
-            // itself as connected, and its tools must disappear from the
-            // entry (v2 watchForUnexpectedClose marks the entry failed and
-            // drops its tools, connection-manager.ts:360-378; `toolCount` is
-            // 0 unless the entry is connected, connection-manager.ts:507-518).
-            let (status, error, tools) = if client.is_closed() {
+            if servers.contains_key(name) {
+                continue;
+            }
+            let mut tools = Vec::new();
+            let (status, error) = if client.is_closed() {
                 (
                     "failed".to_string(),
                     Some("server closed unexpectedly".to_string()),
-                    Vec::new(),
                 )
             } else {
-                let mut tools = Vec::new();
                 for (qual_name, (srv, tool)) in cached.iter() {
                     if srv == name && qual_name.starts_with("mcp__") {
                         tools.push(McpToolSummary {
@@ -724,37 +1165,16 @@ impl McpManager {
                     }
                 }
                 tools.sort_by(|a, b| a.name.cmp(&b.name));
-                ("connected".to_string(), None, tools)
+                ("connected".to_string(), None)
             };
-            let tool_count = tools.len();
             entries.push(McpServerEntry {
                 name: name.clone(),
                 transport: client.transport_type().to_string(),
                 status,
-                tool_count,
+                tool_count: tools.len(),
                 error,
+                next_retry_at: None,
                 tools,
-            });
-        }
-        // Failed-to-spawn and disabled servers have no client but must still
-        // surface — they carry their recipe and, for failures, the spawn error.
-        let servers = self.servers.read().await;
-        for (name, state) in servers.iter() {
-            if clients.contains_key(name) {
-                continue;
-            }
-            entries.push(McpServerEntry {
-                name: name.clone(),
-                transport: match &state.recipe {
-                    McpServerRecipe::Sse { .. } => "sse".into(),
-                    McpServerRecipe::Http { .. } => "http".into(),
-                    McpServerRecipe::Stdio { .. } => "stdio".into(),
-                    McpServerRecipe::Mock => "mock".into(),
-                },
-                status: state.status.clone(),
-                tool_count: 0,
-                error: state.error.clone(),
-                tools: Vec::new(),
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -801,10 +1221,7 @@ impl McpManager {
         // other tasks wait on the client/server maps.
         let removed_server = self.servers.write().await.remove(name).is_some();
         let removed_client = self.clients.write().await.remove(name);
-        self.cached_tools
-            .write()
-            .await
-            .retain(|_, (s, _)| s != name);
+        self.drop_server_tools(name).await;
         self.filters.write().await.remove(name);
         self.timeouts.write().await.remove(name);
         let had_client = removed_client.is_some();
@@ -812,6 +1229,26 @@ impl McpManager {
             client.close().await;
         }
         removed_server || had_client
+    }
+
+    /// Drop one server's cached tools and the matching registry entries.
+    /// v2 `unregisterMcpServer`: both halves must agree or a removed server
+    /// would keep contributing a pinned definition to a later request.
+    async fn drop_server_tools(&self, name: &str) {
+        let removed: Vec<String> = {
+            let mut cached = self.cached_tools.write().await;
+            let names = cached
+                .iter()
+                .filter(|(_, (server, _))| server == name)
+                .map(|(qualified, _)| qualified.clone())
+                .collect();
+            cached.retain(|_, (server, _)| server != name);
+            names
+        };
+        let mut registry = self.registry.write().await;
+        for qualified in removed {
+            registry.unregister(&qualified);
+        }
     }
 
     /// Close a server but keep its entry as `removed` (v2 `markRemoved`,
@@ -823,10 +1260,7 @@ impl McpManager {
         if !known {
             return false;
         }
-        self.cached_tools
-            .write()
-            .await
-            .retain(|_, (server, _)| server != name);
+        self.drop_server_tools(name).await;
         if let Some(state) = self.servers.write().await.get_mut(name) {
             state.status = "removed".into();
             state.error = None;
@@ -842,6 +1276,35 @@ impl McpManager {
 
     /// Close every client and forget all entries (v2 `shutdown`).
     pub async fn shutdown(&self) {
+        // Stop the startup-retry ticker: a retry that fires during teardown
+        // would reconnect a server the caller is closing.
+        self.retry_ticker_stop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Cancel startups that are still handshaking before anything else: an
+        // in-flight connect is not in `clients` yet, so draining `clients`
+        // below would miss its child — the process (and the plugin directory
+        // it runs in) would outlive the teardown until the startup timeout.
+        // Aborting the task drops the future, and `kill_on_drop` takes the
+        // child with it (v2 cancels in-flight startup in `shutdown`).
+        let startups: Vec<tokio::task::AbortHandle> = {
+            let mut tasks = self.connect_tasks.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *tasks)
+        };
+        for task in startups {
+            task.abort();
+        }
+        // Drain in-flight liveness probes before clearing the entries: v2's
+        // `shutdown` awaits the per-entry operation tail, so a probe still
+        // running during teardown is observed rather than orphaned. A probe for
+        // a client this teardown replaces sees `isCurrent` fail and does
+        // nothing.
+        let probes: Vec<tokio::task::JoinHandle<()>> = {
+            let mut tasks = self.probe_tasks.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *tasks)
+        };
+        for probe in probes {
+            let _ = probe.await;
+        }
         let clients: Vec<Arc<McpClient>> = {
             let mut guard = self.clients.write().await;
             guard.drain().map(|(_, client)| client).collect()
@@ -849,7 +1312,13 @@ impl McpManager {
         for client in clients {
             client.close().await;
         }
-        self.cached_tools.write().await.clear();
+        {
+            let servers: Vec<String> = self.servers.read().await.keys().cloned().collect();
+            for server in servers {
+                self.drop_server_tools(&server).await;
+            }
+            self.cached_tools.write().await.clear();
+        }
         self.servers.write().await.clear();
         self.filters.write().await.clear();
         self.timeouts.write().await.clear();
@@ -967,8 +1436,11 @@ impl McpManager {
     /// `config.mcp` as the global timeout defaults (v2 `connectAll` +
     /// `resolveDefaultTimeouts`; per-server failures are isolated so one
     /// crashed entry never blocks the others).
-    pub async fn spawn_from_config(&self, config: &crate::config::KimiConfig) {
+    pub async fn spawn_from_config(self: &Arc<Self>, config: &crate::config::KimiConfig) {
         self.set_defaults(config.mcp.clone());
+        // v2's workspace host enables the startup retry; every entry point
+        // that connects from config gets the same ticker.
+        self.start_retry_ticker();
         let tasks = config
             .mcp_servers
             .iter()
@@ -986,11 +1458,111 @@ impl McpManager {
                     // defaultDeferred`; the napi path passes the host's
                     // per-server verdict instead.
                     deferred: conf.deferred,
+                    oauth: conf.auth.as_deref().map(|auth| auth == "oauth"),
                 };
                 Some(self.configure(name, recipe, options))
             })
             .collect::<Vec<_>>();
         futures_util::future::join_all(tasks).await;
+    }
+
+    /// The current retry policy: the `[mcp]` knobs plus whether a scheduler is
+    /// running to act on a due time.
+    fn retry_policy(&self) -> RetryPolicy {
+        let defaults = self.defaults.read().unwrap_or_else(|e| e.into_inner());
+        RetryPolicy {
+            enabled: defaults.reconnect_retry_enabled.unwrap_or(true),
+            ticker: self
+                .retry_ticker_started
+                .load(std::sync::atomic::Ordering::SeqCst),
+            initial_delay_ms: defaults
+                .reconnect_initial_delay_ms
+                .unwrap_or(DEFAULT_RECONNECT_INITIAL_DELAY_MS),
+            max_delay_ms: defaults
+                .reconnect_max_delay_ms
+                .unwrap_or(DEFAULT_RECONNECT_MAX_DELAY_MS),
+        }
+    }
+
+    /// Start the startup-retry ticker once per manager (v2's `retryDue`
+    /// scheduling, driven by the state machine). The ticker only *drains* what
+    /// [`Self::mark_connect_failure`] scheduled: an entry in `retry-waiting`
+    /// whose due time has passed is reconnected, and a successful connect ends
+    /// the ladder. It stops with [`Self::shutdown`].
+    fn start_retry_ticker(self: &Arc<Self>) {
+        if self
+            .retry_ticker_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let manager = self.clone();
+        let stop = self.retry_ticker_stop.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                manager.retry_due_servers().await;
+            }
+        });
+    }
+
+    /// Recompute the due time of every `retry-waiting` entry from the current
+    /// `[mcp]` knobs (v2 `rescheduleRetries`, connection-manager.ts:501-505):
+    /// a host that changed the reconnect delays while a retry was pending must
+    /// not wait out the old schedule. The streak is preserved — this moves the
+    /// wait, it does not reset the ladder — and the 250 ms ticker picks the new
+    /// due time up on its next pass.
+    pub async fn reschedule_retries(&self) {
+        let policy = self.retry_policy();
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut servers = self.servers.write().await;
+        for state in servers.values_mut() {
+            if state.status != "retry-waiting" {
+                continue;
+            }
+            let streak = state.retry_streak.max(1);
+            let delay = retry_delay_ms(streak - 1, policy.initial_delay_ms, policy.max_delay_ms);
+            state.retry_at_ms = Some(now + delay as i64);
+        }
+    }
+
+    /// Reconnect every entry whose retry is due. The due timestamp is cleared
+    /// under the same lock that checked it, so a reconfigure, removal, or
+    /// manual reconnect that landed in between wins over this pass.
+    async fn retry_due_servers(&self) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let due: Vec<(String, i64)> = {
+            let servers = self.servers.read().await;
+            servers
+                .iter()
+                .filter(|(_, state)| state.status == "retry-waiting")
+                .filter_map(|(name, state)| state.retry_at_ms.map(|at| (name.clone(), at)))
+                .filter(|(_, at)| *at <= now)
+                .collect()
+        };
+        for (name, due_at) in due {
+            {
+                let mut servers = self.servers.write().await;
+                let Some(state) = servers.get_mut(&name) else {
+                    continue;
+                };
+                if state.status != "retry-waiting" || state.retry_at_ms != Some(due_at) {
+                    continue;
+                }
+                state.status = "pending".into();
+                state.retry_at_ms = None;
+            }
+            // No status event for a due retry: v2 suppresses the `retryDue`
+            // transition (`suppressRetryStatus`, connection-manager.ts:600-601)
+            // so a recovering server does not flash `pending` between two
+            // `failed` entries. Only the outcome of the attempt is reported.
+            // `connect_one` records either `connected` (which clears the
+            // streak) or the next retry-waiting step itself.
+            let _ = self.connect_one(&name).await;
+        }
     }
 
     /// Register a server from a host-supplied recipe and connect it unless it
@@ -1002,13 +1574,6 @@ impl McpManager {
         recipe: McpServerRecipe,
         options: McpServerOptions,
     ) -> Result<(), String> {
-        self.set_tool_filter(
-            name,
-            options.enabled,
-            options.enabled_tools,
-            options.disabled_tools,
-        )
-        .await;
         let defaults = self
             .defaults
             .read()
@@ -1020,22 +1585,72 @@ impl McpManager {
             .deferred
             .or(defaults.default_deferred)
             .unwrap_or(false);
-        self.timeouts.write().await.insert(
-            name.to_string(),
-            McpTimeouts {
-                startup: Duration::from_millis(resolve_startup_timeout(
-                    options.startup_timeout_ms,
-                    parse_timeout_env(MCP_STARTUP_TIMEOUT_ENV),
-                    defaults.startup_timeout_ms,
-                )),
-                tool: resolve_tool_timeout(
-                    options.tool_timeout_ms,
-                    parse_timeout_env(MCP_TOOL_TIMEOUT_ENV),
-                    defaults.tool_timeout_ms,
-                )
-                .map(Duration::from_millis),
-            },
-        );
+        let filter = ToolFilter {
+            enabled: options.enabled,
+            enabled_tools: options
+                .enabled_tools
+                .clone()
+                .map(|names| names.into_iter().collect()),
+            disabled_tools: options
+                .disabled_tools
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        };
+        let timeouts = McpTimeouts {
+            startup: Duration::from_millis(resolve_startup_timeout(
+                options.startup_timeout_ms,
+                parse_timeout_env(MCP_STARTUP_TIMEOUT_ENV),
+                defaults.startup_timeout_ms,
+            )),
+            tool: resolve_tool_timeout(
+                options.tool_timeout_ms,
+                parse_timeout_env(MCP_TOOL_TIMEOUT_ENV),
+                defaults.tool_timeout_ms,
+            )
+            .map(Duration::from_millis),
+        };
+        let oauth = options.oauth.unwrap_or(false);
+        // v2 `upsert` (connection-manager.ts:334-353): a live entry whose
+        // configuration is unchanged is returned as it is, so re-running the
+        // same configuration never retires a working client, its tools or its
+        // connection. Everything `configure` would apply is compared, not just
+        // the recipe — otherwise a changed filter or timeout would be dropped
+        // on the floor by the early return.
+        {
+            let unchanged = {
+                let servers = self.servers.read().await;
+                servers.get(name).is_some_and(|state| {
+                    is_live_status(&state.status)
+                        && state.recipe == recipe
+                        && state.deferred == deferred
+                        && state.oauth == oauth
+                })
+            };
+            if unchanged {
+                let same_filter = self
+                    .filters
+                    .read()
+                    .await
+                    .get(name)
+                    .is_some_and(|current| current == &filter);
+                let same_timeouts = self
+                    .timeouts
+                    .read()
+                    .await
+                    .get(name)
+                    .is_some_and(|current| current == &timeouts);
+                if same_filter && same_timeouts {
+                    return Ok(());
+                }
+            }
+        }
+        self.filters.write().await.insert(name.to_string(), filter);
+        self.timeouts
+            .write()
+            .await
+            .insert(name.to_string(), timeouts);
         self.servers.write().await.insert(
             name.to_string(),
             ServerState {
@@ -1051,6 +1666,9 @@ impl McpManager {
                 raw_tools: Vec::new(),
                 deferred,
                 connected_at_ms: None,
+                oauth: options.oauth.unwrap_or(false),
+                retry_at_ms: None,
+                retry_streak: 0,
             },
         );
         self.emit_status(name).await;
@@ -1068,25 +1686,59 @@ impl McpManager {
     /// the (possibly stderr-augmented) text stored on the entry.
     async fn mark_connect_failure(&self, name: &str, error: &McpError, display: &str) {
         let oauth_installed = self.oauth_service().is_some();
-        let recipe = self
+        let (recipe, explicit_oauth) = self
             .servers
             .read()
             .await
             .get(name)
-            .map(|s| s.recipe.clone());
-        let status = match recipe {
-            Some(recipe)
-                if should_mark_needs_auth(&recipe, oauth_installed, error.is_unauthorized()) =>
-            {
-                "needs-auth"
-            }
-            _ => "failed",
-        };
+            .map(|s| (s.recipe.clone(), s.oauth))
+            .unwrap_or((McpServerRecipe::Mock, false));
+        // Startup auth rejections cover 401 and 403 (v2
+        // `isAuthRejectionStatus`); the runtime flip stays 401-only.
+        let needs_auth = should_mark_needs_auth(
+            &recipe,
+            explicit_oauth,
+            oauth_installed,
+            error.is_auth_rejection(),
+        );
+        let policy = self.retry_policy();
+        let now = chrono::Utc::now().timestamp_millis();
+        // v2 `automaticRetry` (connection-manager.ts:511): an attempt that
+        // already carries a failure streak is a retry, so landing back in
+        // `retryWaiting` only moves the due time — the public entry is a
+        // `failed` entry before and after, and v2 suppresses the event
+        // (`suppressRetryStatus`, :600-601) so the UI does not flicker.
+        let mut suppress = false;
         if let Some(state) = self.servers.write().await.get_mut(name) {
-            state.status = status.into();
+            let streak_before = state.retry_streak;
             state.error = Some(display.to_string());
+            if needs_auth {
+                // v2 replaces the startup error with the login hint
+                // (`handshakeFailed` → `needsAuth` returns
+                // `needsAuthHint(entry.name)`, connection-manager.ts:641): the
+                // raw 401 tells the user nothing they can act on.
+                state.error = Some(needs_auth_hint(name));
+                state.status = "needs-auth".into();
+                state.retry_at_ms = None;
+                state.retry_streak = 0;
+            } else if error.is_permanent() {
+                state.status = "failed".into();
+                state.retry_at_ms = None;
+                state.retry_streak = 0;
+            } else {
+                // v2 `failureTarget`: a transient failure retries while the
+                // host enabled the retry (the workspace sets it).
+                let (status, retry_at, streak) =
+                    next_failure_state(policy, state.retry_streak, now);
+                suppress = status == "retry-waiting" && streak_before > 0;
+                state.status = status.into();
+                state.retry_streak = streak;
+                state.retry_at_ms = retry_at;
+            }
         }
-        self.emit_status(name).await;
+        if !suppress {
+            self.emit_status(name).await;
+        }
     }
 
     /// Connect one configured server, marking the outcome on its entry.
@@ -1116,11 +1768,14 @@ impl McpManager {
                     headers,
                     bearer_token_env_var,
                 } => {
+                    // A missing bearer env var is a configuration failure
+                    // (v2 `config`): retrying cannot make the variable exist.
                     let mut headers =
                         resolve_bearer_headers("SSE", headers, bearer_token_env_var.as_deref())
-                            .map_err(McpError::transport)?;
+                            .map_err(McpError::Config)?;
                     self.apply_oauth_header(name, url, &mut headers).await;
-                    McpClient::connect_sse(name, url, headers).await?
+                    let client_name = self.client_name();
+                    McpClient::connect_sse(name, url, headers, client_name.as_deref()).await?
                 }
                 McpServerRecipe::Http {
                     url,
@@ -1129,9 +1784,10 @@ impl McpManager {
                 } => {
                     let mut headers =
                         resolve_bearer_headers("HTTP", headers, bearer_token_env_var.as_deref())
-                            .map_err(McpError::transport)?;
+                            .map_err(McpError::Config)?;
                     self.apply_oauth_header(name, url, &mut headers).await;
-                    McpClient::connect_http(name, url, headers).await?
+                    let client_name = self.client_name();
+                    McpClient::connect_http(name, url, headers, client_name.as_deref()).await?
                 }
                 McpServerRecipe::Stdio {
                     command,
@@ -1139,29 +1795,56 @@ impl McpManager {
                     env,
                     cwd,
                 } => {
+                    // v2 `stdioCwd`: a server whose config omits `cwd` starts
+                    // in the workspace, not wherever the engine process runs.
+                    let effective_cwd = self.stdio_cwd_for(cwd.as_deref());
+                    let client_name = self.client_name();
                     McpClient::spawn_stdio(
                         name,
                         command,
                         &args.iter().map(String::as_str).collect::<Vec<_>>(),
                         env,
-                        cwd.as_deref(),
+                        effective_cwd.as_deref(),
+                        client_name.as_deref(),
                     )
                     .await?
                 }
-                McpServerRecipe::Mock => McpClient::mock(name),
+                McpServerRecipe::Mock => {
+                    let client_name = self.client_name();
+                    McpClient::mock(name).with_client_name(client_name.as_deref())
+                }
             };
             stderr_tail = client.stderr_snapshot();
-            let count = self.register_client(client).await?;
+            // v2 `isCurrent`: a `markRemoved` that landed while the handshake
+            // was in flight owns the entry — the attempt is discarded instead
+            // of resurrecting a tombstoned server (connection-manager.test.ts
+            // "markRemoved … in-flight connects invalidated").
+            if self
+                .servers
+                .read()
+                .await
+                .get(name)
+                .is_some_and(|state| state.status == "removed")
+            {
+                client.close().await;
+                return Ok::<ConnectOutcome, McpError>(ConnectOutcome::Removed);
+            }
+            self.register_client(client).await?;
             // Watch for the transport dying after the handshake (v2
             // `watchForUnexpectedClose`, connection-manager.ts:321-341).
             if let Some(client_arc) = self.clients.read().await.get(name).cloned() {
-                self.watch_unexpected_close(name, client_arc).await;
+                self.watch_session_evidence(name, client_arc).await;
             }
-            Ok::<usize, McpError>(count)
+            Ok(ConnectOutcome::Registered)
         };
         // v2 wraps connect + tool discovery in `withTimeout` and reports
         // `Timed out after <ms>ms` (connection-manager.ts:594-611).
         match tokio::time::timeout(startup, connect).await {
+            Ok(Ok(ConnectOutcome::Removed)) => {
+                // Not a failure: the tombstone is the outcome, so the entry
+                // keeps its `removed` status and emits nothing.
+                return Err(format!("MCP server '{name}' was removed during startup"));
+            }
             Ok(Ok(_)) => {
                 // The transport may have died in the gap between discovery
                 // finishing and this status write; never overwrite that
@@ -1200,60 +1883,78 @@ impl McpManager {
             state.status = "connected".into();
             state.error = None;
             state.connected_at_ms = Some(connected_at_ms);
+            // A successful connect ends the retry ladder (v2 resets the streak
+            // on `connected`).
+            state.retry_at_ms = None;
+            state.retry_streak = 0;
         }
         self.emit_status(name).await;
         Ok(())
     }
 
-    /// Register the unexpected-close watch on a live client (v2
-    /// `watchForUnexpectedClose`, connection-manager.ts:321-341): when the
-    /// transport dies on its own, mark the entry `failed`, drop its tools and
-    /// notify status listeners. The callback checks the client is still the
-    /// registered one before touching state, so a shutdown / reconnect that
-    /// already moved on is never overwritten (v2 `isCurrent` + `entry.client
-    /// !== client`).
-    async fn watch_unexpected_close(&self, name: &str, client: Arc<McpClient>) {
-        let clients = self.clients.clone();
-        let servers = self.servers.clone();
-        let cached = self.cached_tools.clone();
-        let listeners = self.status_listeners.clone();
-        let name_owned = name.to_string();
-        let client_for_cb = client.clone();
+    /// The handles a session-evidence callback needs. `watchSessionEvidence`
+    /// builds one per registration, and the probe path reads the same fields —
+    /// the callback has no manager handle, so everything is cloned out here.
+    fn evidence_context(&self, name: &str, client: Arc<McpClient>) -> EvidenceContext {
+        EvidenceContext {
+            name: name.to_string(),
+            client,
+            clients: self.clients.clone(),
+            servers: self.servers.clone(),
+            cached_tools: self.cached_tools.clone(),
+            registry: self.registry.clone(),
+            status_listeners: self.status_listeners.clone(),
+            probe_tasks: self.probe_tasks.clone(),
+            policy: self.retry_policy(),
+        }
+    }
+
+    /// Register the session-evidence watch on a live client (v2
+    /// `attachSessionEvidence` + `watchForUnexpectedClose`,
+    /// connection-manager.ts:754-764, :321-341).
+    ///
+    /// * **Hard** evidence (the transport closed on its own, v2
+    ///   `sessionEvidence` / `onclose`) fails the entry directly on the retry
+    ///   ladder.
+    /// * **Weak** evidence (a resumable HTTP stream gave up reconnecting, v2
+    ///   `{ kind: 'weak' }`) only says the session *may* be dead: the entry
+    ///   moves to `probing`, pings the server with a 5 s budget, and returns to
+    ///   `connected` untouched when the ping answers.
+    ///
+    /// Both callbacks check the client is still the registered one before
+    /// touching state, so a shutdown / reconnect that already moved on is never
+    /// overwritten (v2 `isCurrent` + `entry.client !== client`).
+    async fn watch_session_evidence(&self, name: &str, client: Arc<McpClient>) {
+        // Captured now: the callbacks have no manager handle, and the policy is
+        // what decides whether a dead connection retries or fails. A policy
+        // change mid-session only applies to the next registration, exactly as
+        // the previous hard-only watch behaved.
+        let context = self.evidence_context(name, client.clone());
+
+        let hard = context.clone();
         client
             .on_unexpected_close(Box::new(move |reason| {
-                let clients = clients.clone();
-                let servers = servers.clone();
-                let cached = cached.clone();
-                let listeners = listeners.clone();
-                let client = client_for_cb.clone();
-                let name = name_owned.clone();
+                let hard = hard.clone();
                 tokio::spawn(async move {
-                    let is_current = {
-                        let clients = clients.read().await;
-                        matches!(clients.get(&name), Some(c) if Arc::ptr_eq(c, &client))
-                    };
-                    if !is_current {
-                        return;
-                    }
-                    {
-                        let mut servers = servers.write().await;
-                        if let Some(state) = servers.get_mut(&name) {
-                            state.status = "failed".into();
-                            state.error = Some(reason);
-                            state.raw_tools.clear();
-                        }
-                    }
-                    cached.write().await.retain(|_, (srv, _)| *srv != name);
-                    let entry = {
-                        let servers = servers.read().await;
-                        let Some(state) = servers.get(&name) else {
-                            return;
-                        };
-                        to_public_entry(&name, state)
-                    };
-                    let listeners = listeners.lock().unwrap_or_else(|e| e.into_inner());
-                    fan_out_status(&listeners, &entry);
+                    hard.fail(reason).await;
                 });
+            }))
+            .await;
+
+        let weak = context;
+        client
+            .on_weak_evidence(Box::new(move |reason| {
+                let weak = weak.clone();
+                let tasks = weak.probe_tasks.clone();
+                let handle = tokio::spawn(async move {
+                    weak.probe(reason).await;
+                });
+                // Keep the probe observable to `shutdown`, which waits for it
+                // (v2 awaits the entry's operation tail). Finished handles are
+                // pruned so a long-lived manager cannot accumulate them.
+                let mut guard = tasks.lock().unwrap_or_else(|e| e.into_inner());
+                guard.retain(|task| !task.is_finished());
+                guard.push(handle);
             }))
             .await;
     }
@@ -1305,15 +2006,23 @@ impl McpManager {
     }
 
     async fn reconnect_inner(&self, name: &str) -> Result<(), String> {
-        let Some(_recipe) = self
+        let Some((_recipe, status)) = self
             .servers
             .read()
             .await
             .get(name)
-            .map(|s| s.recipe.clone())
+            .map(|s| (s.recipe.clone(), s.status.clone()))
         else {
             return Err(format!("MCP server '{name}' is not configured"));
         };
+        // v2's `reconnect` resolves through the *live* entry view, so a
+        // tombstoned server answers "Unknown MCP server" instead of being
+        // revived (connection-manager.test.ts "markRemoved tombstones the
+        // entry … reconnect rejected"). A fresh `connect`/`configure` is what
+        // revives it.
+        if status == "removed" {
+            return Err(format!("Unknown MCP server: {name}"));
+        }
         // A disabled server must not be reconnected (v2 throws
         // `MCP_SERVER_DISABLED`, connection-manager.ts:146-164).
         let enabled = {
@@ -1328,10 +2037,7 @@ impl McpManager {
         // The close happens outside the map locks so it cannot block the
         // manager while the child is being killed.
         let dead = self.clients.write().await.remove(name);
-        self.cached_tools
-            .write()
-            .await
-            .retain(|_, (srv, _)| srv != name);
+        self.drop_server_tools(name).await;
         if let Some(state) = self.servers.write().await.get_mut(name) {
             state.status = "pending".into();
             state.error = None;
@@ -1387,9 +2093,14 @@ fn to_public_entry(name: &str, state: &ServerState) -> McpServerEntry {
     McpServerEntry {
         name: name.to_string(),
         transport: state.recipe.transport_label(),
-        status: state.status.clone(),
+        status: public_status(&state.status).to_string(),
         tool_count: state.raw_tools.len(),
         error: state.error.clone(),
+        // v2 `toPublicEntry`: the due time is only meaningful while a retry is
+        // scheduled; every other state reports `undefined`.
+        next_retry_at: (state.status == "retry-waiting")
+            .then_some(state.retry_at_ms)
+            .flatten(),
         tools: state
             .raw_tools
             .iter()
@@ -1401,12 +2112,75 @@ fn to_public_entry(name: &str, state: &ServerState) -> McpServerEntry {
     }
 }
 
+/// v2 `DEFAULT_RECONNECT_INITIAL_DELAY_MS` (connection-manager.ts:100): the
+/// first automatic startup retry waits this long.
+const DEFAULT_RECONNECT_INITIAL_DELAY_MS: u64 = 5_000;
+
+/// v2 `DEFAULT_RECONNECT_MAX_DELAY_MS` (connection-manager.ts:101).
+const DEFAULT_RECONNECT_MAX_DELAY_MS: u64 = 300_000;
+
+/// v2 `nextRetryDelayMs` (connection-manager.ts:690-696):
+/// `min(initial * 2^streak, max)` times a 50–100 % jitter. `streak` is
+/// zero-based (the first retry uses the initial delay).
+fn retry_delay_ms(streak: u32, initial: u64, max: u64) -> u64 {
+    let nominal = initial
+        .saturating_mul(1u64 << streak.min(32))
+        .min(max)
+        .max(1);
+    let jitter = 0.5 + fastrand::f64() * 0.5;
+    ((nominal as f64) * jitter) as u64
+}
+
+/// The retry policy a failure consults: v2 `reconnectRetryEnabled` plus the
+/// resolved delays. `ticker` is whether a scheduler exists to act on a due
+/// time — without one a `retry-waiting` entry would wait forever, so the entry
+/// fails instead.
+#[derive(Clone, Copy)]
+struct RetryPolicy {
+    enabled: bool,
+    ticker: bool,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+}
+
+/// How one startup attempt ended inside `connect_one`. `Removed` is not a
+/// failure — a `markRemoved` that landed mid-handshake owns the entry — so it
+/// must not run the failure path that would overwrite the tombstone.
+enum ConnectOutcome {
+    Registered,
+    Removed,
+}
+
+/// What a failure does to the entry's retry state (v2 `retryOrFailed` +
+/// `nextRetryDelayMs`): the status, the due time, and the streak after this
+/// failure. `needs-auth` and permanent failures never reach here.
+fn next_failure_state(
+    policy: RetryPolicy,
+    streak: u32,
+    now_ms: i64,
+) -> (&'static str, Option<i64>, u32) {
+    if !policy.enabled || !policy.ticker {
+        return ("failed", None, 0);
+    }
+    let streak = streak.saturating_add(1);
+    let delay = retry_delay_ms(streak - 1, policy.initial_delay_ms, policy.max_delay_ms);
+    ("retry-waiting", Some(now_ms + delay as i64), streak)
+}
+
+/// The actionable message for an entry that needs OAuth (v2 `needsAuthHint`,
+/// connection-manager.ts:641): both the startup 401 and the runtime 401 carry
+/// it, so the user always sees what to run.
+fn needs_auth_hint(name: &str) -> String {
+    LocalizedText::with_params("engine.mcp.needsAuthHint", i18n_params!["name" => name]).render()
+}
+
 /// Whether a failure should flip the entry into `needs-auth` instead of
 /// `failed` (v2 `shouldMarkNeedsAuth`, connection-manager.ts:383-393):
 /// only remote servers without a static credential participate in the OAuth
 /// flow, and only when the transport classified the failure as HTTP 401.
 fn should_mark_needs_auth(
     recipe: &McpServerRecipe,
+    explicit_oauth: bool,
     oauth_installed: bool,
     unauthorized: bool,
 ) -> bool {
@@ -1432,7 +2206,11 @@ fn should_mark_needs_auth(
     if bearer_token_env_var.is_some() {
         return false;
     }
-    if !headers.is_empty() {
+    // v2 `config.headers !== undefined && config.auth !== 'oauth'`: extra
+    // headers on a server that never asked for OAuth are the suspect, so the
+    // entry fails with the header error. An explicit `auth = "oauth"` says the
+    // headers are unrelated to the credential, so the 401 still means "log in".
+    if !headers.is_empty() && !explicit_oauth {
         return false;
     }
     true

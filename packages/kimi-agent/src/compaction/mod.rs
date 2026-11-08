@@ -12,6 +12,7 @@
 
 pub mod micro;
 
+use crate::rpc::types::TokenUsage;
 use crate::turn_loop::retry::{RetryConfig, retry_delay};
 use crate::turn_loop::turn_step::{retry_after_hint, step_delay};
 use crate::turn_loop::types::{ContentBlock, LLM, LLMChatParams, LLMMessage};
@@ -164,6 +165,27 @@ pub fn estimate_message_tokens(message: &LLMMessage) -> u32 {
 /// Total estimated tokens of a message list.
 pub fn estimate_messages_tokens(messages: &[LLMMessage]) -> u32 {
     messages.iter().map(estimate_message_tokens).sum()
+}
+
+/// The post-compaction token total (v2 `buildContextCompactionShape`'s
+/// `tokensAfter`, `compactionHandoff.ts:107-111`): the rebuilt history's
+/// estimate with the summary message's own size replaced by the summarization
+/// request's measured output tokens. Without a measurement — or without the
+/// summary message in the history — the estimate stands.
+pub fn rebased_tokens(history: &[LLMMessage], summary_output_tokens: Option<u32>) -> u32 {
+    let estimate = estimate_messages_tokens(history);
+    let Some(measured) = summary_output_tokens else {
+        return estimate;
+    };
+    let Some(summary) = history
+        .iter()
+        .find(|message| message.content.starts_with(COMPACTION_SUMMARY_PREFIX))
+    else {
+        return estimate;
+    };
+    estimate
+        .saturating_sub(estimate_message_tokens(summary))
+        .saturating_add(measured)
 }
 
 /// Whether the estimated history size should trigger compaction. Mirrors
@@ -673,7 +695,14 @@ fn summarization_prompt(omitted: &[LLMMessage], instruction: Option<&str>) -> Ve
 pub enum CompactionError {
     Cancelled,
     EmptySummary,
-    Provider(Box<dyn std::error::Error + Send + Sync>),
+    Provider {
+        error: Box<dyn std::error::Error + Send + Sync>,
+        /// v2 `CompactionFailedEvent.retry_count`: the backoff retries spent
+        /// before this failure. The compaction's own recovery paths (a
+        /// truncation drop, an overflow shrink) reset it, so it counts the
+        /// wait-and-retry ladder rather than every request.
+        retry_count: u32,
+    },
 }
 
 impl std::fmt::Display for CompactionError {
@@ -689,7 +718,7 @@ impl std::fmt::Display for CompactionError {
                 "{}",
                 crate::i18n::LocalizedText::new("engine.compaction.emptySummary").render()
             ),
-            Self::Provider(error) => std::fmt::Display::fmt(error, f),
+            Self::Provider { error, .. } => std::fmt::Display::fmt(error, f),
         }
     }
 }
@@ -697,10 +726,24 @@ impl std::fmt::Display for CompactionError {
 impl std::error::Error for CompactionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Provider(error) => Some(error.as_ref()),
+            Self::Provider { error, .. } => Some(error.as_ref()),
             Self::Cancelled | Self::EmptySummary => None,
         }
     }
+}
+
+/// One successful summarization round: the summary plus the accounting v2's
+/// `compaction_finished` telemetry reports (`fullCompactionService.ts:768-795`)
+/// — the usage of the request that produced it and the backoff retries spent.
+#[derive(Debug, Clone, Default)]
+pub struct SummaryOutcome {
+    pub summary: String,
+    /// Usage of the final summarization request (`attempt.usage` in v2),
+    /// `None` when the transport reported none.
+    pub usage: Option<TokenUsage>,
+    /// Backoff retries performed in this round (v2 `retryCount`); a recovery
+    /// shrink resets it, exactly like v2.
+    pub retry_count: u32,
 }
 
 /// Generate a usable summary before any history is replaced. Empty responses
@@ -712,7 +755,11 @@ pub async fn summarize_with_llm(
     cancel: Option<&CancellationToken>,
     max_attempts: Option<u32>,
 ) -> Result<String, CompactionError> {
-    summarize_with_llm_budgeted(omitted, llm, instruction, cancel, max_attempts, None).await
+    Ok(
+        summarize_with_llm_budgeted(omitted, llm, instruction, cancel, max_attempts, None)
+            .await?
+            .summary,
+    )
 }
 
 /// [`summarize_with_llm`] with the effective model window, so the summarizer's
@@ -732,7 +779,7 @@ pub async fn summarize_with_llm_budgeted(
     cancel: Option<&CancellationToken>,
     max_attempts: Option<u32>,
     effective_max_tokens: Option<u32>,
-) -> Result<String, CompactionError> {
+) -> Result<SummaryOutcome, CompactionError> {
     let pre_shrunk = pre_shrink_to_window_budget(omitted, instruction, effective_max_tokens);
     // The overflow shrink below replaces the working set, so it owns its
     // buffer; the common path borrows the caller's slice untouched.
@@ -747,6 +794,9 @@ pub async fn summarize_with_llm_budgeted(
     let infinite = crate::turn_loop::retry::infinite_retry_enabled();
     let mut attempt: u32 = 0;
     let mut overflow_shrink_count: u32 = 0;
+    // v2 `compactionRound`'s `retryCount`: the backoff retries performed since
+    // the last recovery reset, reported on failure as `retry_count`.
+    let mut retry_count: u32 = 0;
     loop {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(CompactionError::Cancelled);
@@ -792,11 +842,23 @@ pub async fn summarize_with_llm_budgeted(
             Ok(response) => {
                 let trimmed = response.content.trim();
                 if !trimmed.is_empty() {
-                    return Ok(trimmed.to_string());
+                    // v2 reports the usage of the attempt that succeeded
+                    // (`attempt.usage`), not a sum across retries.
+                    let usage = (response.usage.measured_context_tokens() > 0)
+                        .then(|| response.usage.clone());
+                    return Ok(SummaryOutcome {
+                        summary: trimmed.to_string(),
+                        usage,
+                        retry_count,
+                    });
                 }
                 if attempt >= retry_config.max_attempts || history.len() <= 1 {
                     return Err(CompactionError::EmptySummary);
                 }
+                // v2 resets the retry count on every recovery path: a dropped
+                // message already shrinks the request, so the next attempt is
+                // not a backoff retry.
+                retry_count = 0;
                 history = &history[1..];
                 while history
                     .first()
@@ -843,7 +905,10 @@ pub async fn summarize_with_llm_budgeted(
                         || attempt >= retry_config.max_attempts
                         || current.len() <= 1
                     {
-                        return Err(CompactionError::Provider(err));
+                        return Err(CompactionError::Provider {
+                            error: err,
+                            retry_count,
+                        });
                     }
                     let ratio =
                         COMPACTION_OVERFLOW_SHRINK_RATIOS[(overflow_shrink_count - 1) as usize];
@@ -854,15 +919,24 @@ pub async fn summarize_with_llm_budgeted(
                     let shrunk =
                         take_recent_within_budget(&current, (f64::from(total) * ratio) as u32);
                     if shrunk.is_empty() {
-                        return Err(CompactionError::Provider(err));
+                        return Err(CompactionError::Provider {
+                            error: err,
+                            retry_count,
+                        });
                     }
+                    // A shrink is a recovery, not a backoff retry (v2 resets
+                    // `retryCount` here).
+                    retry_count = 0;
                     current = std::borrow::Cow::Owned(shrunk);
                     continue;
                 }
                 if !llm.is_retryable_error(&err_str)
                     || (!infinite && attempt >= retry_config.max_attempts)
                 {
-                    return Err(CompactionError::Provider(err));
+                    return Err(CompactionError::Provider {
+                        error: err,
+                        retry_count,
+                    });
                 }
                 let delay = step_delay(
                     retry_delay(attempt, &retry_config),
@@ -876,6 +950,7 @@ pub async fn summarize_with_llm_budgeted(
                     },
                     None => tokio::time::sleep(delay).await,
                 }
+                retry_count += 1;
             }
         }
     }
@@ -1066,12 +1141,61 @@ pub async fn force_compact_messages_with_summary_budgeted(
 /// What one compaction did, for the host's `compaction.completed` event (v2
 /// `full_compaction.completed`). The engine folds a prefix into an LLM-written
 /// summary; the host renders a transcript card from these numbers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompactionReport {
     pub summary: String,
     pub compacted_count: u32,
     pub tokens_before: u32,
     pub tokens_after: u32,
+    /// Usage of the summarization request that produced the summary (v2
+    /// `compaction_finished`'s `input_tokens` / `output_tokens` / cache
+    /// fields); `None` when the transport reported none.
+    pub usage: Option<TokenUsage>,
+    /// Backoff retries the summarization round performed (v2 `retry_count`).
+    pub retry_count: u32,
+    /// Wall-clock time the compaction took, summarizer call included (v2
+    /// `duration_ms`).
+    pub duration_ms: u64,
+}
+
+impl CompactionReport {
+    /// The `compaction_finished` telemetry properties v2 reports for a
+    /// completed compaction (`fullCompactionService.ts:768-795`). `source` is
+    /// `"auto"` or `"manual"`; `turn_index` is `None` for a compaction between
+    /// turns (v2 omits `turn_id` there).
+    pub fn finished_payload(
+        &self,
+        source: &str,
+        round: u32,
+        thinking_effort: &str,
+        turn_index: Option<u32>,
+    ) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "event": "compaction_finished",
+            "source": source,
+            "tokens_before": self.tokens_before,
+            "tokens_after": self.tokens_after,
+            "duration_ms": self.duration_ms,
+            "compacted_count": self.compacted_count,
+            "retry_count": self.retry_count,
+            "round": round,
+            "thinking_effort": thinking_effort,
+        });
+        if let Some(index) = turn_index {
+            payload["turn_id"] = serde_json::json!(index);
+        }
+        if let Some(usage) = &self.usage {
+            // v2 `usageTelemetry`: `input_tokens` is the *total* input — the
+            // uncached remainder plus both cache buckets.
+            payload["input_tokens"] = serde_json::json!(
+                usage.input_tokens + usage.input_cache_read + usage.input_cache_creation
+            );
+            payload["output_tokens"] = serde_json::json!(usage.output_tokens);
+            payload["input_cache_read"] = serde_json::json!(usage.input_cache_read);
+            payload["input_cache_creation"] = serde_json::json!(usage.input_cache_creation);
+        }
+        payload
+    }
 }
 
 /// [`force_compact_messages_with_summary_budgeted`] that also returns the
@@ -1102,11 +1226,15 @@ pub async fn force_compact_messages_with_summary_report(
                 compacted_count: 0,
                 tokens_before,
                 tokens_after: tokens_before,
+                usage: None,
+                retry_count: 0,
+                duration_ms: 0,
             },
         ));
     }
     let omitted = &messages[1..count as usize];
-    let summary = summarize_with_llm_budgeted(
+    let started = std::time::Instant::now();
+    let outcome = summarize_with_llm_budgeted(
         omitted,
         llm,
         instruction,
@@ -1115,7 +1243,8 @@ pub async fn force_compact_messages_with_summary_report(
         effective_max_tokens,
     )
     .await?;
-    let summary = post_process_summary(summary, todos);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let summary = post_process_summary(outcome.summary, todos);
     let compacted = apply_compaction_with_summary(messages, count, summary.clone());
     let tokens_after = estimate_messages_tokens(&compacted);
     Ok((
@@ -1125,6 +1254,9 @@ pub async fn force_compact_messages_with_summary_report(
             compacted_count: count,
             tokens_before,
             tokens_after,
+            usage: outcome.usage,
+            retry_count: outcome.retry_count,
+            duration_ms,
         },
     ))
 }
@@ -1155,7 +1287,7 @@ pub async fn force_compact_messages_manual_with_summary(
         return Ok((messages.to_vec(), String::new()));
     }
     let omitted = &messages[1..count as usize];
-    let summary = summarize_with_llm_budgeted(
+    let outcome = summarize_with_llm_budgeted(
         omitted,
         llm,
         instruction,
@@ -1164,7 +1296,7 @@ pub async fn force_compact_messages_manual_with_summary(
         effective_max_tokens,
     )
     .await?;
-    let summary = post_process_summary(summary, todos);
+    let summary = post_process_summary(outcome.summary, todos);
     let compacted = apply_compaction_with_summary(messages, count, summary.clone());
     Ok((compacted, summary))
 }

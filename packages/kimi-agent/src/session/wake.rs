@@ -242,6 +242,7 @@ impl EngineSession {
             core.next_turn_id += 1;
             core.held.push(HeldTurn {
                 turn_id,
+                prompt_id: Some(format!("wake-{turn_id}")),
                 request,
                 cancel: Arc::new(AtomicBool::new(false)),
                 outcome: Some(outcome_tx),
@@ -253,17 +254,25 @@ impl EngineSession {
                 &mut core,
                 request,
                 outcome_tx,
+                None,
                 TurnPlacement {
                     preallocated_id: None,
                     wake: Some(payload),
                 },
-                &self.steer_queue,
-                &self.steer_slot,
-                &self.wakeup,
+                AdmissionHandles {
+                    steer_queue: &self.steer_queue,
+                    steer_slot: &self.steer_slot,
+                    wakeup: &self.wakeup,
+                    journal: self.steer_trace.as_ref(),
+                },
             )?
         };
         Ok(TurnReceipt {
             turn_id,
+            prompt_id: format!("wake-{turn_id}"),
+            created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            state: PromptSubmissionState::Running,
+            steered: false,
             outcome: outcome_rx,
         })
     }
@@ -456,6 +465,7 @@ fn enqueue_notification_locked(
     }]);
     core.pending.push(PendingTurn {
         turn_id,
+        prompt_id: None,
         prompt: message,
         input,
         origin,
@@ -466,6 +476,10 @@ fn enqueue_notification_locked(
     wakeup.notify_one();
     TurnReceipt {
         turn_id,
+        prompt_id: format!("wake-{turn_id}"),
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        state: PromptSubmissionState::Running,
+        steered: false,
         outcome: outcome_rx,
     }
 }

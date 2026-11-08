@@ -10,9 +10,9 @@ description:
   en: >
       MCP clients and transports: stdio spawn, SSE/HTTP, shared client state, output normalization and errors.
       
-revision: 28f4b101d79bba811d53e53662341c0bb0fe93c0
-updated_at: "2026-11-03T16:01:43.453Z"
-fingerprint: 48f7fdc12037862e2c251ce082e9aa9ca7c1d90a530be2dfe139ea3335fc34d8
+revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
+updated_at: "2026-11-07T00:59:05.829Z"
+fingerprint: 08cf9acce52dc39cfb7420eebb60235c4d656e0da72e367ef20b6531d2fa06b8
 source:
   - path: "packages/kimi-agent/src/mcp/client.rs"
   - path: "packages/kimi-agent/src/mcp/client_shared.rs"

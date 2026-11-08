@@ -390,16 +390,39 @@ pub fn scan_date_baseline(messages: &[LLMMessage]) -> Option<String> {
     None
 }
 
-/// Find an AGENTS.md instruction file directly under `root` (v2
-/// `AGENTS_MD_PLAIN_NAMES`: `AGENTS.md` / `agents.md`).
-pub fn find_agents_md(root: &Path) -> Option<PathBuf> {
-    for name in ["AGENTS.md", "agents.md"] {
-        let candidate = root.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
+/// The instruction files directly under `root` that the runtime reminder
+/// suggests (v2 `findAgentsMdInDir`): the `.kimi-code/AGENTS.md` variant plus
+/// the first non-empty of `AGENTS.md` / `agents.md`.
+///
+/// An empty or whitespace-only file is not an instruction file (v2
+/// `isNonEmptyFile`) — the same rule the init-time loader applies — so a
+/// placeholder file never earns a reminder.
+pub fn find_agents_md(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    // v2 probes the whole chain from the work-tree root down to the anchor
+    // directory (`probeDir` → `dirsRootToLeaf`), so a session running in a
+    // subdirectory is reminded about the repository root's files too.
+    for dir in crate::prompt::agents_md::instruction_dirs(root) {
+        let dot_kimi = dir.join(".kimi-code").join("AGENTS.md");
+        if is_non_empty_file(&dot_kimi) {
+            found.push(dot_kimi);
+        }
+        for name in ["AGENTS.md", "agents.md"] {
+            let candidate = dir.join(name);
+            if is_non_empty_file(&candidate) {
+                found.push(candidate);
+                break;
+            }
         }
     }
-    None
+    found
+}
+
+/// v2 `isNonEmptyFile`: readable and not whitespace-only.
+fn is_non_empty_file(path: &Path) -> bool {
+    std::fs::read(path)
+        .map(|bytes| !String::from_utf8_lossy(&bytes).trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// Provider for the AGENTS.md reminder (v2 `agents_md` variant), backed by
@@ -542,12 +565,11 @@ impl AgentsMdReminder {
     }
 
     fn queue_here(&mut self, dir: &Path) {
-        let Some(found) = find_agents_md(dir) else {
-            return;
-        };
-        let key = normalize_agents_md(&found);
-        if !self.known.contains(&key) && !self.queue.contains(&key) {
-            self.queue.push(key);
+        for found in find_agents_md(dir) {
+            let key = normalize_agents_md(&found);
+            if !self.known.contains(&key) && !self.queue.contains(&key) {
+                self.queue.push(key);
+            }
         }
     }
 
@@ -992,51 +1014,95 @@ mod tests {
         );
     }
 
+    /// v2 `probeDir` walks `dirsRootToLeaf`: a session running in a
+    /// subdirectory is reminded about the work-tree root's instructions too,
+    /// root first.
+    #[test]
+    fn test_find_agents_md_walks_from_the_work_tree_root() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        let nested = repo.path().join("packages").join("app");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(repo.path().join("AGENTS.md"), "# Root").unwrap();
+        std::fs::write(nested.join("AGENTS.md"), "# Nested").unwrap();
+
+        let found = find_agents_md(&nested);
+        assert_eq!(
+            found,
+            vec![repo.path().join("AGENTS.md"), nested.join("AGENTS.md")],
+            "root first, then the leaf: {found:?}"
+        );
+    }
+
     #[test]
     fn test_find_agents_md_cases() {
         let dir = tempfile::tempdir().unwrap();
 
-        assert_eq!(find_agents_md(dir.path()), None);
+        assert!(find_agents_md(dir.path()).is_empty());
 
         let uppercase = dir.path().join("AGENTS.md");
         std::fs::write(&uppercase, "# Instructions").unwrap();
-        let found = find_agents_md(dir.path()).expect("AGENTS.md found");
-        assert_eq!(found, uppercase);
-        assert_eq!(found.file_name().unwrap(), "AGENTS.md");
+        let found = find_agents_md(dir.path());
+        assert_eq!(found, vec![uppercase]);
+        assert_eq!(found[0].file_name().unwrap(), "AGENTS.md");
 
         let dir2 = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir2.path().join("AGENTS.md")).unwrap();
-        assert_eq!(
-            find_agents_md(dir2.path()),
-            None,
+        assert!(
+            find_agents_md(dir2.path()).is_empty(),
             "directory named AGENTS.md must not match"
         );
 
         let dir3 = tempfile::tempdir().unwrap();
         let lowercase = dir3.path().join("agents.md");
         std::fs::write(&lowercase, "# Instructions").unwrap();
-        let found_lower = find_agents_md(dir3.path()).expect("agents.md found");
-        assert!(found_lower.is_file());
+        let found_lower = find_agents_md(dir3.path());
+        assert_eq!(found_lower.len(), 1);
+        assert!(found_lower[0].is_file());
         assert_eq!(
-            std::fs::read_to_string(&found_lower).unwrap(),
+            std::fs::read_to_string(&found_lower[0]).unwrap(),
             "# Instructions"
         );
-        assert_eq!(found_lower.parent().unwrap(), dir3.path());
-        assert!(
-            found_lower
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .eq_ignore_ascii_case("agents.md")
-        );
-        #[cfg(not(windows))]
-        assert_eq!(found_lower, lowercase);
+        assert_eq!(found_lower[0].parent().unwrap(), dir3.path());
 
+        // Both plain names present: the uppercase one wins, and only one is
+        // listed (v2's `break` inside `findAgentsMdInDir`).
         let dir4 = tempfile::tempdir().unwrap();
-        let path_upper = dir4.path().join("AGENTS.md");
-        std::fs::write(&path_upper, "# Upper").unwrap();
-        let found_prec = find_agents_md(dir4.path()).expect("found");
-        assert_eq!(found_prec.file_name().unwrap(), "AGENTS.md");
+        std::fs::write(dir4.path().join("AGENTS.md"), "# Upper").unwrap();
+        std::fs::write(dir4.path().join("agents.md"), "# Lower").unwrap();
+        let found_prec = find_agents_md(dir4.path());
+        assert_eq!(found_prec.len(), 1);
+        assert_eq!(found_prec[0].file_name().unwrap(), "AGENTS.md");
+    }
+
+    /// v2 `findAgentsMdInDir`: the `.kimi-code/AGENTS.md` variant is listed
+    /// alongside the plain file, and a whitespace-only file is not an
+    /// instruction file (v2 `isNonEmptyFile`, the same rule the init-time
+    /// loader applies).
+    #[test]
+    fn test_find_agents_md_discovers_dot_kimi_and_ignores_empty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".kimi-code")).unwrap();
+        std::fs::write(dir.path().join(".kimi-code/AGENTS.md"), "# House rules").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Instructions").unwrap();
+        let found = find_agents_md(dir.path());
+        assert_eq!(found.len(), 2, "both variants: {found:?}");
+        assert_eq!(found[0].file_name().unwrap(), "AGENTS.md");
+        assert_eq!(
+            found[0].parent().unwrap().file_name().unwrap(),
+            ".kimi-code"
+        );
+        assert_eq!(found[1], dir.path().join("AGENTS.md"));
+
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(empty.path().join("AGENTS.md"), "  \n\t\n").unwrap();
+        assert!(
+            find_agents_md(empty.path()).is_empty(),
+            "a whitespace-only AGENTS.md is not an instruction file"
+        );
+        std::fs::create_dir(empty.path().join(".kimi-code")).unwrap();
+        std::fs::write(empty.path().join(".kimi-code/AGENTS.md"), "").unwrap();
+        assert!(find_agents_md(empty.path()).is_empty());
     }
 
     /// A non-turn build pass carrying one step's tool activity — what

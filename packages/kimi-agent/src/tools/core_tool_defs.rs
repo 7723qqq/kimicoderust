@@ -19,16 +19,16 @@ If the user provides a concrete file path to a text file, call Read directly. Do
 When you need several files, prefer to read them in parallel: emit multiple `Read` calls in a single response instead of reading one file per turn.
 
 - Relative paths resolve against the working directory; a path outside the working directory must be absolute.
-- Returns up to 1000 lines or 100 KB per call, whichever comes first; lines longer than 2000 chars are truncated mid-line (recover the elided content with Bash, e.g. `cut` or `sed`).
-- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read up to the 1000-line cap.
+- Results are bounded by `max_chars`: 100 000 by default, up to 500 000. A page that hits the budget says so in the status block and returns the arguments to continue from.
+- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read toward the end of the file; the page still ends on the `max_chars` budget.
 - Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused to protect secrets; do not attempt to read them. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public SSH keys such as `id_rsa.pub` read normally.
 - UTF-8 text files are read directly. UTF-16 LE/BE text files (with or without a BOM) are detected automatically and transcoded to UTF-8 for display; the status block notes the detected encoding, and Edit/Write on such a file still expect UTF-8 — convert its encoding first (e.g. with `iconv`). Other encodings (e.g. GBK), binary files, and files containing NUL bytes are refused.
 - **Images and videos** (max 100MB) are sent to the model as multimodal media instead of text; this requires a model with the matching vision capability (`image_in` / `video_in`). `region` and `full_resolution` apply only to images; `line_offset` and `n_lines` apply only to text files.
 - Large images are downsampled by default when automatic compression can safely fit them within model limits, which can blur fine detail (small text, dense UI). Compute absolute coordinates from the original dimensions reported in the `<system>` block, never by measuring the displayed copy. When the `<system>` tag reports downsampling and you need that detail, call Read again with the `region` parameter (original-image pixel coordinates) to view a crop at full fidelity, or set `full_resolution` to true when the whole file fits the per-image byte limit. Re-reading the same file without these parameters just reproduces the same downsampled image.
 - If automatic compression cannot safely produce an image within model limits, the tool returns an error and does not send the original image. Follow the error: use Bash or an available image-processing tool to create a smaller copy, then read that copy. Do not retry the unchanged file.
-- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines); the absolute value cannot exceed 1000.
+- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).
 - Output format: `<line-number>\t<content>` per line.
-- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line and byte counts, truncation, line-ending notes) and is not part of the file itself.
+- A `<system>...</system>` status block is appended after the file content; it summarizes how much was read (line count, range completeness, truncation, line-ending notes) and is not part of the file itself.
 - Pure CRLF files are displayed with LF line endings; `Edit` matches this output and preserves CRLF when writing back.
 - Mixed or lone carriage-return line endings are shown as `\r` and require exact `Edit.old_string` escapes.
 - After a successful `Edit`/`Write`, do not re-read solely to prove the write landed. When the task depends on an exact file, API, or output shape, inspect the final external contract before finishing.
@@ -67,7 +67,6 @@ const WRITE_DESCRIPTION: &str = r#"Create, append to, or replace a file entirely
 
 - Missing parent directories are created automatically (like `mkdir(parents=True, exist_ok=True)`).
 - Mode defaults to overwrite; append adds content at EOF without adding a newline.
-- Write is NOT ALLOWED for incremental changes to existing files, including trivial, one-line, quick, or cosmetic edits. Use Edit instead.
 - Use Write only when the file does not exist, you intend a complete replacement, or the new contents have little continuity with the old contents.
 - Do not create unsolicited documentation files (`*.md` write-ups, `README`s, summaries) just because a task finished — write one only when the user asks for it, or when a task or project instruction requires it (e.g. the plan-mode plan file, created with Write when plan mode directs you to, or a changeset the repo mandates).
 - Read before overwriting an existing file.
@@ -78,14 +77,11 @@ const WRITE_DESCRIPTION: &str = r#"Create, append to, or replace a file entirely
 
 const EDIT_DESCRIPTION: &str = r#"Perform exact replacements in existing files.
 
-- Edit is mandatory for every incremental change, especially small edits. DO NOT use Write or Bash `sed`.
 - Read the target file before every Edit. DO NOT call Edit from memory, stale context, or a guessed `old_string`.
 - Take `old_string` and `new_string` from the Read output view.
 - Drop the line-number prefix and tab; match only file content.
 - `old_string` must be unique unless `replace_all` is set.
 - If `old_string` is ambiguous, add surrounding context. Use `replace_all` only when every occurrence should change — for example, renaming a symbol throughout the file.
-- Multiple Edit calls may run in one response only when they do not target the same file.
-- DO NOT issue consecutive Edit calls on the same file. A previous Edit can invalidate a later Edit's `old_string`, causing `old_string not found`. Read the file again before the next Edit.
 - A write lock serializes same-file edits in response order, but serialization does not make stale `old_string` valid.
 - For pure CRLF files, Read shows LF; use LF in `old_string` and `new_string`, and Edit writes CRLF back.
 - For mixed endings or lone carriage returns, Read shows carriage returns as \r; include actual \r escapes in those positions.
@@ -95,7 +91,6 @@ const BASH_DESCRIPTION: &str = r#"Execute a `${SHELL_NAME}` command. Use this fo
 
 **Translate these to a dedicated tool instead:**
 - `cat` / `head` / `tail` (known path) → `Read`
-- `sed` / `awk` (in-place edit) → `Edit`
 - `echo > file` / `cat <<EOF` → `Write`
 - `find` / recursive `ls` to locate files by name pattern → `Glob` (plain `ls <known-directory>` is fine for listing a directory)
 - `grep` / `rg` (search file contents) → `Grep`
@@ -199,7 +194,7 @@ fn build_core_tool_defs() -> Vec<ToolInfo> {
                         "description": "Path to a file. Text files are read as text; image and video files are sent to the model as multimodal content (requires a model with the matching vision capability). Relative paths resolve against the working directory; a path outside the working directory must be absolute. Directories are not supported; use `ls` via Bash for a known directory, or Glob for pattern search."
                     },
                     "line_offset": {
-                        "description": "The line number to start reading from. Omit to start at line 1. Negative values read from the end of the file; the absolute value cannot exceed 1000.",
+                        "description": "The line number to start reading from. Omit to start at line 1. Negative values read from the end of the file (for example, -100 reads the last 100 lines).",
                         "anyOf": [
                             {
                                 "type": "integer",
@@ -208,8 +203,7 @@ fn build_core_tool_defs() -> Vec<ToolInfo> {
                             },
                             {
                                 "type": "integer",
-                                "minimum": -1000,
-                                "maximum": -1
+                                "exclusiveMaximum": 0
                             }
                         ]
                     },
@@ -219,7 +213,7 @@ fn build_core_tool_defs() -> Vec<ToolInfo> {
                         "minimum": 0
                     },
                     "n_lines": {
-                        "description": "The number of lines to read; the tool also applies its internal cap. Omit to read up to the internal cap of 1000 lines. Text files only.",
+                        "description": "The number of lines to read. Omit to read toward the end of the file. Results are bounded by max_chars, with continuation arguments when the requested range is incomplete. Text files only.",
                         "type": "integer",
                         "exclusiveMinimum": 0,
                         "maximum": 9007199254740991i64
@@ -940,14 +934,15 @@ mod tests {
                 .clone()
         };
 
-        // Read: ${MAX_LINES} / ${MAX_BYTES_KB} / ${MAX_LINE_LENGTH} /
-        // ${MAX_MEDIA_MEGABYTES} rendered with the v2 constants.
+        // Read: the page budget is characters, not lines or bytes (v2
+        // `read.md`: "Results are bounded by `max_chars`"), and a negative
+        // `line_offset` has no schema ceiling.
         let read = get("Read");
-        assert!(read.contains("1000 lines or 100 KB per call"));
-        assert!(read.contains("2000 chars are truncated mid-line"));
-        assert!(read.contains("1000-line cap"));
+        assert!(read.contains("Results are bounded by `max_chars`"));
+        assert!(!read.contains("truncated mid-line"));
+        assert!(!read.contains("1000-line cap"));
         assert!(read.contains("(max 100MB)"));
-        assert!(read.contains("the absolute value cannot exceed 1000."));
+        assert!(!read.contains("absolute value cannot exceed"));
 
         // Bash: ${SHELL_NAME} / ${DEFAULT_TIMEOUT_S} / ${MAX_TIMEOUT_S} /
         // ${DEFAULT_BACKGROUND_TIMEOUT_S} / ${MAX_BACKGROUND_TIMEOUT_S}.
@@ -1034,7 +1029,9 @@ mod tests {
             "Optional timeout in seconds for the command to execute. Foreground default 60s, max 300s. Background default 600s, max 86400s. Ignored for background commands when disable_timeout=true."
         );
 
-        // Read.line_offset — z.union maps to anyOf with the v2 bounds.
+        // Read.line_offset — v2's `z.union([positive, negative])` maps to anyOf
+        // with no lower bound on the negative branch; the fork used to pin a
+        // -1000 floor here that v2 never had.
         let read_schema = get("Read");
         let any_of = read_schema["properties"]["line_offset"]["anyOf"]
             .as_array()
@@ -1042,8 +1039,11 @@ mod tests {
         assert_eq!(any_of[0]["type"], "integer");
         assert_eq!(any_of[0]["minimum"], 1);
         assert_eq!(any_of[1]["type"], "integer");
-        assert_eq!(any_of[1]["minimum"], -1000);
-        assert_eq!(any_of[1]["maximum"], -1);
+        assert_eq!(any_of[1]["exclusiveMaximum"], 0);
+        assert!(
+            any_of[1].get("minimum").is_none(),
+            "v2's negative branch has no floor"
+        );
 
         // Read.region — nested object with its own required list.
         let region = &read_schema["properties"]["region"];

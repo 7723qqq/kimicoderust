@@ -30,12 +30,6 @@ pub type OutputUpdate<'a> = &'a (dyn Fn(&str, &str) + Send + Sync);
 
 use crate::turn_loop::types::{ExecutableToolResult, ToolInfo};
 
-/// Maximum number of lines a native Read returns (host Read cap).
-const READ_MAX_LINES: usize = 1000;
-/// Maximum rendered length of a single Read line (host Read cap).
-const READ_MAX_LINE_LENGTH: usize = 2000;
-/// Maximum rendered output bytes for a native Read (host/addon MAX_BYTES).
-const READ_MAX_OUTPUT_BYTES: usize = 100 * 1024;
 /// Maximum file size a native Read serves (addon TRANSCODE_MAX_BYTES; larger
 /// files fall back to the host, which streams them).
 const READ_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -221,8 +215,6 @@ impl ProgressThrottle {
         }
     }
 }
-/// Cap on captured Bash output (matches the JS tool's truncation scale).
-const BASH_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 pub mod agent_tool;
 pub mod ask_user_question;
@@ -252,6 +244,7 @@ pub mod mode_mutex;
 pub mod moonshot_service;
 pub mod plan_mode;
 pub mod read_media;
+pub mod registry;
 pub mod sandbox;
 mod search;
 pub mod select_tools;
@@ -266,6 +259,8 @@ pub mod todo_item;
 pub mod todo_list;
 pub mod tool_dedupe;
 pub mod tool_policy;
+pub mod tool_retriever;
+pub mod tool_select_state;
 mod toolset;
 pub mod tower;
 pub mod web_search;
@@ -405,10 +400,19 @@ pub const NATIVE_TOOL_NAMES: &[&str] = &[
 /// execute natively — host-forwarded calls stay under the host's own
 /// `toolDedupeService`, so a repeated call is never deduped twice.
 pub fn is_native_tool_name(tool_name: &str) -> bool {
+    is_builtin_tool_name(tool_name) || tool_name.starts_with("mcp__")
+}
+
+/// The engine's own executable builtins, excluding the MCP names
+/// [`is_native_tool_name`] also accepts.
+///
+/// Dispatch serves both, which is why `is_native_tool_name` lumps them
+/// together, but "registered inline" is a different question: an `mcp__*` name
+/// belongs to a server and is deferred or missing depending on that server's
+/// state, so the disclosure decision must not treat it as a builtin.
+pub fn is_builtin_tool_name(tool_name: &str) -> bool {
     let lowered = tool_name.to_ascii_lowercase();
-    NATIVE_TOOL_NAMES.contains(&lowered.as_str())
-        || github::is_github_tool(tool_name)
-        || tool_name.starts_with("mcp__")
+    NATIVE_TOOL_NAMES.contains(&lowered.as_str()) || github::is_github_tool(tool_name)
 }
 
 /// The engine's own spelling for a tool name the model echoed back.
@@ -626,6 +630,12 @@ pub struct NativeToolset {
     /// current deferred set against this, so a mid-session MCP change
     /// announces only the delta instead of the full list every turn.
     announced_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// v2 #4719: the session's tool-select revision ledger (initial table +
+    /// ordered changes). `take_disclosure_announcement` reconciles the live
+    /// registry into it and walks changes since the last announced revision.
+    tool_select_state: Arc<std::sync::Mutex<crate::tools::tool_select_state::ToolSelectState>>,
+    /// The last announcement revision delivered to the model.
+    announcement_revision: Arc<std::sync::atomic::AtomicUsize>,
     /// Upstream #4190: whether the empty loadable state ("No tools are
     /// currently available for dynamic loading…") has already been announced.
     /// Set when it goes out, cleared when a non-empty announcement follows,
@@ -661,6 +671,11 @@ pub struct NativeToolset {
     /// advertises `select_tools` instead; a call to a deferred-but-unloaded
     /// tool is refused with load guidance.
     tool_select_enabled: bool,
+    /// The session's initial tool-name snapshot (v2 #4720 / #4719): when
+    /// disclosure is off, later requests reconcile the live registry into
+    /// this set instead of rebuilding it, so same-name updates use the
+    /// current definition and runtime-only additions stay invisible.
+    initial_tool_names: std::sync::Arc<std::sync::Mutex<Option<std::collections::HashSet<String>>>>,
     /// `[background].bash_auto_background_on_timeout`: migrate a timed-out
     /// foreground Bash call to the background instead of killing it.
     /// Defaults to `true`.

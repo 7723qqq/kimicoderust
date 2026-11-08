@@ -1096,12 +1096,15 @@ pub struct SessionBtwCancelParams {
 }
 
 /// Params for `session/generate_title`. `source` is `first_turn` (default)
-/// or `user_prompts`; `digest` is rejected.
+/// or `user_prompts`; `digest` is rejected. `force` marks a host-forced
+/// regeneration in the title-generation telemetry event.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionGenerateTitleParams {
     pub session_id: String,
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Params for `session/background_task_output`.
@@ -1315,7 +1318,7 @@ pub struct ToolExecuteResponse {
 /// kosong's `inputOther` in; upstream has no such file). `total_tokens` is
 /// `input_tokens + output_tokens` under the same convention — not the
 /// provider's raw total.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     #[serde(default)]
     pub input_tokens: u32,

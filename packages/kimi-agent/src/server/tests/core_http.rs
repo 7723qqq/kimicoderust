@@ -428,6 +428,54 @@ async fn session_goal_route_serves_the_engine_store_snapshot() {
     assert_eq!(body["budget"]["remainingTurns"], 3);
 }
 
+/// v2 #4568: `PATCH /sessions/{id}/goal` edits the current objective in
+/// place, without resetting counters or the goal id, and refuses an empty
+/// objective or an unknown session.
+#[tokio::test]
+async fn patch_session_goal_edits_the_objective_in_place() {
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let hub = Arc::new(EventHub::new());
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = store
+        .create_workspace(dir.path().to_str().unwrap(), None)
+        .unwrap();
+    store
+        .create_session_with_workspace("sess-goal-edit", None, Some(&workspace.id))
+        .unwrap();
+    let server = HttpServer::with_hub(store.clone(), hub.clone())
+        .with_engine(engine_without_a_model(store.clone(), hub));
+    let session_store =
+        crate::storage::StateStore::for_session(dir.path(), "sess-goal-edit").unwrap();
+    for write in [
+        json!({ "action": "create", "objective": "old objective" }),
+        json!({ "action": "record_usage", "turns": 2 }),
+    ] {
+        let outcome = session_store.apply_write("goal", &write).unwrap();
+        session_store.write_domain("goal", &outcome.stored).unwrap();
+    }
+
+    let patch = |objective: &str, session: &str| HttpRequest {
+        method: "PATCH".into(),
+        path: format!("/api/v1/sessions/{session}/goal"),
+        query: None,
+        headers: HashMap::new(),
+        body: serde_json::to_vec(&json!({ "objective": objective })).unwrap(),
+    };
+    let res = server
+        .handle_request(&patch("new objective", "sess-goal-edit"))
+        .await;
+    assert_eq!(res.status, 200);
+    let body: Value = serde_json::from_slice(&res.body).unwrap();
+    assert_eq!(body["objective"], "new objective");
+    assert_eq!(body["status"], "active");
+    assert_eq!(body["turnsUsed"], 2, "editing must not reset counters");
+
+    let empty = server.handle_request(&patch("   ", "sess-goal-edit")).await;
+    assert_eq!(empty.status, 400);
+    let unknown = server.handle_request(&patch("x", "sess-missing")).await;
+    assert_eq!(unknown.status, 404);
+}
+
 #[tokio::test]
 async fn the_prompt_route_reaches_the_engine_and_reports_its_failure() {
     let server = HttpServer::in_memory().unwrap();

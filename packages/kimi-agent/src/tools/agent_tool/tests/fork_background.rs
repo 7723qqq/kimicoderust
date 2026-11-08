@@ -94,11 +94,108 @@ async fn fork_inherits_conversation_history_and_runs_natively() {
             .contains(crate::subagent::fork::FORK_CONTEXT_NOTICE.trim())
     );
     assert_eq!(sent_messages[user_idx + 4].role, "user");
-    assert!(
-        sent_messages[user_idx + 4]
-            .content
-            .contains("continue from fork")
+    // v2 `runAgentTurn` submits `{ role: 'user', content: [{ text: prompt }] }`
+    // — the task prompt alone. A `"{systemPrompt}\n\nTask: …"` wrapper would
+    // change the request bytes for every spawn.
+    assert_eq!(sent_messages[user_idx + 4].content, "continue from fork");
+    // And a fork inherits the caller's scope, system prompt included: the
+    // child's first request carries the session transport's own prompt.
+    assert_eq!(sent_messages[0].role, "system");
+    assert_eq!(sent_messages[0].content, "test");
+}
+
+/// v2 `agentLifecycle.create({ binding: { profile } })`: a spawned subagent's
+/// first request carries its profile's `systemPrompt`, not the session's, and
+/// its user message is the bare prompt.
+#[tokio::test]
+async fn a_spawn_sends_the_profile_system_prompt_and_the_bare_prompt() {
+    let llm = Arc::new(RecordingPromptLlm::new(vec!["child answer".into()]));
+    let manager = manager_with_callbacks(llm.clone(), Arc::new(EventRecorder::new())).await;
+    manager.register_builtin_profiles().await;
+    let coder_prompt = manager
+        .get_definition("coder")
+        .await
+        .expect("the builtin coder profile is registered")
+        .system_prompt;
+
+    let result = execute_agent(
+        &manager,
+        None,
+        &serde_json::json!({ "subagent_type": "coder", "prompt": "do the task" }),
+        None,
+        None,
+        Some("call-spawn"),
+        None,
+    )
+    .await
+    .expect("a plain spawn runs natively");
+    assert!(!result.is_error, "{}", result.content);
+
+    let messages_sent = llm.messages_sent.lock().unwrap();
+    let sent = &messages_sent[0];
+    assert_eq!(sent[0].role, "system");
+    assert_eq!(sent[0].content, coder_prompt);
+    let user = sent
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("the spawn carries its prompt");
+    assert_eq!(user.content, "do the task");
+}
+
+/// v2 `checkBackendArgs` (`agentTool.ts:328-349`): with the
+/// `subagent_backends` flag off, a non-empty `backend` is refused with the
+/// exact v2 message instead of being silently ignored — otherwise a model that
+/// asked for an external backend would believe the in-process spawn honoured
+/// it. An empty or whitespace value is the in-process default and launches.
+#[tokio::test]
+async fn a_backend_argument_is_refused_before_spawn() {
+    let recorder = Arc::new(EventRecorder::new());
+    let manager = manager_with_callbacks(Arc::new(SummaryLlm), recorder.clone()).await;
+    manager.register_builtin_profiles().await;
+
+    let result = execute_agent(
+        &manager,
+        None,
+        &serde_json::json!({
+            "prompt": "must not launch",
+            "subagent_type": "coder",
+            "backend": "claude-code",
+        }),
+        None,
+        None,
+        Some("call-backend-unavailable"),
+        None,
+    )
+    .await
+    .expect("the native gate answers instead of falling back");
+
+    assert!(result.is_error, "{}", result.content);
+    assert_eq!(
+        result.content,
+        "backend is disabled: the subagent_backends experimental flag is off."
     );
+    assert!(
+        manager.list().await.is_empty(),
+        "the refusal happens before any subagent is spawned"
+    );
+
+    // An empty value is the in-process default, which launches normally.
+    let launched = execute_agent(
+        &manager,
+        None,
+        &serde_json::json!({
+            "prompt": "run in process",
+            "subagent_type": "coder",
+            "backend": "  ",
+        }),
+        None,
+        None,
+        Some("call-backend-blank"),
+        None,
+    )
+    .await
+    .expect("a blank backend does not fall back to the host");
+    assert!(!launched.is_error, "{}", launched.content);
 }
 
 /// v2 refuses a background launch before `spawn` when the live table lacks
@@ -203,31 +300,53 @@ async fn run_in_background_registers_in_task_runner() {
 
     assert!(!result.is_error);
     assert!(result.content.contains("status: running"));
-    assert!(result.content.contains("task_id: subagent-"));
+    assert!(
+        result.content.contains("task_id: agent-"),
+        "v2 mints the background task id from the agent prefix:\n{}",
+        result.content
+    );
 
-    let agent_id = result
-        .content
-        .lines()
-        .find(|l| l.starts_with("task_id: "))
-        .unwrap()
-        .strip_prefix("task_id: ")
-        .unwrap();
+    let field = |name: &str| {
+        result
+            .content
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+            .unwrap_or_else(|| panic!("the result carries {name}:\n{}", result.content))
+            .to_string()
+    };
+    let task_id = field("task_id");
+    let agent_id = field("agent_id");
+    assert_ne!(
+        task_id, agent_id,
+        "the task id is its own identifier, not the agent id"
+    );
+    assert!(
+        result
+            .content
+            .contains(&format!("NOT task_id (\"{task_id}\")")),
+        "the resume hint names the task id explicitly:\n{}",
+        result.content
+    );
 
-    let wait_res = runner.wait(agent_id, 3000).await;
+    let wait_res = runner.wait(&task_id, 3000).await;
     assert!(matches!(
         wait_res,
         crate::storage::TaskWaitResult::Completed(_)
     ));
 
-    let output = runner.get_output(agent_id);
+    let output = runner.get_output(&task_id);
     assert_eq!(
         output.as_deref(),
         Some("findings: the loop is in run_turn.rs")
     );
 
-    let entry = runner.entry(agent_id).expect("entry must exist");
+    let entry = runner.entry(&task_id).expect("entry must exist");
     assert_eq!(entry["status"], "completed");
     assert_eq!(entry["description"], "Scout background");
+    assert_eq!(
+        entry["agentId"], agent_id,
+        "the task keeps the agent id for resume"
+    );
 }
 
 #[tokio::test]
@@ -256,20 +375,83 @@ async fn run_in_background_cooperative_stop_via_task_runner() {
     .await
     .expect("must execute natively");
 
-    let agent_id = result
+    let task_id = result
         .content
         .lines()
         .find(|l| l.starts_with("task_id: "))
         .unwrap()
         .strip_prefix("task_id: ")
         .unwrap();
+    assert!(
+        task_id.starts_with("agent-"),
+        "a background subagent task id carries the agent prefix, got {task_id}"
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let stop_res = runner
-        .stop(agent_id, None)
+        .stop(task_id, None)
         .await
         .expect("stop should succeed");
     assert_eq!(stop_res["status"], "killed");
     assert_eq!(stop_res["stopReason"], "Stopped by TaskStop");
+}
+
+/// v2 `forkIncompatibility` compares an explicit `model` against the caller's
+/// own alias: naming it is a no-op inherit, anything else is an override. The
+/// fork passed `None` as the caller model, so even the caller's own alias was
+/// rejected.
+#[tokio::test]
+async fn a_fork_may_name_the_callers_own_model_alias() {
+    let recorder = Arc::new(EventRecorder::new());
+    let llm =
+        Arc::new(RecordingPromptLlm::new(vec!["child result".into()]).with_alias("mock-model"));
+    let manager = manager_with_callbacks(llm.clone(), recorder.clone()).await;
+    manager.register_builtin_profiles().await;
+
+    let refused = execute_agent(
+        &manager,
+        None,
+        &serde_json::json!({
+            "prompt": "Continue the analysis",
+            "description": "Fork context",
+            "fork": true,
+            "model": "provider-other",
+        }),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the tool handles the call");
+    assert!(refused.is_error, "content: {}", refused.content);
+    assert!(
+        refused.content.contains("Cannot override the model"),
+        "content: {}",
+        refused.content
+    );
+
+    let accepted = execute_agent(
+        &manager,
+        None,
+        &serde_json::json!({
+            "prompt": "Continue the analysis",
+            "description": "Fork context",
+            "fork": true,
+            "model": "mock-model",
+        }),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the tool handles the call");
+    assert!(
+        !accepted.is_error,
+        "the caller's own alias is an inherit, not an override: {}",
+        accepted.content
+    );
+    assert!(accepted.content.contains("child result"));
 }

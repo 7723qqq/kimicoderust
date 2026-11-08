@@ -43,8 +43,8 @@ async fn test_shared_mcp_manager_reuses_one_manager_per_configuration() {
         )]
     };
 
-    let first = shared_mcp_manager(demo(), None, None);
-    let second = shared_mcp_manager(demo(), None, None);
+    let first = shared_mcp_manager(demo(), None, None, None, None);
+    let second = shared_mcp_manager(demo(), None, None, None, None);
     assert!(
         Arc::ptr_eq(&first, &second),
         "one configuration, one manager"
@@ -63,6 +63,8 @@ async fn test_shared_mcp_manager_reuses_one_manager_per_configuration() {
         )],
         None,
         None,
+        None,
+        None,
     );
     assert!(
         !Arc::ptr_eq(&first, &other),
@@ -79,6 +81,8 @@ async fn test_shared_mcp_manager_reuses_one_manager_per_configuration() {
             default_deferred: Some(true),
             ..Default::default()
         }),
+        None,
+        None,
     );
     assert!(
         !Arc::ptr_eq(&first, &with_section),
@@ -99,10 +103,41 @@ async fn test_shared_mcp_manager_reuses_one_manager_per_configuration() {
         )],
         None,
         None,
+        None,
+        None,
     );
     assert!(
         !Arc::ptr_eq(&first, &inline),
         "an explicit per-server deferred verdict must not reuse the manager"
+    );
+
+    // v2 `stdioCwd` is part of the identity: a stdio server with no `cwd` of
+    // its own starts in the session's workspace, so two workspaces must not
+    // share a manager whose working directory the first one decided.
+    let workspace_b = Some(std::path::PathBuf::from("/tmp/workspace-b"));
+    let elsewhere = shared_mcp_manager(demo(), None, None, workspace_b.clone(), None);
+    assert!(
+        !Arc::ptr_eq(&first, &elsewhere),
+        "a different stdio cwd must not reuse the manager"
+    );
+    let same_workspace = shared_mcp_manager(demo(), None, None, workspace_b, None);
+    assert!(
+        Arc::ptr_eq(&elsewhere, &same_workspace),
+        "the same cwd still shares one manager"
+    );
+
+    // The announced client identity is observable by every server, so a
+    // manager built under one identity must not be handed to another
+    // (v2 keeps one identity per workspace: workspaceMcpService.ts:42).
+    let named = shared_mcp_manager(demo(), None, None, None, Some("kimi-code-cli".into()));
+    assert!(
+        !Arc::ptr_eq(&first, &named),
+        "a different client identity must not reuse the manager"
+    );
+    let same_name = shared_mcp_manager(demo(), None, None, None, Some("kimi-code-cli".into()));
+    assert!(
+        Arc::ptr_eq(&named, &same_name),
+        "the same identity still shares one manager"
     );
 }
 

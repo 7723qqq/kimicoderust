@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
 import type { KimiConfig, ModelAlias } from '#/config-local';
@@ -371,10 +370,7 @@ export function providerTypeForAlias(config: KimiConfig, alias: string | undefin
  * directly misses both an `aliases` name and an `overrides.maxContextSize`,
  * so the session would report a 0-token window for a model it can run.
  */
-export function resolveModelContextWindow(
-  config: KimiConfig,
-  alias: string | undefined,
-): number {
+export function resolveModelContextWindow(config: KimiConfig, alias: string | undefined): number {
   if (alias === undefined) return 0;
   const entry = lookupModelAlias(config, alias);
   if (entry === undefined) return 0;
@@ -879,10 +875,7 @@ export function resolvePrintBackground(config: {
  * default model). `undefined` means the file declares none — the engine
  * treats the model as unknown and allows image reads.
  */
-export function resolveModelCapabilities(
-  config: KimiConfig,
-  alias?: string,
-): string[] | undefined {
+export function resolveModelCapabilities(config: KimiConfig, alias?: string): string[] | undefined {
   const key = alias ?? config.defaultModel;
   if (key === undefined) return undefined;
   const capabilities = lookupModelAlias(config, key)?.capabilities;
@@ -963,21 +956,24 @@ export function resolveWebFetchService(config: {
 export function resolveBingApiService(config: {
   services?: { bingApi?: MoonshotServiceConfigShape };
 }): WebServiceConfig | undefined {
-  return resolveWebService(
-    config.services?.bingApi,
-    'KIMI_BING_BASE_URL',
-    'KIMI_BING_API_KEY',
-  );
+  return resolveWebService(config.services?.bingApi, 'KIMI_BING_BASE_URL', 'KIMI_BING_API_KEY');
 }
 
-/** `where <name>` — the same PATH lookup `packages/kimi-agent/src/native/shell.rs` performs. */
+/**
+ * `where <name>` — the same PATH lookup `packages/kimi-agent/src/native/shell.rs`
+ * performs, answered by Bun's native resolver instead of a `where` subprocess.
+ * The declaration is module-local so it cannot merge with another package's Bun
+ * surface during a cross-package typecheck.
+ */
+declare const Bun: {
+  which(
+    command: string,
+    options?: { readonly PATH?: string; readonly cwd?: string },
+  ): string | null;
+};
+
 function whichOnPath(name: string): string | undefined {
-  const result = spawnSync('where', [name], { encoding: 'utf8', windowsHide: true });
-  if (result.status !== 0 || typeof result.stdout !== 'string') return undefined;
-  return result.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
+  return Bun.which(name) ?? undefined;
 }
 
 export function probeShellPath(): string | undefined {

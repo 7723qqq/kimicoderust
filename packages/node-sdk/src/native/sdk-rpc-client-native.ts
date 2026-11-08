@@ -147,6 +147,8 @@ import type {
   PluginInfo,
   PluginSummary,
   PromptPart,
+  PromptSubmissionResult,
+  SkillActivationResult,
   ReloadSummary,
   RenameSessionInput,
   ResumeSessionInput,
@@ -1126,8 +1128,8 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       );
     }
     try {
-      const turnId = await meta.handle.enqueueTurn(prompt, 'newTurn');
-      void meta.handle.turnOutcome(turnId).then(
+      const submission = await meta.handle.enqueueTurn(prompt, 'newTurn');
+      void meta.handle.turnOutcome(submission.turnId).then(
         (outcome) => this.settleTurn(meta, outcome),
         () => this.settleTurn(meta, undefined),
       );
@@ -1190,7 +1192,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     await meta.handle.cancelTurn();
   }
 
-  override async steer(input: SessionPromptRpcInput): Promise<void> {
+  override async steer(input: SessionPromptRpcInput): Promise<PromptSubmissionResult> {
     const meta = this.requireSession(input.sessionId);
     this.assertSessionModelWindow(meta);
     if (!meta.handle) {
@@ -1216,14 +1218,18 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
         input.clientMetadata?.displayText,
       );
     }
-    const turnId = await meta.handle.enqueueTurn(prompt, 'activeOrNewTurn');
+    const submission = await meta.handle.enqueueTurn(prompt, 'activeOrNewTurn');
     if (!meta.busy) {
       meta.busy = true;
-      void meta.handle.turnOutcome(turnId).then(
+      void meta.handle.turnOutcome(submission.turnId).then(
         (outcome) => this.settleTurn(meta, outcome),
         () => this.settleTurn(meta, undefined),
       );
     }
+    // v2 #4627: the submission result is what the host pairs its optimistic
+    // entry with; a steer that joined the turn must not be acknowledged until
+    // the engine reports the message read.
+    return submission;
   }
 
   /**
@@ -2379,12 +2385,12 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     // launches its own turn (a subagent system trigger on the engine), does
     // not touch the prompt-derived metadata, and awaits the run so a failed
     // launch surfaces as session.init_failed.
-    const turnId = await meta.handle.enqueueTurn(
+    const submission = await meta.handle.enqueueTurn(
       { role: 'user', content: DEFAULT_INIT_PROMPT },
       'newTurn',
     );
     try {
-      await meta.handle.turnOutcome(turnId);
+      await meta.handle.turnOutcome(submission.turnId);
     } catch (error) {
       throw new KimiError(ErrorCodes.SESSION_INIT_FAILED, 'Session init failed', {
         cause: error,
@@ -2668,7 +2674,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     if (!input.force && (meta.titleKind === 'generated' || meta.titleKind === 'custom')) {
       return meta.title;
     }
-    const title = await meta.handle.generateTitle(input.source);
+    const title = await meta.handle.generateTitle(input.source, input.force);
     if (title === null) return undefined;
     meta.title = title;
     meta.titleKind = 'generated';
@@ -2811,7 +2817,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     return merged;
   }
 
-  override async activateSkill(input: ActivateSkillRpcInput): Promise<void> {
+  override async activateSkill(input: ActivateSkillRpcInput): Promise<SkillActivationResult> {
     const meta = this.requireSession(input.sessionId);
     const name = input.name.trim();
     if (name.length === 0) {
@@ -2884,19 +2890,21 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     // fresh `newTurn` enqueue here would queue a second turn behind a busy
     // session instead of joining the running one.
     if (meta.busy) {
-      return this.steer({
+      const submission = await this.steer({
         sessionId: meta.id,
         input: parts,
         clientMetadata,
         skipPromptMetadata: true,
       });
+      return { activationId, submission };
     }
-    return this.prompt({
+    await this.prompt({
       sessionId: meta.id,
       input: parts,
       clientMetadata,
       skipPromptMetadata: true,
     });
+    return { activationId };
   }
 
   /**
@@ -3274,6 +3282,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
         transport: String(raw['transport']),
         status: raw['status'] as McpServerInfo['status'],
         toolCount: typeof raw['tool_count'] === 'number' ? raw['tool_count'] : (tools?.length ?? 0),
+        nextRetryAt: typeof raw['next_retry_at'] === 'number' ? raw['next_retry_at'] : undefined,
         tools,
       } as McpServerInfo;
     });
@@ -3480,7 +3489,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     const started = await beginMcpOAuthFlow({
       name,
       serverUrl: url,
-      clientName: 'Kimi Code',
+      clientName: this.identity?.productName,
       persist: async (tokens) => {
         const native = await this.engineMcpOAuth();
         native.mcpOauthStoreTokens(name, url, JSON.stringify(tokens), this.mcpOAuthDir());
@@ -3570,7 +3579,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     const started = await beginMcpOAuthFlow({
       name: locator.serverName,
       serverUrl: url,
-      clientName: 'Kimi Code',
+      clientName: this.identity?.productName,
       persist: async (tokens) => {
         const native = await this.engineMcpOAuth();
         native.mcpOauthStoreTokens(
@@ -3627,7 +3636,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
     const started = await beginMcpOAuthFlow({
       name: runtimeName,
       serverUrl: url,
-      clientName: 'Kimi Code',
+      clientName: this.identity?.productName,
       persist: async (tokens) => {
         const native = await this.engineMcpOAuth();
         native.mcpOauthStoreTokens(runtimeName, url, JSON.stringify(tokens), this.mcpOAuthDir());
@@ -4615,6 +4624,16 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
       closePluginStore();
       this.pluginStoreReady = false;
     }
+    // The MCP managers are process-wide and outlive a session on purpose
+    // (v2's workspace-scoped service: `/new` reuses the live connections), so
+    // closing the sessions above leaves their stdio children running. A host
+    // that is done with the engine is the one place that may stop them, and it
+    // has to: a plugin's server runs *in* the plugin's directory, so Windows
+    // keeps that directory busy — unremovable — until the child exits.
+    try {
+      const { mcpManagersDispose } = await import('@moonshot-ai/kimi-agent/native');
+      await mcpManagersDispose();
+    } catch {}
     await flushDiagnosticLogs();
   }
 }

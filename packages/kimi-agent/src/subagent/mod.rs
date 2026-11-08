@@ -8,6 +8,7 @@ pub mod btw;
 pub mod fork;
 pub mod manager;
 pub mod persistent;
+pub mod profile_prompt;
 pub mod secondary;
 pub mod types;
 

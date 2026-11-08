@@ -208,6 +208,9 @@ pub(super) struct RecordingPromptLlm {
     /// Content returned per call (cycled on the last entry).
     pub(super) responses: Vec<String>,
     pub(super) calls: Mutex<usize>,
+    /// `[models.<alias>]` name the transport would report (`LLM::model_alias`).
+    /// `None` mirrors a transport that only knows the wire model name.
+    pub(super) alias: Option<String>,
 }
 
 impl RecordingPromptLlm {
@@ -217,7 +220,13 @@ impl RecordingPromptLlm {
             messages_sent: Mutex::new(Vec::new()),
             responses,
             calls: Mutex::new(0),
+            alias: None,
         }
+    }
+
+    pub(super) fn with_alias(mut self, alias: &str) -> Self {
+        self.alias = Some(alias.to_string());
+        self
     }
 
     pub(super) fn call_count(&self) -> usize {
@@ -235,6 +244,9 @@ impl LLM for RecordingPromptLlm {
     }
     fn model_name(&self) -> &str {
         "recording-prompt-llm"
+    }
+    fn model_alias(&self) -> Option<&str> {
+        self.alias.as_deref()
     }
     fn is_retryable_error(&self, _: &str) -> bool {
         false

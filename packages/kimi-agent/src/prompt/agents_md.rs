@@ -67,6 +67,31 @@ fn read_agent_file(path: &Path) -> Option<AgentFile> {
     }
 }
 
+/// Every directory from the git work-tree root down to `work_dir`, inclusive
+/// (v2 `dirsRootToLeaf` in `loadAgentsMdForRoots`, `profile/context.ts:198-208`).
+///
+/// A session started in `packages/foo` of a monorepo must see the repository
+/// root's `AGENTS.md` as well as its own; before this the root's instructions
+/// were silently dropped whenever the work directory was a subdirectory.
+/// Without a work-tree root the chain is just `work_dir`, and a work directory
+/// outside the root keeps its single directory.
+pub(crate) fn instruction_dirs(work_dir: &Path) -> Vec<PathBuf> {
+    let single = || vec![work_dir.to_path_buf()];
+    let Some(root) = crate::permission::find_git_work_tree(&work_dir.display().to_string()) else {
+        return single();
+    };
+    let Ok(relative) = work_dir.strip_prefix(&root) else {
+        return single();
+    };
+    let mut chain = vec![root.clone()];
+    let mut current = root;
+    for component in relative.components() {
+        current.push(component);
+        chain.push(current.clone());
+    }
+    chain
+}
+
 /// Load and aggregate all relevant AGENTS.md files for a workspace.
 pub fn load_agents_md(workspace_root: &Path, custom_brand_home: Option<&Path>) -> LoadedAgentsMd {
     let mut discovered: Vec<AgentFile> = Vec::new();
@@ -96,11 +121,15 @@ pub fn load_agents_md(workspace_root: &Path, custom_brand_home: Option<&Path>) -
         }
     }
 
-    // 2. Workspace root: .kimi-code/AGENTS.md, AGENTS.md, agents.md
-    collect(workspace_root.join(".kimi-code").join("AGENTS.md"));
-    for name in AGENTS_MD_PLAIN_NAMES {
-        if collect(workspace_root.join(name)) {
-            break;
+    // 2. Every directory from the work-tree root down to the workspace root
+    //    (v2 `dirsRootToLeaf`): a session started in a subdirectory still sees
+    //    the repository root's instructions, root first.
+    for dir in instruction_dirs(workspace_root) {
+        collect(dir.join(".kimi-code").join("AGENTS.md"));
+        for name in AGENTS_MD_PLAIN_NAMES {
+            if collect(dir.join(name)) {
+                break;
+            }
         }
     }
 
@@ -191,6 +220,35 @@ mod tests {
         );
         assert_eq!(loaded.content, expected_content);
         assert_eq!(loaded.warning, None);
+    }
+
+    /// v2 `loadAgentsMdForRoots` walks from the work-tree root down to the work
+    /// directory (`dirsRootToLeaf`): a session started in `packages/app` of a
+    /// repository still reads the repository's own `AGENTS.md`, root first.
+    #[test]
+    fn test_load_agents_md_walks_from_the_work_tree_root() {
+        let repo = tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        let nested = repo.path().join("packages").join("app");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(repo.path().join("AGENTS.md"), "# Root rules").unwrap();
+        std::fs::write(nested.join("AGENTS.md"), "# Nested rules").unwrap();
+        let brand = tempdir().unwrap();
+
+        let loaded = load_agents_md(&nested, Some(brand.path()));
+        assert_eq!(
+            loaded.paths,
+            vec![
+                normalize_path_display(&repo.path().join("AGENTS.md")),
+                normalize_path_display(&nested.join("AGENTS.md")),
+            ],
+            "the chain runs root first, then the leaf"
+        );
+        assert!(
+            loaded.content.find("# Root rules").unwrap()
+                < loaded.content.find("# Nested rules").unwrap(),
+            "root instructions must precede the leaf's"
+        );
     }
 
     #[test]

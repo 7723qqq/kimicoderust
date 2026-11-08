@@ -1,0 +1,22 @@
+[package]
+name = "kimi-tui-host"
+version = "0.1.0"
+edition = "2024"
+description = "Composition root: one engine session behind the Rust terminal UI."
+
+[[bin]]
+name = "kimi-tui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+kimi-agent = { path = "../kimi-agent", default-features = false, features = ["cli"] }
+kimi-tui-app = { path = "../kimi-tui-app" }
+kimi-ui-core = { path = "../kimi-ui-core" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[dev-dependencies]
+# The integration tests drive the real transport and read the projection seam.
+kimi-tui-app = { path = "../kimi-tui-app", features = ["ops-trace"] }
+tokio = { version = "1", features = ["net", "io-util", "time"] }

@@ -1381,6 +1381,40 @@ fn test_file_history_crud_and_diff() {
         std::fs::read_to_string(&file_path).unwrap(),
         "original code"
     );
+
+    // v2 `manual_edit`: a file that moved on since the tool wrote it belongs to
+    // the user. Restoring the pre-image would silently destroy that edit, so
+    // the revert refuses and leaves the file alone.
+    std::fs::write(&file_path, "hand-edited after the turn").unwrap();
+    let conflict = store
+        .revert_turn_file_changes("sess-revert", 1, temp_ws.path())
+        .expect_err("a manual edit is a conflict, not a silent overwrite");
+    assert!(
+        matches!(
+            &conflict,
+            crate::session::sqlite_store::FileRevertError::Conflict { path, .. } if path == "src/main.rs"
+        ),
+        "{conflict:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file_path).unwrap(),
+        "hand-edited after the turn",
+        "the manual edit survives the refused undo"
+    );
+
+    // v2 `deleted`: the file the tool modified is gone, so there is nothing to
+    // restore it from and nothing to overwrite either.
+    std::fs::remove_file(&file_path).unwrap();
+    let deleted = store
+        .revert_turn_file_changes("sess-revert", 1, temp_ws.path())
+        .expect_err("a deleted file is a conflict");
+    assert!(
+        matches!(
+            &deleted,
+            crate::session::sqlite_store::FileRevertError::Conflict { path, .. } if path == "src/main.rs"
+        ),
+        "{deleted:?}"
+    );
 }
 
 /// `plan_undo_turns` reports the newest turn numbers first and refuses a
@@ -2484,6 +2518,58 @@ fn the_wire_readers_refuse_a_newer_protocol_version() {
     match store.fold_projection("sess-newer") {
         Err(EventStoreError::WireProtocolTooNew { .. }) => {}
         other => panic!("fold_projection must refuse a newer journal, got {other:?}"),
+    }
+}
+
+/// v2 #4638: the session store's readers share the event store's gate, so a
+/// row declaring a newer minimum reader is refused on every slice, not only
+/// on the cold fold.
+#[test]
+fn the_wire_readers_refuse_a_minimum_reader_version_above_this_engine() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-min-reader", None).unwrap();
+    store
+        .append_wire_event(&RawWireEvent {
+            id: "evt-min".into(),
+            session_id: "sess-min-reader".into(),
+            event_type: "prompt.submitted".into(),
+            payload: json!({}),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .unwrap();
+    {
+        let conn = store.conn.lock();
+        conn.execute(
+            "UPDATE wire_events SET min_protocol_version = '9.9' WHERE session_id = 'sess-min-reader'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let expect_too_low =
+        |result: Result<Vec<WireEventRecord>, EventStoreError>, reader: &str| match result {
+            Err(EventStoreError::WireReaderTooLow {
+                required,
+                supported,
+            }) => {
+                assert_eq!(required, "9.9");
+                assert_eq!(supported, WIRE_PROTOCOL_VERSION);
+            }
+            other => panic!("{reader} must refuse a newer min reader, got {other:?}"),
+        };
+    expect_too_low(
+        store.get_wire_events("sess-min-reader", 0, 10),
+        "get_wire_events",
+    );
+    expect_too_low(
+        store.interaction_wire_events("sess-min-reader"),
+        "interaction_wire_events",
+    );
+    match store.fold_projection("sess-min-reader") {
+        Err(EventStoreError::WireReaderTooLow { .. }) => {}
+        other => panic!("fold_projection must refuse a newer min reader, got {other:?}"),
     }
 }
 

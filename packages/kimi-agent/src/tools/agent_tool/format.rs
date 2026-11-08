@@ -1,30 +1,129 @@
-use super::defs::{
-    SUBAGENT_STOPPED_MESSAGE, USER_INTERRUPTED_SUBAGENT_MESSAGE, timeout_resume_hint,
-};
+use super::defs::{SUBAGENT_STOPPED_MESSAGE, USER_INTERRUPTED_SUBAGENT_MESSAGE};
 use super::events::{emit_cancelled, emit_completed, emit_failed};
 use crate::turn_loop::types::LoopTurnStopReason;
 
-/// The v2 success shape (`formatForegroundAgentSuccess`).
-pub(super) fn format_success(agent_id: &str, profile: &str, summary: &str) -> String {
+/// v2 `REPEAT_BREAKER_NOTICE`: a handoff, not a finished result.
+pub(super) const REPEAT_BREAKER_NOTICE: &str = "notice: The subagent was stopped by the repeat breaker after issuing the same tool call repeatedly. The summary below is its handoff, not a finished result.";
+
+/// v2 `NO_PARTIAL_OUTPUT`: the placeholder the failure shape prints when the
+/// subagent produced no text.
+pub(super) const NO_PARTIAL_OUTPUT: &str =
+    "[partial output] none — the subagent wrote no text in this run before it ended.";
+
+/// v2 `resumeHint`: `prompt` is `"..."` on success (the caller writes the next
+/// prompt) and `"continue"` on failure.
+pub(super) fn resume_hint(agent_id: &str, prompt: &str) -> String {
     format!(
-        "agent_id: {agent_id}\nactual_subagent_type: {profile}\nstatus: completed\n\n[summary]\n{summary}"
+        "resume_hint: Continue with Agent(resume=\"{agent_id}\", prompt=\"{prompt}\"). \
+Use agent_id only; do not set subagent_type. The subagent retains its prior context; \
+redo any unfinished tool call if its result was lost."
     )
 }
 
-/// The v2 failure shape (`formatForegroundAgentFailure`); the timeout case
-/// appends the resume hint.
+/// v2 `NEXT_STEP_BY_REASON`: what the parent should do next, per stop reason.
+pub(super) fn next_step(reason: &str) -> Option<&'static str> {
+    const RESUME_NEXT_STEP: &str = "next_step: Resume to continue where it stopped, or take over the task yourself; if neither works, report the failure to the user.";
+    match reason {
+        "completed" => None,
+        "repeat_breaker" => Some(
+            "next_step: The subagent was stuck on one tool call. If you resume it, change the instructions or supply the missing input; otherwise continue the work yourself.",
+        ),
+        "cancelled" => Some(
+            "next_step: The user stopped this subagent. Do not restart it unless the user asks.",
+        ),
+        "filtered" => Some(
+            "next_step: Resuming is unlikely to help; rephrase or split the task before trying again.",
+        ),
+        "max_tokens" | "max_steps" | "provider_error" | "no_final_message" | "stopped"
+        | "timed_out" | "error" => Some(RESUME_NEXT_STEP),
+        _ => Some(RESUME_NEXT_STEP),
+    }
+}
+
+/// The v2 `SubagentStopReason` for a finished turn.
+pub(super) fn subagent_stop_reason(
+    stop: &LoopTurnStopReason,
+    user_cancelled: bool,
+) -> &'static str {
+    match stop {
+        LoopTurnStopReason::EndTurn => "completed",
+        LoopTurnStopReason::RepeatBreaker => "repeat_breaker",
+        LoopTurnStopReason::MaxSteps => "max_steps",
+        LoopTurnStopReason::MaxTokens => "max_tokens",
+        LoopTurnStopReason::Filtered => "filtered",
+        LoopTurnStopReason::Aborted => {
+            if user_cancelled {
+                "cancelled"
+            } else {
+                "stopped"
+            }
+        }
+        _ => "error",
+    }
+}
+
+/// A turn that ended cleanly enough to report as a completion. v2's lifecycle
+/// completion carries only the repeat-breaker stop code; every other failure
+/// arrives as a thrown error.
+pub(super) fn is_success_reason(reason: &str) -> bool {
+    matches!(reason, "completed" | "repeat_breaker")
+}
+
+/// The report token for a native run failure (v2's error-code → token table):
+/// `AGENT_NO_FINAL_MESSAGE` has its own token, every other run failure is a
+/// plain `error`.
+pub(super) fn run_failure_reason(message: &str) -> &'static str {
+    if message.starts_with(crate::subagent::manager::NO_FINAL_MESSAGE_PREFIX) {
+        "no_final_message"
+    } else {
+        "error"
+    }
+}
+
+/// The v2 success shape (`formatForegroundAgentSuccess`).
+pub(super) fn format_success(agent_id: &str, profile: &str, summary: &str, reason: &str) -> String {
+    let mut text = format!(
+        "agent_id: {agent_id}\nactual_subagent_type: {profile}\nstatus: completed\nstop_reason: {reason}"
+    );
+    if reason == "repeat_breaker" {
+        text.push('\n');
+        text.push_str(REPEAT_BREAKER_NOTICE);
+    }
+    text.push_str(&format!(
+        "\n\n[summary]\n{summary}\n\n{}",
+        resume_hint(agent_id, "...")
+    ));
+    if let Some(next) = next_step(reason) {
+        text.push('\n');
+        text.push_str(next);
+    }
+    text
+}
+
+/// The v2 failure shape (`formatForegroundAgentFailure`).
+///
+/// The message is the error the turn ended with; `partial_output` is what the
+/// subagent wrote before it stopped (v2 prints `NO_PARTIAL_OUTPUT` when there is
+/// none), and a cancelled turn omits the resume hint because resuming it is not
+/// the next step.
 pub(super) fn format_failure(
     agent_id: &str,
     profile: &str,
     message: &str,
-    timed_out: bool,
+    reason: &str,
+    partial_output: Option<&str>,
 ) -> String {
     let mut text = format!(
-        "agent_id: {agent_id}\nactual_subagent_type: {profile}\nstatus: failed\n\nsubagent error: {message}"
+        "agent_id: {agent_id}\nactual_subagent_type: {profile}\nstatus: failed\nstop_reason: {reason}\n\nsubagent error: {message}\n\n{}",
+        partial_output.unwrap_or(NO_PARTIAL_OUTPUT)
     );
-    if timed_out {
+    if reason != "cancelled" {
+        text.push_str("\n\n");
+        text.push_str(&resume_hint(agent_id, "continue"));
+    }
+    if let Some(next) = next_step(reason) {
         text.push('\n');
-        text.push_str(&timeout_resume_hint(agent_id));
+        text.push_str(next);
     }
     text
 }
@@ -42,25 +141,68 @@ pub(super) fn report_foreground_turn(
     turn: &crate::turn_loop::types::TurnResult,
     parent_cancel: Option<&crate::subagent::types::ParentCancel>,
 ) -> (String, bool) {
-    if matches!(turn.stop_reason, LoopTurnStopReason::Aborted) {
-        let interrupted = parent_cancel.is_some_and(|signal| signal.triggered());
-        let message = if interrupted {
-            emit_cancelled(callbacks, agent_id, profile_name);
-            USER_INTERRUPTED_SUBAGENT_MESSAGE
-        } else {
-            emit_failed(callbacks, agent_id, profile_name, SUBAGENT_STOPPED_MESSAGE);
-            SUBAGENT_STOPPED_MESSAGE
-        };
-        let mut content = format_failure(agent_id, profile_name, message, false);
-        if let Some(section) = crate::subagent::manager::partial_output_section(turn) {
-            content.push_str(&section);
-        }
-        (content, true)
-    } else {
+    let interrupted = parent_cancel.is_some_and(|signal| signal.triggered());
+    let reason = subagent_stop_reason(&turn.stop_reason, interrupted);
+    if is_success_reason(reason) {
         let summary = crate::subagent::manager::final_assistant_summary(&turn.messages);
         emit_completed(callbacks, agent_id, profile_name, &summary, &turn.usage);
-        (format_success(agent_id, profile_name, &summary), false)
+        return (
+            format_success(agent_id, profile_name, &summary, reason),
+            false,
+        );
     }
+    if reason == "cancelled" {
+        emit_cancelled(callbacks, agent_id, profile_name);
+    } else {
+        emit_failed(callbacks, agent_id, profile_name, SUBAGENT_STOPPED_MESSAGE);
+    }
+    let message = failure_message(&turn.stop_reason, turn.steps, interrupted);
+    let partial = crate::subagent::manager::partial_output_section(turn);
+    let content = format_failure(agent_id, profile_name, &message, reason, partial.as_deref());
+    (content, true)
+}
+
+/// The `subagent error:` text for a failed turn.
+///
+/// v2 throws a typed error carrying that error's own message: the step cap
+/// says how many steps it spent and carries **no** config advice (unlike the
+/// main-turn message), a filtered response keeps the provider sentence, and a
+/// token cap names the reason. Anything v2 does not word gets the stopped
+/// sentence, and a reason longer than v2's 2,000-character budget is cut with
+/// its `… [truncated]` marker.
+pub(super) fn failure_message(stop: &LoopTurnStopReason, steps: u32, interrupted: bool) -> String {
+    let message = match stop {
+        LoopTurnStopReason::Aborted if interrupted => USER_INTERRUPTED_SUBAGENT_MESSAGE.to_string(),
+        LoopTurnStopReason::MaxSteps => format!(
+            "Subagent hit the per-turn step cap (maxSteps={steps}) before finishing its handoff."
+        ),
+        LoopTurnStopReason::Filtered => "Provider safety policy blocked the response.".to_string(),
+        LoopTurnStopReason::MaxTokens => {
+            "Subagent turn failed before completing its final summary: reason=max_tokens"
+                .to_string()
+        }
+        _ => SUBAGENT_STOPPED_MESSAGE.to_string(),
+    };
+    truncate_reason(&message)
+}
+
+/// v2 `truncateReason`: cut at 2,000 UTF-16 code units, the way JS `length`
+/// counts them, and mark the cut.
+pub(super) fn truncate_reason(reason: &str) -> String {
+    const REASON_MAX_CHARS: usize = 2000;
+    if reason.encode_utf16().count() <= REASON_MAX_CHARS {
+        return reason.to_string();
+    }
+    let mut units = 0usize;
+    let mut cut = reason.len();
+    for (index, character) in reason.char_indices() {
+        units += character.len_utf16();
+        if units > REASON_MAX_CHARS {
+            cut = index;
+            break;
+        }
+    }
+    format!("{}… [truncated]", &reason[..cut])
 }
 
 /// A background task's output for a stopped subagent: the v2 stopped message

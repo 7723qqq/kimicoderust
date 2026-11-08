@@ -136,7 +136,33 @@ pub struct TurnReceipt {
     /// For steering admissions this is the active turn's id — the steer
     /// joins that turn and its outcome resolves with the turn's.
     pub turn_id: u64,
+    /// v2 #4627 `SteerResult`: the prompt identity, its creation time, the
+    /// state observed at admission, and whether it joined the active turn.
+    pub prompt_id: String,
+    pub created_at: String,
+    pub state: PromptSubmissionState,
+    pub steered: bool,
     outcome: oneshot::Receiver<Result<TurnOutcome, String>>,
+}
+
+/// v2 `SteerResult.state`: `running` when the prompt launched or steered a
+/// live turn, `queued` when it waits behind one, `blocked` when a hook or
+/// quiescence guard refused to launch it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSubmissionState {
+    Running,
+    Queued,
+    Blocked,
+}
+
+impl PromptSubmissionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Queued => "queued",
+            Self::Blocked => "blocked",
+        }
+    }
 }
 
 impl TurnReceipt {
@@ -244,6 +270,12 @@ pub struct SessionConfig {
     /// emits `turn_started` / `turn_ended` / `turn_interrupted` through the
     /// host/telemetry seam. `None` leaves the turn telemetry to the host.
     pub telemetry: Option<crate::turn_loop::types::TelemetryContext>,
+    /// Diagnostics: every steer hop the engine sees is appended here (see
+    /// [`kimi_ui_core::SteerJournal`]). `None` disables the trace; the terminal
+    /// host installs one so an operator — or an integration test — can answer
+    /// "which stage is this steer at" instead of inferring it from the
+    /// transcript.
+    pub steer_trace: Option<kimi_ui_core::SteerJournal>,
 }
 
 /// What a print-mode (`kimi -p`) session does once its main turn ends while
@@ -344,6 +376,9 @@ const CRON_FIRE_GRACE_MS: i64 = 2_000;
 
 struct PendingTurn {
     turn_id: u64,
+    /// The host prompt id minted at admission (v2 #4627 `TurnPrompt.promptId`);
+    /// `None` for turns the engine opens for itself.
+    prompt_id: Option<String>,
     prompt: LLMMessage,
     input: serde_json::Value,
     origin: serde_json::Value,
@@ -414,6 +449,9 @@ struct Core {
 /// when the guard is released.
 struct HeldTurn {
     turn_id: u64,
+    /// Kept with the request so the turn's `turn.prompt` / `turn.started`
+    /// carry its prompt id after the quiescence window closes.
+    prompt_id: Option<String>,
     request: TurnRequest,
     cancel: Arc<AtomicBool>,
     outcome: Option<oneshot::Sender<Result<TurnOutcome, String>>>,
@@ -430,6 +468,17 @@ struct WakeInterruption {
 struct TurnPlacement {
     preallocated_id: Option<u64>,
     wake: Option<wake::WakePayload>,
+}
+
+/// The session-owned handles an admission needs. Grouped so `admit_locked`
+/// stays within clippy's argument budget and every admission site passes the
+/// same set — a steer admission that forgot the wakeup would park forever.
+struct AdmissionHandles<'a> {
+    steer_queue: &'a Mutex<Vec<LLMMessage>>,
+    steer_slot: &'a Option<Arc<Mutex<Option<crate::subagent::types::ParentCancel>>>>,
+    wakeup: &'a Notify,
+    /// Diagnostics sink for the steer hops that happen inside admission.
+    journal: Option<&'a kimi_ui_core::SteerJournal>,
 }
 
 /// Resolve every [`Core::settle_waiters`] when the session is fully idle.
@@ -477,6 +526,8 @@ impl Drop for ReleaseGuard {
 struct SessionContext {
     llm: Arc<dyn LLM>,
     callbacks: Arc<dyn HostCallbacks>,
+    /// See [`SessionConfig::steer_trace`]: the pump records the turn claim.
+    steer_trace: Option<kimi_ui_core::SteerJournal>,
     /// The host's session id; see [`SessionConfig::session_id`].
     session_id: Option<String>,
     tool_defs: ToolDefsProvider,
@@ -554,6 +605,8 @@ pub struct EngineSession {
     /// turns; [`Self::set_history`] / [`Self::clear_history`] advance its
     /// revision so an undo invalidates a recovery captured before the cut.
     media_recovery: crate::llm::media_budget::SharedMediaRecovery,
+    /// See [`SessionConfig::steer_trace`]; cloned into the pump context too.
+    steer_trace: Option<kimi_ui_core::SteerJournal>,
 }
 
 impl EngineSession {
@@ -606,9 +659,14 @@ impl EngineSession {
         let ctx = Arc::new(SessionContext {
             llm: config.llm,
             callbacks: Arc::new(
-                SteerQueueCallbacks::new(config.callbacks, steer_queue.clone())
-                    .with_steer_slot(config.steer_slot.clone()),
+                SteerQueueCallbacks::new(
+                    config.callbacks,
+                    steer_queue.clone(),
+                    config.steer_trace.clone(),
+                )
+                .with_steer_slot(config.steer_slot.clone()),
             ),
+            steer_trace: config.steer_trace.clone(),
             tool_defs: config.tool_defs,
             goal: config.goal,
             on_before_turn: config.on_before_turn,
@@ -653,6 +711,7 @@ impl EngineSession {
             steer_slot: config.steer_slot,
             hook_guard: config.hook_guard.clone(),
             media_recovery,
+            steer_trace: config.steer_trace.clone(),
         }
     }
 
@@ -694,7 +753,18 @@ impl EngineSession {
     ///
     /// While a [`QuiescenceGuard`] is alive the request is parked (M1c
     /// backpressure, v2 `heldAdmissions`) and only admitted on guard release.
-    pub fn enqueue_turn(&self, mut request: TurnRequest) -> Result<TurnReceipt, String> {
+    pub fn enqueue_turn(&self, request: TurnRequest) -> Result<TurnReceipt, String> {
+        self.enqueue_turn_with_id(request, None)
+    }
+
+    /// Enqueue with a caller-minted prompt id (v2 #4627: a client may submit a
+    /// prompt under an id it already knows, so it can pair its optimistic row
+    /// with every hop). The id is used verbatim; `None` mints one.
+    pub fn enqueue_turn_with_id(
+        &self,
+        mut request: TurnRequest,
+        prompt_id: Option<String>,
+    ) -> Result<TurnReceipt, String> {
         let (outcome_tx, outcome_rx) = oneshot::channel();
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         // v2 `publishPromptQueued`: a *user* prompt admitted behind an active
@@ -713,7 +783,12 @@ impl EngineSession {
             request.admission = Admission::NewTurn;
         }
         let queued_behind_active = core.active_turn_id.is_some();
+        let active_turn_id = core.active_turn_id;
+        let admission = request.admission;
         let prompt_text = request.prompt.content.clone();
+        let prompt_id = prompt_id
+            .unwrap_or_else(|| format!("prompt-{}-{:016x}", core.next_turn_id, fastrand::u64(..)));
+        let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if core.quiescence_depth > 0 {
             // Quiescence: park the request. The id is allocated now (the
             // receipt is already in the caller's hands); admission happens on
@@ -723,6 +798,7 @@ impl EngineSession {
             core.next_turn_id += 1;
             core.held.push(HeldTurn {
                 turn_id,
+                prompt_id: Some(prompt_id.clone()),
                 request,
                 cancel: Arc::new(AtomicBool::new(false)),
                 outcome: Some(outcome_tx),
@@ -730,12 +806,22 @@ impl EngineSession {
             });
             let queue_length = core.held.len();
             drop(core);
+            if let Some(journal) = &self.steer_trace {
+                journal.record(
+                    prompt_id.clone(),
+                    kimi_ui_core::SteerStage::Parked { turn_id },
+                );
+            }
             self.emit_wake_interruption(interruption);
             if user_prompt {
                 self.fire_user_prompt_queued(turn_id, &prompt_text, queue_length);
             }
             return Ok(TurnReceipt {
                 turn_id,
+                prompt_id,
+                created_at,
+                state: PromptSubmissionState::Queued,
+                steered: false,
                 outcome: outcome_rx,
             });
         }
@@ -743,19 +829,50 @@ impl EngineSession {
             &mut core,
             request,
             outcome_tx,
+            Some(prompt_id.clone()),
             TurnPlacement::default(),
-            &self.steer_queue,
-            &self.steer_slot,
-            &self.wakeup,
+            AdmissionHandles {
+                steer_queue: &self.steer_queue,
+                steer_slot: &self.steer_slot,
+                wakeup: &self.wakeup,
+                journal: self.steer_trace.as_ref(),
+            },
         )?;
         let queue_length = core.pending.len();
+        let joined_active = active_turn_id.is_some()
+            && matches!(
+                admission,
+                Admission::ActiveTurnOnly | Admission::ActiveOrNewTurn
+            )
+            && core
+                .pending
+                .iter()
+                .all(|pending| pending.turn_id != turn_id);
         drop(core);
         self.emit_wake_interruption(interruption);
         if user_prompt && queued_behind_active {
             self.fire_user_prompt_queued(turn_id, &prompt_text, queue_length);
         }
+        let state = if queued_behind_active && !joined_active {
+            PromptSubmissionState::Queued
+        } else {
+            PromptSubmissionState::Running
+        };
+        if let Some(journal) = &self.steer_trace {
+            journal.record(
+                prompt_id.clone(),
+                kimi_ui_core::SteerStage::Admitted {
+                    turn_id,
+                    steered: joined_active,
+                },
+            );
+        }
         Ok(TurnReceipt {
             turn_id,
+            prompt_id,
+            created_at,
+            state,
+            steered: joined_active,
             outcome: outcome_rx,
         })
     }
@@ -785,11 +902,16 @@ impl EngineSession {
         core: &mut Core,
         request: TurnRequest,
         outcome_tx: oneshot::Sender<Result<TurnOutcome, String>>,
+        prompt_id: Option<String>,
         placement: TurnPlacement,
-        steer_queue: &Mutex<Vec<LLMMessage>>,
-        steer_slot: &Option<Arc<Mutex<Option<crate::subagent::types::ParentCancel>>>>,
-        wakeup: &Notify,
+        handles: AdmissionHandles<'_>,
     ) -> Result<u64, String> {
+        let AdmissionHandles {
+            steer_queue,
+            steer_slot,
+            wakeup,
+            journal,
+        } = handles;
         match request.admission {
             Admission::NewTurn | Admission::ActiveOrNextTurn => {
                 let turn_id = match placement.preallocated_id {
@@ -802,6 +924,7 @@ impl EngineSession {
                 };
                 core.pending.push(PendingTurn {
                     turn_id,
+                    prompt_id: prompt_id.clone(),
                     prompt: request.prompt,
                     input: request.input,
                     origin: request.origin,
@@ -816,12 +939,19 @@ impl EngineSession {
                 if let Some(active) = core.active_turn_id {
                     // Steer: the prompt joins the active turn through the
                     // drain_steers seam; the receipt resolves with the active
-                    // turn's outcome.
+                    // turn's outcome. The message keeps the host prompt id and
+                    // origin so the drain can report it (v2 #4627 `TurnSteer`).
                     core.steer_waiters.push((active, outcome_tx));
+                    let mut prompt = request.prompt;
+                    prompt.prompt_id = prompt_id.clone();
+                    prompt.origin = Some(request.origin.clone());
                     steer_queue
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .push(request.prompt);
+                        .push(prompt);
+                    if let (Some(journal), Some(id)) = (journal, prompt_id.as_deref()) {
+                        journal.record(id, kimi_ui_core::SteerStage::QueuePushed);
+                    }
                     // Fire the turn's steer signal (#3697, v2
                     // `steerController.abort`): a blocking `WaitFor` ends now
                     // and hands the model the new input, instead of holding the
@@ -846,6 +976,7 @@ impl EngineSession {
                     };
                     core.pending.push(PendingTurn {
                         turn_id,
+                        prompt_id: prompt_id.clone(),
                         prompt: request.prompt,
                         input: request.input,
                         origin: request.origin,
@@ -985,6 +1116,7 @@ impl EngineSession {
             steer_queue: self.steer_queue.clone(),
             steer_slot: self.steer_slot.clone(),
             wakeup: self.wakeup.clone(),
+            steer_trace: self.steer_trace.clone(),
         })
     }
 
@@ -1116,6 +1248,7 @@ pub struct QuiescenceGuard {
     steer_queue: Arc<Mutex<Vec<LLMMessage>>>,
     steer_slot: Option<Arc<Mutex<Option<crate::subagent::types::ParentCancel>>>>,
     wakeup: Arc<Notify>,
+    steer_trace: Option<kimi_ui_core::SteerJournal>,
 }
 
 impl Drop for QuiescenceGuard {
@@ -1136,6 +1269,7 @@ impl Drop for QuiescenceGuard {
             for entry in held {
                 let HeldTurn {
                     turn_id,
+                    prompt_id,
                     request,
                     cancel: _,
                     outcome,
@@ -1153,13 +1287,17 @@ impl Drop for QuiescenceGuard {
                     &mut core,
                     request,
                     outcome,
+                    prompt_id,
                     TurnPlacement {
                         preallocated_id: Some(turn_id),
                         wake,
                     },
-                    &self.steer_queue,
-                    &self.steer_slot,
-                    &self.wakeup,
+                    AdmissionHandles {
+                        steer_queue: &self.steer_queue,
+                        steer_slot: &self.steer_slot,
+                        wakeup: &self.wakeup,
+                        journal: self.steer_trace.as_ref(),
+                    },
                 );
             }
         }
@@ -1309,6 +1447,7 @@ async fn pump(
         let mut entry_outcome = entry.outcome.take();
         let PendingTurn {
             turn_id,
+            prompt_id,
             prompt,
             input,
             origin,
@@ -1328,13 +1467,21 @@ async fn pump(
             *slot.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(crate::subagent::types::ParentCancel::new());
         }
+        if let (Some(journal), Some(id)) = (&ctx.steer_trace, &prompt_id) {
+            journal.record(
+                id.clone(),
+                kimi_ui_core::SteerStage::TurnClaimed { turn_id },
+            );
+        }
         ctx.callbacks.turn_event(TurnEvent::Prompt {
             turn_id,
+            prompt_id: prompt_id.clone(),
             input,
             origin: origin.clone(),
         });
         ctx.callbacks.turn_event(TurnEvent::Started {
             turn_id,
+            prompt_id,
             origin: origin.clone(),
         });
         if let Some(ref guard) = ctx.hook_guard {
@@ -1972,6 +2119,7 @@ fn enqueue_print_followup_turn(
     core.next_turn_id += 1;
     core.pending.push(PendingTurn {
         turn_id,
+        prompt_id: None,
         prompt: LLMMessage {
             role: "user".to_string(),
             content: text.clone(),
@@ -2288,20 +2436,35 @@ async fn run_session_turn(
 pub(crate) struct SteerQueueCallbacks {
     inner: Arc<dyn HostCallbacks>,
     steer_queue: Arc<Mutex<Vec<LLMMessage>>>,
+    /// Diagnostics sink for the drain hop (see [`SessionConfig::steer_trace`]).
+    steer_trace: Option<kimi_ui_core::SteerJournal>,
     /// #3697: the turn's steer slot. Draining a steer refreshes it, so the
     /// turn that consumed the message can wait again instead of tripping over
     /// the interrupt that just ended its previous wait.
     steer_slot: Option<Arc<Mutex<Option<crate::subagent::types::ParentCancel>>>>,
 }
 
+/// Project a consumed steer message to the `ContentPart[]` the model reads.
+/// Non-empty blocks win over `content`, the same rule every provider
+/// projection applies, so `turn.steer` carries one representation of the input
+/// rather than both.
+fn steer_input(message: &LLMMessage) -> serde_json::Value {
+    if message.blocks.is_empty() {
+        return serde_json::json!([{ "type": "text", "text": message.content }]);
+    }
+    serde_json::to_value(&message.blocks).unwrap_or_else(|_| serde_json::json!([]))
+}
+
 impl SteerQueueCallbacks {
     pub(crate) fn new(
         inner: Arc<dyn HostCallbacks>,
         steer_queue: Arc<Mutex<Vec<LLMMessage>>>,
+        steer_trace: Option<kimi_ui_core::SteerJournal>,
     ) -> Self {
         Self {
             inner,
             steer_queue,
+            steer_trace,
             steer_slot: None,
         }
     }
@@ -2373,8 +2536,34 @@ impl HostCallbacks for SteerQueueCallbacks {
     ) -> futures_util::future::BoxFuture<'static, Result<Vec<LLMMessage>, String>> {
         let queue = self.steer_queue.clone();
         let slot = self.steer_slot.clone();
+        let inner = self.inner.clone();
+        let steer_trace = self.steer_trace.clone();
         Box::pin(async move {
             let drained = std::mem::take(&mut *queue.lock().unwrap_or_else(|e| e.into_inner()));
+            if let Some(journal) = &steer_trace {
+                for message in &drained {
+                    if let Some(prompt_id) = &message.prompt_id {
+                        journal.record(prompt_id.clone(), kimi_ui_core::SteerStage::Drained);
+                    }
+                }
+            }
+            // v2 #4627 `TurnSteer` fires when the loop consumes a steer into
+            // its context, not when the host submits it — this drain is that
+            // moment. The payload is the message the model receives, so the
+            // host can clear its optimistic row only for input that was read.
+            for message in drained.iter().filter(|message| message.prompt_id.is_some()) {
+                let prompt_id = message.prompt_id.clone().unwrap_or_default();
+                inner.turn_event(TurnEvent::Steer {
+                    turn_id: None,
+                    input: steer_input(message),
+                    origin: message
+                        .origin
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({ "kind": "user" })),
+                    message_id: Some(prompt_id.clone()),
+                    prompt_ids: vec![prompt_id],
+                });
+            }
             // The turn has now consumed the steering messages, so refresh its
             // steer signal (v2 `loopService`: a fresh `steerController` once no
             // undropped steer nudge remains). Without this the next `WaitFor`

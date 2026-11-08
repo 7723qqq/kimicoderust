@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{LocalizedText, i18n_params};
 use crate::session::sqlite_store::SqliteSessionStore;
 use crate::subagent::types::*;
 
@@ -175,6 +176,26 @@ pub(crate) fn partial_output_section(turn: &crate::turn_loop::types::TurnResult)
     let partial = final_assistant_summary(&turn.messages);
     let partial = partial.trim();
     (!partial.is_empty()).then(|| format!("\n\n[partial output]\n{partial}"))
+}
+
+/// Shared prefix of the v2 `AGENT_NO_FINAL_MESSAGE` failure text, so the
+/// report layer can name the reason without re-parsing prose.
+pub const NO_FINAL_MESSAGE_PREFIX: &str = "Subagent turn ended without a final message";
+
+/// v2 `runAgentTurn` `awaitRun`: a turn that ends without any assistant text
+/// has no handoff to report, so it fails instead of completing with an empty
+/// summary (v2 `AGENT_NO_FINAL_MESSAGE`). The loop only ever forces one stop
+/// reason — the repeat breaker — and v2 renders it in the message.
+fn no_final_message_error(turn: &crate::turn_loop::types::TurnResult) -> Option<String> {
+    if !final_assistant_summary(&turn.messages).trim().is_empty() {
+        return None;
+    }
+    Some(match turn.stop_reason {
+        crate::turn_loop::types::LoopTurnStopReason::RepeatBreaker => {
+            format!("{NO_FINAL_MESSAGE_PREFIX} (stop reason: repeat_breaker).")
+        }
+        _ => format!("{NO_FINAL_MESSAGE_PREFIX}."),
+    })
 }
 
 /// A profile's tool policy (v2 `resolveActiveToolNames` subset semantics):
@@ -520,6 +541,12 @@ pub struct SubagentManager {
     /// `isDiscoveredAgentProfileSource` set): the spawn allowlist's
     /// delegation extras for the main agent.
     discovered_types: RwLock<Vec<String>>,
+    /// The session model's `[models.<alias>]` name, captured when the runtime
+    /// LLM is installed (`LLM::model_alias`). v2's `forkIncompatibility` lets a
+    /// fork pass the caller's own alias — it is a no-op inherit — and rejects
+    /// every other explicit model; without this the engine rejected the
+    /// caller's own alias too.
+    caller_model_alias: RwLock<Option<String>>,
 }
 
 /// A foreground subagent's resume record (P55).
@@ -564,6 +591,12 @@ pub struct SubagentPersistedState {
     /// restored swarm render as a pile of plain subagent cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm_index: Option<u32>,
+    /// The delegation depth stamped at spawn (v2 `subagentDepth`). A record
+    /// written before this field existed reads back as depth 0, which admits a
+    /// deeper chain than the live spawn would have — the alternative, refusing
+    /// every resume of an old record, loses the conversation instead.
+    #[serde(default)]
+    pub depth: u32,
 }
 
 /// Who spawned a subagent, and as what (v2 `subagentLabels` /
@@ -903,6 +936,7 @@ worktree root the tower assigns you as your full authority scope.";
             parents: Arc::new(RwLock::new(HashMap::new())),
             main_profile_name: RwLock::new(None),
             discovered_types: RwLock::new(Vec::new()),
+            caller_model_alias: RwLock::new(None),
         }
     }
 
@@ -1158,6 +1192,9 @@ worktree root the tower assigns you as your full authority scope.";
         callbacks: Arc<dyn crate::callbacks::HostCallbacks>,
         session_id: Option<String>,
     ) {
+        // The alias belongs to the transport that is being installed, so it is
+        // captured here rather than resolved at fork time.
+        *self.caller_model_alias.write().await = llm.model_alias().map(str::to_owned);
         *self.runtime.write().await = Some(Arc::new(SubagentRuntime {
             llm,
             callbacks,
@@ -1166,6 +1203,12 @@ worktree root the tower assigns you as your full authority scope.";
             media_dropped: Default::default(),
             media_recovery: Default::default(),
         }));
+    }
+
+    /// The session model's `[models.<alias>]` name, when the installed transport
+    /// knows it. `None` for a transport that only knows the wire model name.
+    pub async fn caller_model_alias(&self) -> Option<String> {
+        self.caller_model_alias.read().await.clone()
     }
 
     /// Current execution runtime, if injected.
@@ -1236,6 +1279,23 @@ worktree root the tower assigns you as your full authority scope.";
         self.spawn_with_id(&id, type_name, role).await
     }
 
+    /// Spawn a subagent for an explicitly named caller.
+    ///
+    /// A batch resolves its members on the scheduler's own tasks, which do not
+    /// inherit the caller's [`crate::tools::CALLER_AGENT_ID`] scope, so the
+    /// caller is passed in rather than read from the ambient scope. Everything
+    /// else — the depth gate included — is the shared spawn path.
+    pub async fn spawn_child(
+        &self,
+        caller_id: &str,
+        type_name: &str,
+        role: &str,
+    ) -> Result<String, String> {
+        let id = format!("subagent-{}", fastrand::u64(..));
+        self.spawn_with_id_from(&id, caller_id, type_name, role)
+            .await
+    }
+
     /// Spawn a new subagent instance with an explicit identifier.
     pub async fn spawn_with_id(
         &self,
@@ -1243,11 +1303,31 @@ worktree root the tower assigns you as your full authority scope.";
         type_name: &str,
         role: &str,
     ) -> Result<String, String> {
+        let caller_id = crate::tools::CALLER_AGENT_ID
+            .try_with(|id| id.clone())
+            .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
+        self.spawn_with_id_from(id, &caller_id, type_name, role)
+            .await
+    }
+
+    /// The shared spawn path: resolve the child's delegation depth from its
+    /// caller, refuse a caller already at [`MAX_SUBAGENT_DEPTH`] (v2
+    /// `assertSubagentDepthAllowed`), then register the instance.
+    pub async fn spawn_with_id_from(
+        &self,
+        id: &str,
+        caller_id: &str,
+        type_name: &str,
+        role: &str,
+    ) -> Result<String, String> {
         self.scope_cache_error()?;
-        let defs = self.definitions.read().await;
-        if !defs.contains_key(type_name) && type_name != "self" {
-            return Err(format!("Unknown subagent type: '{type_name}'"));
+        {
+            let defs = self.definitions.read().await;
+            if !defs.contains_key(type_name) && type_name != "self" {
+                return Err(format!("Unknown subagent type: '{type_name}'"));
+            }
         }
+        let depth = self.child_depth_for_spawn(caller_id).await?;
 
         let cancellation = Arc::new(AtomicBool::new(false));
 
@@ -1263,6 +1343,7 @@ worktree root the tower assigns you as your full authority scope.";
             state: SubagentState::Running,
             created_at_ms: now_ms,
             last_result: None,
+            depth,
         };
 
         let mut instances = self.instances.write().await;
@@ -1272,6 +1353,45 @@ worktree root the tower assigns you as your full authority scope.";
         self.record_parent(id);
 
         Ok(id.to_string())
+    }
+
+    /// The delegation depth of `agent_id` (v2 `subagentDepthOf`): 0 for the
+    /// main agent and for any id this engine never spawned, else the hop count
+    /// recorded when it was spawned.
+    pub async fn depth_of(&self, agent_id: &str) -> u32 {
+        if let Some((instance, _)) = self.instances.read().await.get(agent_id) {
+            return instance.depth;
+        }
+        self.persisted_depth(agent_id).await
+    }
+
+    /// Depth from the cold-resume record, for an agent whose resident scope
+    /// the completed-scope LRU already evicted.
+    async fn persisted_depth(&self, agent_id: &str) -> u32 {
+        let store = self.session_store.read().await.as_ref().cloned();
+        let Some(store) = store else {
+            return 0;
+        };
+        store
+            .get_state("subagent_resume", agent_id)
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_value::<SubagentPersistedState>(value).ok())
+            .map_or(0, |state| state.depth)
+    }
+
+    /// v2 `assertSubagentDepthAllowed`: the depth a child of `caller_id` gets,
+    /// or the refusal when the caller already sits at the ceiling.
+    async fn child_depth_for_spawn(&self, caller_id: &str) -> Result<u32, String> {
+        let caller_depth = self.depth_of(caller_id).await;
+        if caller_depth >= MAX_SUBAGENT_DEPTH {
+            return Err(LocalizedText::with_params(
+                "engine.subagent.depthExceeded",
+                i18n_params!["maxDepth" => MAX_SUBAGENT_DEPTH],
+            )
+            .render());
+        }
+        Ok(caller_depth + 1)
     }
 
     /// Record who spawned `id` (v2 `subagents.spawn({ callerAgentId })`).
@@ -1427,9 +1547,14 @@ worktree root the tower assigns you as your full authority scope.";
                     .await;
             }
             let end_guard = hook_guard.clone();
+            // Same seam as the foreground path: the turn's system message is
+            // the profile's, and the user message is the task prompt alone
+            // (v2 `runAgentTurn` submits `{ role: 'user', content: [{ text: prompt }] }`).
+            let llm =
+                crate::subagent::profile_prompt::ProfilePromptLlm::wrap(llm, &def.system_prompt);
             let messages = vec![crate::turn_loop::types::LLMMessage {
                 role: "user".into(),
-                content: format!("{}\n\nTask: {}", def.system_prompt, prompt_str),
+                content: prompt_str,
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
@@ -1513,6 +1638,7 @@ worktree root the tower assigns you as your full authority scope.";
                     kind: "subagent",
                     subagent_type: Some(type_name),
                     agent_id: Some(id.as_str()),
+                    timeout_ms: None,
                 },
                 id.clone(),
                 description,
@@ -1570,10 +1696,23 @@ worktree root the tower assigns you as your full authority scope.";
             .runtime()
             .await
             .ok_or_else(|| "no subagent runtime injected".to_string())?;
+        let def = self.definition_for(&type_name, &role).await;
         // A `[secondary_model]` pool binding overrides the session model for
         // this instance only; the callbacks chain is shared either way.
-        let runtime = match self.instance_llm(id).await {
-            Some(llm) => Arc::new(SubagentRuntime {
+        let bound_llm = self.instance_llm(id).await;
+        let bound = bound_llm.is_some();
+        // v2 `agentLifecycle.create({ binding: { profile } })`: a spawned
+        // subagent's requests carry its profile's `systemPrompt`. A fork
+        // inherits the caller's whole scope — system prompt included — so it
+        // keeps the session transport's prompt, which is the caller's own.
+        let llm = bound_llm.unwrap_or_else(|| runtime.llm.clone());
+        let llm = if inherited_history.is_none() {
+            crate::subagent::profile_prompt::ProfilePromptLlm::wrap(llm, &def.system_prompt)
+        } else {
+            llm
+        };
+        let runtime = if bound || inherited_history.is_none() {
+            Arc::new(SubagentRuntime {
                 llm,
                 callbacks: runtime.callbacks.clone(),
                 session_id: runtime.session_id.clone(),
@@ -1581,12 +1720,18 @@ worktree root the tower assigns you as your full authority scope.";
                 media_dropped: runtime.media_dropped.clone(),
                 // v2 #4413 keys the recovery by model: an instance on its own
                 // pool model gets its own cell — sharing the session's would
-                // let one model's capture clobber the other's.
-                media_recovery: Default::default(),
-            }),
-            None => runtime,
+                // let one model's capture clobber the other's. A prompt-only
+                // override stays on the same model, so it keeps the shared
+                // cell.
+                media_recovery: if bound {
+                    Default::default()
+                } else {
+                    runtime.media_recovery.clone()
+                },
+            })
+        } else {
+            runtime
         };
-        let def = self.definition_for(&type_name, &role).await;
 
         // The subagent sees the host table narrowed by its profile policy
         // (v2 `resolveActiveToolNames` subset): an explicit allowlist wins,
@@ -1618,7 +1763,7 @@ worktree root the tower assigns you as your full authority scope.";
             ));
             msgs.push(crate::turn_loop::types::LLMMessage {
                 role: "user".into(),
-                content: format!("{}\n\nTask: {}", def.system_prompt, prompt),
+                content: prompt.clone(),
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
@@ -1630,7 +1775,7 @@ worktree root the tower assigns you as your full authority scope.";
         } else {
             vec![crate::turn_loop::types::LLMMessage {
                 role: "user".into(),
-                content: format!("{}\n\nTask: {}", def.system_prompt, prompt),
+                content: prompt,
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
@@ -1703,6 +1848,15 @@ worktree root the tower assigns you as your full authority scope.";
                 self.record_instance_usage(id, &turn_res.usage);
                 // Persist to sqlite store if available (#3478)
                 self.persist_resume_state(id, &type_name, &role, turn_res.messages.clone());
+                // v2 `awaitRun`: no assistant text means the agent never wrote
+                // its handoff — a failure, not an empty completion. The
+                // conversation is persisted above, so a resume still picks it
+                // up.
+                if let Some(message) = no_final_message_error(&turn_res) {
+                    self.update_state(id, SubagentState::Failed, Some(format!("Error: {message}")))
+                        .await;
+                    return Err(message);
+                }
                 // Completed last: the scope may be evicted right here, and
                 // only a durable resume record makes that safe.
                 self.update_state(id, SubagentState::Completed, Some(summary))
@@ -1786,6 +1940,25 @@ worktree root the tower assigns you as your full authority scope.";
         let def = self
             .definition_for(&record.profile_name, &record.role)
             .await;
+        // A resumed agent keeps the profile's system prompt (v2 rebuilds the
+        // scope from the same profile); a blank profile prompt — the btw side
+        // channel — leaves the session transport's prompt in place.
+        let llm = crate::subagent::profile_prompt::ProfilePromptLlm::wrap(
+            runtime.llm.clone(),
+            &def.system_prompt,
+        );
+        let runtime = if Arc::ptr_eq(&llm, &runtime.llm) {
+            runtime
+        } else {
+            Arc::new(SubagentRuntime {
+                llm,
+                callbacks: runtime.callbacks.clone(),
+                session_id: runtime.session_id.clone(),
+                media: crate::llm::media_resolver::MediaResolver::new(),
+                media_dropped: runtime.media_dropped.clone(),
+                media_recovery: Default::default(),
+            })
+        };
         let filter = ToolPolicyFilter::from_definition(&def);
         // A tool-table failure is not "no persisted record": returning `None`
         // here would send the caller down the plain-foreground fallback and
@@ -1929,6 +2102,13 @@ worktree root the tower assigns you as your full authority scope.";
                 p.usage = turn_res.usage.clone();
             }
         }
+        // v2 `awaitRun`: a resumed turn that ends without assistant text fails
+        // like any other (the conversation is already persisted above).
+        if let Some(message) = no_final_message_error(&turn_res) {
+            self.update_state(id, SubagentState::Failed, Some(format!("Error: {message}")))
+                .await;
+            return Some(Err(message));
+        }
         // Completed last: the scope may be evicted right here, and only a
         // durable resume record makes that safe.
         self.update_state(id, SubagentState::Completed, Some(summary))
@@ -2047,6 +2227,12 @@ worktree root the tower assigns you as your full authority scope.";
             .try_read()
             .ok()
             .and_then(|parents| parents.get(id).cloned());
+        let depth = self
+            .instances
+            .try_read()
+            .ok()
+            .and_then(|instances| instances.get(id).map(|(instance, _)| instance.depth))
+            .unwrap_or(0);
         let state = SubagentPersistedState {
             id: id.to_string(),
             profile_name: profile_name.to_string(),
@@ -2057,6 +2243,7 @@ worktree root the tower assigns you as your full authority scope.";
             parent_tool_call_id: parent.as_ref().and_then(|p| p.parent_tool_call_id.clone()),
             swarm_item: parent.as_ref().and_then(|p| p.swarm_item.clone()),
             swarm_index: parent.and_then(|p| p.swarm_index),
+            depth,
         };
         if let Ok(val) = serde_json::to_value(&state) {
             let _ = store.put_state("subagent_resume", id, &val);
@@ -2080,6 +2267,10 @@ worktree root the tower assigns you as your full authority scope.";
             return Err(format!("Unknown subagent type: '{type_name}'"));
         }
         drop(defs);
+        let caller_id = crate::tools::CALLER_AGENT_ID
+            .try_with(|id| id.clone())
+            .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
+        let depth = self.child_depth_for_spawn(&caller_id).await?;
 
         let def = self.definition_for(type_name, role).await;
         let id = format!("subagent-{}", fastrand::u64(..));
@@ -2097,6 +2288,7 @@ worktree root the tower assigns you as your full authority scope.";
             state: SubagentState::Running,
             created_at_ms: now_ms,
             last_result: None,
+            depth,
         };
 
         {
@@ -2571,6 +2763,7 @@ worktree root the tower assigns you as your full authority scope.";
     /// one for the resumed turn — and the rebuilt conversation is tracked by
     /// the LRU again instead of leaking untracked.
     async fn rebuild_instance(&self, id: &str, type_name: &str, role: &str) {
+        let depth = self.persisted_depth(id).await;
         let mut instances = self.instances.write().await;
         if instances.contains_key(id) {
             return;
@@ -2589,6 +2782,7 @@ worktree root the tower assigns you as your full authority scope.";
                     state: SubagentState::Running,
                     created_at_ms: now_ms,
                     last_result: None,
+                    depth,
                 },
                 Arc::new(AtomicBool::new(false)),
             ),

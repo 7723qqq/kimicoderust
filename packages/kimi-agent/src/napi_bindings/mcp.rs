@@ -42,11 +42,26 @@ pub(crate) fn shared_mcp_manager(
     servers: Vec<McpServerSpec>,
     oauth_dir: Option<std::path::PathBuf>,
     defaults: Option<crate::config::McpConfig>,
+    stdio_cwd: Option<std::path::PathBuf>,
+    client_name: Option<String>,
 ) -> Arc<crate::mcp::McpManager> {
     let mut key = mcp_servers_key(&servers);
     if let Some(dir) = oauth_dir.as_deref() {
         key.push_str("|oauth:");
         key.push_str(&dir.display().to_string());
+    }
+    // A stdio server with no `cwd` of its own starts in the workspace (v2
+    // `stdioCwd`), so two sessions from different workspaces must not share a
+    // manager: the first one's working directory would decide for both.
+    if let Some(dir) = stdio_cwd.as_deref() {
+        key.push_str("|cwd:");
+        key.push_str(&dir.display().to_string());
+    }
+    // The announced client name is observable by every server, so a manager
+    // built for one identity must not be handed to another.
+    if let Some(name) = client_name.as_deref() {
+        key.push_str("|client:");
+        key.push_str(name);
     }
     // `[mcp]` defaults change the resolved timeouts and the disclosure of
     // servers that declare neither, so they are part of the identity too.
@@ -69,6 +84,7 @@ pub(crate) fn shared_mcp_manager(
         if let Some(defaults) = defaults {
             existing.set_defaults(defaults);
         }
+        existing.set_client_name(client_name);
         return existing;
     }
     let manager = Arc::new(crate::mcp::McpManager::new());
@@ -82,6 +98,11 @@ pub(crate) fn shared_mcp_manager(
     if let Some(defaults) = defaults {
         manager.set_defaults(defaults);
     }
+    if let Some(dir) = stdio_cwd {
+        manager.set_default_stdio_cwd(dir);
+    }
+    // Before `connect_all`: every initialize it sends announces this name.
+    manager.set_client_name(client_name);
     manager.connect_all(servers);
     cache.insert(key, Arc::downgrade(&manager));
     manager
@@ -211,20 +232,37 @@ impl Drop for McpStatusBridge {
 /// not await them — so without this bridge the host only ever saw the one-shot
 /// roster snapshot and a still-connecting server stayed `pending` forever.
 ///
-/// v2 also replays the current roster here; that replay is deliberately
-/// omitted: it runs before the host has subscribed (so the events are dropped
-/// anyway), and replaying a stale `pending` after the host's own snapshot
-/// already rendered `connected` would resurrect a spinner that never stops.
-/// The host's roster snapshot is the initial sync; this bridge carries the
-/// transitions after it.
+/// The current roster is emitted once *after* the subscription is installed.
+/// v2 does the same thing on attach, in the opposite order and synchronously:
+/// `attachMcpTools` walks `this.list()` through the status handler before it
+/// registers `onStatusChange` (mcpService.ts:190-198). The fork subscribes
+/// first and emits the snapshot from a task, so the replay cannot run inside
+/// the bridge's own construction; a transition landing in that gap emits one
+/// duplicate status, which is idempotent. Without the replay a session
+/// attaching to an already warm manager — `/new` reuses one manager per
+/// resolved configuration — never learns its servers are `connected`, because
+/// the transition happened before this session existed. The snapshot is taken
+/// now rather than captured earlier, so it cannot resurrect a stale state: a
+/// `pending` entry in it is one that is still connecting, and its `connected`
+/// transition follows.
 pub(crate) fn attach_mcp_status(
     manager: &Option<Arc<crate::mcp::McpManager>>,
     callbacks: Arc<dyn crate::callbacks::HostCallbacks>,
 ) -> Option<Arc<McpStatusBridge>> {
     let manager = manager.as_ref()?.clone();
-    let listener: crate::mcp::manager::McpStatusListener =
-        Box::new(move |entry| callbacks.emit_event(mcp_status_event(&entry)));
+    let listener: crate::mcp::manager::McpStatusListener = Box::new({
+        let callbacks = callbacks.clone();
+        move |entry| callbacks.emit_event(mcp_status_event(&entry))
+    });
     let subscription = manager.on_status_change(listener);
+    // Late-attach replay: the host subscribes at handle creation, so emitting
+    // from a spawned task lands after the bridge exists and survives ordering.
+    let replay = manager.clone();
+    tokio::spawn(async move {
+        for entry in replay.server_entries().await {
+            callbacks.emit_event(mcp_status_event(&entry));
+        }
+    });
     Some(Arc::new(McpStatusBridge {
         manager,
         subscription,
@@ -313,4 +351,35 @@ pub async fn mcp_oauth_reconnect(name: String) -> napi::Result<u32> {
         }
     }
     Ok(reconnected)
+}
+
+/// Close every server the process-wide cache spawned and forget the managers,
+/// returning how many were shut down.
+///
+/// Sessions share these managers on purpose — `/new` reuses live connections,
+/// which is v2's workspace-scoped `WorkspaceMcpService` — so no per-session
+/// teardown may close them: a workspace outlives its sessions on v2, and the
+/// same connections serve the next one. v2 closes them with the workspace
+/// instead: `WorkspaceMcpService.disposeAsync` awaits `manager.shutdown()`
+/// (workspaceMcpService.ts:91-112). The fork has no workspace tier behind this
+/// addon — the host *is* the workspace — so that dispose step is this export,
+/// and a host that is done with the engine (a test deleting its temporary
+/// home, an embedder shutting down) needs it explicitly: on Windows a stdio
+/// server's working directory stays busy until that child exits, so
+/// `remove_dir_all` on a plugin's own directory fails with `EBUSY` long after
+/// the last session is gone.
+#[napi]
+pub async fn mcp_managers_dispose() -> napi::Result<u32> {
+    let managers: Vec<Arc<crate::mcp::McpManager>> = {
+        let mut cache = MCP_MANAGERS.lock().unwrap_or_else(|e| e.into_inner());
+        let live: Vec<Arc<crate::mcp::McpManager>> =
+            cache.values().filter_map(Weak::upgrade).collect();
+        cache.clear();
+        live
+    };
+    let count = u32::try_from(managers.len()).unwrap_or(u32::MAX);
+    for manager in managers {
+        manager.shutdown().await;
+    }
+    Ok(count)
 }

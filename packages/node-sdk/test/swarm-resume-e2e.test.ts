@@ -11,6 +11,7 @@ import { findKimiAgentAddon } from '@moonshot-ai/kimi-agent/session-handle';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createKimiHarnessNative, type KimiHarness } from '../src/index';
+import { listenOnEphemeralPort } from './listen-server';
 import { TEST_IDENTITY } from './test-identity';
 
 const hasNativeAddon = findKimiAgentAddon() !== null;
@@ -87,8 +88,7 @@ describe.skipIf(!hasNativeAddon)('swarm resume (real engine)', () => {
         res.end();
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = (server.address() as { port: number }).port;
+    const port = await listenOnEphemeralPort(server);
 
     homeDir = mkdtempSync(join(tmpdir(), 'kimi-swarm-resume-'));
     harness = createKimiHarnessNative({ homeDir, identity: TEST_IDENTITY });

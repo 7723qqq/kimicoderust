@@ -776,3 +776,40 @@ async fn second_background_resume_of_the_same_agent_still_runs() {
     assert_eq!(completed[1]["result_summary"], "third pass answer");
     }).await;
 }
+
+/// v2 `agentTool.ts` refuses a resume that also names a `subagent_type` before
+/// it touches the lifecycle: the resumed agent keeps its own profile. The fork
+/// accepted both and silently ignored the type, and the schema description
+/// already claimed the combination was rejected.
+#[tokio::test]
+async fn resume_with_a_subagent_type_is_refused() {
+    let _owned = as_main_agent(async {
+        let recorder = Arc::new(EventRecorder::new());
+        let llm = Arc::new(RecordingPromptLlm::new(vec![]));
+        let manager = manager_with_callbacks(llm.clone(), recorder.clone()).await;
+
+        let result = execute_agent(
+            &manager,
+            None,
+            &serde_json::json!({
+                "resume": "agent-existing",
+                "prompt": "continue",
+                "subagent_type": "explore",
+            }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the tool handles the call");
+
+        assert!(result.is_error, "content: {}", result.content);
+        assert_eq!(
+            result.content,
+            "Cannot set subagent_type when resuming an existing agent. Resume by agent id only."
+        );
+        assert_eq!(llm.call_count(), 0, "no turn may run");
+    })
+    .await;
+}

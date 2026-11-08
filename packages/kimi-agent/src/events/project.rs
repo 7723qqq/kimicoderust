@@ -114,9 +114,14 @@ impl Pending {
 /// Per-turn projection state.
 #[derive(Debug)]
 struct TurnState {
+    /// The turn this state belongs to; a host-injected entry is only accepted
+    /// for the turn it names.
+    turn_id: String,
     alloc: EntryIdAllocator,
-    assistant: Option<EntryId>,
-    thinking: Option<EntryId>,
+    /// Open text streams keyed by (agent id, kind). A subagent's answer is an
+    /// entry of its own: folding it into the parent's text is how a swarm
+    /// becomes one long paragraph with no way to tell which member said what.
+    streams: BTreeMap<(String, EntryKind), EntryId>,
     /// tool_call_id → (entry, tool name). The name is kept so the snapshot
     /// fold can keep it visible above the folded result.
     tools: HashMap<String, (EntryId, String)>,
@@ -138,9 +143,9 @@ struct TurnState {
 impl TurnState {
     fn new(turn_id: String) -> Self {
         Self {
-            alloc: EntryIdAllocator::engine(turn_id),
-            assistant: None,
-            thinking: None,
+            alloc: EntryIdAllocator::engine(turn_id.clone()),
+            turn_id,
+            streams: BTreeMap::new(),
             tools: HashMap::new(),
             pendings: BTreeMap::new(),
             ordinals: BTreeMap::new(),
@@ -172,7 +177,11 @@ impl Projector {
                 self.turn = Some(TurnState::new(turn_id));
                 let mut ops = Vec::new();
                 if let Some(prompt) = prompt {
-                    let (id, created) = self.entry_or_create(EntryKind::UserMsg, None);
+                    let (id, created) = self.entry_or_create(
+                        EntryKind::UserMsg,
+                        crate::callbacks::MAIN_AGENT_ID,
+                        None,
+                    );
                     debug_assert!(created);
                     ops.push(EntryOp::Upsert {
                         id: id.clone(),
@@ -182,21 +191,25 @@ impl Projector {
                 }
                 ops
             }
-            EngineEvent::AssistantDelta { delta, .. } => {
-                self.text_delta(EntryKind::AssistantMsg, &delta)
-            }
-            EngineEvent::ThinkingDelta { delta, .. } => {
-                self.text_delta(EntryKind::Thinking, &delta)
-            }
-            EngineEvent::LlmDelta { part, .. } => {
+            EngineEvent::AssistantDelta {
+                agent_id, delta, ..
+            } => self.text_delta(EntryKind::AssistantMsg, &agent_id, &delta),
+            EngineEvent::ThinkingDelta {
+                agent_id, delta, ..
+            } => self.text_delta(EntryKind::Thinking, &agent_id, &delta),
+            EngineEvent::LlmDelta { agent_id, part, .. } => {
                 // The raw transport shape: `{ "type": "text", "text": … }` or
                 // `{ "type": "think", "think": … }` (+ provider aliases). What
                 // a part *is* is one shared answer (kimi_ui_core), so the
                 // transcript projection cannot disagree with this one by
                 // omission.
                 match delta_part_text(&part) {
-                    Some(("assistant", text)) => self.text_delta(EntryKind::AssistantMsg, text),
-                    Some(("thinking", think)) => self.text_delta(EntryKind::Thinking, think),
+                    Some(("assistant", text)) => {
+                        self.text_delta(EntryKind::AssistantMsg, &agent_id, text)
+                    }
+                    Some(("thinking", think)) => {
+                        self.text_delta(EntryKind::Thinking, &agent_id, think)
+                    }
                     _ => Vec::new(),
                 }
             }
@@ -204,7 +217,11 @@ impl Projector {
                 tool_call_id, name, ..
             } => {
                 let mut ops = self.flush_all(false);
-                let (id, _) = self.entry_or_create(EntryKind::ToolCall, Some(&tool_call_id));
+                let (id, _) = self.entry_or_create(
+                    EntryKind::ToolCall,
+                    crate::callbacks::MAIN_AGENT_ID,
+                    Some(&tool_call_id),
+                );
                 if let Some(turn) = self.turn.as_mut() {
                     turn.tools.insert(tool_call_id, (id.clone(), name.clone()));
                 }
@@ -222,7 +239,11 @@ impl Projector {
                 let Some(part) = arguments_part else {
                     return Vec::new();
                 };
-                let (id, created) = self.entry_or_create(EntryKind::ToolCall, Some(&tool_call_id));
+                let (id, created) = self.entry_or_create(
+                    EntryKind::ToolCall,
+                    crate::callbacks::MAIN_AGENT_ID,
+                    Some(&tool_call_id),
+                );
                 self.buffer(id, &part, created)
             }
             EngineEvent::ToolNative {
@@ -302,6 +323,7 @@ impl Projector {
                 ops
             }
             EngineEvent::StreamSegment {
+                agent_id,
                 stream,
                 text,
                 span,
@@ -318,7 +340,7 @@ impl Projector {
                         (EntryKind::ToolCall, Some(tool_call_id.clone()))
                     }
                 };
-                let (id, created) = self.entry_or_create(kind, tool_key.as_deref());
+                let (id, created) = self.entry_or_create(kind, &agent_id, tool_key.as_deref());
                 let mut ops = Vec::new();
                 if created {
                     ops.push(EntryOp::Upsert {
@@ -339,7 +361,32 @@ impl Projector {
             EngineEvent::TurnEnded { .. } => {
                 let mut ops = self.flush_all(true);
                 if let Some(turn) = &self.turn {
-                    for id in [&turn.thinking, &turn.assistant].into_iter().flatten() {
+                    // A step-end flush already emitted the pending text with
+                    // `is_final = false`, so that stream has nothing left to
+                    // flush here. Sealing it without a final marker would
+                    // record `SealWithoutFinal` on every real turn; an empty
+                    // segment continues the span and closes the stream. Only
+                    // streams that saw a delta get it — an upsert-only entry
+                    // seals cleanly on its own.
+                    let flushed: std::collections::BTreeSet<EntryId> = ops
+                        .iter()
+                        .filter_map(|op| match op {
+                            EntryOp::Append { id, delta } if delta.is_final => Some(id.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    for id in turn.streams.values() {
+                        if !flushed.contains(id) && turn.pendings.contains_key(id) {
+                            let next = turn.ordinals.get(id).copied().unwrap_or(0);
+                            ops.push(EntryOp::Append {
+                                id: id.clone(),
+                                delta: AppendDelta {
+                                    text: String::new(),
+                                    span: SeqSpan::new(next, next),
+                                    is_final: true,
+                                },
+                            });
+                        }
                         ops.push(EntryOp::Seal { id: id.clone() });
                     }
                 }
@@ -348,6 +395,19 @@ impl Projector {
             }
             // Boundary flush only: step end is transport-only, never an entry.
             EngineEvent::LlmStepEnd { .. } => self.flush_all(false),
+            // v2 #4663 `TurnStepStreamReset`: the provider discarded the
+            // step's partial stream. Seal every open entry and forget the
+            // stream mapping, so a later delta starts a fresh row instead of
+            // appending to text the model never saw.
+            EngineEvent::StepStreamReset { .. } => {
+                let ops = self.flush_all(true);
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.streams.clear();
+                    turn.pendings.clear();
+                    turn.tools.clear();
+                }
+                ops
+            }
             EngineEvent::SubagentSpawned {
                 subagent_id,
                 subagent_name,
@@ -386,17 +446,57 @@ impl Projector {
         }
     }
 
+    /// Allocate a user entry the host submitted into the open turn — a steer.
+    ///
+    /// The projector owns the per-turn id allocator, so a host-created row has
+    /// to come through it: an id minted elsewhere would interleave with the
+    /// streamed entries by sequence and paint in the wrong place. The open text
+    /// streams are flushed (final segment) and detached first; after a steer the
+    /// model's next output is a new assistant message, and appending it to the
+    /// pre-steer row would put the answer above the message the user just sent.
+    ///
+    /// Returns the new entry's id and the ops to apply, or `None` when no turn
+    /// with that id is open (a steer the engine refused, or a stale receipt).
+    ///
+    /// The host calls this *after* the admission was accepted, not before: the
+    /// flush detaches the open stream, so allocating a row for a steer the
+    /// engine then refused would split the answer being streamed for nothing.
+    pub fn note_user_entry(
+        &mut self,
+        turn_id: &str,
+        text: impl Into<String>,
+    ) -> Option<(EntryId, Vec<EntryOp>)> {
+        if self.turn.as_ref()?.turn_id != turn_id {
+            return None;
+        }
+        let mut ops = self.flush_all(true);
+        let turn = self.turn.as_mut()?;
+        turn.streams.clear();
+        turn.pendings.clear();
+        let id = turn.alloc.alloc(EntryKind::UserMsg);
+        ops.push(EntryOp::Upsert {
+            id: id.clone(),
+            content: EntryContent::new(EntryKind::UserMsg, text),
+        });
+        Some((id, ops))
+    }
+
     /// Resolve the entry for a stream, creating it on first use. Returns the
     /// id and whether it was created now. Without an active turn, falls back
     /// to a throwaway UI-local id: deltas before `turn.started` are an engine
     /// ordering bug and must not crash the projection.
-    fn entry_or_create(&mut self, kind: EntryKind, tool_key: Option<&str>) -> (EntryId, bool) {
+    fn entry_or_create(
+        &mut self,
+        kind: EntryKind,
+        agent_id: &str,
+        tool_key: Option<&str>,
+    ) -> (EntryId, bool) {
         let Some(turn) = self.turn.as_mut() else {
             return (EntryId::ui_local(0, kind), false);
         };
+        let stream_key = (agent_id.to_owned(), kind);
         let existing = match kind {
-            EntryKind::AssistantMsg => turn.assistant.clone(),
-            EntryKind::Thinking => turn.thinking.clone(),
+            EntryKind::AssistantMsg | EntryKind::Thinking => turn.streams.get(&stream_key).cloned(),
             EntryKind::ToolCall => {
                 tool_key.and_then(|key| turn.tools.get(key).map(|(id, _)| id.clone()))
             }
@@ -407,8 +507,9 @@ impl Projector {
         }
         let id = turn.alloc.alloc(kind);
         match kind {
-            EntryKind::AssistantMsg => turn.assistant = Some(id.clone()),
-            EntryKind::Thinking => turn.thinking = Some(id.clone()),
+            EntryKind::AssistantMsg | EntryKind::Thinking => {
+                turn.streams.insert(stream_key, id.clone());
+            }
             EntryKind::ToolCall => {
                 if let Some(key) = tool_key {
                     turn.tools
@@ -488,12 +589,26 @@ impl Projector {
         ops
     }
 
-    fn text_delta(&mut self, kind: EntryKind, text: &str) -> Vec<EntryOp> {
-        let (id, created) = self.entry_or_create(kind, None);
+    fn text_delta(&mut self, kind: EntryKind, agent_id: &str, text: &str) -> Vec<EntryOp> {
+        let (id, created) = self.entry_or_create(kind, agent_id, None);
         if self.turn.is_none() {
             return Vec::new();
         }
-        self.buffer(id, text, created)
+        let mut ops = Vec::new();
+        if created {
+            // The owner is what keeps a subagent's answer out of the parent's
+            // entry: a reader groups by it, and the main agent's own entries
+            // stay unattributed.
+            let mut content = EntryContent::new(id.kind, String::new());
+            content.agent_id =
+                (agent_id != crate::callbacks::MAIN_AGENT_ID).then(|| agent_id.to_owned());
+            ops.push(EntryOp::Upsert {
+                id: id.clone(),
+                content,
+            });
+        }
+        ops.extend(self.buffer(id, text, false));
+        ops
     }
 
     /// Flush one stream, if it has buffered bytes.

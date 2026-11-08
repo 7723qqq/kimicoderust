@@ -149,7 +149,7 @@ async fn summary_request_reports_used_context_tokens() {
     let summary = summarize_with_llm_budgeted(&history, &llm, None, None, None, Some(window))
         .await
         .expect("summary");
-    assert_eq!(summary, "summary");
+    assert_eq!(summary.summary, "summary");
 
     let expected_estimate = summarization_prompt(&history, None)
         .iter()
@@ -1698,7 +1698,7 @@ async fn test_summarizer_shrinks_history_after_overflow_and_retries() {
     ];
     let llm = SummarizerMockLlm::overflow_then_ok("Recovered summary.", 1);
     let result = summarize_with_llm_budgeted(&omitted, &llm, None, None, None, None).await;
-    assert_eq!(result.unwrap(), "Recovered summary.");
+    assert_eq!(result.unwrap().summary, "Recovered summary.");
     assert_eq!(llm.call_count(), 2, "one shrink-retry after the overflow");
     let second_prompt = llm.last_user_content();
     assert!(
@@ -1728,7 +1728,7 @@ async fn test_summarizer_gives_up_after_max_overflow_shrinks() {
     // A generous attempt cap isolates the shrink bound as the stop reason.
     let result = summarize_with_llm_budgeted(&omitted, &llm, None, None, Some(10), None).await;
     assert!(
-        matches!(result, Err(CompactionError::Provider(_))),
+        matches!(result, Err(CompactionError::Provider { .. })),
         "the original overflow error must surface"
     );
     assert_eq!(
@@ -1844,5 +1844,58 @@ fn test_select_kept_user_messages_head_elision_tail_budget() {
     assert!(
         kept.iter().all(|m| !m.content.is_empty()),
         "no empty-content message may be kept"
+    );
+}
+
+/// v2 `compactionRound`'s `retry_count`: a retryable summarizer failure that
+/// exhausts the attempts reports how many backoff retries it actually spent,
+/// not the round's cap (the event used to carry the configured maximum).
+#[tokio::test]
+async fn test_compaction_failure_reports_the_retries_it_spent() {
+    struct FlakySummarizer {
+        calls: std::sync::atomic::AtomicU32,
+    }
+    impl LLM for FlakySummarizer {
+        fn system_prompt(&self) -> &str {
+            "sys"
+        }
+        fn model_name(&self) -> &str {
+            "flaky-summarizer"
+        }
+        fn is_retryable_error(&self, _: &str) -> bool {
+            true
+        }
+        fn chat(
+            &self,
+            _: LLMChatParams,
+        ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Err(Box::new(std::io::Error::other("backend stream failure"))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            })
+        }
+    }
+
+    let llm = FlakySummarizer {
+        calls: std::sync::atomic::AtomicU32::new(0),
+    };
+    let history = vec![msg("user", "a"), msg("assistant", "b")];
+    let error = summarize_with_llm(&history, &llm, None, None, Some(2))
+        .await
+        .expect_err("two exhausted attempts fail the compaction");
+
+    match error {
+        CompactionError::Provider { retry_count, .. } => assert_eq!(
+            retry_count, 1,
+            "two requests are one backoff retry, not the cap"
+        ),
+        other => panic!("expected a provider failure, got {other:?}"),
+    }
+    assert_eq!(
+        llm.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the cap bounds requests, and both were made"
     );
 }

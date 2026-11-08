@@ -10,9 +10,9 @@ description:
   en: >
       The terminal app: command parsing, TUI, session orchestration, slash commands and the plugin panel, driving the engine via the node SDK.
       
-revision: 932e017600564470d7e43d7b25bb49896c06cca1
-updated_at: "2026-11-01T08:11:47.954Z"
-fingerprint: a9c95ca649784914f77d1efd8484564bbf88862d2f9e6bab0db98a6361747bfe
+revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
+updated_at: "2026-11-07T16:34:05.538Z"
+fingerprint: e1fb80fcc50020520a34130c3257e2c7d6f94f8e17f1e7f0fa4b57a9cf7f868e
 source:
   - path: "apps/kimi-code/src/main.ts"
   - path: "apps/kimi-code/src/cli/commands.ts"

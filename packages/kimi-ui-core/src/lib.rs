@@ -35,6 +35,7 @@ pub mod event_class;
 pub mod input;
 pub mod layout;
 pub mod render;
+pub mod steer;
 
 pub use coalesce::CoalescingPolicy;
 pub use entry_id::{EntryId, EntryIdAllocator, EntryKind, EntryNs, ParseEntryIdError};
@@ -45,3 +46,4 @@ pub use event_class::{
 };
 pub use input::{InputEvent, Key, KeyEvent, Modifiers, MouseEvent, MouseKind};
 pub use layout::{Attributes, Block, Color, Row, Style, char_width, expand_tabs, width, wrap};
+pub use steer::{SteerDelivery, SteerJournal, SteerStage, SteerTrace, SubmissionState};

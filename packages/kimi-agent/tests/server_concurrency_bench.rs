@@ -187,6 +187,7 @@ async fn bench_concurrent_websocket_fanout_stress() {
             // the whole burst, which is what a real delta stream looks like.
             turn_id: "bench-turn".into(),
             delta: format!("token_{step} "),
+            block: None,
         });
     }
 

@@ -119,6 +119,16 @@ impl ContextTokens {
     fn invalidate(&mut self) {
         self.stale = true;
     }
+
+    /// Re-seed after a compaction (v2 `applyCompaction`'s `tokensAfter`): the
+    /// summary message costs what the summarization request actually produced,
+    /// not what the estimator guesses for its text. The next compaction
+    /// threshold therefore sees the measured figure instead of a guess.
+    fn rebase_with_summary(&mut self, messages: &[LLMMessage], summary_output_tokens: Option<u32>) {
+        self.tokens = crate::compaction::rebased_tokens(messages, summary_output_tokens);
+        self.len = messages.len();
+        self.stale = false;
+    }
 }
 
 /// Build a [`TurnResult`] with the turn's telemetry counters.
@@ -165,6 +175,29 @@ fn emit_step_begin_event(callbacks: &dyn HostCallbacks, agent_id: &str, turn_id:
     }));
 }
 
+/// The turn loop's step-interrupted event (v2 `TurnStepInterrupted`,
+/// `loopService.ts:2301-2313`): a step that began but never completed is closed
+/// with the reason it ended (`aborted` / `max_steps` / `error`) and, except for
+/// a user cancellation, the message that ended it. v2 emits it immediately
+/// before `turn.ended`, and only when a step was actually in flight.
+fn emit_step_interrupted_event(
+    callbacks: &dyn HostCallbacks,
+    agent_id: &str,
+    turn_id: &str,
+    step: u32,
+    reason: &str,
+    message: Option<&str>,
+) {
+    callbacks.emit_event(serde_json::json!({
+        "type": "llm.step.interrupted",
+        "agent_id": agent_id,
+        "turn_id": turn_id,
+        "step": step,
+        "reason": reason,
+        "message": message,
+    }));
+}
+
 /// The turn loop's addressed copy of v2 `turn.step.completed` (upstream #3938
 /// puts the request timing on it): the transcript projector folds this into the
 /// step — completion, usage, and the timing breakdown. The transport's own sink
@@ -172,6 +205,39 @@ fn emit_step_begin_event(callbacks: &dyn HostCallbacks, agent_id: &str, turn_id:
 /// turn/step id, so it cannot address a step; this one can — and `finish_reason`
 /// rides along with it so the step's terminal signal (`max_tokens`, `filtered`)
 /// is still readable from the only `llm.step.end` that names a step.
+/// Reduce one finished call to v2's `ToolReceipt`: the command a shell tool
+/// ran and the paths its declared accesses touched. v2 reads these off the
+/// tool's `accesses`; the engine derives the same list with
+/// [`tool_scheduler::infer_tool_accesses`], so the two agree about what a call
+/// wrote.
+fn progress_receipt(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    success: bool,
+) -> crate::turn_loop::progress_track::ToolReceipt {
+    use crate::turn_loop::types::{FileOperation, ToolResourceAccess};
+    let mut receipt = crate::turn_loop::progress_track::ToolReceipt {
+        command: arguments
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        success,
+        ..Default::default()
+    };
+    for access in tool_scheduler::infer_tool_accesses(tool_name, arguments) {
+        let ToolResourceAccess::File(file) = access else {
+            continue;
+        };
+        if matches!(
+            file.operation,
+            FileOperation::Write | FileOperation::ReadWrite
+        ) {
+            receipt.write_paths.push(file.path);
+        }
+    }
+    receipt
+}
+
 fn emit_step_end_event(
     callbacks: &dyn HostCallbacks,
     agent_id: &str,
@@ -660,7 +726,15 @@ pub fn run_turn<'a>(
     callbacks: &'a Arc<dyn HostCallbacks>,
 ) -> BoxFuture<'a, Result<TurnResult, Box<dyn std::error::Error + 'a>>> {
     let turn_id = input.turn_id.clone();
-    let max_steps = input.max_steps.max(1);
+    // v2 `loopService.ts:1047-1050`: the cap applies only when it is a
+    // positive number — an unset or `0` `max_steps_per_turn` means "no cap",
+    // not "one step". Clamping to 1 turned a 0 into a turn that failed after
+    // its first tool call.
+    let max_steps = if input.max_steps == 0 {
+        u32::MAX
+    } else {
+        input.max_steps
+    };
     let user_messages = input.messages.clone();
     // Seed the date-change baseline from the conversation history (v2's
     // history-scanned `lastDisclosure`) before `user_messages` moves into the
@@ -756,6 +830,20 @@ pub fn run_turn<'a>(
             ..Default::default()
         }];
         messages.extend(user_messages);
+
+        // v2 `shapeUnsupportedDynamicToolContext` (#4719 / #4720): a history
+        // recorded while the model could load tools may still carry a
+        // `<tools_added>` announcement that tells this (now incapable) model
+        // to call `select_tools`. Rewrite it into the runtime-change reminder
+        // before any hook or provider sees the messages.
+        let supports_dynamic_loading = input
+            .toolset
+            .as_ref()
+            .is_some_and(|toolset| toolset.supports_dynamic_tool_loading());
+        crate::tools::tool_select_state::shape_unsupported_dynamic_tool_history(
+            &mut messages,
+            supports_dynamic_loading,
+        );
 
         // v2 `onBeforeSubmitPrompt`: matching hooks settle before the model
         // call. A block appends the rendered assistant result and skips the
@@ -921,6 +1009,32 @@ pub fn run_turn<'a>(
         // home-local directory would be a side effect with no consumer.
         let mut injection_registry =
             crate::injection::InjectionRegistry::with_defaults(date_baseline, agents_md_baseline);
+        // v2 `ProgressTrackerService`: once the turn has made
+        // `EBM_BLIND_MUTATION_THRESHOLD` changes nobody verified, the next
+        // request asks for a verification run. The reminder is gated on
+        // `ebmInjectedThisTurn` (v2 `progressTrackerService.ts:71-75`), which is
+        // set once and reset only by `turn.started`, so a turn that keeps
+        // writing unverified files after the threshold is crossed still sees it
+        // exactly once. Arming alone is not that gate: `blind` stays at or above
+        // the threshold, so every later write would re-arm it and the reminder
+        // would land on every following request.
+        let ebm_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ebm_injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut progress_tracker = crate::turn_loop::progress_track::ProgressTracker::default();
+        {
+            let pending = ebm_pending.clone();
+            let injected = ebm_injected.clone();
+            injection_registry.register(
+                "progress_reminder",
+                Box::new(move |_ctx| {
+                    if !pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        return None;
+                    }
+                    (!injected.swap(true, std::sync::atomic::Ordering::SeqCst))
+                        .then(|| crate::turn_loop::progress_track::EBM_REMINDER.to_string())
+                }),
+            );
+        }
         crate::injection::permission_mode::register_permission_mode_injection(
             &mut injection_registry,
             input.permission_mode,
@@ -993,6 +1107,11 @@ pub fn run_turn<'a>(
             injection_registry.register(
                 "tool_select",
                 Box::new(move |_ctx| disclosure_toolset.take_disclosure_announcement()),
+            );
+            let update_toolset = toolset.clone();
+            injection_registry.register(
+                "tool_update_pending",
+                Box::new(move |_ctx| update_toolset.take_pending_update_notice()),
             );
             // Previous-session background tasks (v2 `taskService.reconcile` →
             // `appendPreviousSessionTasksReminder`): a task the last process
@@ -1194,6 +1313,14 @@ pub fn run_turn<'a>(
                                 "tokensAfter": report.tokens_after,
                             },
                         }));
+                        // v2 `compaction_finished`: the success telemetry for
+                        // the round that just landed, usage included.
+                        callbacks.telemetry(report.finished_payload(
+                            "auto",
+                            1,
+                            input.llm.thinking_effort().unwrap_or("none"),
+                            crate::turn_loop::turn_index(&turn_id),
+                        ));
                         tracing::debug!(
                             turn_id = %turn_id,
                             step = step_num,
@@ -1211,7 +1338,6 @@ pub fn run_turn<'a>(
                                 .notify_post_compact(&turn_id, "auto", report.tokens_after as u64)
                                 .await;
                         }
-                        context_tokens.invalidate();
                         // The compacted shape already closes its block with
                         // the continuation note (v2 `buildContextCompactionShape`
                         // splices exactly `result.messages`), so nothing is
@@ -1219,6 +1345,10 @@ pub fn run_turn<'a>(
                         // re-injects reminders, which the injection pass below
                         // owns, not a second continuation.
                         messages = compacted;
+                        context_tokens.rebase_with_summary(
+                            &messages,
+                            report.usage.as_ref().map(|usage| usage.output_tokens),
+                        );
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -1305,6 +1435,27 @@ pub fn run_turn<'a>(
             // the compaction guard can fail the turn, and outside the recovery
             // loop so an overflow round does not announce the same step twice.
             emit_step_begin_event(callbacks.as_ref(), &input.agent_id, &turn_id, steps);
+            // v2 `failMachineStep` (loopService.ts:2160-2171): a terminal step
+            // failure closes the step it began before the turn ends, carrying
+            // the error text the user will see. Every step-block failure
+            // return goes through this funnel so none can forget it.
+            macro_rules! fail_current_step {
+                ($err:expr) => {{
+                    // Bind once: the error expression may move a value, and
+                    // naming it twice would move it twice.
+                    let failure = $err;
+                    let error_text = failure.to_string();
+                    emit_step_interrupted_event(
+                        callbacks.as_ref(),
+                        &input.agent_id,
+                        &turn_id,
+                        steps,
+                        "error",
+                        Some(&error_text),
+                    );
+                    return Err(Box::new(failure) as Box<dyn std::error::Error + 'a>);
+                }};
+            }
             let step_result = 'overflow_recovery: loop {
                 // Set inside the loop: an overflow round leaves the phase at
                 // `Compacting`, and the retried request is an LLM wait again.
@@ -1333,6 +1484,14 @@ pub fn run_turn<'a>(
                         } else {
                             LoopTurnStopReason::Aborted
                         };
+                        emit_step_interrupted_event(
+                            callbacks.as_ref(),
+                            &input.agent_id,
+                            &turn_id,
+                            steps,
+                            "aborted",
+                            None,
+                        );
                         return Ok(turn_result(
                             stop_reason,
                             steps,
@@ -1347,7 +1506,7 @@ pub fn run_turn<'a>(
                     // credential fails the turn with the upload's own error
                     // rather than degrading the media to a path tag.
                     Err(error) => {
-                        return Err(Box::new(error) as Box<dyn std::error::Error + 'a>);
+                        fail_current_step!(error);
                     }
                 };
                 let call = execute_loop_step_with_retry(
@@ -1391,6 +1550,14 @@ pub fn run_turn<'a>(
                         } else {
                             LoopTurnStopReason::Aborted
                         };
+                        emit_step_interrupted_event(
+                            callbacks.as_ref(),
+                            &input.agent_id,
+                            &turn_id,
+                            steps,
+                            "aborted",
+                            None,
+                        );
                         return Ok(turn_result(
                             stop_reason,
                             steps,
@@ -1434,8 +1601,7 @@ pub fn run_turn<'a>(
                                 )
                             });
                             if degraded == 0 {
-                                return Err(Box::new(std::io::Error::other(err_str))
-                                    as Box<dyn std::error::Error + 'a>);
+                                fail_current_step!(std::io::Error::other(err_str));
                             }
                             // v2 #4413 `markMediaRecovery`: the recovery the
                             // provider just forced is agent-level state, so the
@@ -1462,8 +1628,7 @@ pub fn run_turn<'a>(
                                 crate::llm::media_budget::strip_all_media(&mut messages, entries)
                             });
                             if stripped == 0 {
-                                return Err(Box::new(std::io::Error::other(err_str))
-                                    as Box<dyn std::error::Error + 'a>);
+                                fail_current_step!(std::io::Error::other(err_str));
                             }
                             // v2 #4413: the strip snapshot is the captured key
                             // set, so media added by a later turn stay visible
@@ -1503,8 +1668,7 @@ pub fn run_turn<'a>(
                             }
                             crate::llm::media_budget::MEDIA_STRIPPED_CODE
                         } else {
-                            return Err(Box::new(std::io::Error::other(err_str))
-                                as Box<dyn std::error::Error + 'a>);
+                            fail_current_step!(std::io::Error::other(err_str));
                         };
                         callbacks.emit_event(serde_json::json!({
                             "type": "warning",
@@ -1552,8 +1716,7 @@ pub fn run_turn<'a>(
                         estimated_request_tokens,
                         effective_window,
                     ) {
-                        return Err(Box::new(std::io::Error::other(err_str))
-                            as Box<dyn std::error::Error + 'a>);
+                        fail_current_step!(std::io::Error::other(err_str));
                     }
                     // v2 `recordOverflowRecovery`: count the round, then refuse
                     // once the budget is spent. The sentence comes from
@@ -1569,8 +1732,7 @@ pub fn run_turn<'a>(
                             crate::i18n::i18n_params!["max_attempts" => max_attempts],
                         )
                         .render();
-                        return Err(Box::new(std::io::Error::other(message))
-                            as Box<dyn std::error::Error + 'a>);
+                        fail_current_step!(std::io::Error::other(message));
                     }
                     callbacks.emit_event(serde_json::json!({
                         "type": "compaction.started",
@@ -1622,13 +1784,31 @@ pub fn run_turn<'a>(
                             // turn; `none` is the same spelling the wire uses
                             // when no effort is in effect, so it states the
                             // truth rather than omitting a required property.
+                            // v2's `CompactionFailedEvent.retry_count` is the
+                            // backoff retries this round performed, carried by
+                            // the failure itself; a cancellation or an empty
+                            // summary spent none.
+                            let summarizer_error = match &error {
+                                crate::compaction::CompactionError::Provider {
+                                    error: inner,
+                                    ..
+                                } => Some(inner.as_ref()),
+                                _ => None,
+                            };
+                            let failure_retry_count = match &error {
+                                crate::compaction::CompactionError::Provider {
+                                    retry_count,
+                                    ..
+                                } => *retry_count,
+                                _ => 0,
+                            };
                             let mut payload = serde_json::json!({
                                 "event": "compaction_failed",
                                 "source": "auto",
                                 "tokens_before": crate::compaction::estimate_messages_tokens(&messages),
                                 "duration_ms": compaction_started.elapsed().as_millis() as u64,
                                 "round": consecutive_overflow_compactions,
-                                "retry_count": compaction_config.max_overflow_compaction_attempts,
+                                "retry_count": failure_retry_count,
 
                                 "error_type": format!("{error:?}"),
                                 "thinking_effort": input.llm.thinking_effort().unwrap_or("none"),
@@ -1638,12 +1818,6 @@ pub fn run_turn<'a>(
                             }
                             // The summarizer request's trace id, when the
                             // failure carried one (v2 `request_id`).
-                            let summarizer_error = match &error {
-                                crate::compaction::CompactionError::Provider(inner) => {
-                                    Some(inner.as_ref())
-                                }
-                                _ => None,
-                            };
                             if let Some(id) = summarizer_error
                                 .and_then(|inner| inner.downcast_ref::<crate::llm::LlmError>())
                                 .and_then(crate::llm::LlmError::trace_id)
@@ -1651,7 +1825,7 @@ pub fn run_turn<'a>(
                                 payload["request_id"] = serde_json::json!(id);
                             }
                             callbacks.telemetry(payload);
-                            return Err(Box::new(error) as Box<dyn std::error::Error + 'a>);
+                            fail_current_step!(error);
                         }
                     };
                     // A compaction that produced no summary cannot change the
@@ -1682,8 +1856,7 @@ pub fn run_turn<'a>(
                         callbacks.emit_event(serde_json::json!({
                             "type": "compaction.cancelled",
                         }));
-                        return Err(Box::new(std::io::Error::other(err_str))
-                            as Box<dyn std::error::Error + 'a>);
+                        fail_current_step!(std::io::Error::other(err_str));
                     }
                     callbacks.emit_event(serde_json::json!({
                         "type": "compaction.completed",
@@ -1694,6 +1867,14 @@ pub fn run_turn<'a>(
                             "tokensAfter": report.tokens_after,
                         },
                     }));
+                    // v2 `compaction_finished` for the recovery round that
+                    // just landed (the round index is the overflow attempt).
+                    callbacks.telemetry(report.finished_payload(
+                        "auto",
+                        consecutive_overflow_compactions,
+                        input.llm.thinking_effort().unwrap_or("none"),
+                        crate::turn_loop::turn_index(&turn_id),
+                    ));
                     // Completion arm of the pair opened alongside
                     // `compaction.started` above.
                     if let Some(ref guard) = hook_guard {
@@ -1711,7 +1892,10 @@ pub fn run_turn<'a>(
                         "recovered from context overflow via emergency compaction"
                     );
                     messages = force_compacted;
-                    context_tokens.invalidate();
+                    context_tokens.rebase_with_summary(
+                        &messages,
+                        report.usage.as_ref().map(|usage| usage.output_tokens),
+                    );
                 }
             };
             // The step produced a result, so the window fits: v2 `afterStep`
@@ -1834,25 +2018,21 @@ pub fn run_turn<'a>(
                     // model can read and correct. Dropping it (what the streaming
                     // transports used to do) gave the model nothing; executing a
                     // fabricated `{}` would run Bash/Write with no inputs.
-                    let mut unusable_arguments = Vec::new();
-                    tool_calls.retain(|tc| {
-                        let Some(reason) = unusable_tool_arguments(tc) else {
-                            return true;
-                        };
-                        unusable_arguments.push((tc.id.clone(), tc.name.clone(), reason));
-                        false
-                    });
-                    for (tool_call_id, tool_name, reason) in unusable_arguments {
-                        messages.push(LLMMessage {
-                            role: "tool".into(),
-                            content: reason.message(&tool_name),
-                            blocks: Vec::new(),
-                            tool_calls: Vec::new(),
-                            tool_call_id: Some(tool_call_id),
-                            prompt_id: None,
-                            origin: None,
-                        });
-                    }
+                    //
+                    // The refusal is recorded against the call's position rather
+                    // than answered here, because the call keeps its place in the
+                    // dedup plan: v2 `registerSkipped` registers a call the
+                    // before-hook never saw, so a turn that keeps re-issuing one
+                    // undecodable call still earns the repeat ladder and is
+                    // force-stopped at 12 (`toolDedupe.test.ts:1131`). Answering
+                    // it outside the plan — what this used to do — hid the loop
+                    // from the breaker and treated every repeat as the first.
+                    let mut refusals: Vec<Option<String>> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            unusable_tool_arguments(tc).map(|reason| reason.message(&tc.name))
+                        })
+                        .collect();
 
                     // v2 `AgentSwarmService`'s first gate: in swarm mode the
                     // single-subagent `Agent` tool is refused, so the model uses
@@ -1934,7 +2114,7 @@ pub fn run_turn<'a>(
                     // `tool_calls` (the scheduler preserves call order).
                     let dedupe_plan = tool_dedupe.plan_step_by(&tool_calls, |tc| {
                         crate::tools::is_native_tool_name(&tc.name)
-                            .then(|| crate::tools::tool_dedupe::make_key(&tc.name, &tc.arguments))
+                            .then(|| crate::tools::tool_dedupe::dedupe_key(tc))
                     });
                     let call_index: std::collections::HashMap<String, usize> = tool_calls
                         .iter()
@@ -2103,8 +2283,13 @@ pub fn run_turn<'a>(
                     // parser entirely; an owned but unparseable command is
                     // refused conservatively by the pure tower analyzer.
                     let mut schedulable = Vec::with_capacity(tool_calls.len());
-                    let mut tower_denials = Vec::new();
-                    for tc in &tool_calls {
+                    for (index, tc) in tool_calls.iter().enumerate() {
+                        // Answered by the preflight refusal above; the tower
+                        // guard reads `command`, which an undecodable call does
+                        // not have.
+                        if refusals[index].is_some() {
+                            continue;
+                        }
                         if tc.name.eq_ignore_ascii_case("bash")
                             && let Some(toolset) = input.toolset.as_ref()
                             && let Some(command) =
@@ -2156,26 +2341,12 @@ pub fn run_turn<'a>(
                                         crate::tools::tower::bash_guard::parse_shell_script,
                                     );
                                 if let Some(veto) = veto {
-                                    tower_denials.push((tc.id.clone(), veto));
+                                    refusals[index] = Some(veto);
                                     continue;
                                 }
                             }
                         }
                         schedulable.push(tc.clone());
-                    }
-                    for (tool_call_id, veto) in tower_denials {
-                        messages.push(LLMMessage {
-                            role: "tool".into(),
-                            content: veto,
-                            blocks: Vec::new(),
-                            tool_calls: Vec::new(),
-                            tool_call_id: Some(tool_call_id),
-                            prompt_id: None,
-                            origin: None,
-                        });
-                    }
-                    if schedulable.is_empty() {
-                        continue;
                     }
                     let scheduled: Vec<ScheduledToolCall> = schedulable
                         .iter()
@@ -2278,7 +2449,15 @@ pub fn run_turn<'a>(
                         }
                     }
                     turn_watch_state.set_phase(TurnPhase::Tools);
-                    let (mut results, durations_ms, _batch_cancelled) =
+                    // The scheduler answers exactly the calls it was handed, so
+                    // its outcome is indexed by *scheduled* call, not by call
+                    // position. Re-aligning here is what lets a refused call
+                    // (preflight or tower guard) keep its position in the plan
+                    // and in the history: `finalize_step` and every consumer
+                    // below index by position in `tool_calls`.
+                    let (executed, executed_durations, _batch_cancelled) = if scheduled.is_empty() {
+                        (Vec::new(), Vec::new(), false)
+                    } else {
                         match tool_scheduler::execute_scheduled(
                             input.cancellation.as_ref(),
                             scheduled,
@@ -2309,14 +2488,67 @@ pub fn run_turn<'a>(
                                 }
                                 return Err(err);
                             }
-                        };
+                        }
+                    };
                     turn_watch_state.note_tool_activity();
+                    let mut executed = executed.into_iter();
+                    let mut executed_durations = executed_durations.into_iter();
+                    let mut results = Vec::with_capacity(tool_calls.len());
+                    let mut durations_ms = Vec::with_capacity(tool_calls.len());
+                    for refusal in refusals.iter() {
+                        match refusal {
+                            Some(content) => {
+                                results.push(ExecutableToolResult {
+                                    delivery: None,
+                                    stop_turn: false,
+                                    content: content.clone(),
+                                    is_error: true,
+                                    note: None,
+                                    display: None,
+                                });
+                                durations_ms.push(None);
+                            }
+                            None => {
+                                results.push(
+                                    executed
+                                        .next()
+                                        .expect("the scheduler answers every scheduled call"),
+                                );
+                                durations_ms.push(executed_durations.next().flatten());
+                            }
+                        }
+                    }
 
                     // Dedup finalize (v2 `finalizeResult` + `endStep`):
                     // streak reminders are appended to the originals'
                     // results, same-step repeats receive the original's
                     // final result, and the cross-step streak advances.
                     let dedupe_force_stop = tool_dedupe.finalize_step(&dedupe_plan, &mut results);
+
+                    // v2 `ProgressTrackerService.onDidExecuteTool`: score each
+                    // executed call; three unverified mutations arm the
+                    // verification reminder for the next request.
+                    for (index, result) in results.iter().enumerate() {
+                        // A same-step repeat shared the original's execution;
+                        // scoring it again would double-count the mutation.
+                        if dedupe_plan
+                            .original_of
+                            .get(index)
+                            .is_some_and(|original| *original != index)
+                        {
+                            continue;
+                        }
+                        let Some(call) = tool_calls.get(index) else {
+                            continue;
+                        };
+                        let receipt =
+                            progress_receipt(&call.name, &call.arguments, !result.is_error);
+                        if progress_tracker.observe(&receipt)
+                            >= crate::turn_loop::progress_track::EBM_BLIND_MUTATION_THRESHOLD
+                        {
+                            ebm_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
 
                     // Insert tool results, each linked back to its call
                     // via `tool_call_id` (same call order as `tool_calls`).
@@ -2425,18 +2657,13 @@ pub fn run_turn<'a>(
                     }
 
                     if dedupe_force_stop {
-                        // Upstream #3459: Handoff step after repeat breaker forced stop.
-                        // Append a text-only reminder and give the model one step to
-                        // write its final handoff reply without tool calls.
-                        messages.push(LLMMessage {
-                            role: "user".into(),
-                            content: crate::injection::wrap_system_reminder(
-                                "The repeat breaker has stopped the turn due to repeated tool calls. \
-Deliver your final response as text now. Further tool calls are refused.",
-                            ),
-                            ..Default::default()
-                        });
-
+                        // v2 `settleHandoff`: one extra step with the normal
+                        // tool table. The model is expected to answer in text
+                        // because the last tool result carries the
+                        // final-response reminder; a call it makes anyway is
+                        // refused (`HANDOFF_VETO_TEXT`) and answered, never
+                        // executed. Dropping it silently left the refusal
+                        // invisible to the model and the transcript.
                         steps += 1;
                         turn_watch_state.note_steps(steps as u64);
                         turn_watch_state.set_phase(TurnPhase::Llm);
@@ -2451,7 +2678,7 @@ Deliver your final response as text now. Further tool calls are refused.",
                             input.llm,
                             &messages,
                             input.tools,
-                            &[],
+                            &step_tool_defs,
                             &retry_config,
                             Some(turn_cancel.token()),
                             Some(&telemetry),
@@ -2471,19 +2698,59 @@ Deliver your final response as text now. Further tool calls are refused.",
                             );
                         }
 
-                        if let Ok(step_res) = handoff_res
-                            && !step_res.content.is_empty()
-                        {
-                            messages.push(LLMMessage {
-                                role: "assistant".into(),
-                                content: step_res.content,
-                                blocks: Vec::new(),
-                                tool_calls: Vec::new(),
-                                tool_call_id: None,
+                        if let Ok(step_res) = handoff_res {
+                            let vetoed = match step_res.stop_reason {
+                                crate::turn_loop::types::LoopStepStopReason::ToolCalls(calls) => {
+                                    calls
+                                }
+                                _ => Vec::new(),
+                            };
+                            if vetoed.is_empty() {
+                                if !step_res.content.is_empty() {
+                                    messages.push(LLMMessage {
+                                        role: "assistant".into(),
+                                        content: step_res.content,
+                                        blocks: step_res.thinking,
+                                        tool_calls: Vec::new(),
+                                        tool_call_id: None,
 
-                                prompt_id: None,
-                                origin: None,
-                            });
+                                        prompt_id: None,
+                                        origin: None,
+                                    });
+                                }
+                            } else {
+                                messages.push(LLMMessage {
+                                    role: "assistant".into(),
+                                    content: step_res.content,
+                                    blocks: step_res.thinking,
+                                    tool_calls: vetoed.clone(),
+                                    tool_call_id: None,
+
+                                    prompt_id: None,
+                                    origin: None,
+                                });
+                                let veto = crate::tools::tool_dedupe::handoff_veto_text();
+                                let rendered = tool_result_render::render_status(&veto, true);
+                                for call in &vetoed {
+                                    callbacks.emit_event(serde_json::json!({
+                                        "type": "tool.native",
+                                        "agent_id": input.agent_id,
+                                        "turn_id": turn_id,
+                                        "tool_call_id": call.id,
+                                        "tool_name": call.name,
+                                        "arguments": call.arguments,
+                                        "content": rendered,
+                                        "is_error": true,
+                                        "note": null,
+                                    }));
+                                    messages.push(LLMMessage {
+                                        role: "tool".into(),
+                                        content: rendered.clone(),
+                                        tool_call_id: Some(call.id.clone()),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
                         }
 
                         return Ok(turn_result(
@@ -2510,6 +2777,19 @@ Deliver your final response as text now. Further tool calls are refused.",
             LoopTurnStopReason::EndTurn => LoopTurnStopReason::MaxSteps,
             other => other,
         };
+        // The last step completed, but the budget ran out with the model still
+        // asking for tools: v2 closes that step with `max_steps`
+        // (loopService.ts:2201 emitStepInterrupted via failMachineStep).
+        if reason == LoopTurnStopReason::MaxSteps {
+            emit_step_interrupted_event(
+                callbacks.as_ref(),
+                &input.agent_id,
+                &turn_id,
+                steps,
+                "max_steps",
+                None,
+            );
+        }
         Ok(
             turn_result(reason, steps, total_usage, 0, llm_retries, messages.clone())
                 .with_last_request_usage(last_request_usage),
@@ -2640,8 +2920,8 @@ impl UnusableArguments {
 
 /// v2 `preflightToolCall`: why this call cannot run, or `None` when it can.
 fn unusable_tool_arguments(call: &ToolCall) -> Option<UnusableArguments> {
-    if let Some(detail) = &call.args_parse_error {
-        return Some(UnusableArguments::NotJson(detail.clone()));
+    if let Some(failure) = &call.args_parse_error {
+        return Some(UnusableArguments::NotJson(failure.error.clone()));
     }
     (!call.arguments.is_object()).then_some(UnusableArguments::NotObject)
 }

@@ -271,6 +271,11 @@ export interface JsMcpServerConfig {
    * `bearerTokenEnvVar`).
    */
   bearerTokenEnvVar?: string
+  /**
+   * The server's authentication mode (v2 `config.auth`); `"oauth"` keeps a
+   * 401 flipping to `needs-auth` even when extra headers are set.
+   */
+  auth?: string
   /** `false` keeps the server listed as `disabled` and skips connecting it. */
   enabled?: boolean
   /** Allowlist of tool names exposed to the model (v2 `enabledTools`). */
@@ -576,6 +581,13 @@ export interface JsRunTurnParams {
    */
   mcpDefaults?: JsMcpDefaults
   /**
+   * The host's identity as an MCP client name (v2 `resolveClientName`,
+   * wired from the host identity slug in `workspaceMcpService.ts:42`).
+   * Announced as `initialize.clientInfo.name`; `None` announces the
+   * builtin `kimi-code`.
+   */
+  mcpClientName?: string
+  /**
    * Host-resolved `[services.moonshot_search]` / `KIMI_WEB_SEARCH_*`
    * backend (v2 `configSection.ts`). When set, the native WebSearch tool
    * calls this endpoint instead of scraping DuckDuckGo.
@@ -619,6 +631,11 @@ export interface JsRunTurnParams {
   maxRunningTasks?: number
   bashAutoBackgroundOnTimeout?: boolean
   bashTaskTimeoutS?: number
+  /**
+   * `[background].keepAliveOnExit` (v2): leave background tasks running on
+   * session close. Absent keeps the engine's stop-on-exit default.
+   */
+  keepAliveOnExit?: boolean
   /**
    * `[background].print_background_mode` — what a print-mode (`kimi -p`)
    * session does once its main turn ends with background tasks still
@@ -874,6 +891,25 @@ export interface ListDirectoryResult {
   output: string
   error?: string
 }
+
+/**
+ * Close every server the process-wide cache spawned and forget the managers,
+ * returning how many were shut down.
+ *
+ * Sessions share these managers on purpose — `/new` reuses live connections,
+ * which is v2's workspace-scoped `WorkspaceMcpService` — so no per-session
+ * teardown may close them: a workspace outlives its sessions on v2, and the
+ * same connections serve the next one. v2 closes them with the workspace
+ * instead: `WorkspaceMcpService.disposeAsync` awaits `manager.shutdown()`
+ * (workspaceMcpService.ts:91-112). The fork has no workspace tier behind this
+ * addon — the host *is* the workspace — so that dispose step is this export,
+ * and a host that is done with the engine (a test deleting its temporary
+ * home, an embedder shutting down) needs it explicitly: on Windows a stdio
+ * server's working directory stays busy until that child exits, so
+ * `remove_dir_all` on a plugin's own directory fails with `EBUSY` long after
+ * the last session is gone.
+ */
+export declare function mcpManagersDispose(): Promise<number>
 
 /**
  * Reconnect every live manager that knows `name`, so a server marked
@@ -1753,7 +1789,7 @@ export declare function sessionDispose(sessionId: string): object
  * through `session_turn_outcome`. `prompt` is a serialized `LLMMessage`
  * JSON (role/content/blocks/tool_calls/tool_call_id).
  */
-export declare function sessionEnqueueTurn(sessionId: string, prompt: string, admission: string): number
+export declare function sessionEnqueueTurn(sessionId: string, prompt: string, admission: string): TurnSubmission
 
 /** Append messages to the cross-turn history (e.g. a resumed transcript). */
 export declare function sessionExtendHistory(sessionId: string, historyJson: string): void
@@ -1765,9 +1801,10 @@ export declare function sessionExtendHistory(sessionId: string, historyJson: str
  * the managed platform through the `chat_title` tool, which needs an
  * OAuth-managed model — a session on a static API key rejects that source
  * rather than silently falling back to the deterministic title. Resolves
- * null when the history cannot supply an input.
+ * null when the history cannot supply an input. `force` marks a host-forced
+ * regeneration in the title-generation telemetry event.
  */
-export declare function sessionGenerateTitle(sessionId: string, source?: string | undefined | null): object
+export declare function sessionGenerateTitle(sessionId: string, source?: string | undefined | null, force?: boolean | undefined | null): object
 
 /**
  * The session's current cross-turn history as a JSON `LLMMessage[]` — the
@@ -1941,6 +1978,19 @@ export interface ToolAccessMeta {
  * Returns `key` itself when the key is in neither embedded locale.
  */
 export declare function translate(key: string, params?: Record<string, string> | undefined | null): string
+
+/**
+ * v2 #4627 `SteerResult`: what a submitted prompt got at admission — the
+ * prompt id the engine minted, the state observed, and whether the prompt
+ * joined the running turn (a steer) instead of opening or queueing a turn.
+ */
+export interface TurnSubmission {
+  turnId: number
+  promptId: string
+  createdAt: string
+  state: string
+  steered: boolean
+}
 
 /**
  * What trusting `work_dir` would switch on (v2 `trustDisclosureService`,

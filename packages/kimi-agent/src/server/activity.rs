@@ -804,6 +804,7 @@ mod tests {
 
         callbacks.turn_event(crate::turn_events::TurnEvent::Started {
             turn_id: 3,
+            prompt_id: Some("prompt-3-test".to_string()),
             origin: serde_json::json!({ "kind": "user" }),
         });
         let started = next_event(&mut sub).await;

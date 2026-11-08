@@ -544,6 +544,7 @@ pub async fn build_engine_pipeline(
                         runner.apply_background_limits(
                             spec.background.kill_grace_period_ms,
                             spec.background.max_running_tasks,
+                            spec.background.keep_alive_on_exit,
                         );
                         toolset = toolset.with_task_runner(runner.clone());
                         // The async setter: `set_task_runner_sync` can lose the
@@ -1189,6 +1190,7 @@ X"
             kind: "subagent",
             subagent_type: Some("explore"),
             agent_id: Some(agent_id),
+            timeout_ms: None,
         }
     }
 

@@ -76,6 +76,7 @@ async fn test_session_update_notifications_are_forwarded() {
         agent_id: "main".into(),
         turn_id: "turn-3".into(),
         delta: "hi".into(),
+        block: None,
     });
     bus.publish(&EngineEvent::TurnStarted {
         agent_id: "main".into(),
@@ -100,6 +101,7 @@ async fn test_session_update_notifications_are_forwarded() {
         agent_id: "main".into(),
         turn_id: "turn-3".into(),
         delta: "again".into(),
+        block: None,
     });
     assert!(
         rx.try_recv().is_err(),

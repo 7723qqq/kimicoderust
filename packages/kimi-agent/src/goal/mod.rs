@@ -108,7 +108,38 @@ pub struct GoalState {
     pub updated_at: u64,
 }
 
+/// v2 `MAX_GOAL_OBJECTIVE_LENGTH` (`features/goal/goalService.ts:83`).
+pub const MAX_GOAL_OBJECTIVE_CHARS: usize = 4000;
+
 impl GoalState {
+    /// Edit the current goal's objective in place (v2 #4568
+    /// `editGoalObjective`). A completed goal is terminal; the input is
+    /// trimmed and bounded like a create. Returns `false` when the objective
+    /// is unchanged, so the caller can skip the state write and event.
+    pub fn edit_objective(&mut self, objective: &str) -> Result<bool, String> {
+        if self.status == GoalStatus::Complete {
+            return Err(format!(
+                "Cannot edit a goal in status \"{}\"",
+                self.status.as_str()
+            ));
+        }
+        let objective = objective.trim();
+        if objective.is_empty() {
+            return Err("Goal objective cannot be empty".into());
+        }
+        if objective.chars().count() > MAX_GOAL_OBJECTIVE_CHARS {
+            return Err(format!(
+                "Goal objective cannot exceed {MAX_GOAL_OBJECTIVE_CHARS} characters. \
+                 Put long content in a file and reference the file path."
+            ));
+        }
+        if objective == self.objective {
+            return Ok(false);
+        }
+        self.objective = objective.to_string();
+        Ok(true)
+    }
+
     /// The live wall-clock figure: the settled elapsed time plus the time
     /// since the last resume for an active goal (v2 `liveWallClockMs`).
     pub fn live_wall_clock_ms(&self, now_ms: u64) -> u64 {
@@ -739,6 +770,40 @@ mod tests {
         assert_eq!(state.completion_criterion, None);
         assert_eq!(state.budget_limits, GoalBudgetLimits::default());
         assert_eq!(state.status, GoalStatus::Blocked);
+    }
+
+    /// v2 #4568 `editGoalObjective`: only an active/paused/blocked goal can
+    /// have its objective edited in place; `complete` is terminal, the input
+    /// is trimmed and bounded, and an unchanged objective is a no-op.
+    #[test]
+    fn edit_objective_validates_status_and_length() {
+        let mut state: GoalState = serde_json::from_value(json!({
+            "goalId": "goal-edit",
+            "objective": "old objective",
+            "status": "active",
+            "turnsUsed": 0,
+            "tokensUsed": 0,
+            "inputTokensUsed": 0,
+            "outputTokensUsed": 0,
+            "wallClockMs": 0,
+            "createdAt": 1,
+            "updatedAt": 1
+        }))
+        .unwrap();
+        assert!(state.edit_objective("  new objective  ").unwrap());
+        assert_eq!(state.objective, "new objective");
+        assert!(!state.edit_objective("new objective").unwrap());
+
+        assert!(state.edit_objective("   ").is_err(), "empty is refused");
+        assert!(
+            state.edit_objective(&"x".repeat(4001)).is_err(),
+            "over 4000 characters is refused"
+        );
+        state.status = GoalStatus::Complete;
+        assert!(
+            state.edit_objective("another").is_err(),
+            "a completed goal is terminal"
+        );
     }
 
     #[test]

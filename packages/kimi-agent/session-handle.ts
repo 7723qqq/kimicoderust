@@ -11,7 +11,14 @@
 /// session runs turns serially, so one active registration suffices).
 import { existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { authTokenRequestSchema, authTokenResponseSchema } from './wire-schema';
+
+import {
+  authTokenRequestSchema,
+  authTokenResponseSchema,
+  llmChatRequestSchema,
+  permissionCheckRequestSchema,
+  toolExecuteRequestSchema,
+} from './wire-schema';
 
 /** A serialized LLMMessage crossing the session boundary. */
 export interface SessionPrompt {
@@ -37,6 +44,20 @@ export type SessionAdmission =
   | 'activeOrNewTurn'
   | 'activeOrNextTurn'
   | 'activeTurnOnly';
+
+/**
+ * What a submitted prompt got at admission (v2 #4627 `SteerResult`): the id
+ * the engine minted for it, the state observed, and whether it joined the
+ * running turn. A host pairs its optimistic entry with `promptId` and clears
+ * its "not read yet" state when the engine later echoes that id.
+ */
+export interface TurnSubmission {
+  turnId: number;
+  promptId: string;
+  createdAt: string;
+  state: 'running' | 'queued' | 'blocked';
+  steered: boolean;
+}
 
 /**
  * The `title/generate` source selector the engine accepts: `first_turn` and
@@ -165,7 +186,7 @@ export interface SessionNativeModule {
     authTokenCb?: (callbackId: number) => void,
     parseBashCb?: (callbackId: number) => void,
   ): Promise<string>;
-  sessionEnqueueTurn(sessionId: string, prompt: string, admission: string): number;
+  sessionEnqueueTurn(sessionId: string, prompt: string, admission: string): TurnSubmission;
   sessionTurnOutcome(sessionId: string, turnId: number): Promise<SessionTurnOutcome>;
   sessionCancelTurn(sessionId: string, turnId?: number): boolean;
   /** Evict a foreign occupancy holder (v2 `takeOverSessionLock`, #4246). */
@@ -218,6 +239,7 @@ export interface SessionNativeModule {
   sessionGenerateTitle(
     sessionId: string,
     source?: SessionTitleSource,
+    force?: boolean,
   ): Promise<string | null>;
   sessionCompact(sessionId: string, instruction?: string): Promise<string>;
   sessionCancelCompaction(sessionId: string): boolean;
@@ -295,6 +317,22 @@ function loadSessionNativeModule(): SessionNativeModule {
  * fires with a callback id, the handler fetches the payload, answers, and
  * resolves.
  */
+/**
+ * Validate an inbound wire payload against its schema, then hand the original
+ * bytes on.
+ *
+ * The callback contract is a JSON string, and re-serializing the parsed object
+ * would silently drop every field the schema does not declare yet — that is the
+ * bug this validation exists to find, not one it should cause. A schema that
+ * describes a field the engine no longer sends throws, and
+ * `makeRequestCallback` turns that into a named error on the callback instead
+ * of a wrong call.
+ */
+export function checked(schema: { parse: (value: unknown) => unknown }, raw: string): string {
+  schema.parse(JSON.parse(raw));
+  return raw;
+}
+
 function makeRequestCallback(
   mod: SessionNativeModule,
   handler: (request: string) => CallbackAnswer,
@@ -353,8 +391,12 @@ export class EngineSessionHandle {
     return new EngineSessionHandle(id, transport);
   }
 
-  /** Enqueue a prompt; resolves with the engine-assigned turn id (monotonic). */
-  enqueueTurn(prompt: SessionPrompt, admission: SessionAdmission): Promise<number> {
+  /**
+   * Enqueue a prompt; resolves with the engine's submission result — the
+   * monotonic turn id plus the prompt identity and whether the prompt joined
+   * the running turn (v2 #4627 `SteerResult`).
+   */
+  enqueueTurn(prompt: SessionPrompt, admission: SessionAdmission): Promise<TurnSubmission> {
     return this.transport.enqueueTurn(this.id, prompt, admission);
   }
 
@@ -473,7 +515,10 @@ export class EngineSessionHandle {
   }
 
   /** Run one btw side-channel turn on a previously started instance. */
-  async btwPrompt(agentId: string, prompt: string): Promise<{ content: string; stopReason: string }> {
+  async btwPrompt(
+    agentId: string,
+    prompt: string,
+  ): Promise<{ content: string; stopReason: string }> {
     if (!this.transport.btwPrompt) {
       throw new Error('btw side-channel is not supported on this session transport');
     }
@@ -493,11 +538,14 @@ export class EngineSessionHandle {
    * user prompt exists yet. `source` is the v2 `title/generate` selector;
    * `digest` asks the managed platform and needs an OAuth-managed model.
    */
-  async generateTitle(source?: SessionTitleSource): Promise<string | null> {
+  async generateTitle(
+    source?: SessionTitleSource,
+    force?: boolean,
+  ): Promise<string | null> {
     if (!this.transport.generateTitle) {
       throw new Error('session title generation is not supported on this session transport');
     }
-    return this.transport.generateTitle(this.id, source);
+    return this.transport.generateTitle(this.id, source, force);
   }
 
   /**
@@ -541,7 +589,7 @@ export interface SessionTransport {
     sessionId: string,
     prompt: SessionPrompt,
     admission: SessionAdmission,
-  ): Promise<number>;
+  ): Promise<TurnSubmission>;
   turnOutcome(sessionId: string, turnId: number): Promise<SessionTurnOutcome>;
   cancelTurn(sessionId: string, turnId?: number): Promise<boolean>;
   /** Evict a foreign occupancy holder (v2 `takeOverSessionLock`, #4246). */
@@ -588,7 +636,11 @@ export interface SessionTransport {
     prompt: string,
   ): Promise<{ content: string; stopReason: string }>;
   btwCancel?(agentId: string): Promise<boolean>;
-  generateTitle?(sessionId: string, source?: SessionTitleSource): Promise<string | null>;
+  generateTitle?(
+    sessionId: string,
+    source?: SessionTitleSource,
+    force?: boolean,
+  ): Promise<string | null>;
   /** Compact with an engine-written LLM summary; resolves with the engine's report. */
   compact?(sessionId: string, instruction?: string): Promise<SessionCompactionReport>;
   cancelCompaction?(sessionId: string): Promise<boolean>;
@@ -622,21 +674,19 @@ class NapiSessionTransport implements SessionTransport {
     const parseBash = callbacks.parseBash;
     return this.mod.createEngineSession(
       params,
-      makeRequestCallback(this.mod, (p) => callbacks.llmChat(p)),
-      makeRequestCallback(this.mod, (p) => callbacks.executeTool(p)),
+      makeRequestCallback(this.mod, (p) => callbacks.llmChat(checked(llmChatRequestSchema, p))),
+      makeRequestCallback(this.mod, (p) =>
+        callbacks.executeTool(checked(toolExecuteRequestSchema, p)),
+      ),
       emitEvent === undefined ? undefined : makeEventCallback(this.mod, emitEvent),
       checkPermission === undefined
         ? undefined
-        : makeRequestCallback(this.mod, (p) => checkPermission(p)),
-      askQuestion === undefined
-        ? undefined
-        : makeRequestCallback(this.mod, (p) => askQuestion(p)),
-      stateRead === undefined
-        ? undefined
-        : makeRequestCallback(this.mod, (p) => stateRead(p)),
-      stateWrite === undefined
-        ? undefined
-        : makeRequestCallback(this.mod, (p) => stateWrite(p)),
+        : makeRequestCallback(this.mod, (p) =>
+            checkPermission(checked(permissionCheckRequestSchema, p)),
+          ),
+      askQuestion === undefined ? undefined : makeRequestCallback(this.mod, (p) => askQuestion(p)),
+      stateRead === undefined ? undefined : makeRequestCallback(this.mod, (p) => stateRead(p)),
+      stateWrite === undefined ? undefined : makeRequestCallback(this.mod, (p) => stateWrite(p)),
       checkpoint === undefined
         ? undefined
         : makeRequestCallback(this.mod, async (p) => {
@@ -645,9 +695,7 @@ class NapiSessionTransport implements SessionTransport {
           }),
       turnEvent === undefined ? undefined : makeEventCallback(this.mod, turnEvent),
       telemetry === undefined ? undefined : makeEventCallback(this.mod, telemetry),
-      listTools === undefined
-        ? undefined
-        : makeRequestCallback(this.mod, async () => listTools()),
+      listTools === undefined ? undefined : makeRequestCallback(this.mod, async () => listTools()),
       goal === undefined
         ? undefined
         : makeRequestCallback(this.mod, async () => (await goal()) ?? 'null'),
@@ -668,7 +716,7 @@ class NapiSessionTransport implements SessionTransport {
     sessionId: string,
     prompt: SessionPrompt,
     admission: SessionAdmission,
-  ): Promise<number> {
+  ): Promise<TurnSubmission> {
     return this.mod.sessionEnqueueTurn(sessionId, JSON.stringify(prompt), admission);
   }
 
@@ -794,12 +842,18 @@ class NapiSessionTransport implements SessionTransport {
     return this.mod.sessionBtwCancel(agentId);
   }
 
-  async generateTitle(sessionId: string, source?: SessionTitleSource): Promise<string | null> {
-    return (await this.mod.sessionGenerateTitle(sessionId, source)) ?? null;
+  async generateTitle(
+    sessionId: string,
+    source?: SessionTitleSource,
+    force?: boolean,
+  ): Promise<string | null> {
+    return (await this.mod.sessionGenerateTitle(sessionId, source, force)) ?? null;
   }
 
   async compact(sessionId: string, instruction?: string): Promise<SessionCompactionReport> {
-    return JSON.parse(await this.mod.sessionCompact(sessionId, instruction)) as SessionCompactionReport;
+    return JSON.parse(
+      await this.mod.sessionCompact(sessionId, instruction),
+    ) as SessionCompactionReport;
   }
 
   async cancelCompaction(sessionId: string): Promise<boolean> {

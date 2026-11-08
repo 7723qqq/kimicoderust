@@ -379,6 +379,96 @@ async fn select_tools_remembers_loaded_names_and_announces_them() {
     );
 }
 
+/// v2's `select_tools` query branch: a capability search ranks the deferred
+/// catalogue and returns candidates **without** loading them, and a call
+/// carrying neither argument is the schema's refine failure.
+#[tokio::test]
+async fn select_tools_searches_deferred_tools_without_loading_them() {
+    let (_dir, ts) = setup();
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    manager
+        .configure(
+            "github",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_client(crate::mcp::client::McpClient::mock("github"))
+        .await;
+    let ts = ts
+        .with_callbacks(std::sync::Arc::new(ToolTableHost(vec![tool_info("Read")])))
+        .with_mcp(manager)
+        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_tool_select_enabled(true);
+
+    let search = ts
+        .execute_tool("select_tools", &json!({ "query": "github sample" }))
+        .await
+        .expect("select_tools is a native tool");
+    assert!(!search.is_error, "{}", search.content);
+    assert!(
+        search
+            .content
+            .starts_with("Search results for \"github sample\":"),
+        "{}",
+        search.content
+    );
+    assert!(
+        search.content.contains("mcp__github__github_sample_tool"),
+        "{}",
+        search.content
+    );
+    assert!(
+        search.content.contains("These are candidates."),
+        "{}",
+        search.content
+    );
+
+    // A search never loads: the same name still arrives as a load below.
+    let load = ts
+        .execute_tool(
+            "select_tools",
+            &json!({ "names": ["mcp__github__github_sample_tool"] }),
+        )
+        .await
+        .expect("select_tools is a native tool");
+    assert!(
+        load.content
+            .contains("Loaded: mcp__github__github_sample_tool"),
+        "{}",
+        load.content
+    );
+
+    // Neither argument is the refine failure, not an empty search.
+    let neither = ts
+        .execute_tool("select_tools", &json!({}))
+        .await
+        .expect("select_tools is a native tool");
+    assert!(neither.is_error);
+    assert_eq!(
+        neither.content,
+        crate::tools::select_tools::SELECT_TOOLS_PROVIDE_NAMES_OR_QUERY
+    );
+
+    // The disclosure gate closed mid-session: the call says why it did
+    // nothing instead of searching a catalogue it would not expose.
+    let closed = ts.with_tool_select_enabled(false);
+    let refused = closed
+        .execute_tool("select_tools", &json!({ "query": "github" }))
+        .await
+        .expect("select_tools is a native tool");
+    assert!(refused.is_error);
+    assert_eq!(
+        refused.content,
+        crate::tools::select_tools::SELECT_TOOLS_UNAVAILABLE
+    );
+}
+
 /// A deferred server's tools leave the advertised table and
 /// `select_tools` appears in their place — but only when the model
 /// declares `dynamically_loaded_tools` (v2 `shapeTools`).
@@ -1432,8 +1522,11 @@ fn read_mixed_line_endings_make_cr_visible() {
     );
 }
 
+/// v2 has no per-line cap: a 3,000-character line comes back whole when it fits
+/// the `max_chars` budget. A page that does not fit splits the line and hands
+/// back a `column_offset` continuation instead of a `...` marker.
 #[test]
-fn read_truncates_long_lines_with_marker() {
+fn read_returns_a_long_line_whole() {
     let (_dir, ts) = setup();
     let long_line = "a".repeat(3000);
     std::fs::write(
@@ -1445,17 +1538,18 @@ fn read_truncates_long_lines_with_marker() {
     assert!(!result.is_error, "content: {}", result.content);
     let first = result.content.split('\n').next().unwrap();
     let text = first.strip_prefix("1\t").unwrap();
-    assert!(text.ends_with("..."), "line: {text}");
-    assert_eq!(text.chars().count(), 2000);
+    assert_eq!(text, long_line, "the line is not truncated");
+    assert!(!text.ends_with("..."), "no marker is appended: {text}");
     let note = result.note.unwrap();
-    assert!(
-        note.contains("Lines [1] were truncated to 2000 characters"),
-        "note: {note}"
-    );
+    assert!(!note.contains("were truncated"), "note: {note}");
 }
 
+/// v2 pages on characters only (`max_chars`, default 100 000, cap 500 000).
+/// The fork used to also stop at 100 KB of bytes, which cut multi-byte text to
+/// about a third of the page v2 would return; this pins the removal: ~110 KB of
+/// ASCII under a 500 000-character budget is one complete page.
 #[test]
-fn read_output_byte_budget_reports_max_bytes() {
+fn read_pages_on_characters_with_no_byte_ceiling() {
     let (_dir, ts) = setup();
     let mut content = String::new();
     for _ in 0..100 {
@@ -1468,16 +1562,21 @@ fn read_output_byte_budget_reports_max_bytes() {
         .unwrap();
     assert!(!result.is_error, "content: {}", result.content);
     let note = result.note.unwrap();
-    assert!(note.contains("Max 102400 bytes reached."), "note: {note}");
+    assert!(note.contains("Requested range complete."), "note: {note}");
     assert!(
-        !result.content.contains("100\t"),
-        "byte budget must stop rendering early: {}",
+        note.contains("Effective max_chars: 500000."),
+        "note: {note}"
+    );
+    assert!(note.contains("End of file reached."), "note: {note}");
+    assert!(
+        result.content.contains("100\t"),
+        "the whole page is returned; no byte ceiling cuts it early: {}",
         result.content
     );
 }
 
 #[test]
-fn read_output_character_budget_reports_max_chars() {
+fn read_output_character_budget_reports_the_v2_summary() {
     let (_dir, ts) = setup();
     let mut content = String::new();
     for _ in 0..100 {
@@ -1488,11 +1587,39 @@ fn read_output_character_budget_reports_max_chars() {
     let result = ts.execute("Read", &json!({ "path": "wide.txt" })).unwrap();
     assert!(!result.is_error, "content: {}", result.content);
     let note = result.note.unwrap();
+    assert!(note.contains("Character limit reached."), "note: {note}");
     assert!(
-        note.contains("Max 100000 characters reached."),
+        note.contains("Effective max_chars: 100000."),
         "note: {note}"
     );
     assert!(note.contains("To resume reading, call Read with line_offset="));
+}
+
+/// v2 has no line-count ceiling: a page ends on `max_chars`, so a 1,500-line
+/// file of short lines comes back in one call. The fork used to stop at 1,000
+/// lines and report "Max 1000 lines reached."; both the ceiling and the
+/// sentence are gone.
+#[test]
+fn read_has_no_line_count_ceiling() {
+    let (_dir, ts) = setup();
+    let mut content = String::new();
+    for i in 1..=1500 {
+        content.push_str(&format!("line {i}\n"));
+    }
+    std::fs::write(_dir.path().join("many.txt"), content).unwrap();
+    let result = ts.execute("Read", &json!({ "path": "many.txt" })).unwrap();
+    assert!(!result.is_error, "content: {}", result.content);
+    let note = result.note.unwrap();
+    assert!(
+        note.contains("1500 lines read from file starting from line 1."),
+        "note: {note}"
+    );
+    assert!(!note.contains("Max 1000 lines"), "note: {note}");
+    assert!(
+        result.content.contains("1500\tline 1500"),
+        "the whole file is in one page: {}",
+        result.content
+    );
 }
 
 #[test]
@@ -2478,6 +2605,52 @@ async fn bash_reports_failure_exit_code() {
         result.content.contains("exit code: 3"),
         "content: {}",
         result.content
+    );
+}
+
+/// v2 `foregroundCompletionResult` wording, which the port had drifted from: a
+/// clean run says `Command executed successfully.` (the fork added "(no
+/// output)"), and a failure with nothing printed opens with
+/// `Process exited with code N` instead of a blank line. Neither string had a
+/// test before.
+#[tokio::test]
+async fn bash_result_messages_match_v2() {
+    let Some(shell) = find_bash() else { return };
+    let (_dir, ts) = setup_with_shell(Some(&shell));
+
+    let ok_empty = ts
+        .execute_mutating("Bash", &json!({ "command": "true" }))
+        .await
+        .unwrap();
+    assert!(!ok_empty.is_error, "content: {}", ok_empty.content);
+    assert_eq!(ok_empty.content, "Command executed successfully.");
+
+    let ok_output = ts
+        .execute_mutating("Bash", &json!({ "command": "echo hi" }))
+        .await
+        .unwrap();
+    assert_eq!(ok_output.content.trim_end(), "hi");
+
+    let failed_empty = ts
+        .execute_mutating("Bash", &json!({ "command": "exit 3" }))
+        .await
+        .unwrap();
+    assert!(failed_empty.is_error);
+    assert!(
+        failed_empty
+            .content
+            .starts_with("Process exited with code 3\nCommand failed with exit code: 3."),
+        "content: {}",
+        failed_empty.content
+    );
+
+    let failed_output = ts
+        .execute_mutating("Bash", &json!({ "command": "echo oops; exit 4" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        failed_output.content,
+        "oops\nCommand failed with exit code: 4."
     );
 }
 
@@ -4205,4 +4378,103 @@ async fn edit_refuses_invalid_utf8_instead_of_rewriting_it() {
         .unwrap();
     assert!(result.is_error, "content: {}", result.content);
     assert_eq!(std::fs::read(&path).unwrap(), vec![0xff, 0xfe, b'a']);
+}
+
+/// v2 `describeUnavailableTool` / `describeMissingTool`
+/// (`toolSelectService.ts:298-318`) at the dispatch seam: a deferred tool that
+/// was never loaded is told to load itself, and one whose server went away is
+/// told why retrying cannot help. Both answers come from the engine — without
+/// them the call reaches the host and comes back as a generic unknown-tool
+/// error that tells the model nothing about loading or reconnecting.
+#[tokio::test]
+async fn a_deferred_tool_call_is_refused_with_v2_guidance() {
+    let (_dir, ts) = setup();
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    manager
+        .configure(
+            "github",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_client(crate::mcp::client::McpClient::mock("github"))
+        .await;
+    let ts = ts
+        .with_mcp(manager.clone())
+        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_tool_select_enabled(true);
+
+    // Not loaded yet: the table hid it, so the call gets load guidance.
+    let unloaded = ts
+        .execute_tool("mcp__github__github_sample_tool", &json!({}))
+        .await
+        .expect("the engine answers it, so the host never sees it");
+    assert!(unloaded.is_error);
+    assert_eq!(
+        unloaded.content,
+        "Tool \"mcp__github__github_sample_tool\" is available but not loaded. \
+Call select_tools with [\"mcp__github__github_sample_tool\"] first, then call the tool."
+    );
+
+    // Loaded, then the server goes away: the name leaves the registry, and the
+    // model is told a reconnect is what would bring it back.
+    ts.execute_tool(
+        "select_tools",
+        &json!({ "names": ["mcp__github__github_sample_tool"] }),
+    )
+    .await
+    .expect("select_tools is a native tool");
+    manager.remove_server("github").await;
+    let gone = ts
+        .execute_tool("mcp__github__github_sample_tool", &json!({}))
+        .await
+        .expect("the engine answers it");
+    assert!(gone.is_error, "content: {}", gone.content);
+    assert_eq!(
+        gone.content,
+        "Tool \"mcp__github__github_sample_tool\" was loaded but its MCP server is \
+currently disconnected. It may become available again when the server reconnects; \
+do not retry immediately."
+    );
+}
+
+/// v2 #4720 / #4719: without progressive disclosure, the request still
+/// reconciles the live registry into the session's initial snapshot — a
+/// same-name tool uses its current definition, while a runtime-only addition
+/// never joins the initial table. Rebuilding from scratch would silently
+/// keep the stale schema and advertise the new tool with no announcement.
+#[tokio::test]
+async fn disabled_disclosure_reconciles_the_initial_tool_table() {
+    let (_dir, ts) = setup();
+    let mut initial = tool_info("Read");
+    initial.description = "old read".into();
+    initial.input_schema = json!({ "type": "object", "properties": { "old": {} } });
+    ts.record_initial_tool_table_ref(&[initial.clone()]);
+
+    let mut current = tool_info("Read");
+    current.description = "new read".into();
+    current.input_schema = json!({ "type": "object", "properties": { "new": {} } });
+    let runtime_only = tool_info("mcp__github__late_addition");
+    let shaped = ts.shape_tool_table(vec![current, runtime_only]);
+
+    assert_eq!(
+        shaped.len(),
+        1,
+        "runtime-only additions stay out: {shaped:?}"
+    );
+    assert_eq!(shaped[0].description, "new read");
+    assert!(
+        shaped[0].input_schema["properties"].get("new").is_some(),
+        "a same-name tool must carry the current schema: {:?}",
+        shaped[0].input_schema
+    );
+    assert!(
+        shaped[0].input_schema["properties"].get("old").is_none(),
+        "the initial snapshot must not survive a same-name update"
+    );
 }

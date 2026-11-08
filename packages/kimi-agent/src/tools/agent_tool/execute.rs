@@ -14,6 +14,12 @@ use crate::subagent::manager::ForegroundTurnOutcome;
 use crate::subagent::types::ParentCancel;
 use crate::turn_loop::types::{ExecutableToolResult, LoopTurnStopReason};
 
+/// v2 `BACKENDS_EXPERIMENTAL_UNAVAILABLE` (`session/subagent/backend/configSection.ts:57`):
+/// the exact refusal a `backend` argument gets while the backends feature is
+/// off, which is every configuration of this engine.
+const BACKENDS_UNAVAILABLE: &str =
+    "backend is disabled: the subagent_backends experimental flag is off.";
+
 /// v2 `canRunInBackground`: all three task tools must be active for this
 /// caller, both in the merged live table and in its own profile policy.
 pub(super) async fn background_agent_available(
@@ -50,6 +56,22 @@ pub async fn execute_agent(
     tool_call_id: Option<&str>,
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> Option<ExecutableToolResult> {
+    // v2 `checkBackendArgs` (`agentTool.ts:328-349`): `backend` picks an
+    // external subagent backend (acp / claude-code / codex). This engine has
+    // none, and v2 with the `subagent_backends` flag off refuses the parameter
+    // with exactly this message instead of silently ignoring it — a model that
+    // asks for a backend must learn it is unavailable, not believe the
+    // in-process spawn honoured the request.
+    if string_arg(args, "backend").is_some_and(|value| !value.trim().is_empty()) {
+        return Some(ExecutableToolResult {
+            delivery: None,
+            stop_turn: false,
+            content: BACKENDS_UNAVAILABLE.to_string(),
+            is_error: true,
+            note: None,
+            display: None,
+        });
+    }
     // Without a `[secondary_model]` pool the engine still absorbs the `model`
     // parameter: omitting it inherits the caller's model, and any explicit
     // value — `primary` included (v2 #4418) — is the no-pool error. The host
@@ -107,12 +129,15 @@ pub async fn execute_agent(
         let resume = string_arg(args, "resume");
         let subagent_type = string_arg(args, "subagent_type");
         let model = string_arg(args, "model");
+        // v2 `forkIncompatibility` compares an explicit model against the
+        // caller's own alias: naming it is a no-op inherit, not an override.
+        let caller_model_alias = manager.caller_model_alias().await;
         if let Some(err) = crate::subagent::fork_incompatibility(
             resume.as_deref(),
             subagent_type.as_deref(),
             model.as_deref(),
             &caller_profile,
-            None,
+            caller_model_alias.as_deref(),
         ) {
             return Some(ExecutableToolResult {
                 delivery: None,
@@ -233,7 +258,19 @@ pub async fn execute_agent(
     // back through the `subagent.completed` / `subagent.failed` lifecycle events,
     // which the host turns into the usual synthetic notification turn.
     if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
-        let agent_id = manager.spawn(&profile_name, &description).await.ok()?;
+        let agent_id = match manager.spawn(&profile_name, &description).await {
+            Ok(id) => id,
+            Err(message) => {
+                return Some(ExecutableToolResult {
+                    delivery: None,
+                    stop_turn: false,
+                    content: message,
+                    is_error: true,
+                    note: None,
+                    display: None,
+                });
+            }
+        };
         if let Some(llm) = binding_llm.as_ref() {
             manager.set_instance_llm(&agent_id, llm.clone()).await;
         }
@@ -258,6 +295,13 @@ pub async fn execute_agent(
             description.clone()
         };
         let task_runner = manager.get_task_runner().await;
+
+        // v2 `RegisterAgentTaskOptions`: a background subagent is a task of its
+        // own, with an `agent-xxxxxxxx` id minted by
+        // `generateTaskId(task.idPrefix)`. The agent id is a *separate*
+        // identifier: the tool output reports both, and resuming goes through
+        // the agent id, never the task id.
+        let task_id = crate::storage::generate_task_id("agent");
 
         let profile = profile_name.clone();
         let bg_future = async move {
@@ -304,8 +348,9 @@ pub async fn execute_agent(
                         kind: "subagent",
                         subagent_type: Some(&profile_name),
                         agent_id: Some(agent_id.as_str()),
+                        timeout_ms: None,
                     },
-                    agent_id.clone(),
+                    task_id.clone(),
                     task_desc,
                     bg_future,
                 )
@@ -338,7 +383,7 @@ pub async fn execute_agent(
             });
         }
         let content = [
-            format!("task_id: {agent_id}"),
+            format!("task_id: {task_id}"),
             "status: running".into(),
             format!("agent_id: {agent_id}"),
             format!("actual_subagent_type: {profile_name}"),
@@ -353,7 +398,10 @@ pub async fn execute_agent(
             format!(
                 "resume_hint: To continue or recover this same subagent later, call \
                  Agent(resume=\"{agent_id}\", prompt=\"...\"). The parameter is agent_id \
-                 (\"{agent_id}\"), NOT task_id."
+                 (\"{agent_id}\"), NOT task_id (\"{task_id}\") or source_id from a later \
+                 <notification>. Recovery cases: a later <notification type=\"task.lost\" | \
+                 \"task.failed\" | \"task.killed\"> for this subagent — its conversation history \
+                 is preserved across session restarts and resume will pick it up."
             ),
         ]
         .join("\n");
@@ -369,7 +417,19 @@ pub async fn execute_agent(
 
     // Spawn first so the id exists even if the run times out (the failure
     // text carries it, matching v2).
-    let agent_id = manager.spawn(&profile_name, &description).await.ok()?;
+    let agent_id = match manager.spawn(&profile_name, &description).await {
+        Ok(id) => id,
+        Err(message) => {
+            return Some(ExecutableToolResult {
+                delivery: None,
+                stop_turn: false,
+                content: message,
+                is_error: true,
+                note: None,
+                display: None,
+            });
+        }
+    };
     if let Some(llm) = binding_llm.as_ref() {
         manager.set_instance_llm(&agent_id, llm.clone()).await;
     }
@@ -426,7 +486,8 @@ pub async fn execute_agent(
                     &agent_id,
                     &profile_name,
                     USER_INTERRUPTED_SUBAGENT_MESSAGE,
-                    false,
+                    "cancelled",
+                    None,
                 ),
                 true,
             )
@@ -438,8 +499,16 @@ pub async fn execute_agent(
                 &profile_name,
                 &message,
             );
+            // v2's error-code → report token table gives
+            // `AGENT_NO_FINAL_MESSAGE` its own token.
             (
-                format_failure(&agent_id, &profile_name, &message, false),
+                format_failure(
+                    &agent_id,
+                    &profile_name,
+                    &message,
+                    super::format::run_failure_reason(&message),
+                    None,
+                ),
                 true,
             )
         }
@@ -456,7 +525,7 @@ pub async fn execute_agent(
                 &message,
             );
             (
-                format_failure(&agent_id, &profile_name, &message, true),
+                format_failure(&agent_id, &profile_name, &message, "timed_out", None),
                 true,
             )
         }

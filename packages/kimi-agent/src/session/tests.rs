@@ -181,6 +181,7 @@ async fn make_session_with_steer(
     steer_slot: Option<Arc<Mutex<Option<crate::subagent::types::ParentCancel>>>>,
 ) -> EngineSession {
     let config = SessionConfig {
+        steer_trace: None,
         llm,
         callbacks,
         max_steps: 5,
@@ -344,6 +345,7 @@ async fn shutdown_stops_the_sessions_background_tasks() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "task-pump".into(),
             "background".into(),
@@ -354,6 +356,7 @@ async fn shutdown_stops_the_sessions_background_tasks() {
 
     let server = Arc::new(RpcServer::new());
     let config = SessionConfig {
+        steer_trace: None,
         llm: Arc::new(ScriptedLlm::simple(Vec::new())),
         callbacks: rpc_callbacks(server),
         max_steps: 5,
@@ -457,6 +460,7 @@ async fn test_print_steer_feeds_task_notifications_back() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "t1".into(),
             "quick job".into(),
@@ -472,6 +476,7 @@ async fn test_print_steer_feeds_task_notifications_back() {
     ]));
     let requests = llm.requests.clone();
     let config = SessionConfig {
+        steer_trace: None,
         llm,
         callbacks: rpc_callbacks(server),
         max_steps: 5,
@@ -542,6 +547,7 @@ async fn test_print_steer_ignores_another_sessions_notifications() {
                     kind: "bash",
                     subagent_type: None,
                     agent_id: None,
+                    timeout_ms: None,
                 },
                 id.into(),
                 description.into(),
@@ -559,6 +565,7 @@ async fn test_print_steer_ignores_another_sessions_notifications() {
     ]));
     let requests = llm.requests.clone();
     let config = SessionConfig {
+        steer_trace: None,
         llm,
         callbacks: rpc_callbacks(server),
         max_steps: 5,
@@ -650,6 +657,7 @@ async fn test_print_run_continues_active_goal() {
     ]));
     let requests = llm.requests.clone();
     let config = SessionConfig {
+        steer_trace: None,
         llm,
         callbacks,
         max_steps: 5,
@@ -761,6 +769,86 @@ fn test_render_cron_fire_reports_coalesced_and_stale() {
     assert_eq!(
         cron_fire_origin(&entry, 11, true)["coalescedCount"],
         serde_json::json!(11)
+    );
+}
+
+/// v2 #4627 `SteerResult`: the receipt carries a prompt identity, creation
+/// time, the state observed at admission, and whether the prompt joined the
+/// active turn. A steer into a running turn reports running + steered; a
+/// normal prompt queued behind it reports queued without steering.
+#[tokio::test]
+async fn a_steer_and_a_queued_prompt_report_distinct_submission_states() {
+    let server = Arc::new(RpcServer::new());
+    let (llm, senders) =
+        ScriptedLlm::with_gate(vec![text_response("first"), text_response("second")]);
+    let llm = Arc::new(llm);
+    let session = make_session(llm, rpc_callbacks(server)).await;
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(msg("user", "hello"), Admission::NewTurn))
+        .unwrap();
+    assert_eq!(first.state.as_str(), "running");
+    assert!(!first.steered);
+    assert!(first.prompt_id.starts_with("prompt-"));
+    assert!(!first.created_at.is_empty());
+    // The pump marks the turn active before its first provider call; wait
+    // until that call is in flight (held by the gate) so a steer really
+    // joins a running turn instead of racing admission.
+    for _ in 0..100 {
+        if session.status().active_turn_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(session.status().active_turn_id.is_some());
+
+    let steer = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "steer me"),
+            Admission::ActiveOrNewTurn,
+        ))
+        .unwrap();
+    assert_eq!(steer.state.as_str(), "running");
+    assert!(steer.steered);
+    assert_eq!(steer.turn_id, first.turn_id);
+
+    let queued = session
+        .enqueue_turn(TurnRequest::user(msg("user", "later"), Admission::NewTurn))
+        .unwrap();
+    assert_eq!(queued.state.as_str(), "queued");
+    assert!(!queued.steered);
+    assert_ne!(first.prompt_id, steer.prompt_id);
+
+    for sender in senders {
+        let _ = sender.send(());
+    }
+    let _ = first.outcome().await;
+}
+
+/// v2 #4627 `TurnSteer` fires where the loop consumes a steer into context —
+/// this engine's `drain_steers` seam — and names the host prompt id the
+/// submission minted, which is what lets the host clear the pending row.
+#[tokio::test]
+async fn draining_a_steer_reports_it_read_with_its_prompt_id() {
+    let (inner, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
+    let queue = Arc::new(Mutex::new(vec![LLMMessage {
+        role: "user".to_string(),
+        content: "steer me".to_string(),
+        prompt_id: Some("prompt-4-abc".to_string()),
+        origin: Some(serde_json::json!({"kind": "user"})),
+        ..LLMMessage::default()
+    }]));
+    let callbacks = SteerQueueCallbacks::new(Arc::new(inner), queue, None);
+    let drained = callbacks.drain_steers().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        recorded(&events)[0],
+        TurnEvent::Steer {
+            turn_id: None,
+            input: serde_json::json!([{"type": "text", "text": "steer me"}]),
+            origin: serde_json::json!({"kind": "user"}),
+            message_id: Some("prompt-4-abc".to_string()),
+            prompt_ids: vec!["prompt-4-abc".to_string()],
+        }
     );
 }
 
@@ -999,7 +1087,7 @@ async fn test_steer_fires_the_turn_signal_and_draining_refreshes_it() {
         Some(crate::subagent::types::ParentCancel::new()),
     ));
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(
-        SteerQueueCallbacks::new(rpc_callbacks(server), queue.clone())
+        SteerQueueCallbacks::new(rpc_callbacks(server), queue.clone(), None)
             .with_steer_slot(Some(slot.clone())),
     );
     let current = || {
@@ -1241,19 +1329,35 @@ async fn test_turn_events_dispatch_in_order() {
 
     let seen = recorded(&events);
     assert_eq!(seen.len(), 3, "prompt + started + ended: {seen:?}");
-    assert_eq!(
-        seen[0],
+    // v2 #4627: the engine mints the prompt id and echoes it on both turn
+    // events, so a host that submitted the prompt as a steer can pair it.
+    let prompt_id = match &seen[0] {
         TurnEvent::Prompt {
-            turn_id: 0,
-            input: serde_json::json!([{"type": "text", "text": "hello"}]),
-            origin: serde_json::json!({"kind": "user"}),
-        },
-        "the host's own payload must come back unchanged"
-    );
+            turn_id,
+            prompt_id,
+            input,
+            origin,
+        } => {
+            assert_eq!(*turn_id, 0);
+            assert_eq!(
+                input,
+                &serde_json::json!([{"type": "text", "text": "hello"}])
+            );
+            assert_eq!(origin, &serde_json::json!({"kind": "user"}));
+            let prompt_id = prompt_id.clone().expect("a host prompt carries its id");
+            assert!(
+                prompt_id.starts_with("prompt-0-"),
+                "the id is minted from the turn id: {prompt_id}"
+            );
+            prompt_id
+        }
+        other => panic!("expected turn.prompt, got {other:?}"),
+    };
     assert_eq!(
         seen[1],
         TurnEvent::Started {
             turn_id: 0,
+            prompt_id: Some(prompt_id),
             origin: serde_json::json!({"kind": "user"}),
         }
     );
@@ -1339,6 +1443,7 @@ async fn turn_lifecycle_hooks_fire_from_the_session_wiring() {
         ScriptedLlm::with_gate(vec![text_response("first"), text_response("second")]);
     let server = Arc::new(RpcServer::new());
     let session = EngineSession::new(SessionConfig {
+        steer_trace: None,
         llm: Arc::new(llm),
         callbacks: rpc_callbacks(server),
         max_steps: 5,
@@ -1428,6 +1533,7 @@ async fn stop_failure_hook_fires_for_a_failed_turn() {
     }]));
     let server = Arc::new(RpcServer::new());
     let session = EngineSession::new(SessionConfig {
+        steer_trace: None,
         llm,
         callbacks: rpc_callbacks(server),
         max_steps: 5,
@@ -1706,14 +1812,23 @@ async fn test_failed_turn_reports_ended_with_error() {
         emitted,
         vec![
             // The loop opens the step before the request goes out, so a
-            // provider refusal leaves the boundary standing ahead of the
-            // error. v2 would close it with `turn.step.interrupted`, which
-            // this engine does not emit.
+            // provider refusal leaves the boundary standing until the step is
+            // closed. v2 closes it with `turn.step.interrupted` (reason
+            // "error") before the turn ends; the engine emits the same event
+            // under its own `llm.step.*` vocabulary.
             serde_json::json!({
                 "type": "llm.step.begin",
                 "agent_id": "main",
                 "turn_id": "turn-0",
                 "step": 1,
+            }),
+            serde_json::json!({
+                "type": "llm.step.interrupted",
+                "agent_id": "main",
+                "turn_id": "turn-0",
+                "step": 1,
+                "reason": "error",
+                "message": "provider is offline",
             }),
             serde_json::json!({
                 "type": "error",
@@ -2178,6 +2293,7 @@ async fn test_interactive_session_wakes_on_a_background_task_completion() {
     let llm = Arc::new(ScriptedLlm::simple(vec![text_response("noted")]));
     let requests = llm.requests.clone();
     let config = SessionConfig {
+        steer_trace: None,
         llm,
         callbacks: rpc_callbacks(server),
         max_steps: 5,
@@ -2208,6 +2324,7 @@ async fn test_interactive_session_wakes_on_a_background_task_completion() {
                 kind: "bash",
                 subagent_type: None,
                 agent_id: None,
+                timeout_ms: None,
             },
             "t-wake".into(),
             "wake job".into(),
@@ -2800,6 +2917,7 @@ async fn test_interactive_session_continues_an_active_goal() {
     ]));
     let requests = llm.requests.clone();
     let config = SessionConfig {
+        steer_trace: None,
         llm,
         callbacks,
         max_steps: 5,
@@ -2863,4 +2981,113 @@ async fn test_interactive_session_continues_an_active_goal() {
         .filter_map(|event| event["value"]["goal"]["turnsUsed"].as_u64())
         .collect();
     assert_eq!(updated, vec![1, 2], "one snapshot per folded turn");
+}
+
+/// v2 #4627 tracks a steer "across turns": a message submitted while a turn
+/// runs but never drained before that turn ends is **not** lost. The queue is
+/// per session (nothing clears it at a turn boundary), so the next turn's
+/// first step drains it and emits `turn.steer`, which is what lets the host
+/// keep the row dimmed across the boundary instead of resetting it on
+/// `turn.ended`.
+#[tokio::test]
+async fn a_steer_that_missed_its_turn_is_read_by_the_next_one() {
+    let (callbacks, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
+    let (llm, senders) =
+        ScriptedLlm::with_gate(vec![text_response("first"), text_response("second")]);
+    let llm = Arc::new(llm);
+    let requests = Arc::clone(&llm.requests);
+    let mut senders = senders;
+    let session = make_session(llm, Arc::new(callbacks)).await;
+
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(msg("user", "hello"), Admission::NewTurn))
+        .unwrap();
+    // The pump marks the turn active before its provider call; wait for that
+    // call to be parked so the steer really joins a live turn.
+    for _ in 0..100 {
+        if session.status().active_turn_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(session.status().active_turn_id.is_some());
+
+    let steer = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "late steer"),
+            Admission::ActiveOrNewTurn,
+        ))
+        .unwrap();
+    assert!(steer.steered, "the steer joined the running turn");
+    let steer_prompt_id = steer.prompt_id.clone();
+
+    // One response ends the turn: it never reaches a second step, so the
+    // queued steer is not drained there.
+    let _ = senders.pop().expect("one gate per request").send(());
+    let _ = first.outcome().await;
+
+    // The next turn's first step drains the leftover steer.
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(msg("user", "next"), Admission::NewTurn))
+        .unwrap();
+    let _ = senders.pop().expect("one gate per request").send(());
+    let _ = second.outcome().await;
+
+    let recorded_events = recorded(&events);
+    let steer_events: Vec<&TurnEvent> = recorded_events
+        .iter()
+        .filter(|event| matches!(event, TurnEvent::Steer { .. }))
+        .collect();
+    assert_eq!(
+        steer_events.len(),
+        1,
+        "one steer, one read report: {recorded_events:?}"
+    );
+    match steer_events[0] {
+        TurnEvent::Steer {
+            message_id,
+            prompt_ids,
+            ..
+        } => {
+            assert_eq!(message_id.as_deref(), Some(steer_prompt_id.as_str()));
+            assert_eq!(prompt_ids, &vec![steer_prompt_id.clone()]);
+        }
+        other => panic!("expected turn.steer, got {other:?}"),
+    }
+
+    // The steered message reached the model in the *next* turn's request.
+    let second_request = requests
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(1)
+        .cloned()
+        .expect("the second turn made its request");
+    assert!(
+        second_request
+            .iter()
+            .any(|message| message.role == "user" && message.content == "late steer"),
+        "the steer is in the next turn's context: {second_request:?}"
+    );
+}
+
+/// A steer admission never parks behind a turn: with no active turn it opens
+/// one (`running`, `steered = false`), and with one it joins (`steered =
+/// true`). The `queued` state exists for ordinary prompts behind a turn, not
+/// for steers — which is why the host does not need an optimistic row for a
+/// queued steer.
+#[tokio::test]
+async fn an_active_or_new_turn_admission_is_never_queued() {
+    let server = Arc::new(RpcServer::new());
+    let llm = Arc::new(ScriptedLlm::simple(vec![text_response("answer")]));
+    let session = make_session(llm, rpc_callbacks(server)).await;
+
+    let mut idle = session
+        .enqueue_turn(TurnRequest::user(
+            msg("user", "idle steer"),
+            Admission::ActiveOrNewTurn,
+        ))
+        .unwrap();
+    assert_eq!(idle.state.as_str(), "running");
+    assert!(!idle.steered);
+    let _ = idle.outcome().await;
 }

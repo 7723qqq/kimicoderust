@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 
 import { OAuthError, OAuthUnauthorizedError } from './errors';
@@ -24,6 +23,30 @@ export {
 
 export const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 export const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
+
+/**
+ * The Bun server surface the loopback callback needs.
+ *
+ * The repo types TypeScript against `node` only — installing `bun-types` to name
+ * one listener would replace the global `fetch` / timer types for every package.
+ * `Bun.serve` is not the Node compatibility layer either: it accepts on Bun's own
+ * socket code, so the browser callback still lands while the JavaScript loop is
+ * busy. `packages/node-sdk/src/native/mcp-oauth.ts` declares the same seam for
+ * the MCP listener; the two packages have no shared dependency to host it.
+ */
+interface BunLoopbackServer {
+  readonly port: number;
+  stop(closeActiveConnections?: boolean): void | Promise<void>;
+}
+
+declare const Bun: {
+  serve(options: {
+    readonly hostname: string;
+    readonly port: number;
+    readonly development?: boolean;
+    fetch(request: Request): Response | Promise<Response>;
+  }): BunLoopbackServer;
+};
 
 // Default Google OAuth Client for native/desktop applications.
 // Can be customized via GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables.
@@ -241,17 +264,20 @@ export class GoogleOAuthManager {
     const state = randomBytes(16).toString('hex');
 
     return new Promise((resolve, reject) => {
-      let server: Server | undefined;
+      let server: BunLoopbackServer | undefined;
       let cleanupDone = false;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
-      const cleanup = (): void => {
+      // `force` closes in-flight connections too: the timeout and abort paths
+      // have no response to deliver, while a callback page still has to reach
+      // the browser.
+      const cleanup = (force = false): void => {
         if (cleanupDone) return;
         cleanupDone = true;
         if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
-        if (server) {
+        if (server !== undefined) {
           try {
-            server.close();
+            void server.stop(force);
           } catch {
             /* ignore */
           }
@@ -261,7 +287,7 @@ export class GoogleOAuthManager {
       // Overall deadline: never leave a pending callback server behind if
       // the user never completes the browser flow.
       timeoutTimer = setTimeout(() => {
-        cleanup();
+        cleanup(true);
         reject(
           new OAuthError(
             `Google login timed out after ${GOOGLE_LOGIN_TIMEOUT_MS / 1000 / 60} minutes; restart the login to try again.`,
@@ -272,51 +298,48 @@ export class GoogleOAuthManager {
 
       if (options.signal) {
         options.signal.addEventListener('abort', () => {
-          cleanup();
+          cleanup(true);
           reject(new Error('Google login aborted'));
         });
       }
 
-      const handleCallback = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      let port = 0;
+      const html = (body: string, status: number): Response =>
+        new Response(body, { status, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+
+      const handleCallback = async (request: Request): Promise<Response> => {
         try {
-          const reqUrl = new URL(req.url ?? '/', `http://127.0.0.1`);
+          const reqUrl = new URL(request.url);
           if (reqUrl.pathname !== '/oauth2callback') {
-            res.writeHead(404);
-            res.end('Not Found');
-            return;
+            return new Response('Not Found', { status: 404 });
           }
 
           const error = reqUrl.searchParams.get('error');
           if (error) {
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(
-              `<html><body><h2>Google 授权失败 / Authorization Failed</h2><p>${escapeHtml(error)}</p></body></html>`,
-            );
             cleanup();
             reject(new Error(`Google authorization returned error: ${error}`));
-            return;
+            return html(
+              `<html><body><h2>Google 授权失败 / Authorization Failed</h2><p>${escapeHtml(error)}</p></body></html>`,
+              400,
+            );
           }
 
           const returnedState = reqUrl.searchParams.get('state');
           if (returnedState !== state) {
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<html><body><h2>CSRF State Mismatch</h2></body></html>');
             cleanup();
             reject(new Error('Google authorization state mismatch'));
-            return;
+            return html('<html><body><h2>CSRF State Mismatch</h2></body></html>', 400);
           }
 
           const code = reqUrl.searchParams.get('code');
           if (!code) {
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<html><body><h2>Missing authorization code</h2></body></html>');
             cleanup();
             reject(new Error('No authorization code returned from Google'));
-            return;
+            return html('<html><body><h2>Missing authorization code</h2></body></html>', 400);
           }
 
           // Exchange code for token
-          const redirectUri = `http://localhost:${(server?.address() as { port: number })?.port}/oauth2callback`;
+          const redirectUri = `http://localhost:${port}/oauth2callback`;
           const tokenParams = new URLSearchParams({
             client_id: this.clientId,
             code,
@@ -336,13 +359,12 @@ export class GoogleOAuthManager {
 
           if (!tokenRes.ok) {
             const errBody = await tokenRes.text();
-            res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(
-              `<html><body><h2>Token exchange failed</h2><p>${escapeHtml(errBody)}</p></body></html>`,
-            );
             cleanup();
             reject(new Error(`Google token exchange failed (HTTP ${tokenRes.status}): ${errBody}`));
-            return;
+            return html(
+              `<html><body><h2>Token exchange failed</h2><p>${escapeHtml(errBody)}</p></body></html>`,
+              500,
+            );
           }
 
           const tokenData = (await tokenRes.json()) as Record<string, unknown>;
@@ -351,13 +373,12 @@ export class GoogleOAuthManager {
           // Reject responses missing the load-bearing field instead of
           // persisting an empty access_token that fails mysteriously later.
           if (accessToken.length === 0) {
-            res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(
-              '<html><body><h2>Token exchange failed</h2><p>Google response is missing access_token.</p></body></html>',
-            );
             cleanup();
             reject(new OAuthError('Google token exchange response missing access_token'));
-            return;
+            return html(
+              '<html><body><h2>Token exchange failed</h2><p>Google response is missing access_token.</p></body></html>',
+              502,
+            );
           }
           const refreshToken =
             typeof tokenData['refresh_token'] === 'string' ? tokenData['refresh_token'] : '';
@@ -378,9 +399,13 @@ export class GoogleOAuthManager {
           };
 
           await this.saveToken(token);
-
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(`
+          cleanup();
+          resolve({
+            token,
+            providerName: GOOGLE_GEMINI_PROVIDER_ID,
+          });
+          return html(
+            `
             <!DOCTYPE html>
             <html lang="zh-CN">
             <head>
@@ -401,55 +426,52 @@ export class GoogleOAuthManager {
               </div>
             </body>
             </html>
-          `);
-
-          cleanup();
-          resolve({
-            token,
-            providerName: GOOGLE_GEMINI_PROVIDER_ID,
-          });
+          `,
+            200,
+          );
         } catch (error) {
           cleanup();
           reject(error);
+          return new Response(String(error), { status: 500 });
         }
       };
 
-      server = createServer((req, res) => {
-        void handleCallback(req, res);
+      try {
+        server = Bun.serve({
+          hostname: '127.0.0.1',
+          port: 0,
+          development: false,
+          fetch: (request) => handleCallback(request),
+        });
+      } catch (error) {
+        cleanup(true);
+        reject(error);
+        return;
+      }
+      port = server.port;
+      // Redirect host mirrors gemini-cli (localhost, not the raw loopback IP)
+      // so Google's allowed-redirect matching accepts the installed client.
+      const redirectUri = `http://localhost:${port}/oauth2callback`;
+
+      const authParams = new URLSearchParams({
+        client_id: this.clientId,
+        redirect_uri: redirectUri,
+        response_type: 'code',
+        scope: this.scopes.join(' '),
+        code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
+        state,
+        access_type: 'offline',
+        prompt: 'consent',
       });
 
-      server.listen(0, '127.0.0.1', () => {
-        const addr = server?.address() as { port: number };
-        const port = addr.port;
-        // Redirect host mirrors gemini-cli (localhost, not the raw loopback IP)
-        // so Google's allowed-redirect matching accepts the installed client.
-        const redirectUri = `http://localhost:${port}/oauth2callback`;
+      const authUrl = `${GOOGLE_AUTH_ENDPOINT}?${authParams.toString()}`;
 
-        const authParams = new URLSearchParams({
-          client_id: this.clientId,
-          redirect_uri: redirectUri,
-          response_type: 'code',
-          scope: this.scopes.join(' '),
-          code_challenge: codeChallenge,
-          code_challenge_method: 'S256',
-          state,
-          access_type: 'offline',
-          prompt: 'consent',
-        });
-
-        const authUrl = `${GOOGLE_AUTH_ENDPOINT}?${authParams.toString()}`;
-
-        options.onAuthUrl?.({
-          authUrl,
-          codeVerifier,
-          state,
-          port,
-        });
-      });
-
-      server.on('error', (err) => {
-        cleanup();
-        reject(err);
+      options.onAuthUrl?.({
+        authUrl,
+        codeVerifier,
+        state,
+        port,
       });
     });
   }

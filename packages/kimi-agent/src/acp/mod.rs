@@ -663,11 +663,21 @@ impl AcpServer {
     /// manager of their own rather than the process-wide one every session
     /// shares. Without an attached engine there is nowhere to register them,
     /// so this is a no-op.
-    async fn register_session_mcp_servers(&self, session_id: &str, servers: &[serde_json::Value]) {
+    async fn register_session_mcp_servers(
+        &self,
+        session_id: &str,
+        servers: &[serde_json::Value],
+        stdio_cwd: Option<&str>,
+    ) {
         let Some(engine) = self.engine.as_ref() else {
             return;
         };
         let manager = std::sync::Arc::new(crate::mcp::manager::McpManager::new());
+        // v2 `stdioCwd`: a stdio server whose config omits `cwd` starts in the
+        // session's working directory, not in the editor host's.
+        if let Some(dir) = stdio_cwd {
+            manager.set_default_stdio_cwd(dir);
+        }
         let mut registered = false;
         for server in servers {
             let Some(name) = server.get("name").and_then(|value| value.as_str()) else {
@@ -1162,8 +1172,12 @@ impl AcpServer {
                             );
                         }
                         if !mcp_servers.is_empty() {
-                            self.register_session_mcp_servers(&session_id, &mcp_servers)
-                                .await;
+                            self.register_session_mcp_servers(
+                                &session_id,
+                                &mcp_servers,
+                                cwd.as_deref(),
+                            )
+                            .await;
                         }
                         self.modes
                             .lock()

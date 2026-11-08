@@ -103,7 +103,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             packages/kimi-agent/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('packages/kimi-agent/Cargo.lock') }}
+            packages/kimi-tui-app/target
+            packages/kimi-tui-host/target
+            packages/kimi-ui-core/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('packages/kimi-agent/Cargo.lock', 'packages/kimi-tui-app/Cargo.lock', 'packages/kimi-tui-host/Cargo.lock', 'packages/kimi-ui-core/Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 
@@ -133,6 +136,22 @@ jobs:
       - name: Test Rust engine
         working-directory: packages/kimi-agent
         run: cargo test --no-default-features --features cli,workflow-js
+
+      # The three Rust UI crates are independent Cargo workspaces. The root
+      # vitest suite and the engine's cargo test cannot reach them, so they
+      # need explicit targets here; kimi-tui-host exercises the real engine
+      # transport, the widget state and the projection seam together.
+      - name: Test Rust UI core
+        working-directory: packages/kimi-ui-core
+        run: cargo test --all-targets
+
+      - name: Test Rust TUI app
+        working-directory: packages/kimi-tui-app
+        run: cargo test --all-targets
+
+      - name: Test Rust TUI host
+        working-directory: packages/kimi-tui-host
+        run: cargo test --all-targets
 
       # The integration tests skip — and therefore pass — when that binary is
       # missing, which would turn this job green while it tested nothing.
@@ -226,7 +245,7 @@ jobs:
       # package.json `workspaces` globs. A path missing there is silently dropped
       # from the Nix build's src fileset, so the mismatch has to fail here.
       - run: bun run check:nix-workspace
-      # Terminal-state gate (ROADMAP P161): no retired engine package
+      # Terminal-state gate: no retired engine package
       # (agent-core-v2 / kimi-native-tools / klient / acp-server) may be
       # referenced from manifests, imports, tsconfigs, flake.nix, or CI.
       - run: bun scripts/check-no-legacy-engine.mjs
@@ -267,13 +286,11 @@ jobs:
       # does a recorded one that is gone, so the record cannot rot. Re-record with
       # `bun run check:rust-module-deps:update` in the same commit as the change.
       - run: bun scripts/check-rust-module-deps.mjs
-      # Ledger gate (packages/kimi-agent/ROADMAP.md): every file and test the
-      # divergence ledger cites must still exist. The ledger is the fork's only
-      # record of what the Rust port did and did not take from the deleted
-      # TypeScript engine, so a citation to a deleted file or a renamed test
-      # makes it a source of wrong conclusions — see ROADMAP §6.17.2. Line
-      # numbers are intentionally not checked; see the script header.
-      - run: bun scripts/check-roadmap-refs.mjs
+      - run: bun scripts/check-bun-first.mjs
+      - run: bun scripts/check-error-codes.mjs
+      - run: bun scripts/check-config-registry.mjs
+      - run: bun scripts/check-event-coverage.mjs
+      - run: bun scripts/check-patch-budget.mjs
       # Fetch upstream once: the parity cross-check and the retired-package delta
       # ratchet both read it. Best-effort so an unreachable upstream cannot break
       # the build, but each gate surfaces the skip instead of passing quietly.

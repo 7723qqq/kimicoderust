@@ -26,6 +26,8 @@ import type {
   PromptInput,
   PromptFileAttachment,
   PromptSkillActivation,
+  PromptSubmissionResult,
+  SkillActivationResult,
   ReloadSessionOptions,
   ReloadSummary,
   ResumedSessionState,
@@ -208,9 +210,9 @@ export class Session {
     return this.rpc.cancelShellCommand({ sessionId: this.id, commandId });
   }
 
-  async steer(input: string | PromptInput): Promise<void> {
+  async steer(input: string | PromptInput): Promise<PromptSubmissionResult> {
     this.ensureOpen();
-    await this.rpc.steer({
+    return this.rpc.steer({
       sessionId: this.id,
       input: normalizePromptInput(input),
     });
@@ -737,7 +739,7 @@ export class Session {
       /** `displayText` for the session title / last-prompt derivation. */
       readonly displayText?: string;
     },
-  ): Promise<void> {
+  ): Promise<SkillActivationResult> {
     this.ensureOpen();
     const skillName = normalizeRequiredString(
       name,
@@ -746,7 +748,7 @@ export class Session {
     );
     const skillArgs = normalizeOptionalString(args);
     const content = extra?.content === undefined ? undefined : normalizePromptInput(extra.content);
-    await this.rpc.activateSkill({
+    return this.rpc.activateSkill({
       sessionId: this.id,
       name: skillName,
       ...(skillArgs !== undefined ? { args: skillArgs } : {}),

@@ -120,6 +120,14 @@ pub enum EntryOp {
     Append { id: EntryId, delta: AppendDelta },
     /// Finalize an entry; any later content mutation is a contract violation.
     Seal { id: EntryId },
+    /// Mark or clear the entry's "not yet read" presentation state. A steered
+    /// message the engine has not consumed yet is dimmed (v2 #4627); the flag
+    /// rides its own op so acknowledging it never rewrites the entry's text.
+    ///
+    /// An id that is no longer in the store is tolerated: an acknowledgement
+    /// can race the removal of the entry it refers to, and a missing row is
+    /// not a projection breach.
+    SetPending { id: EntryId, pending: bool },
     /// Remove an entry (undo range pruning).
     Remove { id: EntryId },
     /// Ordering fence for debugging and recorded-stream tests. No-op on apply.
@@ -173,6 +181,10 @@ pub enum ContractViolation {
 struct EntryRecord {
     content: EntryContent,
     sealed: bool,
+    /// Not-yet-read presentation state (v2 #4627). Kept out of
+    /// [`EntryContent`] so a renderer reads it from the same record as the
+    /// text and cannot paint one without the other.
+    pending: bool,
     last_span: Option<SeqSpan>,
     saw_final: bool,
 }
@@ -182,6 +194,7 @@ impl EntryRecord {
         Self {
             content,
             sealed: false,
+            pending: false,
             last_span: None,
             saw_final: false,
         }
@@ -286,6 +299,13 @@ impl EntryStore {
                     record.sealed = true;
                 }
             },
+            EntryOp::SetPending { id, pending } => {
+                // Presentation only: a sealed entry's text is authoritative,
+                // but whether the reader has seen it is not part of content.
+                if let Some(record) = self.entries.get_mut(&id) {
+                    record.pending = pending;
+                }
+            }
             EntryOp::Remove { id } => {
                 if self.entries.remove(&id).is_none() {
                     self.violations
@@ -302,6 +322,12 @@ impl EntryStore {
 
     pub fn contains(&self, id: &EntryId) -> bool {
         self.entries.contains_key(id)
+    }
+
+    /// Whether the entry is waiting to be read (see [`EntryOp::SetPending`]).
+    /// A missing id is not pending.
+    pub fn is_pending(&self, id: &EntryId) -> bool {
+        self.entries.get(id).is_some_and(|record| record.pending)
     }
 
     pub fn is_sealed(&self, id: &EntryId) -> bool {
@@ -686,5 +712,40 @@ mod tests {
                 .by_agent("sub-9")
                 .is_subagent()
         );
+    }
+
+    /// The pending flag is presentation, not content: it survives a re-upsert,
+    /// does not resurrect a removed row, and a missing id is not a violation.
+    #[test]
+    fn set_pending_tracks_presentation_without_touching_content() {
+        let id = EntryId::engine("t1", 0, EntryKind::UserMsg);
+        let mut store = EntryStore::new();
+        store.apply(EntryOp::SetPending {
+            id: id.clone(),
+            pending: true,
+        });
+        assert!(!store.is_pending(&id));
+        assert!(store.violations().is_empty());
+
+        store.apply(EntryOp::Upsert {
+            id: id.clone(),
+            content: EntryContent::new(EntryKind::UserMsg, "hi"),
+        });
+        store.apply(EntryOp::SetPending {
+            id: id.clone(),
+            pending: true,
+        });
+        assert!(store.is_pending(&id));
+
+        // A re-upsert replaces the text but the reader still has not seen it.
+        store.apply(EntryOp::Upsert {
+            id: id.clone(),
+            content: EntryContent::new(EntryKind::UserMsg, "hi again"),
+        });
+        assert!(store.is_pending(&id));
+
+        store.apply(EntryOp::Remove { id: id.clone() });
+        assert!(!store.is_pending(&id));
+        assert!(store.violations().is_empty());
     }
 }

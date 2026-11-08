@@ -23,6 +23,7 @@ use crate::swarm::agent_run_batch::{
     AgentRunTaskKind, SubagentSpawnPlan,
 };
 use crate::swarm::service::SwarmLauncher;
+use crate::tools::arg_error;
 use crate::turn_loop::types::{ExecutableToolResult, LoopTurnStopReason, ToolInfo};
 
 /// The v2 default profile name (`DEFAULT_PROFILE_NAME`).
@@ -314,21 +315,45 @@ pub async fn execute_agent_swarm(
         _ => return Some(err_result(description_required())),
     };
 
-    let resume_entries: Vec<(String, String)> = input
-        .resume_agent_ids
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
-        .collect();
+    // v2's zod schema trims and rejects an empty key or prompt
+    // (`z.record(z.string().trim().min(1), z.string().trim().min(1))`); the port
+    // dropped them silently, so a swarm ran with fewer members than the caller
+    // asked for and the report never said which one was lost.
+    let mut resume_entries: Vec<(String, String)> = Vec::new();
+    for (key, value) in input.resume_agent_ids.unwrap_or_default() {
+        let key = key.trim().to_string();
+        let value = value.trim().to_string();
+        if key.is_empty() {
+            return Some(arg_error(
+                "AgentSwarm",
+                "resume_agent_ids key",
+                "engine.tools.argMustNotBeEmpty",
+            ));
+        }
+        if value.is_empty() {
+            return Some(arg_error(
+                "AgentSwarm",
+                &format!("resume_agent_ids.{key}"),
+                "engine.tools.argMustNotBeEmpty",
+            ));
+        }
+        resume_entries.push((key, value));
+    }
 
-    let items: Vec<String> = input
-        .items
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    // v2 `items: z.array(z.string().trim().min(1)).max(128)`: an empty entry is
+    // an invalid call, not an entry to skip.
+    let mut items: Vec<String> = Vec::new();
+    for (index, raw) in input.items.unwrap_or_default().into_iter().enumerate() {
+        let item = raw.trim().to_string();
+        if item.is_empty() {
+            return Some(arg_error(
+                "AgentSwarm",
+                &format!("items[{index}]"),
+                "engine.tools.argMustNotBeEmpty",
+            ));
+        }
+        items.push(item);
+    }
 
     let resume_count = resume_entries.len();
     let item_count = items.len();
@@ -631,12 +656,14 @@ pub fn agent_swarm_tool_def(
             },
             "items": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": { "type": "string", "minLength": 1 },
+                "maxItems": MAX_AGENT_SWARM_SUBAGENTS,
                 "description": "Values used to fill {{item}}. Each item launches one new subagent."
             },
             "resume_agent_ids": {
                 "type": "object",
-                "additionalProperties": { "type": "string" },
+                "additionalProperties": { "type": "string", "minLength": 1 },
+                "propertyNames": { "minLength": 1 },
                 "description": "Flat object: keys are existing subagent agent_id strings, values are continuation prompts."
             },
             "fork": {
@@ -1843,5 +1870,58 @@ mod tests {
             .unwrap();
         assert!(!res.is_error, "a plain fork must run: {}", res.content);
         assert!(res.content.contains("<summary>completed: 2</summary>"));
+    }
+
+    /// v2's zod schema refuses an empty item and an empty resume key or prompt
+    /// (`z.array(z.string().trim().min(1))` / `z.record(min(1), min(1))`). The
+    /// port filtered them out instead, so a swarm silently ran with fewer
+    /// members than the caller asked for and the result never said which one
+    /// was dropped.
+    #[tokio::test]
+    async fn test_validation_rejects_blank_items_and_resume_entries() {
+        let mgr = manager_with_runtime().await;
+
+        let blank_item = serde_json::json!({
+            "description": "two members",
+            "items": ["a", "   "],
+            "prompt_template": "check {{item}}"
+        });
+        let res = execute_with_swarm(&mgr, &blank_item, None, None, None, None)
+            .await
+            .unwrap();
+        assert!(res.is_error, "content: {}", res.content);
+        assert!(res.content.contains("items[1]"), "content: {}", res.content);
+        assert!(
+            res.content.contains("must not be empty"),
+            "content: {}",
+            res.content
+        );
+
+        let blank_prompt = serde_json::json!({
+            "description": "resume one",
+            "resume_agent_ids": { "agent-1": "  " }
+        });
+        let res = execute_with_swarm(&mgr, &blank_prompt, None, None, None, None)
+            .await
+            .unwrap();
+        assert!(res.is_error, "content: {}", res.content);
+        assert!(
+            res.content.contains("resume_agent_ids.agent-1"),
+            "content: {}",
+            res.content
+        );
+    }
+
+    /// The advertised schema carries v2's own bounds, so the model is told the
+    /// limit the executor enforces instead of discovering it as a refusal.
+    #[test]
+    fn test_swarm_schema_declares_the_v2_bounds() {
+        let def = agent_swarm_tool_def(None);
+        let items = &def.input_schema["properties"]["items"];
+        assert_eq!(items["maxItems"], 128, "{items}");
+        assert_eq!(items["items"]["minLength"], 1, "{items}");
+        let resume = &def.input_schema["properties"]["resume_agent_ids"];
+        assert_eq!(resume["additionalProperties"]["minLength"], 1, "{resume}");
+        assert_eq!(resume["propertyNames"]["minLength"], 1, "{resume}");
     }
 }

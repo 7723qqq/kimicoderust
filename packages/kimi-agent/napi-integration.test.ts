@@ -11,7 +11,8 @@
 import { readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { EngineSessionHandle, type SessionNativeModule } from './session-handle';
+import { checked, EngineSessionHandle, type SessionNativeModule } from './session-handle';
+import { llmChatRequestSchema, permissionCheckRequestSchema } from './wire-schema';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -640,9 +641,7 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — cancellation', () => {
               callbackId,
               null,
               JSON.stringify({
-                tool_calls: [
-                  { id: 'tc-cancel', name: 'Read', arguments: '{"path":"a.txt"}' },
-                ],
+                tool_calls: [{ id: 'tc-cancel', name: 'Read', arguments: '{"path":"a.txt"}' }],
                 finish_reason: 'tool_calls',
                 usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
               }),
@@ -654,21 +653,22 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — cancellation', () => {
         // The Rust loop must not reach a second chat: step 1 top checks the
         // cancel flag and returns Aborted. If this branch fires, something
         // is wrong.
-        mod.resolveCallback(callbackId, null, JSON.stringify({
-          tool_calls: [], finish_reason: 'stop',
-          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-        }));
+        mod.resolveCallback(
+          callbackId,
+          null,
+          JSON.stringify({
+            tool_calls: [],
+            finish_reason: 'stop',
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          }),
+        );
       }
     };
     const toolCb = (callbackId: number) => {
       mod.resolveCallback(callbackId, null, JSON.stringify({ content: 'ok', is_error: false }));
     };
 
-    const inFlight = mod.runTurnRust(
-      { ...validParams, maxSteps: undefined },
-      llmCb,
-      toolCb,
-    );
+    const inFlight = mod.runTurnRust({ ...validParams, maxSteps: undefined }, llmCb, toolCb);
 
     // Let the gate await, then set the cancel flag before releasing the
     // chat so step 1 is guaranteed to observe it.
@@ -704,12 +704,11 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — native mutating tools', () =
           {
             name: 'Write',
             description: 'Write a file',
-            inputSchema: '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}',
+            inputSchema:
+              '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}',
           },
         ],
-        messages: [
-          { role: 'user', content: 'write it' },
-        ],
+        messages: [{ role: 'user', content: 'write it' }],
       },
       makeCallback(mod, () => {
         llmCalls += 1;
@@ -759,7 +758,8 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — native mutating tools', () =
           {
             name: 'Write',
             description: 'Write a file',
-            inputSchema: '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}',
+            inputSchema:
+              '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}',
           },
         ],
         messages: [{ role: 'user', content: 'write it' }],
@@ -804,8 +804,7 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — stale-write guard (G-6 #3)',
   const readDef = {
     name: 'Read',
     description: 'Read a file',
-    inputSchema:
-      '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}',
+    inputSchema: '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}',
   };
 
   it('denies an unread native Write with the v2 message', async () => {
@@ -849,7 +848,9 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — stale-write guard (G-6 #3)',
         return JSON.stringify({ content: '', is_error: false });
       }),
       makeCallback(mod, (eventJson) => {
-        nativeEvents.push(JSON.parse(eventJson) as { type?: string; is_error?: boolean; content?: string });
+        nativeEvents.push(
+          JSON.parse(eventJson) as { type?: string; is_error?: boolean; content?: string },
+        );
         return '';
       }),
       makeCallback(mod, () => JSON.stringify({ decision: 'allow' })),
@@ -892,7 +893,13 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — stale-write guard (G-6 #3)',
           llmCalls === 1
             ? [{ id: 'call-rw-1', name: 'Read', arguments: { path: 'a.txt' } }]
             : llmCalls === 2
-              ? [{ id: 'call-rw-2', name: 'Write', arguments: { path: 'a.txt', content: 'updated' } }]
+              ? [
+                  {
+                    id: 'call-rw-2',
+                    name: 'Write',
+                    arguments: { path: 'a.txt', content: 'updated' },
+                  },
+                ]
               : [];
         return JSON.stringify({
           tool_calls: calls,
@@ -949,7 +956,13 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — stale-write guard (G-6 #3)',
             llmCalls === 1
               ? [{ id: 'call-s1', name: 'Read', arguments: { path: 'a.txt' } }]
               : llmCalls === 3
-                ? [{ id: 'call-s2', name: 'Write', arguments: { path: 'a.txt', content: 'turn two' } }]
+                ? [
+                    {
+                      id: 'call-s2',
+                      name: 'Write',
+                      arguments: { path: 'a.txt', content: 'turn two' },
+                    },
+                  ]
                 : [];
           return JSON.stringify({
             tool_calls: calls,
@@ -969,14 +982,14 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — stale-write guard (G-6 #3)',
       },
     );
     try {
-      const turnOne = await session.enqueueTurn({ role: 'user', content: 'read' }, 'newTurn');
+      const turnOne = (await session.enqueueTurn({ role: 'user', content: 'read' }, 'newTurn')).turnId;
       const outcomeOne = await session.turnOutcome(turnOne);
       expect(outcomeOne.status).toBe('ran');
       // The native-tool counter is session-cumulative (pipeline-scoped), so
       // turn two reports the running total.
       expect(outcomeOne.result?.nativeToolCalls).toBe(1);
 
-      const turnTwo = await session.enqueueTurn({ role: 'user', content: 'write' }, 'newTurn');
+      const turnTwo = (await session.enqueueTurn({ role: 'user', content: 'write' }, 'newTurn')).turnId;
       const outcomeTwo = await session.turnOutcome(turnTwo);
       expect(outcomeTwo.status).toBe('ran');
       expect(outcomeTwo.result?.nativeToolCalls).toBe(2);
@@ -993,102 +1006,105 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — stale-write guard (G-6 #3)',
   });
 });
 
-describe.skipIf(!nativeEntry)('napi runTurnRust — permission mode decides the approval prompt', () => {
-  const memoryListDef = {
-    name: 'memory_list',
-    description: 'List memory entries',
-    inputSchema: '{"type":"object","properties":{}}',
-  };
-  const memoryWriteDef = {
-    name: 'memory_write',
-    description: 'Write a memory entry',
-    inputSchema:
-      '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}',
-  };
+describe.skipIf(!nativeEntry)(
+  'napi runTurnRust — permission mode decides the approval prompt',
+  () => {
+    const memoryListDef = {
+      name: 'memory_list',
+      description: 'List memory entries',
+      inputSchema: '{"type":"object","properties":{}}',
+    };
+    const memoryWriteDef = {
+      name: 'memory_write',
+      description: 'Write a memory entry',
+      inputSchema:
+        '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}',
+    };
 
-  async function runMemoryTool(
-    policySnapshotJson: string,
-    toolDef: typeof memoryListDef,
-    call: { id: string; name: string; arguments: Record<string, unknown> },
-    decision: 'allow' | 'deny',
-  ): Promise<{ nativeToolCalls: number; permissionChecks: number }> {
-    const os = await import('node:os');
-    const { mkdtempSync, rmSync } = await import('node:fs');
-    const workspaceRoot = mkdtempSync(join(os.tmpdir(), 'kimi-perm-mode-'));
-    const mod = loadNativeModule();
-    let permissionChecks = 0;
-    let llmCalls = 0;
-    try {
-      const result = await mod.runTurnRust(
-        {
-          ...validParams,
-          maxSteps: 2,
-          workspaceRoot,
-          nativeTools: true,
-          policySnapshotJson,
-          tools: [toolDef],
-          messages: [{ role: 'user', content: 'go' }],
-        },
-        makeCallback(mod, () => {
-          llmCalls += 1;
-          const first = llmCalls === 1;
-          return JSON.stringify({
-            tool_calls: first ? [call] : [],
-            finish_reason: first ? 'tool_calls' : 'stop',
-            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-          });
-        }),
-        makeCallback(mod, () => JSON.stringify({ content: 'HOST EXEC', is_error: false })),
-        makeCallback(mod, () => ''),
-        makeCallback(mod, () => {
-          permissionChecks += 1;
-          return JSON.stringify({ decision });
-        }),
-      );
-      return { nativeToolCalls: result.nativeToolCalls, permissionChecks };
-    } finally {
-      rmSync(workspaceRoot, { recursive: true, force: true });
+    async function runMemoryTool(
+      policySnapshotJson: string,
+      toolDef: typeof memoryListDef,
+      call: { id: string; name: string; arguments: Record<string, unknown> },
+      decision: 'allow' | 'deny',
+    ): Promise<{ nativeToolCalls: number; permissionChecks: number }> {
+      const os = await import('node:os');
+      const { mkdtempSync, rmSync } = await import('node:fs');
+      const workspaceRoot = mkdtempSync(join(os.tmpdir(), 'kimi-perm-mode-'));
+      const mod = loadNativeModule();
+      let permissionChecks = 0;
+      let llmCalls = 0;
+      try {
+        const result = await mod.runTurnRust(
+          {
+            ...validParams,
+            maxSteps: 2,
+            workspaceRoot,
+            nativeTools: true,
+            policySnapshotJson,
+            tools: [toolDef],
+            messages: [{ role: 'user', content: 'go' }],
+          },
+          makeCallback(mod, () => {
+            llmCalls += 1;
+            const first = llmCalls === 1;
+            return JSON.stringify({
+              tool_calls: first ? [call] : [],
+              finish_reason: first ? 'tool_calls' : 'stop',
+              usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+            });
+          }),
+          makeCallback(mod, () => JSON.stringify({ content: 'HOST EXEC', is_error: false })),
+          makeCallback(mod, () => ''),
+          makeCallback(mod, () => {
+            permissionChecks += 1;
+            return JSON.stringify({ decision });
+          }),
+        );
+        return { nativeToolCalls: result.nativeToolCalls, permissionChecks };
+      } finally {
+        rmSync(workspaceRoot, { recursive: true, force: true });
+      }
     }
-  }
 
-  it('auto-approves a read-only tool in yolo without asking the host', async () => {
-    const { nativeToolCalls, permissionChecks } = await runMemoryTool(
-      JSON.stringify({ mode: 'yolo' }),
-      memoryListDef,
-      { id: 'call-yolo-read', name: 'memory_list', arguments: {} },
-      'allow',
-    );
-    expect(nativeToolCalls).toBe(1);
-    expect(permissionChecks).toBe(0);
-  });
+    it('auto-approves a read-only tool in yolo without asking the host', async () => {
+      const { nativeToolCalls, permissionChecks } = await runMemoryTool(
+        JSON.stringify({ mode: 'yolo' }),
+        memoryListDef,
+        { id: 'call-yolo-read', name: 'memory_list', arguments: {} },
+        'allow',
+      );
+      expect(nativeToolCalls).toBe(1);
+      expect(permissionChecks).toBe(0);
+    });
 
-  it('auto-approves a read-only tool in manual without asking the host', async () => {
-    const { nativeToolCalls, permissionChecks } = await runMemoryTool(
-      JSON.stringify({ mode: 'manual' }),
-      memoryListDef,
-      { id: 'call-manual-read', name: 'memory_list', arguments: {} },
-      'allow',
-    );
-    expect(nativeToolCalls).toBe(1);
-    expect(permissionChecks).toBe(0);
-  });
+    it('auto-approves a read-only tool in manual without asking the host', async () => {
+      const { nativeToolCalls, permissionChecks } = await runMemoryTool(
+        JSON.stringify({ mode: 'manual' }),
+        memoryListDef,
+        { id: 'call-manual-read', name: 'memory_list', arguments: {} },
+        'allow',
+      );
+      expect(nativeToolCalls).toBe(1);
+      expect(permissionChecks).toBe(0);
+    });
 
-  it('asks the host before a mutating tool in manual', async () => {
-    const { nativeToolCalls, permissionChecks } = await runMemoryTool(
-      JSON.stringify({ mode: 'manual' }),
-      memoryWriteDef,
-      {
-        id: 'call-manual-write',
-        name: 'memory_write',
-        arguments: { path: 'note.md', content: 'x' },
-      },
-      'deny',
-    );
-    // The host was consulted and refused, so nothing executed.
-    expect(permissionChecks).toBe(1);
-    expect(nativeToolCalls).toBe(0);
-  });
-});
+    it('asks the host before a mutating tool in manual', async () => {
+      const { nativeToolCalls, permissionChecks } = await runMemoryTool(
+        JSON.stringify({ mode: 'manual' }),
+        memoryWriteDef,
+        {
+          id: 'call-manual-write',
+          name: 'memory_write',
+          arguments: { path: 'note.md', content: 'x' },
+        },
+        'deny',
+      );
+      // The host was consulted and refused, so nothing executed.
+      expect(permissionChecks).toBe(1);
+      expect(nativeToolCalls).toBe(0);
+    });
+  },
+);
 
 describe.skipIf(!nativeEntry)('napi runTurnRust — goal guard (G-6 #7/#8)', () => {
   const createGoalDef = {
@@ -1230,6 +1246,7 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — goal guard (G-6 #7/#8)', () 
     const nativeEvents: Array<{ type?: string; is_error?: boolean; content?: string }> = [];
     let llmCalls = 0;
     let goalCalls = 0;
+    let goalSwitched = false;
     const session = await EngineSessionHandle.create(
       {
         ...validParams,
@@ -1245,6 +1262,9 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — goal guard (G-6 #7/#8)', () 
         llmChat: () => {
           llmCalls += 1;
           const first = llmCalls === 1;
+          // The goal changes after the turn bound to G1 and before the model
+          // asks to mutate it — the exact window the stale gate exists for.
+          if (first) goalSwitched = true;
           return JSON.stringify({
             tool_calls: first
               ? [{ id: 'call-stale-goal', name: 'UpdateGoal', arguments: { status: 'complete' } }]
@@ -1262,14 +1282,16 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — goal guard (G-6 #7/#8)', () 
         checkPermission: () => JSON.stringify({ decision: 'allow' }),
         goal: () => {
           goalCalls += 1;
-          // Call 1 binds the turn to G1 (session turn-start); call 2 is the
-          // gate's current-goal read after the goal changed to G2.
-          return goalJson(goalCalls === 1 ? 'g1' : 'g2');
+          // G1 until the model asks to mutate, G2 from then on. The gate's read
+          // happens after the LLM call, so it sees the new goal and vetoes.
+          // Keying the switch to a call *count* assumed the engine reads the
+          // goal exactly once before the turn, which is not the contract.
+          return goalJson(goalSwitched ? 'g2' : 'g1');
         },
       },
     );
     try {
-      const turn = await session.enqueueTurn({ role: 'user', content: 'update' }, 'newTurn');
+      const turn = (await session.enqueueTurn({ role: 'user', content: 'update' }, 'newTurn')).turnId;
       const outcome = await session.turnOutcome(turn);
       expect(outcome.status).toBe('ran');
       const veto = nativeEvents.find((e) => e.type === 'tool.native' && e.is_error === true);
@@ -1304,9 +1326,10 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — PreToolUse hooks (G-6 #6)', 
     const { mkdtempSync, existsSync, rmSync } = await import('node:fs');
     const workspaceRoot = mkdtempSync(join(os.tmpdir(), 'kimi-hook-napi-'));
     const mod = loadNativeModule();
-    const command = process.platform === 'win32'
-      ? 'echo blocked by napi hook 1>&2 & exit /b 2'
-      : 'echo blocked by napi hook >&2; exit 2';
+    const command =
+      process.platform === 'win32'
+        ? 'echo blocked by napi hook 1>&2 & exit /b 2'
+        : 'echo blocked by napi hook >&2; exit 2';
 
     const nativeEvents: Array<{ type?: string; is_error?: boolean; content?: string }> = [];
     let llmCalls = 0;
@@ -1682,7 +1705,7 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — pure I/O tools (P26 批 2)',
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   });
 
-  it('executes FetchURL natively and blocks private SSRF addresses', async () => {
+  it('executes FetchURL natively and allows private addresses', async () => {
     const fs = await import('node:fs');
     const os = await import('node:os');
     const path = await import('node:path');
@@ -1714,7 +1737,13 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — pure I/O tools (P26 批 2)',
         const first = llmRequests.length === 1;
         return JSON.stringify({
           tool_calls: first
-            ? [{ id: 'call-fetch-ssrf', name: 'FetchURL', arguments: { url: 'http://127.0.0.1:8080/admin' } }]
+            ? [
+                {
+                  id: 'call-fetch-ssrf',
+                  name: 'FetchURL',
+                  arguments: { url: 'http://127.0.0.1:8080/admin' },
+                },
+              ]
             : [],
           finish_reason: first ? 'tool_calls' : 'stop',
           usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
@@ -1731,7 +1760,13 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — pure I/O tools (P26 批 2)',
 
     expect(hostExecuteCalls).toBe(0);
     const followUp = JSON.stringify(llmRequests[1]?.messages ?? []);
-    expect(followUp).toContain('Failed to fetch URL: Refusing to fetch private address');
+    // v2 #4650: a local FetchURL permits private/loopback addresses — the
+    // guard exists for server-side fetches, not for the user's own machine.
+    // Nothing listens on the port here, so the fetch fails at the network
+    // layer instead of being refused up front.
+    expect(followUp).toContain('Failed to fetch URL due to network error');
+    expect(followUp).toContain('http://127.0.0.1:8080/admin');
+    expect(followUp).not.toContain('Refusing to fetch private address');
 
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   });
@@ -1763,7 +1798,8 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — local permission engine (P26
           {
             name: 'Write',
             description: 'Write file',
-            inputSchema: '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}',
+            inputSchema:
+              '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}',
           },
         ],
         messages: [{ role: 'user', content: 'write test file' }],
@@ -1773,7 +1809,13 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — local permission engine (P26
         const first = llmRequests.length === 1;
         return JSON.stringify({
           tool_calls: first
-            ? [{ id: 'call-write-yolo', name: 'Write', arguments: { path: 'yolo-test.txt', content: 'yolo content' } }]
+            ? [
+                {
+                  id: 'call-write-yolo',
+                  name: 'Write',
+                  arguments: { path: 'yolo-test.txt', content: 'yolo content' },
+                },
+              ]
             : [],
           finish_reason: first ? 'tool_calls' : 'stop',
           usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
@@ -1823,7 +1865,8 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — local permission engine (P26
           {
             name: 'Write',
             description: 'Write file',
-            inputSchema: '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}',
+            inputSchema:
+              '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}',
           },
         ],
         messages: [{ role: 'user', content: 'write blocked file' }],
@@ -1833,7 +1876,13 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — local permission engine (P26
         const first = llmRequests.length === 1;
         return JSON.stringify({
           tool_calls: first
-            ? [{ id: 'call-write-blocked', name: 'Write', arguments: { path: 'blocked.txt', content: 'should not land' } }]
+            ? [
+                {
+                  id: 'call-write-blocked',
+                  name: 'Write',
+                  arguments: { path: 'blocked.txt', content: 'should not land' },
+                },
+              ]
             : [],
           finish_reason: first ? 'tool_calls' : 'stop',
           usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
@@ -1858,8 +1907,6 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — local permission engine (P26
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   });
 });
-
-
 
 describe.skipIf(!nativeEntry)('napi runTurnRust — native subagents (P28 批 3 接线)', () => {
   it('executes invoke_subagent natively and runs a real subagent turn', async () => {
@@ -1901,7 +1948,11 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — native subagents (P28 批 3 
                   name: 'invoke_subagent',
                   arguments: {
                     Subagents: [
-                      { TypeName: 'research', Role: 'Napi Searcher', Prompt: 'search the codebase' },
+                      {
+                        TypeName: 'research',
+                        Role: 'Napi Searcher',
+                        Prompt: 'search the codebase',
+                      },
                     ],
                   },
                 },
@@ -2132,12 +2183,18 @@ describe.skipIf(!nativeEntry)('napi engine session handle (M1d)', () => {
     const sessionId = await createSession(mod);
     expect(sessionId).toMatch(/^session-/);
 
-    const turnId = mod.sessionEnqueueTurn(
+    const submission = mod.sessionEnqueueTurn(
       sessionId,
       JSON.stringify({ role: 'user', content: 'hi' }),
       'newTurn',
     );
-    expect(typeof turnId).toBe('number');
+    expect(typeof submission.turnId).toBe('number');
+    // v2 #4627 `SteerResult`: the engine mints the prompt id at admission and
+    // reports the state it observed.
+    expect(submission.promptId).toMatch(/^prompt-/);
+    expect(submission.state).toBe('running');
+    expect(submission.steered).toBe(false);
+    const turnId = submission.turnId;
 
     const outcome = (await mod.sessionTurnOutcome(sessionId, turnId)) as {
       status: string;
@@ -2195,18 +2252,23 @@ describe.skipIf(!nativeEntry)('napi engine session handle (M1d)', () => {
       trigger: 'user-slash',
       skillSource: 'project',
     };
-    const turnId = mod.sessionEnqueueTurn(
+    const submission = mod.sessionEnqueueTurn(
       sessionId,
       JSON.stringify({ role: 'user', content: 'hi', origin }),
       'newTurn',
     );
+    const turnId = submission.turnId;
     const outcome = (await mod.sessionTurnOutcome(sessionId, turnId)) as { status: string };
     expect(outcome.status).toBe('ran');
 
     const started = turnEvents.find((event) => event['type'] === 'turn.started');
     expect(started?.['origin']).toEqual(origin);
+    // v2 #4627: both turn events name the prompt id minted at admission, so a
+    // host can pair its optimistic entry with the engine's echo.
+    expect(started?.['promptId']).toBe(submission.promptId);
     const promptEvent = turnEvents.find((event) => event['type'] === 'turn.prompt');
     expect(promptEvent?.['origin']).toEqual(origin);
+    expect(promptEvent?.['promptId']).toBe(submission.promptId);
 
     // The origin rides the opening user message into the cross-turn history,
     // so the host's persisted replay (history.jsonl written off getHistory)
@@ -2224,7 +2286,7 @@ describe.skipIf(!nativeEntry)('napi engine session handle (M1d)', () => {
       sessionId,
       JSON.stringify({ role: 'user', content: 'plain' }),
       'newTurn',
-    );
+    ).turnId;
     await mod.sessionTurnOutcome(sessionId, plainId);
     const plainStarted = turnEvents.filter((event) => event['type'] === 'turn.started').at(-1);
     expect(plainStarted?.['origin']).toEqual({ kind: 'user' });
@@ -2258,7 +2320,7 @@ describe.skipIf(!nativeEntry)('napi engine session handle (M1d)', () => {
       sessionId,
       JSON.stringify({ role: 'user', content: 'gated' }),
       'newTurn',
-    );
+    ).turnId;
     // Wait until the pump claims the first turn.
     for (let i = 0; i < 100; i += 1) {
       const status = mod.sessionStatus(sessionId) as { activeTurnId: number | null };
@@ -2272,7 +2334,7 @@ describe.skipIf(!nativeEntry)('napi engine session handle (M1d)', () => {
       sessionId,
       JSON.stringify({ role: 'user', content: 'queued' }),
       'newTurn',
-    );
+    ).turnId;
     expect(mod.sessionCancelTurn(sessionId, queuedId)).toBe(true);
     const queuedOutcome = (await mod.sessionTurnOutcome(sessionId, queuedId)) as {
       status: string;
@@ -2317,7 +2379,7 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle (M1d wrapper)', () => {
     );
     expect(handle.id).toMatch(/^session-/);
 
-    const turnId = await handle.enqueueTurn({ role: 'user', content: 'hi' }, 'newTurn');
+    const turnId = (await handle.enqueueTurn({ role: 'user', content: 'hi' }, 'newTurn')).turnId;
     const outcome = await handle.turnOutcome(turnId);
     expect(outcome.status).toBe('ran');
     expect(outcome.result?.stopReason).toBe('EndTurn');
@@ -2327,7 +2389,7 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle (M1d wrapper)', () => {
     await handle.settled();
 
     // A second turn continues the cross-turn history.
-    const second = await handle.enqueueTurn({ role: 'user', content: 'again' }, 'newTurn');
+    const second = (await handle.enqueueTurn({ role: 'user', content: 'again' }, 'newTurn')).turnId;
     const secondOutcome = await handle.turnOutcome(second);
     expect(secondOutcome.status).toBe('ran');
     expect(await handle.historyLen()).toBe(4);
@@ -2364,13 +2426,13 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle (M1d wrapper)', () => {
       },
     );
 
-    const activeId = await handle.enqueueTurn({ role: 'user', content: 'gated' }, 'newTurn');
+    const activeId = (await handle.enqueueTurn({ role: 'user', content: 'gated' }, 'newTurn')).turnId;
     for (let i = 0; i < 100 && (await handle.status()).activeTurnId !== activeId; i += 1) {
       await new Promise((r) => setTimeout(r, 10));
     }
     expect((await handle.status()).activeTurnId).toBe(activeId);
 
-    const queuedId = await handle.enqueueTurn({ role: 'user', content: 'queued' }, 'newTurn');
+    const queuedId = (await handle.enqueueTurn({ role: 'user', content: 'queued' }, 'newTurn')).turnId;
     expect(await handle.cancelTurn(queuedId)).toBe(true);
     const queuedOutcome = await handle.turnOutcome(queuedId);
     expect(queuedOutcome.status).toBe('cancelledBeforeStart');
@@ -2383,10 +2445,32 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle (M1d wrapper)', () => {
 });
 
 describe.skipIf(!nativeEntry)('EngineSessionHandle — dispose waits for release (D1)', () => {
-  /** A handle whose first turn is parked in `llmChat` until `release()`. */
+  /**
+   * Fail with a named cause instead of letting a promise that can never settle
+   * run into the runner's generic timeout.
+   */
+  function withDeadline<T>(promise: Promise<T>, message: string): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(message)), 5000)),
+    ]);
+  }
+
+  /**
+   * A handle whose first turn is parked in `llmChat` until `release()`.
+   *
+   * `parked` resolves when the provider call is entered — the only place the
+   * pump can park. Polling `status().activeTurnId` instead is a race: the id is
+   * set when the pump takes the turn, and a turn that finishes (or never starts)
+   * leaves the same reading as one that is parked.
+   */
   async function handleWithParkedTurn() {
     const { EngineSessionHandle } = await import('./session-handle');
     let release: (() => void) | undefined;
+    let markParked: (() => void) | undefined;
+    const parked = new Promise<void>((resolve) => {
+      markParked = resolve;
+    });
     const handle = await EngineSessionHandle.create(
       {
         turnId: 'ignored',
@@ -2397,8 +2481,9 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle — dispose waits for release
         maxSteps: 5,
       },
       {
-        llmChat: async () =>
-          new Promise<string>((resolve) => {
+        llmChat: async () => {
+          markParked?.();
+          return new Promise<string>((resolve) => {
             release = () =>
               resolve(
                 JSON.stringify({
@@ -2408,19 +2493,18 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle — dispose waits for release
                   usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
                 }),
               );
-          }),
+          });
+        },
         executeTool: async () => JSON.stringify({ content: 'ok', is_error: false }),
       },
     );
-    return { handle, release: () => release?.() };
+    return { handle, parked, release: () => release?.() };
   }
 
   it('does not resolve while an in-flight turn still owns the conversation', async () => {
-    const { handle, release } = await handleWithParkedTurn();
-    const turnId = await handle.enqueueTurn({ role: 'user', content: 'gated' }, 'newTurn');
-    for (let i = 0; i < 100 && (await handle.status()).activeTurnId !== turnId; i += 1) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
+    const { handle, parked, release } = await handleWithParkedTurn();
+    const turnId = (await handle.enqueueTurn({ role: 'user', content: 'gated' }, 'newTurn')).turnId;
+    await withDeadline(parked, 'the turn never reached the provider call');
     expect((await handle.status()).activeTurnId).toBe(turnId);
 
     let disposed = false;
@@ -2444,11 +2528,14 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle — dispose waits for release
   });
 
   it('makes every concurrent dispose call wait for the same release', async () => {
-    const { handle, release } = await handleWithParkedTurn();
-    const turnId = await handle.enqueueTurn({ role: 'user', content: 'gated' }, 'newTurn');
-    for (let i = 0; i < 100 && (await handle.status()).activeTurnId !== turnId; i += 1) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
+    const { handle, parked, release } = await handleWithParkedTurn();
+    const turnId = (await handle.enqueueTurn({ role: 'user', content: 'gated' }, 'newTurn')).turnId;
+    // The turn owning the conversation is what makes dispose wait; waiting for
+    // the provider call is the real signal, so a turn that never parks fails
+    // here by name instead of letting both disposes resolve and reading as a
+    // dispose bug.
+    await withDeadline(parked, 'the turn never reached the provider call');
+    expect((await handle.status()).activeTurnId).toBe(turnId);
 
     const resolutions: number[] = [];
     const first = handle.dispose().then(() => resolutions.push(1));
@@ -2504,7 +2591,7 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle quiescence (M1c via handle)',
     );
 
     expect(await handle.tryAcquireQuiescence()).toBe(true);
-    const heldId = await handle.enqueueTurn({ role: 'user', content: 'held' }, 'newTurn');
+    const heldId = (await handle.enqueueTurn({ role: 'user', content: 'held' }, 'newTurn')).turnId;
     expect(await handle.isSettled()).toBe(false);
 
     await handle.releaseQuiescence();
@@ -2512,7 +2599,7 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle quiescence (M1c via handle)',
     expect(outcome.status).toBe('ran');
     await handle.settled();
 
-    const activeId = await handle.enqueueTurn({ role: 'user', content: 'active' }, 'newTurn');
+    const activeId = (await handle.enqueueTurn({ role: 'user', content: 'active' }, 'newTurn')).turnId;
     for (let i = 0; i < 100 && (await handle.status()).activeTurnId !== activeId; i += 1) {
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -2588,80 +2675,89 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle quiescence (M1c via handle)',
     }
   }
 
-  it.skipIf(ON_CI)('initializes native MCP servers via mcpServers param', async () => {
-    // CI runners start the mock MCP server + engine session well past the
-    // vitest default; both MCP tests time out at 5 s on ubuntu shards while
-    // passing locally, so they carry an explicit budget.
-    process.env['KIMI_NATIVE_ALLOW_MOCK_MCP'] = '1';
-    try {
-      const handle = await createMockMcpSession();
+  it.skipIf(ON_CI)(
+    'initializes native MCP servers via mcpServers param',
+    async () => {
+      // CI runners start the mock MCP server + engine session well past the
+      // vitest default; both MCP tests time out at 5 s on ubuntu shards while
+      // passing locally, so they carry an explicit budget.
+      process.env['KIMI_NATIVE_ALLOW_MOCK_MCP'] = '1';
+      try {
+        const handle = await createMockMcpSession();
 
-      // The server must actually be registered and connected: a turn that runs
-      // with the server silently dropped would pass either way.
-      const entry = await mockMcpRosterEntry(handle);
-      expect(entry?.status).toBe('connected');
-      expect(entry?.tool_count).toBeGreaterThan(0);
+        // The server must actually be registered and connected: a turn that runs
+        // with the server silently dropped would pass either way.
+        const entry = await mockMcpRosterEntry(handle);
+        expect(entry?.status).toBe('connected');
+        expect(entry?.tool_count).toBeGreaterThan(0);
 
-      const turnId = await handle.enqueueTurn({ role: 'user', content: 'test mcp' }, 'newTurn');
-      const outcome = await handle.turnOutcome(turnId);
-      expect(outcome.status).toBe('ran');
-      await handle.dispose();
-    } finally {
-      delete process.env['KIMI_NATIVE_ALLOW_MOCK_MCP'];
-    }
-  }, 30_000);
-
-  it.skipIf(ON_CI)('emits mcp.server.status transitions after the session is created', async () => {
-    process.env['KIMI_NATIVE_ALLOW_MOCK_MCP'] = '1';    try {
-      const statuses: Array<{ name?: string; status?: string }> = [];
-      const handle = await EngineSessionHandle.create(
-        {
-          turnId: 'mcp_status_test',
-          systemPrompt: 'test',
-          modelName: 'm',
-          messages: [],
-          tools: [],
-          maxSteps: 5,
-          mcpServers: [{ name: 'test_mcp', transport: 'mock' }],
-        },
-        {
-          llmChat: async () =>
-            JSON.stringify({
-              content: 'done',
-              tool_calls: [],
-              finish_reason: 'stop',
-              usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-            }),
-          executeTool: async () => JSON.stringify({ content: 'ok', is_error: false }),
-          emitEvent: (eventJson) => {
-            const parsed = JSON.parse(eventJson) as {
-              type?: string;
-              server?: { name?: string; status?: string };
-            };
-            if (parsed.type === 'mcp.server.status' && parsed.server !== undefined) {
-              statuses.push({ name: parsed.server.name, status: parsed.server.status });
-            }
-          },
-        },
-      );
-
-      // The engine starts its connects in the background, so the transition to
-      // `connected` must arrive as an event: the host's one-shot roster
-      // snapshot is not enough (a still-connecting server would stay
-      // `pending` forever, which is exactly the TUI spinner bug this covers).
-      await mockMcpRosterEntry(handle);
-      const deadline = Date.now() + MCP_CONNECT_TIMEOUT_MS;
-      for (;;) {
-        if (statuses.some((s) => s.name === 'test_mcp' && s.status === 'connected')) break;
-        if (Date.now() >= deadline) break;
-        await new Promise((r) => setTimeout(r, 10));
+        const turnId = (await handle.enqueueTurn({ role: 'user', content: 'test mcp' }, 'newTurn')).turnId;
+        const outcome = await handle.turnOutcome(turnId);
+        expect(outcome.status).toBe('ran');
+        await handle.dispose();
+      } finally {
+        delete process.env['KIMI_NATIVE_ALLOW_MOCK_MCP'];
       }
-      expect(statuses).toContainEqual({ name: 'test_mcp', status: 'connected' });
-      await handle.dispose();
-    } finally {
-      delete process.env['KIMI_NATIVE_ALLOW_MOCK_MCP'];
-    }
-  }, 30_000);
+    },
+    30_000,
+  );
+
+  it.skipIf(ON_CI)(
+    'emits mcp.server.status transitions after the session is created',
+    async () => {
+      process.env['KIMI_NATIVE_ALLOW_MOCK_MCP'] = '1';
+      try {
+        const statuses: Array<{ name?: string; status?: string }> = [];
+        const handle = await EngineSessionHandle.create(
+          {
+            turnId: 'mcp_status_test',
+            systemPrompt: 'test',
+            modelName: 'm',
+            messages: [],
+            tools: [],
+            maxSteps: 5,
+            mcpServers: [{ name: 'test_mcp', transport: 'mock' }],
+          },
+          {
+            llmChat: async () =>
+              JSON.stringify({
+                content: 'done',
+                tool_calls: [],
+                finish_reason: 'stop',
+                usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+              }),
+            executeTool: async () => JSON.stringify({ content: 'ok', is_error: false }),
+            emitEvent: (eventJson) => {
+              const parsed = JSON.parse(eventJson) as {
+                type?: string;
+                server?: { name?: string; status?: string };
+              };
+              if (parsed.type === 'mcp.server.status' && parsed.server !== undefined) {
+                statuses.push({ name: parsed.server.name, status: parsed.server.status });
+              }
+            },
+          },
+        );
+
+        // The engine starts its connects in the background, so the transition to
+        // `connected` must arrive as an event: the host's one-shot roster
+        // snapshot is not enough (a still-connecting server would stay
+        // `pending` forever, which is exactly the TUI spinner bug this covers).
+        await mockMcpRosterEntry(handle);
+        const deadline = Date.now() + MCP_CONNECT_TIMEOUT_MS;
+        for (;;) {
+          if (statuses.some((s) => s.name === 'test_mcp' && s.status === 'connected')) break;
+          if (Date.now() >= deadline) break;
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        expect(statuses).toContainEqual({ name: 'test_mcp', status: 'connected' });
+        await handle.dispose();
+      } finally {
+        delete process.env['KIMI_NATIVE_ALLOW_MOCK_MCP'];
+      }
+    },
+    30_000,
+  );
 
   it('refuses a mock transport without the test opt-in', async () => {
     const handle = await createMockMcpSession();
@@ -2671,7 +2767,6 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle quiescence (M1c via handle)',
     await handle.dispose();
   });
 });
-
 
 describe.skipIf(!nativeEntry)('napi EngineSessionHandle — manual compaction', () => {
   /** The summarizer prompt's system message (compaction/mod.rs). */
@@ -2684,9 +2779,7 @@ describe.skipIf(!nativeEntry)('napi EngineSessionHandle — manual compaction', 
   function isSummarizerCall(request: string): boolean {
     const parsed = JSON.parse(request) as LlmChatWire;
     const first = parsed.messages?.[0];
-    return (
-      first?.role === 'system' && (first.content ?? '').includes(SUMMARIZER_MARKER)
-    );
+    return first?.role === 'system' && (first.content ?? '').includes(SUMMARIZER_MARKER);
   }
 
   it('rewrites the history with the model-written summary', async () => {
@@ -2727,7 +2820,10 @@ describe.skipIf(!nativeEntry)('napi EngineSessionHandle — manual compaction', 
       },
     );
     try {
-      const turn = await session.enqueueTurn({ role: 'user', content: 'first question' }, 'newTurn');
+      const turn = (await session.enqueueTurn(
+        { role: 'user', content: 'first question' },
+        'newTurn',
+      )).turnId;
       const outcome = await session.turnOutcome(turn);
       expect(outcome.status).toBe('ran');
       expect(await session.historyLen()).toBe(2);
@@ -2829,7 +2925,10 @@ describe.skipIf(!nativeEntry)('napi EngineSessionHandle — manual compaction', 
       },
     );
     try {
-      const turn = await session.enqueueTurn({ role: 'user', content: 'first question' }, 'newTurn');
+      const turn = (await session.enqueueTurn(
+        { role: 'user', content: 'first question' },
+        'newTurn',
+      )).turnId;
       expect((await session.turnOutcome(turn)).status).toBe('ran');
       const before = await session.historyLen();
 
@@ -2879,7 +2978,10 @@ describe.skipIf(!nativeEntry)('napi EngineSessionHandle — engine-owned tool ta
         );
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
     const address = server.address();
     const port = typeof address === 'object' && address !== null ? address.port : 0;
 
@@ -2914,7 +3016,7 @@ describe.skipIf(!nativeEntry)('napi EngineSessionHandle — engine-owned tool ta
       },
     );
     try {
-      const turn = await session.enqueueTurn({ role: 'user', content: 'hi' }, 'newTurn');
+      const turn = (await session.enqueueTurn({ role: 'user', content: 'hi' }, 'newTurn')).turnId;
       expect((await session.turnOutcome(turn)).status).toBe('ran');
       expect(captured.length).toBeGreaterThan(0);
       return captured[0] ?? [];
@@ -2997,5 +3099,47 @@ describe('nativeCronNextFire', () => {
     );
     expect(typeof fire).toBe('number');
     expect(fire as number).toBeGreaterThan(now);
+  });
+});
+
+/**
+ * The wire schemas are the only runtime check on payloads that cross the napi
+ * boundary as JSON strings: the Rust structs are compile-time types on their own
+ * side of the seam, so a field rename reaches JS as a missing property rather
+ * than a type error. These cases pin the two properties the wiring depends on —
+ * it names the payload when a required field disappears, and it never rewrites
+ * one, because the callback contract hands the original bytes on.
+ */
+describe('wire-schema validation at the napi boundary', () => {
+  const llmChat = {
+    system_prompt: 'be brief',
+    model_name: 'stub-model',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [],
+  };
+
+  it('hands the original bytes on, so a field the schema does not know survives', () => {
+    const raw = JSON.stringify({ ...llmChat, field_from_a_newer_engine: 1 });
+    expect(checked(llmChatRequestSchema, raw)).toBe(raw);
+  });
+
+  it('fails as a named payload when the engine drops a required field', () => {
+    const { system_prompt: _dropped, ...missing } = llmChat;
+    expect(() => checked(llmChatRequestSchema, JSON.stringify(missing))).toThrow();
+  });
+
+  it('rejects a payload that is not JSON at all', () => {
+    expect(() => checked(llmChatRequestSchema, 'not json')).toThrow();
+  });
+
+  it('accepts the permission request the engine actually sends', () => {
+    const raw = JSON.stringify({
+      tool_name: 'Bash',
+      tool_call_id: 'c1',
+      turn_id: 'turn-1',
+      arguments: { command: 'ls' },
+      reason: 'DangerousCommandAsk',
+    });
+    expect(checked(permissionCheckRequestSchema, raw)).toBe(raw);
   });
 });

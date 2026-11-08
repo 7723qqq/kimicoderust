@@ -773,6 +773,13 @@ export const zh = {
   // Rust 引擎（packages/kimi-agent）自身产生的文案。引擎为每个 key 都带有英文
   // 兜底，未接线时仍能正确渲染；scripts/check-engine-i18n-parity.mjs 负责保持同步。
   engine: {
+    mcp: {
+      needsAuthHint: 'MCP 服务器 "{{name}}" 需要 OAuth 授权，请运行 /mcp-config login {{name}}',
+    },
+    subagent: {
+      depthExceeded:
+        '子代理委托深度超出限制（最大 {{maxDepth}}）——请使用持久子代理或调整委托结构',
+    },
     background: {
       outputLimitExceeded:
         '超出输出限制: 命令产生了超过 {{mib}} MiB 的输出并被终止。请将大量输出重定向到文件（例如 `command > out.txt`）并分片查看。',
@@ -1009,6 +1016,11 @@ export const zh = {
       argRequired: '{{tool}} 参数无效：缺少 `{{field}}`。',
       argsNotJson: '{{tool}} 参数无效：参数不是合法的 JSON（{{detail}}）。',
       argsNotObject: '{{tool}} 参数无效：参数必须是 JSON 对象。',
+    },
+    tui: {
+      turnStoppedFiltered: '本轮已停止：供应商安全策略拦截了响应。',
+      turnStoppedBlocked: '本轮已停止：提示词钩子拦截了请求。',
+      interruptedByUser: '用户中断',
     },
   },
   startup: {

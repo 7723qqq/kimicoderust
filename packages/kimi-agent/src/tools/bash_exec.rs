@@ -28,7 +28,7 @@ impl NativeToolset {
         // otherwise hand back to host fallback.
         if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
             if let Some(runner) = &self.task_runner {
-                let task_id = format!("task_{}", fastrand::u64(..));
+                let task_id = crate::storage::generate_task_id("bash");
                 let desc = args
                     .get("description")
                     .and_then(|v| v.as_str())
@@ -179,6 +179,7 @@ impl NativeToolset {
                             kind: "bash",
                             subagent_type: None,
                             agent_id: None,
+                            timeout_ms: bg_timeout.map(|d| d.as_millis() as u64),
                         },
                         task_id.clone(),
                         desc.clone(),
@@ -293,7 +294,7 @@ impl NativeToolset {
                 if self.bash_auto_background
                     && let Some(runner) = &self.task_runner
                 {
-                    let task_id = format!("task_{}", fastrand::u64(..));
+                    let task_id = crate::storage::generate_task_id("bash");
                     let desc = LocalizedText::with_params(
                         "engine.tools.bash.timedOut",
                         i18n_params!["command" => command],
@@ -333,6 +334,7 @@ impl NativeToolset {
                             kind: "bash",
                             subagent_type: None,
                             agent_id: None,
+                            timeout_ms: bg_timeout.map(|d| d.as_millis() as u64),
                         },
                         task_id.clone(),
                         desc,
@@ -366,25 +368,33 @@ impl NativeToolset {
             }
             text.push_str(stderr.trim_end());
         }
-        if text.len() > BASH_MAX_OUTPUT_BYTES {
-            let mut cut = BASH_MAX_OUTPUT_BYTES;
-            while !text.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            text.truncate(cut);
-            text.push_str("\n[output truncated]");
-        }
-
+        // No byte ceiling here: v2's Bash retains the full output (the
+        // accumulator caps at 10 MB, the same ceiling the truncation service
+        // uses) and spills oversized results to a file the model can read. A
+        // 256 KB cut here threw the tail away before the spill could keep it.
         if exit_code == 0 {
-            let mut out = text;
-            if out.trim().is_empty() {
-                out = "Command executed successfully (no output).".into();
-            }
+            // v2 `foregroundCompletionResult`: `builder.ok('Command executed
+            // successfully.')` — the message is the output when nothing was
+            // produced, and it keeps its period.
+            let out = if text.trim().is_empty() {
+                "Command executed successfully.".to_string()
+            } else {
+                text
+            };
             Some(ok_result(out))
         } else {
-            Some(err_result(format!(
-                "{text}\nCommand failed with exit code: {exit_code}."
-            )))
+            // v2 writes the exit line first when nothing was printed, so the
+            // result never opens with a blank line.
+            let mut out = if text.trim().is_empty() {
+                format!("Process exited with code {exit_code}")
+            } else {
+                text
+            };
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("Command failed with exit code: {exit_code}."));
+            Some(err_result(out))
         }
     }
 }

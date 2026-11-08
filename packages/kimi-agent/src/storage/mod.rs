@@ -24,5 +24,5 @@ pub use session_store::{SessionRecord, SessionStore, SessionSummary};
 pub use state_store::{StateStore, StateWriteOutcome};
 pub use task_runner::{
     BackgroundLimits, TaskEventSink, TaskNotification, TaskOutcome, TaskRunner, TaskSpawnMeta,
-    TaskStatus, TaskWaitResult, scan_previous_session_reminders,
+    TaskStatus, TaskWaitResult, generate_task_id, scan_previous_session_reminders,
 };

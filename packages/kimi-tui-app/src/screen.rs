@@ -14,6 +14,7 @@ use textual_rs::widget::context::AppContext;
 
 use crate::app::UiState;
 use crate::prompt::Prompt;
+use crate::status::StatusLine;
 use crate::transcript::Transcript;
 
 pub struct AppScreen {
@@ -21,11 +22,13 @@ pub struct AppScreen {
 }
 
 impl AppScreen {
-    /// The transcript takes every row the prompt leaves. One row for the prompt
-    /// is the slice's shape; a multi-line editor grows this later.
+    /// The transcript takes every row the prompt and the status line leave. One
+    /// row each for the prompt and the status keeps the slice's shape; a
+    /// multi-line editor and a multi-line status grow these later.
     pub const CSS: &'static str = "
         AppScreen { layout-direction: vertical; }
         Transcript { flex-grow: 1; }
+        StatusLine { height: 1; }
         Prompt { height: 1; }
     ";
 
@@ -52,6 +55,7 @@ impl Widget for AppScreen {
     fn compose(&self) -> Vec<Box<dyn Widget>> {
         vec![
             Box::new(Transcript::new(Arc::clone(&self.state))),
+            Box::new(StatusLine::new(Arc::clone(&self.state))),
             Box::new(Prompt::new(Arc::clone(&self.state))),
         ]
     }

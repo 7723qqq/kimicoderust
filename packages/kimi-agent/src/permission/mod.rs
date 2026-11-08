@@ -2772,6 +2772,44 @@ mod tests {
         assert_eq!(snapshot.pre_tool_hooks[0].timeout, Some(15));
     }
 
+    /// v2 "does not let session approval history exempt dangerous commands"
+    /// (permissionPolicyService.test.ts): the dangerous guard runs before the
+    /// session-approval policy, so an earlier "approve for session" on `Bash`
+    /// must not silence it for a destructive command.
+    #[test]
+    fn a_session_approval_does_not_exempt_a_dangerous_command() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Manual,
+            session_approvals: vec!["Bash".into()],
+            ..Default::default()
+        });
+
+        let dangerous = engine.evaluate("bash", &json!({ "command": "rm -rf /" }));
+        assert_eq!(dangerous.decision, VerdictDecision::Ask);
+        assert_eq!(dangerous.policy_name, "DangerousCommandAsk");
+
+        // The same approval still covers a benign command: the guard bypasses
+        // destructive commands, it does not override the history wholesale.
+        let benign = engine.evaluate("bash", &json!({ "command": "git status" }));
+        assert_eq!(benign.decision, VerdictDecision::Allow);
+        assert_eq!(benign.policy_name, "SessionApprovalHistory");
+    }
+
+    /// v2 "does not use git-cwd approval in auto mode"
+    /// (permissionPolicyService.test.ts): auto approves before the git-cwd
+    /// policy runs, so a write outside the work tree is not judged by it.
+    #[test]
+    fn auto_mode_does_not_consume_the_git_cwd_approval() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Auto,
+            git_cwd: Some("/tmp/repo".into()),
+            ..Default::default()
+        });
+        let verdict = engine.evaluate("Write", &json!({ "path": "/tmp/elsewhere/file.txt" }));
+        assert_eq!(verdict.decision, VerdictDecision::Allow);
+        assert_eq!(verdict.policy_name, "AutoModeApprove");
+    }
+
     /// v2 mode gating (dangerous-command-ask.ts, under
     /// `agent/permissionPolicy/policies/`): a dangerous command asks in
     /// manual and yolo alike; auto skips the policy entirely, so AutoModeApprove

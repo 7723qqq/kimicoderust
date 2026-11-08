@@ -326,7 +326,7 @@ pub struct ToolCall {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extras: Option<serde_json::Value>,
     /// Why the provider's raw argument payload could not be decoded, when it
-    /// could not.
+    /// could not, together with the payload itself.
     ///
     /// v2 `parseToolCallArguments` keeps such a call: the failure is reported
     /// at preflight (`toolExecutorService.ts`), so the model reads an error
@@ -334,9 +334,26 @@ pub struct ToolCall {
     /// instead leaves the model with no feedback and no way to correct itself.
     ///
     /// Engine-internal and never serialized: the wire carries decoded
-    /// `arguments`, and only this step's preflight reads the reason.
+    /// `arguments`, and only this step's preflight and the dedupe key read it.
     #[serde(skip)]
-    pub args_parse_error: Option<String>,
+    pub args_parse_error: Option<ArgsParseError>,
+}
+
+/// A provider payload that could not be decoded, keeping the payload.
+///
+/// The raw text is load-bearing, not a diagnostic. Decoding collapses every
+/// bad payload to `{}`, and the tool-call dedupe keys on what the provider
+/// actually sent (v2 `registerSkipped`, `toolDedupeService.ts:475-482`): two
+/// different broken payloads are two distinct calls, while the same broken
+/// payload repeated still earns the repeat ladder. Keying on the decoded `{}`
+/// instead makes every malformed call identical, so a turn that keeps issuing
+/// different broken JSON is force-stopped as if it were stuck on one call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgsParseError {
+    /// The payload exactly as the provider sent it.
+    pub raw: String,
+    /// Why it could not be decoded, as the decoder reported it.
+    pub error: String,
 }
 
 // ── ExecutableTool trait ───────────────────────────────────────────────────

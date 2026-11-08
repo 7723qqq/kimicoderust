@@ -450,6 +450,92 @@ default_effort = "high"
     assert_eq!(pool.caller_model_alias.as_deref(), Some("thinky"));
 }
 
+/// A pool whose single `fast` entry declares whatever `model_extra` says; the
+/// `[secondary_model]` section takes `tail` (its own `default_effort`, or a
+/// following `[thinking]` table).
+fn pool_effort_config(model_extra: &str, tail: &str) -> KimiConfig {
+    KimiConfig::from_str(&format!(
+        r#"
+default_model = "kimi-k2"
+
+[providers.kimi]
+type = "openai"
+api_key = "sk-kimi-key"
+base_url = "https://api.moonshot.cn/v1"
+
+[models.fast]
+provider = "kimi"
+model = "kimi-k2-fast"
+capabilities = ["thinking"]
+{model_extra}
+
+[secondary_model]
+default_model = "fast"
+{tail}
+"#
+    ))
+    .unwrap()
+}
+
+fn pool_fast_effort(config: &KimiConfig) -> Option<String> {
+    let pool = config.extract_secondary_model_pool(None).unwrap().unwrap();
+    pool.models
+        .iter()
+        .find(|entry| entry.alias == "fast")
+        .expect("the pool carries the fast entry")
+        .llm
+        .reasoning_effort
+        .clone()
+}
+
+/// v2 `resolveSubagentThinking` + `declaredDefaultEffortForModel`: with no
+/// pool-wide `default_effort` the entry keeps the effort its own `[models]`
+/// record declares, when the record lists that value as supported.
+#[test]
+fn test_secondary_model_pool_entry_keeps_its_declared_effort() {
+    let config = pool_effort_config(
+        "default_effort = \"high\"\nsupport_efforts = [\"low\", \"high\"]",
+        "",
+    );
+    assert_eq!(pool_fast_effort(&config).as_deref(), Some("high"));
+}
+
+/// The pool-wide value is the explicit one: it wins over the entry's own
+/// declared effort, which is what "explicit beats model default" means in v2.
+#[test]
+fn test_secondary_model_pool_section_effort_beats_the_declared_one() {
+    let config = pool_effort_config(
+        "default_effort = \"high\"\nsupport_efforts = [\"low\", \"high\"]",
+        "default_effort = \"low\"",
+    );
+    assert_eq!(pool_fast_effort(&config).as_deref(), Some("low"));
+}
+
+/// v2's fallback is not "any declared value": a value outside `support_efforts`
+/// resolves to unset, and an absent list declares nothing at all.
+#[test]
+fn test_secondary_model_pool_declared_effort_needs_declared_support() {
+    let unsupported = pool_effort_config(
+        "default_effort = \"max\"\nsupport_efforts = [\"low\", \"high\"]",
+        "",
+    );
+    assert_eq!(pool_fast_effort(&unsupported), None);
+
+    let no_list = pool_effort_config("default_effort = \"high\"", "");
+    assert_eq!(pool_fast_effort(&no_list), None);
+}
+
+/// `[thinking].enabled = false` leaves the subagent's thinking unset for global
+/// resolution, even when the entry declares a supported default.
+#[test]
+fn test_secondary_model_pool_declared_effort_is_dropped_when_thinking_is_disabled() {
+    let config = pool_effort_config(
+        "default_effort = \"high\"\nsupport_efforts = [\"low\", \"high\"]",
+        "[thinking]\nenabled = false",
+    );
+    assert_eq!(pool_fast_effort(&config), None);
+}
+
 /// `[agent].multi_llm` resolves each named alias into a native transport.
 /// That is what makes the race runnable at all: a racer without one is a
 /// host proxy, and every config-reading entry point answers `host/llm_chat`
@@ -584,6 +670,27 @@ model = "fast"
     let pool = recipe.extract_secondary_model_pool(None).unwrap().unwrap();
     assert_eq!(pool.default_model, "fast");
     assert_eq!(pool.models.len(), 1);
+
+    // v2: the legacy `model` key is the fallback pool only while no table
+    // exists. With a table it is not a pool default, so the section must name
+    // `default_model` even though `model` names a pool entry.
+    let table_without_default = KimiConfig::from_str(&format!(
+        r#"{POOL_CONFIG}
+[secondary_model]
+model = "fast"
+
+[secondary_model.models]
+"fast" = ""
+"#
+    ))
+    .unwrap();
+    let error = table_without_default
+        .extract_secondary_model_pool(None)
+        .unwrap_err();
+    assert!(
+        error.contains("default_model is required when [secondary_model.models] is configured"),
+        "{error}"
+    );
 
     // A section with no pool keys (patch-only recipe) stays inert.
     let inert = KimiConfig::from_str(&format!(

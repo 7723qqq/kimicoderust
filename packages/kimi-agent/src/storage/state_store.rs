@@ -550,6 +550,8 @@ impl StateStore {
                 );
             }
             TurnEvent::Started { .. } => return,
+            // A steer changes no clock: it joins an already-counted turn.
+            TurnEvent::Steer { .. } => return,
         }
         let _ = self.write_domain("turn", &Value::Object(state));
     }
@@ -608,6 +610,7 @@ impl StateStore {
         };
         match action {
             "create" => self.goal_create(value),
+            "objective" => self.goal_edit_objective(value),
             "update" => self.goal_update(value),
             "set_budget" => self.goal_set_budget(value),
             // v2 `incrementGoalTurn` + `accountTokenUsage`: the turn-end fold
@@ -773,6 +776,27 @@ impl StateStore {
             updated_at: now,
         };
         Ok(goal_outcome(&state, now))
+    }
+
+    /// v2 #4568 `editGoalObjective`: change only the objective of the current
+    /// goal. A no-op still returns the live snapshot so the route answers with
+    /// the same shape as a real edit.
+    fn goal_edit_objective(&self, value: &Value) -> Result<StateWriteOutcome, String> {
+        let Some(objective) = value.get("objective").and_then(|o| o.as_str()) else {
+            return Err(
+                "State write error: [-32003] invalid goal objective value: expected { action: \"objective\", objective: string }".into(),
+            );
+        };
+        let now = now_ms();
+        let Some(mut state) = self.read_goal_state() else {
+            return Ok(StateWriteOutcome {
+                stored: json!({ "goal": Value::Null }),
+                response: json!({ "goal": Value::Null }),
+            });
+        };
+        state.edit_objective(objective)?;
+        state.updated_at = now;
+        Ok(goal_outcome(&state, live_wall_clock_ms(&state, now)))
     }
 
     fn goal_update(&self, value: &Value) -> Result<StateWriteOutcome, String> {
@@ -1196,6 +1220,38 @@ impl StateStore {
             "fullOutputAvailable": true,
             "preview": preview,
         }))
+    }
+
+    /// Pause a goal that was active when the engine last stopped, without
+    /// charging the offline time (v2 `resumePersisted` →
+    /// `pauseGoal(goal, 'Paused after agent resume')`,
+    /// `test/wire/resume.test.ts:850-911`).
+    ///
+    /// The wall clock an active goal shows is `settled + (now - resumed_at)`.
+    /// After a restart `resumed_at` is from the previous process, so reading it
+    /// would charge every minute the engine was not running — a goal with a
+    /// wall-clock budget could come back already over budget because the user
+    /// went home. v2 settles at the stored figure, pauses, and clears the
+    /// anchor; resuming is an explicit user action.
+    ///
+    /// Returns the paused snapshot when it had something to do.
+    pub fn pause_goal_on_resume(&self) -> Option<crate::goal::GoalSnapshot> {
+        let mut state = self.read_goal_state()?;
+        if state.status != GoalStatus::Active {
+            return None;
+        }
+        let now = now_ms();
+        // Deliberately not `live_wall_clock_ms`: the gap since the last
+        // resume is offline time, and v2 never charges it.
+        state.wall_clock_resumed_at = None;
+        state.status = GoalStatus::Paused;
+        state.updated_at = now;
+        let outcome = goal_outcome(&state, now);
+        if let Err(error) = self.write_domain("goal", &outcome.stored) {
+            tracing::warn!(%error, "could not persist the goal paused on resume");
+            return None;
+        }
+        Some(to_snapshot(&state, state.wall_clock_ms))
     }
 
     /// The stored goal projected into the turn-loop `GoalContext`, with the
@@ -2362,6 +2418,55 @@ mod tests {
         assert!(after.wall_clock_resumed_at.is_some());
     }
 
+    /// v2 `resumePersisted` (`test/wire/resume.test.ts:850-911`): a goal that
+    /// was active when the engine stopped is paused on resume, and the gap the
+    /// engine was not running is not charged to its wall clock — otherwise a
+    /// wall-clock budget could come back already spent after an overnight
+    /// shutdown.
+    #[test]
+    fn test_goal_paused_on_resume_does_not_charge_offline_time() {
+        let (_tmp, store) = store();
+        // Active for 2 500 ms of *online* time, but the anchor is 60 s old:
+        // reading it would charge 60 s, of which 57.5 s are offline.
+        let now = now_ms();
+        store
+            .write_domain(
+                "goal",
+                &json!({ "goal": {
+                    "goalId": "goal-resume",
+                    "objective": "ship it",
+                    "status": "active",
+                    "turnsUsed": 0,
+                    "tokensUsed": 0,
+                    "inputTokensUsed": 0,
+                    "outputTokensUsed": 0,
+                    "wallClockMs": 2500,
+                    "wallClockResumedAt": now.saturating_sub(60_000),
+                    "budget": { "wallClockBudgetMs": 10_000 },
+                    "createdAt": now.saturating_sub(120_000),
+                    "updatedAt": now.saturating_sub(60_000)
+                }}),
+            )
+            .unwrap();
+
+        let paused = store
+            .pause_goal_on_resume()
+            .expect("an active goal is paused on resume");
+        assert_eq!(paused.wall_clock_ms, 2500, "offline time is not charged");
+        assert!(!paused.budget.wall_clock_budget_reached);
+
+        let state = store.read_goal_state().expect("still stored");
+        assert_eq!(state.status, GoalStatus::Paused);
+        assert_eq!(state.wall_clock_ms, 2500);
+        assert!(
+            state.wall_clock_resumed_at.is_none(),
+            "the stale anchor is cleared so a later resume starts fresh"
+        );
+
+        // Nothing to do on a second resume, and a paused goal is left alone.
+        assert!(store.pause_goal_on_resume().is_none());
+    }
+
     /// Only a goal the host has reported back can be cleared by a host that
     /// now reports none; an engine-created goal the host has not adopted yet
     /// must survive.
@@ -2516,11 +2621,13 @@ mod tests {
         for turn_id in 0..3u64 {
             store.fold_turn_event(&TurnEvent::Prompt {
                 turn_id,
+                prompt_id: None,
                 input: json!([]),
                 origin: json!({ "kind": "user" }),
             });
             store.fold_turn_event(&TurnEvent::Started {
                 turn_id,
+                prompt_id: None,
                 origin: json!({ "kind": "user" }),
             });
             store.fold_turn_event(&TurnEvent::Ended {
@@ -2767,5 +2874,47 @@ mod goal_usage_tests {
         context.updated_at = now as i64 - 5_000;
         assert!(store.sync_goal_from_context(&context).unwrap());
         assert_eq!(store.goal_context().unwrap().goal_id, "goal-other");
+    }
+
+    /// v2 #4568: the `objective` action edits in place. A no-op still returns
+    /// a snapshot, a completed goal is terminal, and counters survive.
+    #[test]
+    fn edit_objective_action_changes_only_the_objective() {
+        let (_tmp, store) = store();
+        let created = store
+            .apply_write("goal", &json!({ "action": "create", "objective": "old" }))
+            .unwrap();
+        store.write_domain("goal", &created.stored).unwrap();
+        store
+            .apply_write("goal", &json!({ "action": "record_usage", "turns": 2 }))
+            .map(|outcome| store.write_domain("goal", &outcome.stored).unwrap())
+            .unwrap();
+
+        let edited = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "objective", "objective": "  new  " }),
+            )
+            .unwrap();
+        store.write_domain("goal", &edited.stored).unwrap();
+        assert_eq!(edited.response["goal"]["objective"], "new");
+        assert_eq!(edited.response["goal"]["turnsUsed"], 2);
+        let stored = store.goal_snapshot().unwrap();
+        assert_eq!(stored["objective"], "new");
+        assert_eq!(stored["turnsUsed"], 2);
+
+        let unchanged = store
+            .apply_write(
+                "goal",
+                &json!({ "action": "objective", "objective": "new" }),
+            )
+            .unwrap();
+        assert_eq!(unchanged.response["goal"]["objective"], "new");
+        assert!(
+            store
+                .apply_write("goal", &json!({ "action": "objective", "objective": " " }))
+                .is_err(),
+            "empty is refused"
+        );
     }
 }
