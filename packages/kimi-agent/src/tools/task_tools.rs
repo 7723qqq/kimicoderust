@@ -942,31 +942,11 @@ fn is_task_not_found(error: &str) -> bool {
 pub fn task_list_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "TaskList".into(),
-        description: r#"List background tasks and their current status.
+        description: r#"List background tasks and their current status, including task IDs for `TaskOutput`.
 
-Use this tool to discover which background tasks exist and where each one
-stands. It is the entry point for inspecting background work: it returns a
-task ID, status, and description for every task it reports, plus the command,
-PID, and (once finished) exit code for shell tasks, and a stop reason for any
-task that ended early.
+After context compaction, or whenever unsure which tasks are running, call TaskList instead of guessing IDs. With `active_only=false`, `lost` tasks from previous processes may appear; treat them as terminated.
 
-Guidelines:
-
-- After a context compaction, or whenever you are unsure which background
-  tasks are running or what their task IDs are, call this tool to
-  re-enumerate them instead of guessing a task ID.
-- Prefer the default `active_only=true`, which lists only non-terminal tasks.
-  Pass `active_only=false` only when you specifically need to see tasks that
-  have already finished. With `active_only=false` the result may also include
-  `lost` tasks — tasks left over from a previous process that can no longer be
-  inspected or controlled; treat them as already terminated.
-- `limit` caps how many tasks are returned. It accepts a value between 1 and
-  100 and defaults to 20 when omitted.
-- This tool only lists tasks; it does not return their output. Use it first
-  to locate the task ID you need, then call `TaskOutput` with that ID to read
-  the task's output and details.
-- This tool is read-only and does not change any state, so it is always safe
-  to call, including in plan mode."#
+This tool is read-only and safe in plan mode; it does not return task output."#
             .into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -994,18 +974,9 @@ Guidelines:
 pub fn task_output_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "TaskOutput".into(),
-        description: r#"Retrieve a snapshot of a running or completed background task.
+        description: r#"Retrieve a non-blocking snapshot of a running or completed background task.
 
-Use this after `Bash(run_in_background=true)`, `Agent(run_in_background=true)`, or `AskUserQuestion(background=true)` to check progress, or to read the output of a task that has already completed.
-
-Guidelines:
-- Prefer relying on automatic completion notifications. Use this tool only when you need task output before the automatic notification arrives.
-- This tool is always non-blocking: it returns the current status/output snapshot immediately and never waits for the task to finish.
-- Do not use TaskOutput to wait for a result you need before continuing — if your next step depends on the task's result, run that task in the foreground instead. TaskOutput is for a deliberate progress check you will act on without blocking, not a way to sit and wait for a background task you just launched.
-- This tool returns structured task metadata, a fixed-size output preview, and an output_path for the full log.
-- For a terminal task, the metadata also explains why it ended. A shell command that runs to completion reports `status: completed` on a zero exit, or `status: failed` with its non-zero `exit_code` — judge that failure from the `exit_code`, because a plain command failure carries no `stop_reason` and no `terminal_reason`. `terminal_reason` is a categorical label emitted only when the end is not an ordinary exit: `timed_out` when the deadline aborted it, `stopped` when it was explicitly stopped, or `failed` when it errored without producing an exit code; the `stopped` and `failed` cases also carry a human-readable `stop_reason`. A task that finished on its own with a clean exit carries neither `stop_reason` nor `terminal_reason`.
-- The full, never-truncated log is always available at output_path; use the `Read` tool with that path to page through it, whether or not the preview was truncated.
-- This tool works with the generic background task system and should remain the primary read path for future task types, not just bash."#
+Use after `Bash(run_in_background=true)`, `Agent(run_in_background=true)`, or `AskUserQuestion(background=true)` to check progress or read completed output. Prefer automatic completion notifications over polling. If your next step depends on task completion, run the task in the foreground instead."#
             .into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -2433,7 +2404,7 @@ mod tests {
         let def = task_output_tool_def();
         assert_eq!(def.name, "TaskOutput");
         assert_eq!(def.input_schema["required"][0], "task_id");
-        assert!(def.description.contains("Retrieve a snapshot"));
+        assert!(def.description.contains("Retrieve a non-blocking snapshot"));
     }
 
     #[test]

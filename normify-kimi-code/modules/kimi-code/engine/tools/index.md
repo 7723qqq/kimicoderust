@@ -10,8 +10,8 @@ description:
   en: >
       Rust native toolset: read/write, bash, grep/glob, skills, team collaboration and external hooks.
       
-revision: 82455791f88c01a0214476427ab6153830b3e2ef
-updated_at: "2026-11-08T09:53:33.126Z"
+revision: c914b3ff3c7f0065aeaa54ddc26197f9c815c5af
+updated_at: "2026-11-08T09:59:45.171Z"
 fingerprint: 375a8c7b05b592b8d22a5557c5de3c9a29b1dbd6604822779df87f7b70072c6a
 source:
   - path: "packages/kimi-agent/src/tools/mod.rs"
