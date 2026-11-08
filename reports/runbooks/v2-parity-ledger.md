@@ -108,12 +108,12 @@ Checked field by field against v2's zod schemas: no missing parameter.
   `revert`. The whole tool is gated on the main agent and on the associative
   memory flag being off (`memoryTool.ts:513-519`). The pure layout functions
   in `tools/memory_paths.rs` **do** have v2 counterparts (`memoryPaths.ts`) —
-  the module header's "fork-original, no v2 counterpart" claim is stale and
-  must be corrected. Two real gaps: project identity is three-tier in v2
-  (git origin → git repo root → cwd, `projectIdentity.ts:105-118`) but a plain
-  cwd digest here; and v2's `search`/`log`/`revert` need MiniDb full-text
-  search, a git repo under the memory dir, and a lock file, none of which this
-  engine has. |
+  the module header's stale provenance has been corrected. `parseAppliesTo`
+  and the three-tier project identity are now ported, and
+  `memory_store::project_id_for` resolves through `resolve_project_identity`,
+  so a nested checkout keeps its repository id. Remaining gap: v2's
+  `search`/`log`/`revert` need MiniDb full-text search, a git repo under the
+  memory dir, and a lock file, none of which this engine has. |
 
 ### Shell task lifecycle (v2 `agent/tools/os/bash/process-task.ts`, 318 lines —
 read end to end)

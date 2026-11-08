@@ -26,8 +26,9 @@ use std::path::{Path, PathBuf};
 use crate::i18n::{LocalizedText, i18n_params};
 use crate::tools::memory_paths::{
     MemoryScope, MemoryType, build_rel_path, content_version, detect_type, extract_title,
-    memory_dir, parse_memory_path, project_id_from_cwd, sanitize_file_name, scope_dir,
+    memory_dir, parse_memory_path, sanitize_file_name, scope_dir,
 };
+use crate::tools::project_identity::resolve_project_identity;
 use crate::tools::tower::frontmatter::parse_frontmatter;
 
 /// A memory file as a listing sees it.
@@ -52,11 +53,13 @@ pub fn memory_base_at(kimi_home: &Path) -> PathBuf {
     memory_dir(kimi_home)
 }
 
-/// The project id of a workspace root. The path is normalized to forward
-/// slashes first, so the same workspace hashes the same however the platform
-/// spelled it.
+/// The project id of a workspace root (v2 `resolveProjectIdentity`).
+///
+/// The id follows the repository, not the checkout path: a git origin wins,
+/// then the repo root, then the cwd. That is what keeps a project's memory
+/// when the workspace is moved or opened from a nested directory.
 pub fn project_id_for(workspace_root: &Path) -> String {
-    project_id_from_cwd(&workspace_root.to_string_lossy().replace('\\', "/"))
+    resolve_project_identity(&workspace_root.to_string_lossy()).id
 }
 
 /// Read a memory file: its content and the version token of that content.
@@ -881,10 +884,25 @@ mod tests {
             project_id_for(Path::new("G:/kimi/kimi-code")),
             project_id_for(Path::new("G:\\kimi\\kimi-code"))
         );
+    }
+
+    #[test]
+    fn test_project_id_follows_the_repository_across_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".git/config"),
+            "[remote \"origin\"]\n url = https://example.com/Org/Repo.git\n",
+        )
+        .unwrap();
+        let nested = dir.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
         assert_eq!(
-            project_id_for(Path::new("G:/kimi/kimi-code")),
-            "28c0fe7f6661"
+            project_id_for(dir.path()),
+            project_id_for(nested.as_path()),
+            "a nested checkout keeps its repository identity"
         );
+        assert_eq!(project_id_for(dir.path()).len(), 12);
     }
 
     #[test]
