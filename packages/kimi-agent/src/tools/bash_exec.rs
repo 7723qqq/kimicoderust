@@ -36,8 +36,10 @@ impl NativeToolset {
             command.to_string()
         };
         let command = command.as_str();
-        let starts_in_background =
-            args.get("run_in_background").and_then(|value| value.as_bool()) == Some(true);
+        let starts_in_background = args
+            .get("run_in_background")
+            .and_then(|value| value.as_bool())
+            == Some(true);
         // v2 \`validateRunRequest\` checks the command first and the background
         // description only once background execution is known to be available.
         // Availability here is the task runner: without one the call is handed
@@ -119,16 +121,13 @@ impl NativeToolset {
                     // process is alive, and their output survives a drain grace
                     // that expires because a grandchild still holds a pipe.
                     let throttle = std::sync::Arc::new(ProgressThrottle::new());
-                    let total_bytes =
-                        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let limit_tripped =
                         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let out_sink = crate::tools::stream_sink::StreamTail::default();
                     let err_sink = crate::tools::stream_sink::StreamTail::default();
 
-                    let mut observers: Vec<
-                        tokio::task::JoinHandle<()>,
-                    > = Vec::new();
+                    let mut observers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
                     if let Some(mut pipe) = stdout_pipe.take() {
                         let throttle = throttle.clone();
                         let runner = progress_runner.clone();
@@ -147,12 +146,7 @@ impl NativeToolset {
                                 }
                             };
                             crate::tools::stream_sink::read_bounded_stream_to_sink(
-                                &mut pipe,
-                                "stdout",
-                                &emit,
-                                &total,
-                                &tripped,
-                                &sink,
+                                &mut pipe, "stdout", &emit, &total, &tripped, &sink,
                             )
                             .await;
                         }));
@@ -175,12 +169,7 @@ impl NativeToolset {
                                 }
                             };
                             crate::tools::stream_sink::read_bounded_stream_to_sink(
-                                &mut pipe,
-                                "stderr",
-                                &emit,
-                                &total,
-                                &tripped,
-                                &sink,
+                                &mut pipe, "stderr", &emit, &total, &tripped, &sink,
                             )
                             .await;
                         }));
@@ -197,11 +186,7 @@ impl NativeToolset {
                     let (out, err) = match bg_timeout {
                         Some(limit) => match tokio::time::timeout(limit, async {
                             let _ = child.wait().await;
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(250),
-                                drained,
-                            )
-                            .await;
+                            let _ = tokio::time::timeout(Duration::from_millis(250), drained).await;
                             (out_sink.take(), err_sink.take())
                         })
                         .await
@@ -218,11 +203,7 @@ impl NativeToolset {
                         },
                         None => {
                             let _ = child.wait().await;
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(250),
-                                drained,
-                            )
-                            .await;
+                            let _ = tokio::time::timeout(Duration::from_millis(250), drained).await;
                             (out_sink.take(), err_sink.take())
                         }
                     };

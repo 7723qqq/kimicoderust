@@ -86,15 +86,7 @@ mod tests {
         let sink = StreamTail::default();
         let total = AtomicU64::new(0);
         let tripped = AtomicBool::new(false);
-        read_bounded_stream_to_sink(
-            &mut pipe,
-            "stdout",
-            &noop_emit,
-            &total,
-            &tripped,
-            &sink,
-        )
-        .await;
+        read_bounded_stream_to_sink(&mut pipe, "stdout", &noop_emit, &total, &tripped, &sink).await;
         assert_eq!(sink.take(), b"one\ntwo\nthree");
         assert_eq!(total.load(Ordering::Relaxed), 13);
     }
@@ -122,24 +114,25 @@ mod tests {
                 std::task::Poll::Pending
             }
         }
-        let mut pipe = Pending { sent: false, _rx: rx };
+        let mut pipe = Pending {
+            sent: false,
+            _rx: rx,
+        };
         let sink = StreamTail::default();
         let total = AtomicU64::new(0);
         let tripped = AtomicBool::new(false);
-        let fut = read_bounded_stream_to_sink(
-            &mut pipe,
-            "stdout",
-            &noop_emit,
-            &total,
-            &tripped,
-            &sink,
-        );
+        let fut =
+            read_bounded_stream_to_sink(&mut pipe, "stdout", &noop_emit, &total, &tripped, &sink);
         // Poll once so the first chunk is appended, then abandon the future.
         let mut fut = Box::pin(fut);
         let _ = tokio::time::timeout(std::time::Duration::from_millis(10), &mut fut).await;
         drop(fut);
         drop(tx);
-        assert_eq!(sink.take(), b"kept", "the grace must not discard read output");
+        assert_eq!(
+            sink.take(),
+            b"kept",
+            "the grace must not discard read output"
+        );
     }
 
     #[tokio::test]
@@ -166,15 +159,7 @@ mod tests {
         let tripped = AtomicBool::new(false);
         let sink = StreamTail::default();
         let mut pipe: &[u8] = b"first";
-        read_bounded_stream_to_sink(
-            &mut pipe,
-            "stdout",
-            &noop_emit,
-            &total,
-            &tripped,
-            &sink,
-        )
-        .await;
+        read_bounded_stream_to_sink(&mut pipe, "stdout", &noop_emit, &total, &tripped, &sink).await;
         assert!(tripped.load(Ordering::Relaxed));
         assert!(sink.take().is_empty());
 

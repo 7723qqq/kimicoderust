@@ -181,9 +181,7 @@ fn tool_kind_and_call_id_match_v2() {
 /// union produces, variant by variant — the `kind` tag is what hosts switch on.
 #[test]
 fn tool_input_display_wire_shape_matches_v2_variants() {
-    use crate::tool_input_display::{
-        PlanReviewOption, SpecReviewDocument, ToolInputDisplay as D,
-    };
+    use crate::tool_input_display::{PlanReviewOption, SpecReviewDocument, ToolInputDisplay as D};
 
     let cases: Vec<(D, &str)> = vec![
         (

@@ -253,9 +253,7 @@ pub fn build_rel_path(scope: MemoryScope, scope_id: &str, file_name: &str) -> St
 pub fn parse_applies_to(body: &str) -> Vec<String> {
     static FRONT: OnceLock<Regex> = OnceLock::new();
     let front = FRONT
-        .get_or_init(|| {
-            Regex::new(r"(?s)\A---[\s\S]*?\n---").expect("static frontmatter regex")
-        })
+        .get_or_init(|| Regex::new(r"(?s)\A---[\s\S]*?\n---").expect("static frontmatter regex"))
         .find(body)
         .map(|m| m.as_str())
         .unwrap_or("");
@@ -276,8 +274,7 @@ pub fn parse_applies_to(body: &str) -> Vec<String> {
     static LIST: OnceLock<Regex> = OnceLock::new();
     let list = LIST
         .get_or_init(|| {
-            Regex::new(r"applies_to:\s*\n((?:\s*-\s*[^\n]+\n?)+)")
-                .expect("static block-list regex")
+            Regex::new(r"applies_to:\s*\n((?:\s*-\s*[^\n]+\n?)+)").expect("static block-list regex")
         })
         .captures(front);
     let Some(caps) = list else {
@@ -301,11 +298,7 @@ fn unquote(value: &str) -> Option<String> {
     let stripped = trimmed
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
-        .or_else(|| {
-            trimmed
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-        })
+        .or_else(|| trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
         .unwrap_or(trimmed);
     let cleaned = stripped.trim_matches('\'').trim_matches('"').trim();
     (!cleaned.is_empty()).then(|| cleaned.to_string())

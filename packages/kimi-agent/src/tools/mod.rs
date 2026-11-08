@@ -72,7 +72,6 @@ fn output_limit_reason() -> String {
     .render()
 }
 
-
 /// Grep caps: scanned files, and wall-clock budget (host/addon
 /// DEFAULT_TIMEOUT_MS = 20s).
 const GREP_MAX_FILES: usize = 5000;
@@ -196,6 +195,7 @@ pub mod memory_tool;
 pub mod mode_mutex;
 pub mod moonshot_service;
 pub mod plan_mode;
+pub mod project_identity;
 pub mod read_media;
 pub mod registry;
 pub mod sandbox;

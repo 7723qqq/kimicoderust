@@ -38,9 +38,7 @@ fn is_nul_redirect_at(chars: &[char], at: usize) -> bool {
     if !word.iter().collect::<String>().eq_ignore_ascii_case("nul") {
         return false;
     }
-    chars
-        .get(at + 3)
-        .is_none_or(|ch| NUL_TARGET_BOUNDARY(*ch))
+    chars.get(at + 3).is_none_or(|ch| NUL_TARGET_BOUNDARY(*ch))
 }
 
 /// The index of the `NUL` word after a `>` or `>>`, with the whitespace between
@@ -281,9 +279,8 @@ fn rewrite_nul_redirects(chars: &[char]) -> String {
         if ch == '#' {
             let previous = plain.chars().last();
             let starts_comment = previous.is_none()
-                || previous.is_some_and(|c| {
-                    matches!(c, ' ' | '\t' | '\n' | '\r' | ';' | '|' | '&' | '(')
-                });
+                || previous
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | ';' | '|' | '&' | '('));
             if starts_comment {
                 let line_end = end_of_line_including_newline(chars, cursor);
                 plain.push_str(&slice(chars, cursor, line_end));
@@ -292,10 +289,7 @@ fn rewrite_nul_redirects(chars: &[char]) -> String {
             }
         }
 
-        if ch == '<'
-            && chars.get(cursor + 1) == Some(&'<')
-            && chars.get(cursor + 2) != Some(&'<')
-        {
+        if ch == '<' && chars.get(cursor + 1) == Some(&'<') && chars.get(cursor + 2) != Some(&'<') {
             if let Some(heredoc) = read_heredoc_delimiter(chars, cursor) {
                 let line_end = end_of_line_including_newline(chars, heredoc.start);
                 let body_end = heredoc_body_end(chars, line_end, &heredoc.delimiter);
@@ -332,14 +326,23 @@ mod tests {
 
     #[test]
     fn a_plain_nul_redirect_becomes_dev_null() {
-        assert_eq!(rewrite_windows_null_redirect("cmd > NUL"), "cmd > /dev/null");
+        assert_eq!(
+            rewrite_windows_null_redirect("cmd > NUL"),
+            "cmd > /dev/null"
+        );
         assert_eq!(rewrite_windows_null_redirect("cmd >NUL"), "cmd >/dev/null");
-        assert_eq!(rewrite_windows_null_redirect("cmd 2>NUL"), "cmd 2>/dev/null");
+        assert_eq!(
+            rewrite_windows_null_redirect("cmd 2>NUL"),
+            "cmd 2>/dev/null"
+        );
     }
 
     #[test]
     fn append_and_whitespace_variants_are_rewritten() {
-        assert_eq!(rewrite_windows_null_redirect("cmd >> NUL"), "cmd >> /dev/null");
+        assert_eq!(
+            rewrite_windows_null_redirect("cmd >> NUL"),
+            "cmd >> /dev/null"
+        );
         assert_eq!(
             rewrite_windows_null_redirect("cmd > \tNUL"),
             "cmd > \t/dev/null"
@@ -348,16 +351,31 @@ mod tests {
 
     #[test]
     fn the_nul_word_must_end_at_a_boundary() {
-        assert_eq!(rewrite_windows_null_redirect("cmd > NULFILE"), "cmd > NULFILE");
-        assert_eq!(rewrite_windows_null_redirect("cmd > nul"), "cmd > /dev/null");
-        assert_eq!(rewrite_windows_null_redirect("cmd > NUL|cat"), "cmd > /dev/null|cat");
-        assert_eq!(rewrite_windows_null_redirect("cmd > NUL;next"), "cmd > /dev/null;next");
+        assert_eq!(
+            rewrite_windows_null_redirect("cmd > NULFILE"),
+            "cmd > NULFILE"
+        );
+        assert_eq!(
+            rewrite_windows_null_redirect("cmd > nul"),
+            "cmd > /dev/null"
+        );
+        assert_eq!(
+            rewrite_windows_null_redirect("cmd > NUL|cat"),
+            "cmd > /dev/null|cat"
+        );
+        assert_eq!(
+            rewrite_windows_null_redirect("cmd > NUL;next"),
+            "cmd > /dev/null;next"
+        );
     }
 
     #[test]
     fn quoted_nul_is_left_alone() {
         assert_eq!(rewrite_windows_null_redirect("echo 'NUL'"), "echo 'NUL'");
-        assert_eq!(rewrite_windows_null_redirect("echo 'a > NUL'"), "echo 'a > NUL'");
+        assert_eq!(
+            rewrite_windows_null_redirect("echo 'a > NUL'"),
+            "echo 'a > NUL'"
+        );
     }
 
     #[test]
@@ -399,7 +417,10 @@ mod tests {
 
     #[test]
     fn an_escaped_redirect_is_not_rewritten() {
-        assert_eq!(rewrite_windows_null_redirect("echo \\> NUL"), "echo \\> NUL");
+        assert_eq!(
+            rewrite_windows_null_redirect("echo \\> NUL"),
+            "echo \\> NUL"
+        );
     }
 
     #[test]
@@ -411,6 +432,9 @@ mod tests {
     #[test]
     fn non_ascii_text_survives_the_walk() {
         let command = "echo '你好' > NUL";
-        assert_eq!(rewrite_windows_null_redirect(command), "echo '你好' > /dev/null");
+        assert_eq!(
+            rewrite_windows_null_redirect(command),
+            "echo '你好' > /dev/null"
+        );
     }
 }

@@ -10248,6 +10248,11 @@
       "text": "the entry names no path",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/memory_paths.rs:').and_then(|s| s.strip_suffix('": {
+      "file": "packages/kimi-agent/src/tools/memory_paths.rs",
+      "text": "').and_then(|s| s.strip_suffix('",
+      "reason": "format-scaffolding"
+    },
     "packages/kimi-agent/src/tools/memory_paths.rs:static H1 regex": {
       "file": "packages/kimi-agent/src/tools/memory_paths.rs",
       "text": "static H1 regex",
@@ -10507,6 +10512,26 @@
       "file": "packages/kimi-agent/src/tools/plan_mode.rs",
       "text": "{} is not available in plan mode because it would mutate scheduled work that runs after plan exit. Call ExitPlanMode first.",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/project_identity.rs:static drive regex": {
+      "file": "packages/kimi-agent/src/tools/project_identity.rs",
+      "text": "static drive regex",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/tools/project_identity.rs:static scheme regex": {
+      "file": "packages/kimi-agent/src/tools/project_identity.rs",
+      "text": "static scheme regex",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/tools/project_identity.rs:static scp regex": {
+      "file": "packages/kimi-agent/src/tools/project_identity.rs",
+      "text": "static scp regex",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/tools/project_identity.rs:static win-shaped regex": {
+      "file": "packages/kimi-agent/src/tools/project_identity.rs",
+      "text": "static win-shaped regex",
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/tools/read_media.rs:\"{}\" is {final_bytes} bytes ({}), over the {inline_budget}-byte ({}) per-image limit, so full_resolution cannot be honored. Use region to view a crop at full fidelity instead.": {
       "file": "packages/kimi-agent/src/tools/read_media.rs",
