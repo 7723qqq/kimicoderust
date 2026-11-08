@@ -35,8 +35,7 @@ use crate::native::permission_engine::dangerous_command::{DangerousVerdict, anal
 /// each multi-word name are listed because [`PermissionEngine::evaluate`]
 /// lowercases without squashing underscores, so `ReadMediaFile` and
 /// `read_media_file` are different keys. The fork's own read-only extras —
-/// `ListDirectory` (v2 folds directory listing into `Glob`) plus `Lsp`, the
-/// memory readers and the tower readers — are appended for the same reason
+/// `Lsp`, the memory readers and the tower readers — are appended for the same reason
 /// their absence prompted: a natively executed read must not fall through to
 /// `FallbackAsk`.
 const DEFAULT_APPROVE_TOOLS: &[&str] = &[
@@ -82,12 +81,10 @@ const DEFAULT_APPROVE_TOOLS: &[&str] = &[
     "updategoal",
     "update_goal",
     "select_tools",
-    "listdirectory",
-    "list_directory",
     // Read-only tools v2's list cannot name (they do not exist upstream) but
     // which execute natively here. Leaving them out sent a pure read to
     // `FallbackAsk`, so a read-only call prompted in every non-Yolo mode —
-    // the same drift `ListDirectory` above already documents.
+    // the same drift the comment above already documents.
     "lsp",
     "memoryread",
     "memory_read",
@@ -859,7 +856,7 @@ fn rule_subject_variants(tool_lower: &str, raw: Option<String>, cwd: Option<&str
     let mut variants = vec![raw.clone()];
     if !matches!(
         tool_lower,
-        "read" | "write" | "edit" | "grep" | "glob" | "listdirectory" | "list_directory"
+        "read" | "write" | "edit" | "grep" | "glob"
     ) {
         return variants;
     }
@@ -935,8 +932,6 @@ fn file_accesses(tool_lower: &str, args: &Value) -> Vec<String> {
             | "edit"
             | "grep"
             | "glob"
-            | "listdirectory"
-            | "list_directory"
             | "lsp"
             | "memoryread"
             | "memory_read"
@@ -971,7 +966,7 @@ fn extract_rule_subject(tool_lower: &str, args: &Value) -> Option<String> {
             .get("path")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        "grep" | "glob" | "listdirectory" | "list_directory" => args
+        "grep" | "glob" => args
             .get("path")
             .and_then(|v| v.as_str())
             .map(str::to_string),
@@ -1241,7 +1236,6 @@ mod tests {
             "Edit",
             "Grep",
             "Glob",
-            "ListDirectory",
             "lsp",
             "memory_write",
             "memory_str_replace",
@@ -1446,8 +1440,6 @@ mod tests {
             ("Grep", json!({ "path": "src", "pattern": "struct" })),
             ("glob", json!({ "path": ".", "pattern": "*.ts" })),
             ("GLOB", json!({ "path": ".", "pattern": "*.rs" })),
-            ("listdirectory", json!({ "path": "src" })),
-            ("list_directory", json!({ "path": "src" })),
             ("fetchurl", json!({ "url": "https://example.com" })),
             ("fetch_url", json!({ "url": "https://example.com/api" })),
             ("Fetch_Url", json!({ "url": "https://example.com/docs" })),
@@ -2644,14 +2636,6 @@ mod tests {
         assert_eq!(
             extract_rule_subject("glob", &json!({ "path": "tests" })).as_deref(),
             Some("tests")
-        );
-        assert_eq!(
-            extract_rule_subject("listdirectory", &json!({ "path": "dir" })).as_deref(),
-            Some("dir")
-        );
-        assert_eq!(
-            extract_rule_subject("list_directory", &json!({ "path": "dir" })).as_deref(),
-            Some("dir")
         );
 
         // URL-bearing tools
