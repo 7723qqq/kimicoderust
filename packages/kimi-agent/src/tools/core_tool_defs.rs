@@ -38,15 +38,12 @@ This engine's own additions, which v2 has no reason to state:
 "#;
 const GREP_DESCRIPTION: &str = r#"Search file contents using regular expressions (powered by ripgrep).
 
-Use Grep when the task is to find unknown content or unknown file locations. Do not use shell `grep` or `rg` directly; this tool applies workspace path policy, output limits, and sensitive-file filtering.
-ALWAYS use Grep tool instead of running `grep` or `rg` from a shell — direct shell calls bypass workspace policy, output limits, and sensitive-file filtering.
-If you already know a concrete file path and need to inspect its contents, use Read directly instead.
+Use Grep to find unknown content or file locations; use Read directly when inspecting a known file's contents. Do not run `grep` or `rg` via shell: they bypass workspace policy, output limits, and sensitive-file filtering.
 
 Write patterns in ripgrep regex syntax, which differs from POSIX `grep` syntax. For example, braces are special, so escape them as `\{` to match a literal `{`.
 
-Hidden files (dotfiles such as `.gitlab-ci.yml` or `.eslintrc.json`) are searched by default. To also search files excluded by `.gitignore` (such as `node_modules` or build outputs), set `include_ignored` to `true`. Sensitive files (such as `.env`) are always skipped for safety, even when `include_ignored` is `true`.
+Hidden files are searched by default.
 "#;
-
 const GLOB_DESCRIPTION: &str = r#"Find files by glob pattern, sorted by modification time (most recent first).
 
 Powered by ripgrep. Matches are files only — directories themselves are never listed; to find a directory, glob for a file inside it (e.g. `**/fixtures/**`).
@@ -62,16 +59,13 @@ Avoid broad searches in dependency or build-output directories, especially with 
 "#;
 const WRITE_DESCRIPTION: &str = r#"Create, append to, or replace a file entirely.
 
-- Missing parent directories are created automatically (like `mkdir(parents=True, exist_ok=True)`).
-- Mode defaults to overwrite; append adds content at EOF without adding a newline.
-- Use Write only when the file does not exist, you intend a complete replacement, or the new contents have little continuity with the old contents.
+- Use Write only for new files, complete replacements, or content with little continuity.
 - Do not create unsolicited documentation files (`*.md` write-ups, `README`s, summaries) just because a task finished — write one only when the user asks for it, or when a task or project instruction requires it (e.g. the plan-mode plan file, created with Write when plan mode directs you to, or a changeset the repo mandates).
 - Read before overwriting an existing file.
 - Write ignores the Read/Edit line-number view. NEVER include line prefixes.
 - Write outputs content literally, including supplied line endings: \n stays LF, \r\n stays CRLF.
 - For new content too large for one call, overwrite the first chunk, then append subsequent chunks. Never chunk Write to modify an existing file.
 "#;
-
 const EDIT_DESCRIPTION: &str = r#"Perform exact replacements in existing files.
 
 - Drop the line-number prefix and tab; match only file content.

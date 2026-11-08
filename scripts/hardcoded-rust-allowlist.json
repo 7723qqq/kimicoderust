@@ -8208,16 +8208,6 @@
       "text": "- If the status block reports an incomplete range, continue with its `Next Read` arguments exactly. Do not answer from a partial page when the task requires the remaining content.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Missing parent directories are created automatically (like `mkdir(parents=True, exist_ok=True)`).": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Missing parent directories are created automatically (like `mkdir(parents=True, exist_ok=True)`).",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Mode defaults to overwrite; append adds content at EOF without adding a newline.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Mode defaults to overwrite; append adds content at EOF without adding a newline.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Multiple Edit calls may run in one response only when they do not target the same file.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Multiple Edit calls may run in one response only when they do not target the same file.",
@@ -8263,9 +8253,9 @@
       "text": "- UTF-16 LE/BE text (with or without a BOM) is detected and transcoded to UTF-8 for display; the status block names the detected encoding, and Edit/Write on such a file still expect UTF-8. Other encodings (for example GBK), binary files, and files containing NUL bytes are refused.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use Write only when the file does not exist, you intend a complete replacement, or the new contents have little continuity with the old contents.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use Write only for new files, complete replacements, or content with little continuity.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Use Write only when the file does not exist, you intend a complete replacement, or the new contents have little continuity with the old contents.",
+      "text": "- Use Write only for new files, complete replacements, or content with little continuity.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use `&&` for commands that depend on each other. Issue independent read-only commands (separate `git show`, `ls`, or status checks) as parallel Bash calls in one response instead of chaining them or stitching their output with `echo` separators.": {
@@ -8368,11 +8358,6 @@
       "text": "A short description for the background task. Required when run_in_background is true.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:ALWAYS use Grep tool instead of running `grep` or `rg` from a shell — direct shell calls bypass workspace policy, output limits, and sensitive-file filtering.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "ALWAYS use Grep tool instead of running `grep` or `rg` from a shell — direct shell calls bypass workspace policy, output limits, and sensitive-file filtering.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Add a line to the end of a memory file.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "Add a line to the end of a memory file.",
@@ -8468,9 +8453,9 @@
       "text": "Good patterns:",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:Hidden files (dotfiles such as `.gitlab-ci.yml` or `.eslintrc.json`) are searched by default. To also search files excluded by `.gitignore` (such as `node_modules` or build outputs), set `include_ignored` to `true`. Sensitive files (such as `.env`) are always skipped for safety, even when `include_ignored` is `true`.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:Hidden files are searched by default.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "Hidden files (dotfiles such as `.gitlab-ci.yml` or `.eslintrc.json`) are searched by default. To also search files excluded by `.gitignore` (such as `node_modules` or build outputs), set `include_ignored` to `true`. Sensitive files (such as `.env`) are always skipped for safety, even when `include_ignored` is `true`.",
+      "text": "Hidden files are searched by default.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:If the user provides a concrete file path to a text file, call Read directly. Do not `Glob`, `ls`, or otherwise pre-check known text file paths; missing or invalid file paths return errors you can handle.": {
@@ -8481,11 +8466,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:If true, do not apply a timeout to the command. Only applies when run_in_background is true.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "If true, do not apply a timeout to the command. Only applies when run_in_background is true.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:If you already know a concrete file path and need to inspect its contents, use Read directly instead.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "If you already know a concrete file path and need to inspect its contents, use Read directly instead.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Images only: skip the default downscaling and view at native resolution. Fails with an explicit error when the payload would exceed the per-image byte limit; use region for files that large.": {
@@ -8815,9 +8795,9 @@
       "text": "Top edge of the crop, in original-image pixels.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:Use Grep when the task is to find unknown content or unknown file locations. Do not use shell `grep` or `rg` directly; this tool applies workspace path policy, output limits, and sensitive-file filtering.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:Use Grep to find unknown content or file locations; use Read directly when inspecting a known file's contents. Do not run `grep` or `rg` via shell: they bypass workspace policy, output limits, and sensitive-file filtering.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "Use Grep when the task is to find unknown content or unknown file locations. Do not use shell `grep` or `rg` directly; this tool applies workspace path policy, output limits, and sensitive-file filtering.",
+      "text": "Use Grep to find unknown content or file locations; use Read directly when inspecting a known file's contents. Do not run `grep` or `rg` via shell: they bypass workspace policy, output limits, and sensitive-file filtering.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Use it for a fact the file does not cover yet; use `memory_str_replace` to change a line that is already there.": {
