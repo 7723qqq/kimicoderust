@@ -1056,6 +1056,11 @@ export const en = {
       memory: {
         readPathRequired: 'Read requires a `path` parameter.',
         notFound: 'Memory file not found: {{path}}',
+        writePathRequired: 'Write requires a `path` parameter (filename).',
+        writeContentRequired: 'Write requires `content` parameter.',
+        invalidFilename:
+          'Invalid memory filename: "{{path}}". Use a plain filename without path separators or "..".',
+        written: 'Memory written to {{path}}\ntitle: {{title}}\ntype: {{type}}',
         cannotRead: 'Cannot read {{rel}}: {{e}}',
         cannotDelete: 'Cannot delete {{rel}}: {{e}}',
         oldStrNotFound:

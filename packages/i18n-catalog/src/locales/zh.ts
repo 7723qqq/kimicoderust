@@ -977,6 +977,11 @@ export const zh = {
       memory: {
         readPathRequired: '读取需要 `path` 参数。',
         notFound: '未找到 memory 文件: {{path}}',
+        writePathRequired: '写入需要 `path` 参数（文件名）。',
+        writeContentRequired: '写入需要 `content` 参数。',
+        invalidFilename:
+          '无效的 memory 文件名："{{path}}"。请使用不含路径分隔符或 ".." 的普通文件名。',
+        written: '已写入 memory：{{path}}\n标题：{{title}}\n类型：{{type}}',
         cannotRead: '无法读取 {{rel}}：{{e}}',
         cannotDelete: '无法删除 {{rel}}：{{e}}',
         oldStrNotFound:
