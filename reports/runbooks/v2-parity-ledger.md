@@ -120,6 +120,17 @@ Three behaviours of that file were checked against `tools/bash_exec.rs` and
 | A stream that closes without `end` is `ERR_STREAM_PREMATURE_CLOSE` | `:171-178` | `read_bounded_stream` treats a closed pipe as EOF | **not-applicable**: the distinction is a Node stream artifact; a tokio pipe reader reports EOF, and the fork has no `close`-without-`end` state to test |
 | `SIGTERM` on abort, `SIGKILL` only on `forceStop` | `:56-58`, `:87-95` | `child.kill()` (SIGKILL on Unix) on timeout and on drop | **recorded divergence** — a killed shell cannot clean up its own children |
 
+### Bash tool (v2 `agent/tools/os/bash/bashTool.ts`, 530 lines + `bash.ts`,
+72 lines — both read end to end)
+
+| v2 behaviour | v2 line | This engine | Verdict |
+|---|---|---|---|
+| `superRefine` rejects `timeout` above 300 s (foreground) / 86400 s (background) | `bash.ts:54-65` | schema carried `maximum: 9007199254740991` while the field description promised both caps | **fixed**: `anyOf` of the two bounded arms, pinned by `core_tool_defs` tests |
+| Windows `>NUL` redirects are rewritten to `>/dev/null` before spawn, skipping quoted spans, heredocs, command substitutions, backticks and comments | `bashTool.ts:182`, `:317-530` | no rewriting at all — Git Bash does not understand `NUL`, so `cmd > NUL` creates a file named `NUL` | **gap** (212 lines of shell-aware rewriting; next slice) |
+| Command is `cd <quoted-cwd> && <command>` rather than `Command::current_dir` | `:151-159` | `current_dir` on the child | recorded divergence: same observable cwd, different argv; not a defect |
+| Tool display carries `language: 'bash'`, `cwd`, `command`, `description` | `:111-117` | `ToolInputDisplay` has no `language` field | **gap**: the approval card cannot label the shell |
+| `GIT_TERMINAL_PROMPT` inherits the process value, defaulting to `0` | `:155` | always forced to `0` | recorded divergence: a host-configured value is ignored |
+
 ## state/ (v2 `src/state` — 7 files)
 
 | v2 surface | Rust counterpart | Status | Tests | Notes |

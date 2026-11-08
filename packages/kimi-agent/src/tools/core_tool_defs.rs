@@ -434,9 +434,10 @@ fn build_core_tool_defs() -> Vec<ToolInfo> {
                     "timeout": {
                         "default": 60,
                         "description": "Optional timeout in seconds for the command to execute. Foreground default 60s, max 300s. Background default 600s, max 86400s. Ignored for background commands when disable_timeout=true.",
-                        "type": "integer",
-                        "exclusiveMinimum": 0,
-                        "maximum": 9007199254740991i64
+                        "anyOf": [
+                            { "type": "integer", "exclusiveMinimum": 0, "maximum": 300 },
+                            { "type": "integer", "exclusiveMinimum": 0, "maximum": 86400 }
+                        ]
                     },
                     "description": {
                         "description": "A short description for the background task. Required when run_in_background is true.",
@@ -932,11 +933,20 @@ mod tests {
             "Regular expression to search for."
         );
 
-        // Bash.timeout — the v2 .describe() text with rendered constants.
+        // Bash.timeout — the v2 .describe() text with rendered constants, plus
+        // the two caps v2's superRefine enforces (`bash.ts:54-65`).
         assert_eq!(
             get("Bash")["properties"]["timeout"]["description"],
             "Optional timeout in seconds for the command to execute. Foreground default 60s, max 300s. Background default 600s, max 86400s. Ignored for background commands when disable_timeout=true."
         );
+        let bash_schema = get("Bash");
+        let branches = bash_schema["properties"]["timeout"]["anyOf"]
+            .as_array()
+            .expect("timeout anyOf");
+        assert_eq!(branches[0]["maximum"], 300);
+        assert_eq!(branches[1]["maximum"], 86400);
+        assert_eq!(branches[0]["exclusiveMinimum"], 0);
+        assert_eq!(branches[1]["exclusiveMinimum"], 0);
 
         // Read.line_offset — v2's `z.union([positive, negative])` maps to anyOf
         // with no lower bound on the negative branch; the fork used to pin a
