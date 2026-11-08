@@ -130,7 +130,7 @@ Three behaviours of that file were checked against `tools/bash_exec.rs` and
 | Command is `cd <quoted-cwd> && <command>` rather than `Command::current_dir` | `:151-159` | `current_dir` on the child | recorded divergence: same observable cwd, different argv; not a defect |
 | Tool display carries `language: 'bash'`, `cwd`, `command`, `description` | `:111-117` | `ToolInputDisplay::Command` already has `language`, and `acp/events_map_golden.rs:192` emits `"bash"` | **was mis-recorded**: no gap; the earlier claim came from grepping only the construction sites, not the type |
 | `toolInputDisplay.ts` declares 14 variants including `spec_review` | `toolInputDisplay.ts:75-80` | the Rust enum had 13 and its header claimed 12 | **fixed**: `SpecReview { dir, documents, options }` added, `kind()` returns `spec_review`, and the golden wire-shape test now covers all 14 |
-| `GIT_TERMINAL_PROMPT` inherits the process value, defaulting to `0` | `:155` | always forced to `0` | recorded divergence: a host-configured value is ignored |
+| `GIT_TERMINAL_PROMPT` inherits the process value, defaulting to `0` | `:155` | `bash_exec.rs` uses `shell_git_terminal_prompt()` on both spawn sites; the ACP reverse-terminal env keeps an explicit `0` because a client's process tree cannot inherit this engine's environment | **ported**, with the ACP boundary recorded in both comments |
 
 ## state/ (v2 `src/state` — 7 files)
 

@@ -1,5 +1,16 @@
 use super::*;
 
+/// v2 `bashTool.ts:152-157`: the non-interactive env inherits a host-configured
+/// `GIT_TERMINAL_PROMPT` and only defaults to `0` when none is set. Forcing
+/// `0` ignores an operator who deliberately enabled git's credential prompt.
+///
+/// The ACP reverse-terminal path is different: its env is sent to a client's
+/// own process tree (`acp/permission.rs` `bash_terminal_env`), which cannot
+/// inherit this engine's environment, so it keeps the explicit `0`.
+fn shell_git_terminal_prompt() -> std::ffi::OsString {
+    std::env::var_os("GIT_TERMINAL_PROMPT").unwrap_or_else(|| "0".into())
+}
+
 impl NativeToolset {
     // ── Bash ───────────────────────────────────────────────────────────
 
@@ -82,7 +93,7 @@ impl NativeToolset {
                         .current_dir(&work_dir)
                         .env("NO_COLOR", "1")
                         .env("TERM", "dumb")
-                        .env("GIT_TERMINAL_PROMPT", "0")
+                        .env("GIT_TERMINAL_PROMPT", shell_git_terminal_prompt())
                         .env("SHELL", &shell_cmd)
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::piped())
@@ -250,7 +261,7 @@ impl NativeToolset {
             .current_dir(&working_dir)
             .env("NO_COLOR", "1")
             .env("TERM", "dumb")
-            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_TERMINAL_PROMPT", shell_git_terminal_prompt())
             .env("SHELL", shell)
             // The engine's own stdin is the host RPC transport. Inheriting it
             // would let any stdin-reading command (`cat`, `read`, `git`,

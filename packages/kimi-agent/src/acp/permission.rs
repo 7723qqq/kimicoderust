@@ -88,7 +88,9 @@ const BASH_MAX_TIMEOUT_S: u64 = 300;
 /// The environment the native Bash spawn sets (`tools/mod.rs`): colors and
 /// prompts corrupt output parsing, and git must never hang on a credential
 /// prompt. The client's terminal is a separate process tree, so these travel
-/// with `terminal/create` instead of being inherited.
+/// with `terminal/create` instead of being inherited — including an explicit
+/// `GIT_TERMINAL_PROMPT=0`, which the native path may instead inherit from this
+/// engine's own environment (`bashTool.ts:155`).
 fn bash_terminal_env(shell: &str) -> Vec<(String, String)> {
     vec![
         ("NO_COLOR".to_string(), "1".to_string()),
