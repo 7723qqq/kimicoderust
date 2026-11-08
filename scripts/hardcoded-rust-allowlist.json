@@ -7727,11 +7727,6 @@
       "text": "The subagent was stopped before it finished.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/agent_tool/defs.rs:When `run_in_background=true`, the subagent runs detached from this turn. The completion arrives in a later turn as a synthetic user-role message containing its result — you do not need to poll, sleep, or check on its progress. Default to a foreground subagent when your next step needs its result.": {
-      "file": "packages/kimi-agent/src/tools/agent_tool/defs.rs",
-      "text": "When `run_in_background=true`, the subagent runs detached from this turn. The completion arrives in a later turn as a synthetic user-role message containing its result — you do not need to poll, sleep, or check on its progress. Default to a foreground subagent when your next step needs its result.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/agent_tool/defs.rs:Which model to run the subagent on: one of the aliases listed under \"Available models\" in this tool description. When omitted, the configured default model is used. Ignored when resuming — resumed subagents keep their own model.": {
       "file": "packages/kimi-agent/src/tools/agent_tool/defs.rs",
       "text": "Which model to run the subagent on: one of the aliases listed under \"Available models\" in this tool description. When omitted, the configured default model is used. Ignored when resuming — resumed subagents keep their own model.",

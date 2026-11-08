@@ -25,19 +25,18 @@ fn agent_def_lists_only_spawnable_types() {
 fn agent_def_requires_explicit_subagent_authorization() {
     let description = agent_tool_def(None).description;
     for expected in [
-        "Do not launch a subagent unless the user explicitly asks for one.",
-        "Explicit instructions in AGENTS.md or a skill",
-        "a multi-agent mode the user turned on (such as swarm or tower mode)",
-        "a large or multi-part task, or a request for depth, thoroughness, research, or investigation, is not a request to launch",
-        "The agent type descriptions below only help you choose a type once launching is authorized; they never authorize it.",
-        "Resuming a subagent to continue already-authorized work needs no new request.",
+        "Do not launch a subagent unless the user explicitly asks for one, including delegation, parallel agents, or a named agent type.",
+        "Explicit instructions in AGENTS.md or a skill, and user-enabled multi-agent modes, also authorize launching.",
+        "Large or multi-part tasks and requests for depth, thoroughness, research, or investigation do not; do that work yourself.",
+        "Agent type descriptions below guide selection only after authorization.",
+        "Resuming already-authorized work needs no new request.",
     ] {
         assert!(
             description.contains(expected),
             "missing explicit-authorization rule {expected:?}:\n{description}"
         );
     }
-    assert!(!description.contains("When NOT to use Agent:"));
+    assert!(description.contains("When NOT to use Agent:"));
     assert!(!description.contains("Delegating also keeps the bulk"));
 }
 
@@ -71,7 +70,7 @@ fn agent_def_disables_background_when_any_task_tool_is_unavailable() {
         );
         assert!(
             !def.description.contains(
-                "When `run_in_background=true`, the subagent runs detached from this turn."
+                "With `run_in_background=true`, the subagent runs detached and its result arrives automatically"
             ),
             "{missing} is unavailable, but the enabled copy is still advertised"
         );
@@ -81,7 +80,7 @@ fn agent_def_disables_background_when_any_task_tool_is_unavailable() {
     assert!(
         enabled
             .description
-            .contains("When `run_in_background=true`, the subagent runs detached from this turn.")
+            .contains("With `run_in_background=true`, the subagent runs detached and its result arrives automatically")
     );
     assert!(!enabled.description.contains(DISABLED));
 }

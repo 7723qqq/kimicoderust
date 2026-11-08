@@ -105,20 +105,20 @@ pub(crate) fn background_agent_unavailable() -> ExecutableToolResult {
     }
 }
 
-const AGENT_BACKGROUND_ENABLED_DESCRIPTION: &str = "When `run_in_background=true`, the subagent runs detached from this turn. The completion arrives in a later turn as a synthetic user-role message containing its result — you do not need to poll, sleep, or check on its progress. Default to a foreground subagent when your next step needs its result.";
+const AGENT_BACKGROUND_ENABLED_DESCRIPTION: &str = "With `run_in_background=true`, the subagent runs detached and its result arrives automatically in a later turn as a synthetic user-role message — for an agent task it states that the subagent finished and points at the output file, so read that file to get the result. Continue with other work or respond to the user, and never fabricate or predict the result. Use it only when you have other work to do meanwhile. When your next step needs the result, run the subagent in the foreground instead of launching it in the background and waiting on it.";
 const AGENT_BACKGROUND_DISABLED_DESCRIPTION: &str = "Background agent execution is disabled for this agent. Do not set `run_in_background=true` — any call that sets it is rejected before the subagent launches. Run every subagent in the foreground and wait for its result.";
 
 /// The v2 `SubagentTool` description body (condensed from
 /// `agent-core-v2/src/agent/tools/agent/agent*.md`), with the profile list
 /// appended at definition time.
 pub(super) const AGENT_TOOL_DESCRIPTION: &str = "\
-Launch a subagent to handle a task. The subagent runs as a same-process loop instance with its own context.
+Launch a subagent to handle a task in its own context.
 
-Do not launch a subagent unless the user explicitly asks for one. Each subagent starts cold and re-derives context you already have, which costs the user time and tokens. Asking means: the user asks for a subagent, delegation, or parallel agents, or requests one of the agent types below by name (for example \"use an explore agent\"). Explicit instructions in AGENTS.md or a skill, and a multi-agent mode the user turned on (such as swarm or tower mode), also count. Nothing else does: a large or multi-part task, or a request for depth, thoroughness, research, or investigation, is not a request to launch — do that work yourself with your own tools. The agent type descriptions below only help you choose a type once launching is authorized; they never authorize it. Resuming a subagent to continue already-authorized work needs no new request.
+Do not launch a subagent unless the user explicitly asks for one, including delegation, parallel agents, or a named agent type. Explicit instructions in AGENTS.md or a skill, and user-enabled multi-agent modes, also authorize launching. Large or multi-part tasks and requests for depth, thoroughness, research, or investigation do not; do that work yourself. Agent type descriptions below guide selection only after authorization. Resuming already-authorized work needs no new request. Each subagent starts cold and re-derives context, costing time and tokens.
 
 Writing the prompt:
-- The subagent starts with zero context — it has not seen this conversation. Brief it like a colleague who just walked into the room: state the goal, list what you already know, hand over the specifics.
-- Lookups (read this file, run that test): put the exact path or command in the prompt. The subagent should not have to search for things you already know.
+- Brief it like a colleague who just walked into the room: state the goal, list what you already know, hand over the specifics.
+- Lookups: put exact paths or commands you already know in the prompt.
 - Investigations (figure out X, find why Y): give the question, not prescribed steps — fixed steps become dead weight when the premise is wrong.
 - Do not delegate understanding. If the task hinges on a file path or line number, find it yourself first and write it into the prompt.
 
@@ -127,7 +127,9 @@ Usage notes:
 - A subagent's result is only visible to you, not to the user. When the user needs to see what a subagent produced, summarize the relevant parts yourself in your own reply.
 - Subagents use a fixed 2-hour timeout. If one times out, resume the same agent instead of starting over.
 
-Once a subagent is running, leave that scope to it: do not redo its searches or reads in parallel, and do not abandon it midway and finish the job manually.";
+When NOT to use Agent: skip delegation for trivial work you can do directly — reading a file whose path you already know, searching a small known set of files, or any task that takes only a step or two. Delegation has a context-handoff cost; it pays off only when the task is substantial enough to outweigh it.
+
+Once a subagent is running, leave that scope to it: do not redo its searches or reads in parallel, and do not abandon it midway and finish the job manually. Both undo the context savings the delegation was meant to buy.";
 
 /// The `Agent` tool definition (v2 `SubagentTool`): the subagent spawn /
 /// resume surface. The optional `model` parameter is added only when a
