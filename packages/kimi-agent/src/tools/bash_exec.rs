@@ -16,6 +16,17 @@ impl NativeToolset {
         on_update: Option<OutputUpdate<'_>>,
     ) -> Option<ExecutableToolResult> {
         let command = args.get("command")?.as_str()?;
+        let starts_in_background =
+            args.get("run_in_background").and_then(|value| value.as_bool()) == Some(true);
+        // v2 \`validateRunRequest\` checks the command first and the background
+        // description only once background execution is known to be available.
+        // Availability here is the task runner: without one the call is handed
+        // to the host, which runs its own validation.
+        if let Some(refusal) =
+            crate::tools::shell_results::validate_run_request(command, false, None)
+        {
+            return Some(err_result(refusal));
+        }
         // Working directory defaults to the sandbox root; explicit cwd must
         // stay inside it. Returns `None` (host fallback) on escape — the
         // host applies its own cwd policy there.
@@ -28,6 +39,14 @@ impl NativeToolset {
         // otherwise hand back to host fallback.
         if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
             if let Some(runner) = &self.task_runner {
+                let description = args.get("description").and_then(|value| value.as_str());
+                if let Some(refusal) = crate::tools::shell_results::validate_run_request(
+                    command,
+                    starts_in_background,
+                    description,
+                ) {
+                    return Some(err_result(refusal));
+                }
                 let task_id = crate::storage::generate_task_id("bash");
                 let desc = args
                     .get("description")
@@ -187,8 +206,12 @@ impl NativeToolset {
                     )
                     .is_ok()
                 {
+                    let next_steps = crate::tools::shell_results::next_step_lines(
+                        true,
+                        crate::tools::shell_results::BackgroundStart::Started,
+                    );
                     return Some(ok_result(format!(
-                        "Background task started (task_id: {task_id}).\ncommand: {command}\ndescription: {desc}\nUse TaskList or TaskOutput to inspect progress."
+                        "Background task started (task_id: {task_id}).\ncommand: {command}\ndescription: {desc}\n{next_steps}"
                     )));
                 }
             }

@@ -8110,10 +8110,10 @@
       "text": "Background command execution finished",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/bash_exec.rs:Background task started (task_id: {task_id}). command: {command} description: {desc} Use TaskList or TaskOutput to inspect progress.": {
+    "packages/kimi-agent/src/tools/bash_exec.rs:Background task started (task_id: {task_id}). command: {command} description: {desc} {next_steps}": {
       "file": "packages/kimi-agent/src/tools/bash_exec.rs",
-      "text": "Background task started (task_id: {task_id}). command: {command} description: {desc} Use TaskList or TaskOutput to inspect progress.",
-      "reason": "deferred"
+      "text": "Background task started (task_id: {task_id}). command: {command} description: {desc} {next_steps}",
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/tools/bash_exec.rs:Command executed successfully.": {
       "file": "packages/kimi-agent/src/tools/bash_exec.rs",
@@ -10742,6 +10742,61 @@
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
       "text": "{reason}Did you mean: {}? Use an exact listed name.",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:Command cannot be empty.": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "Command cannot be empty.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:The task now runs in the background.": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "The task now runs in the background.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:The user moved this task to the background.": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "The user moved this task to the background.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:description is required when run_in_background is true.": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "description is required when run_in_background is true.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:do NOT wait or poll": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "do NOT wait or poll",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:do NOT wait, poll, or call TaskOutput on it": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "do NOT wait, poll, or call TaskOutput on it",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:next_step: The completion arrives automatically in a later turn — do NOT wait, poll,": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "next_step: The completion arrives automatically in a later turn — do NOT wait, poll,",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:next_step: Use TaskStop only if the task must be cancelled.": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "next_step: Use TaskStop only if the task must be cancelled.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:next_step: You will be automatically notified when it completes.": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "next_step: You will be automatically notified when it completes.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:next_step: {moved} You will be automatically notified when it completes — {avoid}; continue with your current work.": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "next_step: {moved} You will be automatically notified when it completes — {avoid}; continue with your current work.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/shell_results.rs:or call TaskOutput on it; continue with your current work.": {
+      "file": "packages/kimi-agent/src/tools/shell_results.rs",
+      "text": "or call TaskOutput on it; continue with your current work.",
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/tools/skill.rs:<plugin-instructions plugin=\"{escaped_id}\"> {trimmed} </plugin-instructions> {content}": {
       "file": "packages/kimi-agent/src/tools/skill.rs",

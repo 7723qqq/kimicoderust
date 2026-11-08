@@ -249,6 +249,7 @@ pub mod registry;
 pub mod sandbox;
 mod search;
 pub mod select_tools;
+pub mod shell_results;
 pub mod skill;
 pub mod stale_guard;
 pub mod subagent_tools;
