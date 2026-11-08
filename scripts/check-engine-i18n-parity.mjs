@@ -55,6 +55,11 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '..');
 const AGENT_SRC = join(ROOT, 'packages', 'kimi-agent', 'src');
+// Rust crates outside the engine that still render engine catalog text: the
+// terminal host composes the status line from `engine.tui.*` keys, so its
+// `LocalizedText` sites have to be in the corpus or those keys report as
+// orphans and their parameter names go unchecked.
+const RS_ROOTS = [AGENT_SRC, join(ROOT, 'packages', 'kimi-tui-host', 'src')];
 const LOCALE_EN = join(ROOT, 'packages', 'kimi-agent', 'src', 'locales', 'en.json');
 
 /** The namespace every engine key must live under. */
@@ -292,7 +297,7 @@ const used = new Map();
 /** @type {Array<[string, string[], string]>} */
 const parameterized = [];
 
-const rsFiles = walkRs(AGENT_SRC);
+const rsFiles = RS_ROOTS.flatMap(walkRs);
 const testOnlyFiles = cfgTestModuleFiles(rsFiles);
 
 for (const file of rsFiles) {

@@ -1,9 +1,259 @@
 {
-  "note": "Verdicts for upstream commits touching packages this fork deleted. Regenerate with `bun scripts/check-upstream-v2-delta.mjs --update`; see scripts/check-upstream-v2-delta.mjs for the gate itself. `tracked` = accepted debt recorded in packages/kimi-agent/ROADMAP.md §6; `not-applicable` = internal refactor with no observable engine behavior to port.",
+  "note": "Verdicts for upstream commits touching packages this fork deleted. Regenerate with `bun scripts/check-upstream-v2-delta.mjs --update`; see scripts/check-upstream-v2-delta.mjs for the gate itself. `tracked` = accepted debt recorded in reports/runbooks/v2-parity-ledger.md; `not-applicable` = internal refactor with no observable engine behavior to port.",
   "upstreamRef": "upstream/main",
   "recordedMergeBase": "52437299ff78de3d0aff7f38f054e5eb20c512e5",
-  "recordedAt": "2026-10-31",
+  "recordedAt": "2026-11-07",
   "entries": [
+    {
+      "sha": "bc6fa89a759a15fa0a92a10b9ffb2180b7545655",
+      "date": "2026-11-06",
+      "subject": "fix: import google-genai providers from custom registries (#4735)",
+      "verdict": "ported",
+      "note": "Rust assembles Google GenerateContent URLs directly and normalizes version segments (llm/http.rs google_api_base), so no SDK baseUrl double-version bug; custom-registry type allow-list remains a host (oauth) gap."
+    },
+    {
+      "sha": "480019652d029623fa31133cfa613adf9afa1417",
+      "date": "2026-11-06",
+      "subject": "chore: sync release/2026-11-06 back to main (#4733)",
+      "verdict": "ported",
+      "note": "tools/registry.rs implements v2's active/pending registration state machine with canonical version signatures; McpManager registers every discovered tool there, keeps list_tool_infos on the pinned active schema, exposes list_live_tool_infos/has_pending_tool, and unregisters on every removal path. tool_select_state::observe_live_updates emits a once-per-signature tool_update_pending reminder delivered by a run_turn injection provider. Pinned by registry, MCP manager, tool-select-state and two end-to-end run_turn tests. Rest of the commit is release/web-bundle churn.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "ce38ebf25d19276b12eca1e1e864b0afe8cdc7d7",
+      "date": "2026-11-06",
+      "subject": "fix(kap-server): end streamed items once from the recorded step (#4730)",
+      "verdict": "not-applicable",
+      "note": "kap-server-only host stream lifecycle (conversationFeed) ends streamed items once from recorded step; fork has no kap-server and Rust engine emits no item.ended timing."
+    },
+    {
+      "sha": "1dd5578649e01dd8f5a2c0c7f924977f919c0b22",
+      "date": "2026-11-06",
+      "subject": "feat(kap-server): stream agent conversations as turns and items (#4663)",
+      "verdict": "not-applicable",
+      "note": "The user's fork at D:\\kimi\\kimi-code is the behavior reference. That checkout does not contain this upstream commit, kap-server/src/protocol/conversation.ts, or a conversation-feed surface; its upstream ref stops at f8e15c7a9b. The engine-side pieces already landed here (block-indexed deltas, EngineEvent::StepStreamReset, event classification, projector sealing and transcript handling) are a superset of the observable v2 behavior in the reference fork. The kap-server conversation feed and durable participant replay hooks are transport/DI surfaces that do not exist on either side of this comparison, so the delta is NA against the user's fork rather than tracked work.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "df90d90ec0714db23dcc830acd2db6232f5c7426",
+      "date": "2026-11-05",
+      "subject": "fix(agent-core-v2): refresh tools without dynamic loading (#4720)",
+      "verdict": "ported",
+      "note": "Complete: initial-snapshot reconciliation in shape_tool_table/callbacks, revision-ledger announcements in ToolSelectState, and render_runtime_tool_change_reminder with a real history-shaping channel (shape_unsupported_dynamic_tool_history called from run_turn before hooks/provider). An incapable model now sees v2's final reminder wording instead of a stale select_tools announcement; pinned by unit, disclosure and end-to-end run_turn tests.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "bae32119ca37229a301f8099e7812b07f205dbfe",
+      "date": "2026-11-05",
+      "subject": "fix(agent-core-v2): reconcile tool definitions after updates (#4719)",
+      "verdict": "ported",
+      "note": "Complete: ToolSelectState holds initial/current/changes with a per-revision delta walk that filters added/removed by deferred disclosure, canonical schema/version signatures decide pending-vs-active registration, and NativeToolset.take_disclosure_announcement reconciles the live registry each turn and walks changes since the last announced revision. Pinned by tool_select_state, registry, MCP manager and turn-loop tests.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "131c21a35a0440309f3b0e965961eccd4a7f417f",
+      "date": "2026-11-05",
+      "subject": "chore: sync release/2026-11-05 back to main (#4709)",
+      "verdict": "not-applicable",
+      "note": "The only agent-core-v2 source change in this release sync is Kimi's message-level tools empty-content deletion (protocol.ts). This fork has no message-level tools: openai.rs projects tools only at the request root and system messages never carry a tools array, so there is no message with both tools and empty content to repair. The rest is web-bundle/docs/changelog churn with no engine behavior; no daemon-media or deleted-workspace code appears in the commit's engine diff.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "d0cd33c300acdc1540f75568d77babea7b9d55c8",
+      "date": "2026-11-05",
+      "subject": "chore(agent-core-v2): remove same-file Edit restriction and re-read requirement (#4708)",
+      "verdict": "ported",
+      "note": "Rust prompt text updated: removed mandatory Write/Edit rule and Bash sed/awk redirection from core_tool_defs.rs; removed same-file Edit restriction and re-read requirement."
+    },
+    {
+      "sha": "2be062e8ea887193db9106013c85c81eb62f2826",
+      "date": "2026-11-05",
+      "subject": "fix: route session status and git data through bound environments (#4698)",
+      "verdict": "not-applicable",
+      "note": "The user's fork at D:\\kimi\\kimi-code is the behavior reference. Its remote-environment subsystem (session-scoped environment bindings, SSH/Docker providers and per-session cwd) has no counterpart in this single-process Rust engine; the engine's local-only binding is now exposed on the fork's environment-binding debug route with cwd and environmentId=local, pinned by server::debug::tests::test_debug_inspect_snapshots_and_unknown_404. Bound-environment status/export routing and environment-scoped git cache invalidation cannot occur without that subsystem, so this delta is NA by architecture rather than an engine gap.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "805f4beb1b88731b922e3e19d287b39e032719cf",
+      "date": "2026-11-05",
+      "subject": "refactor(agent-core-v2): remove unwired human directories (#4706)",
+      "verdict": "not-applicable",
+      "note": "Deletes 31 unwired agent-core-v2 human/* files (todo/usage/timing/plugins); no external behavior observed. Fork Rust never imported that subsystem, so nothing to port."
+    },
+    {
+      "sha": "2b8afafea4238aeb553ab946cf0a1c641f8712ca",
+      "date": "2026-11-05",
+      "subject": "refactor: require explicit retryability for requester errors (#4703)",
+      "verdict": "not-applicable",
+      "note": "Internal refactor making requester-error retryability an explicit field instead of a status-default; no retry set/behavior change. Rust side already derives retryability via is_retryable_status_code."
+    },
+    {
+      "sha": "2a6d1cf570d15174d6d5add04eaa8d9d6d45348b",
+      "date": "2026-11-05",
+      "subject": "feat: add session title generation telemetry (#4699)",
+      "verdict": "ported",
+      "note": "session/title.rs emits session_title_generation_finished once per attempt through host/telemetry: trigger (auto/manual from force), source, success/unavailable/error outcome, duration_ms, title_chars (UTF-16) and title_outcome; the title text and error message are never recorded. Both napi and stdio RPC paths carry force; 14 title tests cover the event shape and mutation of trigger turns them red. Remaining gap: title_outcome is always 'ok' because derive_session_title/fetch_chat_title return only the truncated string; v2 reports 'truncated' when the raw title exceeded its cap.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "f8e15c7a9be44fe4e0361a4ce57eaf690e05476a",
+      "date": "2026-11-04",
+      "subject": "chore: sync release/2026-11-04 back to main (#4674)",
+      "verdict": "not-applicable",
+      "note": "Chore release sync bundle (#4674) merging TUI remote cwd/git, plugin availability, transcript turn-id fixes, kap-server history, SSH exec; host/TS-facing with no net new Rust engine behavior."
+    },
+    {
+      "sha": "8fc5e22f966187ca93ec1027153e7f6028d3661e",
+      "date": "2026-11-04",
+      "subject": "fix: clarify wire version upgrade guidance (#4662)",
+      "verdict": "ported",
+      "note": "WireProtocolTooNew now uses v2's simplified public upgrade sentence; the new WireReaderTooLow refusal reuses it and keeps required/supported versions on the error for diagnostics. Not ported: host/CLI/TUI WIRE_VERSION_TOO_LOW code plus details propagation, because the Rust engine has no typed error-code channel to those hosts; the public sentence is what they render.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "f72dc7e1ca894e68893070ee207fbc933cf8409a",
+      "date": "2026-11-04",
+      "subject": "feat(agent-core-v2): enforce minimum wire reader version (#4638)",
+      "verdict": "ported",
+      "note": "Rows now carry min_protocol_version (WIRE_MIN_READER_VERSION=1.5) in both wire_events schemas, with idempotent ALTERs for old databases; refuse_newer_wire_version checks every reader against it and returns WireReaderTooLow {required,supported} when this engine is below the declared minimum. NULL reads as this version. Pinned by event-store and session-store tests plus a comparison mutation check. v2's JSONL metadata record and migration-rewrite rewrite are not applicable to the SQLite row substrate.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "444c609e8e6629d43fb7fd571a8db48ce5a41570",
+      "date": "2026-11-03",
+      "subject": "feat(agent-core-v2): allow private addresses in local FetchURL (#4650)",
+      "verdict": "ported",
+      "note": "Rust FetchURL direct and native tools now allow private/loopback by default, matching v2 local fetch; plugin archive download keeps its own allow_private=false validator.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "8985b71d7aa1afe5723af115f3459c0881186295",
+      "date": "2026-11-03",
+      "subject": "fix: preserve UTF-8 BOM when editing files (#4644)",
+      "verdict": "ported",
+      "note": "Rust Edit reads the whole file as UTF-8 without stripping its BOM and writes the replacement back verbatim, so the BOM survives; see packages/kimi-agent/src/tools/file_ops.rs::edit and native/edit.rs."
+    },
+    {
+      "sha": "42cb675304e7c08f14acae59efef90e960f5cc73",
+      "date": "2026-11-03",
+      "subject": "fix(mcp): isolate OAuth authorization cancellation per waiter (#4643)",
+      "verdict": "not-applicable",
+      "note": "Interactive MCP OAuth auth and waiter cancellation belong to host/node-sdk, not Rust engine; each fork flow is already isolated by a unique flowId, with no shared waiter map to cancel per ID."
+    },
+    {
+      "sha": "a5724dd32ec5d5f228f21c66597d55fb02c81fa7",
+      "date": "2026-11-03",
+      "subject": "fix(tui): track steer read state across turns (#4627)",
+      "verdict": "ported",
+      "note": "Engine: TurnReceipt already carried the SteerResult fields; turn.prompt/turn.started echo the minted promptId, and TurnEvent::Steer is emitted from SteerQueueCallbacks::drain_steers where the steer is consumed into context (v2 TurnSteer timing). napi sessionEnqueueTurn returns TurnSubmission; SDK steer() returns PromptSubmissionResult. Rust UI (complete module): EntryOp::SetPending + EntryStore::is_pending + render::style_for_entry dim the row; kimi-ui-core::steer::SteerDelivery is the delivery state machine (batch note, receipt, ack, consumed-id race, release, reset; 7 unit tests); Projector::note_user_entry allocates a host-injected row through the per-turn allocator so it sits between the pre- and post-steer text, and flushes/detaches the open stream (UI-slice integration test); kimi-tui-app adds UiCommand::Steer + turn_running + the steer API; kimi-tui-host allocates the row on submission and acknowledges it from turn.steer / turn.started.promptId (end-to-end host test with a gated tool-calling model, mutation-checked). TS TUI: steer entries carry steerPending and render dimmed, cleared by the same events (two flow tests, mutation-checked). Verified non-cases: turn.steer always carries promptIds (no text fallback), pending survives turn.ended because the next turn drains an unread steer (engine test a_steer_that_missed_its_turn_is_read_by_the_next_one), and a steer admission is never queued (an_active_or_new_turn_admission_is_never_queued); each reason also sits at its code site. Deliberate adaptation: the row is allocated after the receipt, because note_user_entry detaches the open stream. Verified end to end on the real path (kimi-tui-host/tests/real_transport_steer.rs): a local OpenAI SSE stub behind the real NativeHttpLlm+sink, one process from UiState input to render::entry_lines, asserting request bodies, bus order, the SteerJournal stage sequence, and that the pended and cleared row are the same EntryId. A second test in the same file starts from `build_engine` (the config-resolved provider path `main` uses) and asserts the same stage sequence plus the applied-op trace: one Upsert for the row, then SetPending(true) and SetPending(false) on that same id. The run found and fixed a real defect: TurnEnded sealed step-flushed streams without a final segment (SealWithoutFinal on every real turn); pinned by a_step_flush_before_turn_end_does_not_record_a_tail_loss. Observability added for this: SteerJournal, the kimi-tui-app ops-trace feature, and host-minted prompt ids (enqueue_turn_with_id). TTY paint is not exercised; render::entry_lines over the real store is. Ported and verified on the same kind of real path: a Ctrl-S steered skill activation is dimmed too. activateSkill now returns SkillActivationResult { activationId, submission } (the SDK's busy branch keeps the PromptSubmissionResult it used to drop), the card carries steerPending and renders dimmed until turn.steer acknowledges that prompt id, and the call site pairs the receipt with the card the SDK already rendered. apps/kimi-code/test/tui/kimi-tui-real-steer.test.ts drives a real KimiTUI over the native harness with a temp config.toml provider pointing at a local OpenAI-shaped SSE stub and a real workspace skill: the second request body carries the rendered skill body after step one's tool_call, the card line is dimmed (ESC[2m) while pending and plain after the acknowledgement, on the same transcript entry. The TUI side of the same question is answerable too: `apps/kimi-code/src/tui/steer-trace.ts` keeps an append-only hop log (`accepted` -> `pending` -> `submitted` -> `acknowledged` | `released`) keyed by prompt id, and the skill test asserts the exact sequence, that `steerCurrentStage` is `acknowledged`, and that the log holds no other prompt id.",
+
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "80193374ebb47973a97d21d0b4ce4c27128eee82",
+      "date": "2026-11-03",
+      "subject": "feat: add plugin marketplace and native mcp oauth (#4525)",
+      "verdict": "ported",
+      "note": "Checked against the user's fork at D:\\kimi\\kimi-code. Its #4525 behavior includes the marketplace sha256sum contract and PluginPackageCache (verified archive reuse, digest mismatch refusal, 500 MiB LRU prune); this engine now parses and exposes sha256sum on marketplace entries, verifies and caches remote archives in <home>/plugins/cache/archives, and uses the digest during catalogued installs. MCP OAuth cancel/invalidate and concurrent-grant protection already live in mcp/oauth and mcp/manager with dedicated tests. Pinned by server::plugin_archive::tests::{a_verified_archive_is_cached_and_reused,a_verified_archive_refuses_a_digest_mismatch}, server::plugins::tests::test_load_marketplace_from_custom_repo_root, MCP OAuth service tests, and the plugin marketplace REST test.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "077239666a11e8b2f7b2a9fd8588cc063d38343b",
+      "date": "2026-11-03",
+      "subject": "feat(goal): edit the current goal objective in place (#4568)",
+      "verdict": "ported",
+      "note": "Engine-side in-place objective editing landed: GoalState::edit_objective (complete gate, trim, 4000-char bound, unchanged no-op), StateStore's objective action, ServerEngine::edit_session_goal_objective, and PATCH /api/v1/sessions/{id}/goal with 400/404 handling; protocol REST manifest + schemas added. Pinned by unit, state-store and REST tests plus a mutation check. Still host-only: objectiveRevision turn gating (ignoring a stale UpdateGoal after a mid-turn edit), GoalUpdate objective fold in replay, and SDK Session.editGoalObjective / native client wiring — the engine has no turn-scoped revision map yet.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "011b1d4163e2846e66bc2d88868a66ae9aab39ee",
+      "date": "2026-11-03",
+      "subject": "feat(kap-server): push agent, usage, goal and todo state over WebSocket (#4606)",
+      "verdict": "not-applicable",
+      "note": "Every changed source file lives under kap-server (ws-agent.ts, ws-control.ts, sessions.ts, transcript.ts, v1 transport), a package this fork deleted. v1 is the only protocol axis and the fork's Rust server does not carry kap-server's transcript service; reintroducing these frames would add a second protocol stack. No agent-core-v2 source file changed.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "02d2e8f3fc79b2ebf160d5aa132dac304608d34a",
+      "date": "2026-11-03",
+      "subject": "fix: preserve model error message and status source (#4477)",
+      "verdict": "ported",
+      "note": "Rust keeps typed LLM failures in llm/error.rs (status, retry-after, trace id) and retryability/status classification in llm/http.rs; no sanitizer drops provider message."
+    },
+    {
+      "sha": "9f0e9d7c6b9f57f75b7d0843bb500959183f6e79",
+      "date": "2026-11-03",
+      "subject": "feat: support Windows remote environments (#4610)",
+      "verdict": "ported",
+      "note": "MSYS native-path handling already exists in native/shell_path_bridge.rs; Rust native tools resolve through native/path_access.rs rather than v2 environment binding."
+    },
+    {
+      "sha": "fc3b521b8b68468268bb4cfe7f45008ce08b2b99",
+      "date": "2026-11-02",
+      "subject": "chore(agent-core-v2): remove mandatory Edit and Bash sed restrictions (#4609)",
+      "verdict": "ported",
+      "note": "Rust prompt text updated: removed mandatory Write/Edit rule and Bash sed/awk redirection from core_tool_defs.rs; removed same-file Edit restriction and re-read requirement."
+    },
+    {
+      "sha": "2d674cfa38d047e57a396124533ef0567c1ad434",
+      "date": "2026-11-02",
+      "subject": "perf: reduce remote file operation round trips (#4543)",
+      "verdict": "not-applicable",
+      "note": "Host-side remote filesystem/perf refactor across retired acp-server/agent-core-v2/kap-server; Rust engine has independent native read/grep/write/glob tools and no remote FS service to port."
+    },
+    {
+      "sha": "1401bddd05f6e8f09e1748d973891a3fcec31465",
+      "date": "2026-11-02",
+      "subject": "fix(kap-server): restore legacy ACP session file tools (#4600)",
+      "verdict": "not-applicable",
+      "note": "kap-server legacy ACP environment-binding migration for old desktop sessions; fork has no environment-binding service and keys file tools off workspaces/default workspace, so not applicable."
+    },
+    {
+      "sha": "2c52fc1e2d0a3ef4c43d80d945dc5f403157295e",
+      "date": "2026-11-02",
+      "subject": "refactor: remove standalone kosong package (#4599)",
+      "verdict": "not-applicable",
+      "note": "Removes standalone kosong and folds LLM/provider contracts into node-sdk/klient; package-structure refactor with no observable Rust engine behavior to port."
+    },
+    {
+      "sha": "aeeaba847f086959384af7e9dc9334b04cd307eb",
+      "date": "2026-11-02",
+      "subject": "fix(tui): surface invalid additional directory errors (#4554)",
+      "verdict": "ported",
+      "note": "Rust project_local_config + node-sdk both validate/additional dirs; TUI and hosted runtime surface existing read-only \"must exist and be a directory\" errors.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "b4da92150986c3e9ae39ece36412da9286e8f890",
+      "date": "2026-11-02",
+      "subject": "feat(agent-core-v2): replace hidden media tool results with omission notices (#4601)",
+      "verdict": "not-applicable",
+      "note": "This fork has no ReadMediaFile tool: media reads go through Read (prompt_media.rs). A model without image_in/video_in is refused at tool execution time with a path-bearing reason (read_media.rs), so no media-bearing tool result ever enters history to be hidden. MediaResolver also replaces an unaccepted media reference with <image/video path=...>. v2's hideReadMediaFile rewrite of a prior tool result has no counterpart state here; porting it would mean first inventing the hidden-result shape.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "aca85b92fc435087b84f6a90bbce9dc71178c90f",
+      "date": "2026-11-02",
+      "subject": "feat(agent-core-v2): link cache breaks to baseline requests (#4489)",
+      "verdict": "not-applicable",
+      "note": "The user's fork at D:\\kimi\\kimi-code is the behavior reference. Its working tree still contains the older client-side cacheProbe/cacheBreakService pair (agent/usage/cacheProbeService.ts, 97 lines) and does not carry the requester-side baseline-hash implementation from aca85b92fc; that commit is present in the fork's upstream history but is not an ancestor of its main branch. This Rust engine keeps the same observable client-side cache-break behavior. Porting requester-side hashing/telemetry would invent a newer upstream contract the stated reference fork has not adopted, so the delta is NA here.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
+    {
+      "sha": "e24e1e1919d729edaa8fe0d60b820cd8f4fdd2b5",
+      "date": "2026-11-02",
+      "subject": "feat(agent-core-v2): support running session forks by turn (#4544)",
+      "verdict": "ported",
+      "note": "Fork-by-turn already ported: route_sessions.rs fork route reads turnIndex and calls fork_session; sqlite_store.rs:1119 cuts at visible turn index (tests 601/714/753)."
+    },
+    {
+      "sha": "ebc2a9f9607414b1ddfc66a75d8725ea5fe47049",
+      "date": "2026-11-01",
+      "subject": "feat: sync running tasks over WebSocket and drop the REST task API (#4535)",
+      "verdict": "not-applicable",
+      "note": "The user's fork at D:\\kimi\\kimi-code is the behavior reference. Its checked-out source is not descended from ebc2a9f960 (merge-base --is-ancestor exits 1) and still declares TranscriptTask / task.upsert in packages/transcript/src/ops/operation.ts; the commit exists only in that fork's upstream history, not the behavior tree. The Rust engine deliberately retains the same task.upsert projection and its v1 transcript contract, so removing it would diverge from the user's fork. task.watch/list transport is part of the upstream protocol change the reference fork has not adopted; NA against the stated reference.",
+      "roadmap": "reports/runbooks/v2-parity-ledger.md"
+    },
     {
       "sha": "a2afdbc7d1fa0737d45d5780cc6c2bd38e477b55",
       "date": "2026-10-30",
@@ -553,7 +803,7 @@
       "subject": "feat(kap-server): add remote control device deletion (#4192)",
       "verdict": "ported",
       "note": "按 RUST-PORT-GAP B-19 范围已移植设备删除：DELETE /api/v1/remote-control/devices/{id}（route_tools_mcp.rs:220-277）经 cloud session 调 /v1/remote/devices/{id} 并返回 {ok:true}；路径 id 解码后由 client 安全再编码，401 重 exchange 复用 c69bd6c5a0 的 client。active/persisted id 命中本机时先关闭 runtime，并持 runtime slot 跨 cloud 删除以阻止重启（对应上游 start gate；fork 未另建文件锁），远端删除不主动关 tunnel。mutation/params schema 与头清单在 protocol/rest/remoteControl.ts:46-56；本机协调测试 deleting_current_device_closes_the_local_runtime。",
-      "roadmap": "待 ROADMAP 清理后回填（RUST-PORT-GAP B-19）"
+      "roadmap": "reports/runbooks/v2-parity-ledger.md（原 RUST-PORT-GAP B-19 编号未随台账迁移）"
     },
     {
       "sha": "3f0857eb7d612c4890c45dfa6acc8381f1e761c2",
@@ -577,7 +827,7 @@
       "subject": "feat(kap-server): add remote control device management (#4169)",
       "verdict": "ported",
       "note": "按 RUST-PORT-GAP B-19 范围已移植设备管理：GET /api/v1/remote-control/devices（route_tools_mcp.rs:201-219）；RemoteControlDeviceClient（remote_control.rs:1289-1563）实现 /auth/exchange、15s 超时、按 relay+credential 缓存 cookie、401 重 exchange 且仅重试一次、设备字段白名单与畸形响应拒绝；OAuth slot/relay 同源（route_tools_mcp.rs:776-821、oauth.rs:300-334），磁盘凭据变化会换 session。本批补齐同提交其余行为：PATCH /devices/{id} rename（route_tools_mcp.rs:250-291，alias trim 1..50 校验、provider_validation_error，client remote_control.rs:1542）+ POST /devices/{id}/deactivate（route_tools_mcp.rs:292-345，本地 id 判定后停 runtime 再云端 deactivate）+ 锁冲突（runtime slot 互斥，占用/logout gate 返回 40928 + details，status 增 conflict，route_tools_mcp.rs:144-176、280-306、986）+ logout 清理（oauth.rs RemoteControlLogoutHook 包裹凭据擦除，设备 session 双清 + 250ms 后延迟 teardown，remote_control.rs:288-395）。fork 无 rc.json 文件锁，按既有 runtime slot + logout gate 等价实现，未引入第二套文件锁。schema 在 protocol/rest/remoteControl.ts 且头清单已登记（含 PATCH/deactivate）。仅无显式 slot 时保留 fork Web UI kimi.json 别名回退。",
-      "roadmap": "待 ROADMAP 清理后回填（RUST-PORT-GAP B-19）"
+      "roadmap": "reports/runbooks/v2-parity-ledger.md（原 RUST-PORT-GAP B-19 编号未随台账迁移）"
     },
     {
       "sha": "afd95f64a5444b649a4cc33504513bf88e4c54ba",

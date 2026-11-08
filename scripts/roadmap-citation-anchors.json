@@ -1,7 +1,0 @@
-{
-  "note": "Citation anchors for packages/kimi-agent/ROADMAP.md. Each entry names the 'cited' literal as it appears in the ledger, the tree it resolves in (worktree / upstream / retired), and the symbol expected at that location. scripts/check-roadmap-refs.mjs verifies each anchored citation. EMPTY since the 2026-11-06 re-basing: the 21 anchored citations moved with the history into packages/kimi-agent/ROADMAP-ARCHIVE-2026-11-06.md, which the gate does not scan. New anchors are added as new ledger entries carry line citations.",
-  "coverageNote": "0 of 0 line citations: the ledger re-based on 2026-11-06 carries no line citations yet, so there is nothing to anchor. The 21 anchors that guarded the pre-2026-11-06 ledger are preserved verbatim in the archive; the anchored-citation ratchet resumes with the first new entry that cites a file:line.",
-  "upstreamRef": "upstream/main",
-  "retiredRef": "ecad4136d9^",
-  "anchors": []
-}

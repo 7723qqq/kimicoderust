@@ -1,0 +1,12 @@
+{
+  "shebang": {},
+  "nativeApi": {
+    "apps/kimi-code/src/cli/sub/web/remote-control.ts::http": "A byte-preserving proxy client, not a server: requestLocalHttp re-emits a raw HTTP/1.1 response from response.rawHeaders + statusMessage and must not let a client auto-decompress the body. Bun has no native API with that contract (fetch merges duplicate headers, canonicalizes names and drops the reason phrase), and node:http under Bun is its Rust HTTP client — so this stays tier 2.",
+    "packages/minidb/src/server.ts::net": "minidb is a Redis-protocol TCP front-end with per-socket framing and backpressure; Bun.listen is a different, callback-style API with no drop-in mapping, and node:net under Bun is already its native implementation. Rewriting the RESP server would trade a native path for a riskier one."
+  },
+  "nodeStart": {
+    "plugins/official/kimi-datasource/kimi.plugin.json": "The manifest declares `command: \"node\"`, v2's plugin vocabulary. The engine rewrites it to the host runtime (`__plugin_run_node`) whenever a host executable is known, so the literal does not start Node in a packaged or dev CLI.",
+    "plugins/official/normify/kimi.plugin.json": "Same rewrite: `command: \"node\"` is the manifest spelling, executed through the host runtime by the engine."
+  },
+  "testScripts": {}
+}

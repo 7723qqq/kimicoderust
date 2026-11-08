@@ -7,7 +7,7 @@
  * (`packages/kimi-agent`) replaces them. Because those directories no longer
  * exist here, an upstream commit that changes them merges *silently* — nothing
  * conflicts, so nothing is ever ported. That is how 21 behavior commits piled up
- * unnoticed (see `packages/kimi-agent/ROADMAP.md` §6).
+ * unnoticed.
  *
  * This gate lists every commit that touched a retired package since the merge
  * base with the upstream ref and requires each one to be recorded in
@@ -115,7 +115,7 @@ resolveUpstreamRef();
 // What the ref actually points at, plus its date. A *stale* local
 // `refs/remotes/upstream/main` silently narrows the range and reports a green
 // "all triaged" — that is how the 2.1.1 deltas were missed on 2026-09-24
-// (packages/kimi-agent/ROADMAP.md §6.8). The commit date is the only offline
+// The commit date is the only offline
 // signal a reviewer has for freshness, so it belongs in every run's output.
 const refTip = git('log', '-1', '--date=short', '--format=%h %cs', UPSTREAM_REF);
 

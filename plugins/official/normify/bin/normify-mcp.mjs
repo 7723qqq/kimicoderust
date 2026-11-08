@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { createRequire } from "node:module";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
@@ -8657,7 +8657,7 @@ async function fingerprintOf(repoRoot, sources) {
 			const buf = await readFile(join(repoRoot, p));
 			hash.update(p);
 			hash.update("\0");
-			hash.update(buf);
+			hash.update(buf.toString("latin1").replaceAll("\r\n", "\n"), "latin1");
 		} catch {
 			missing.push(p);
 		}

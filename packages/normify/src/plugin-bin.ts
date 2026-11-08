@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Entry point bundled into the `normify` Kimi plugin
 // (`plugins/official/normify/bin/normify-mcp.mjs`).
 //

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Config-surface registry gate (RUST-PORT-GAP §5 阶段 3 A8 方案 a).
+ * Config-surface registry gate (原 RUST-PORT-GAP §5 阶段 3 A8 方案 a；该台账已迁至
+ * `reports/runbooks/v2-parity-ledger.md`).
  *
  * `packages/node-sdk/src/config-local/schema.ts` and
  * `packages/kimi-agent/src/config/mod.rs` each parse the same `config.toml`

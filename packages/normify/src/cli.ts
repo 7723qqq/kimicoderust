@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Thin CLI around the tool registry so Normify can be driven from a shell
 // (handy for scripts, CI, and debugging without a host):
 //

@@ -4,12 +4,14 @@
 
 「已核实」表示能在仓库文件、脚本或事故记录中直接定位；「规范归纳」表示本次把多处既有事实统一成操作流程，不冒充仓库已有原文。
 
+> 本文部分「已核实」条目引用的是当时的工作稿或已归档台账：`HANDOVER-kimirust.md`、`SPLIT-PLAN-kimi-agent.md`、`FS-LIST-PROTOCOL.md`、`RUST-PORT-GAP.md`、`DEVELOPMENT-OPTIMIZATION.md`。这些文件当前都不在工作区（前四份从未纳入版本库），其仍有效的结论收在 `reports/runbooks/v2-parity-ledger.md`；在本仓库能复核的证据只剩脚本、源码与 `AGENTS.md` 三类。
+
 <a id="ledger-no-rollback"></a>
 ## 1. 累积型台账不可整文件回滚
 
 **规则**
 
-`scripts/*allowlist*.json`、`architecture.json`、`normify-kimi-code/**`、`scripts/roadmap-citation-anchors.json` 等承载累积记录的文件，禁止用 `git checkout --`、`git restore` 或整文件覆盖做手工回滚；只能逐行编辑，或先备份再做可审计的增量修改。官方刷新命令只能按第 2 节执行。
+`scripts/*allowlist*.json`、`architecture.json`、`normify-kimi-code/**`、`reports/runbooks/v2-parity-ledger.md` 等承载累积记录的文件，禁止用 `git checkout --`、`git restore` 或整文件覆盖做手工回滚；只能逐行编辑，或先备份再做可审计的增量修改。官方刷新命令只能按第 2 节执行。
 
 **为什么（已核实）**
 
@@ -205,14 +207,13 @@ git worktree add --detach <baseline-dir> HEAD
 
 **规则**
 
-处理上游 delta 时必须用 `git show upstream/main:<path>` 或 `git grep` 回到上游源码核实，不信任 allowlist note；只修改目标 sha 的单条记录，禁止用 `--update` 全量重扫代替分诊，verdict 或标签变化必须同批同步 ROADMAP 与 RUST-PORT-GAP 的对应项。
+处理上游 delta 时必须用 `git show upstream/main:<path>` 或 `git grep` 回到上游源码核实，不信任 allowlist note；只修改目标 sha 的单条记录，禁止用 `--update` 全量重扫代替分诊，verdict 或标签变化必须同批同步 `reports/runbooks/v2-parity-ledger.md` 的对应项。
 
 **为什么（已核实）**
 
 - `scripts/check-upstream-v2-delta.mjs` 第 12—30、47 行定义了 ratchet 和合法 verdict：`ported`、`tracked`、`not-applicable`、`pending`；`pending` 仍失败。
 - 同脚本第 126—144 行证明 `--update` 会按当前上游历史重建整个 entries 列表，因此它不是单条分诊工具。
-- `HANDOVER-kimirust.md` 第 160—167 行记录了 note 失真事故、verdict 三件套以及本地读上游源码的命令。
-- `FS-LIST-PROTOCOL.md` 第 156—162 行给出同步实例：目标 sha 的 allowlist entry、`RUST-PORT-GAP.md` 对应行、architecture 和 parity 同批更新。
+- `reports/runbooks/v2-parity-ledger.md` 开头的 ratchet 现状段给出同步实例：目标 sha 的 allowlist entry、台账对应条目、architecture 指纹和 parity 同批更新。
 - `AGENTS.md` 第 746—751 行说明该门禁只覆盖新 commit，绿灯不等于移植完整。
 
 **怎么做**
@@ -233,20 +234,19 @@ git fetch upstream main:refs/remotes/upstream/main --force
 
 - verdict 只能是脚本接受的四个值；完成分诊不得保留 `pending`。
 - note 写明上游 sha、fork 落点 `file:line`、判定测试名和已核实偏差，不复制旧结论。
-- 同批更新 `packages/kimi-agent/ROADMAP.md` §6 与 `RUST-PORT-GAP.md` 的对应项；若目标 sha 在其中一处没有对应项，写明实际归属，不编造交叉引用。
+- 同批更新 `reports/runbooks/v2-parity-ledger.md` 的对应条目；若目标 sha 在台账中没有对应项，写明实际归属，不编造交叉引用。
 - 不运行 `bun scripts/check-upstream-v2-delta.mjs --update`，不顺手改其他 sha。
 
 完成后只跑只读门禁：
 
 ```powershell
 bun run check:upstream-v2-delta
-bun run check:roadmap-refs
 ```
 
 **怎么判定做对了**
 
 - diff 只触及目标 sha 及确有对应关系的台账行，上游证据命令可以复现同一结论。
-- `ported`、`tracked`、`not-applicable` 与实际代码和缺口状态一致；note 中的文件和测试能被 `check:roadmap-refs` 解析。
+- `ported`、`tracked`、`not-applicable` 与实际代码和缺口状态一致；note 中的 `file:line` 与测试名在仓库中可解析。
 - 上游 ref 不可解析时出口码 2 被如实视为未验证，不能写成绿灯。
 
 <a id="pure-moves"></a>
@@ -279,7 +279,6 @@ cargo test --lib <module> -- --list
 ```powershell
 git diff --color-moved=blocks --color-moved-ws=allow-indentation-change
 bun run check:rust-module-deps
-bun run check:roadmap-refs
 bun run scan:hardcoded:rust
 ```
 

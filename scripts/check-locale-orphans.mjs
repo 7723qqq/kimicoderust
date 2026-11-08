@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Orphan locale keys: a catalog entry nobody can reach — a ratchet.
  *
@@ -46,6 +46,10 @@ import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const AGENT_SRC = join(ROOT, 'packages', 'kimi-agent', 'src');
+/** Rust consumers: the engine, plus the terminal host, which renders engine
+ *  catalog text (`engine.tui.*`) through `LocalizedText` from outside the
+ *  engine crate. A root missing here reports its keys as orphans. */
+const RUST_ROOTS = [AGENT_SRC, join(ROOT, 'packages', 'kimi-tui-host', 'src')];
 const CATALOG = join(AGENT_SRC, 'locales', 'en.json');
 const ALLOWLIST = join(ROOT, 'scripts', 'locale-orphan-allowlist.json');
 
@@ -176,9 +180,11 @@ function leafKeys(node, prefix = '', out = []) {
 const reachable = new Set();
 
 let rustFiles = 0;
-for (const file of walkFiles(AGENT_SRC, ['.rs'])) {
-  rustFiles += 1;
-  for (const literal of rustLiterals(readFileSync(file, 'utf8'))) reachable.add(literal);
+for (const root of RUST_ROOTS) {
+  for (const file of walkFiles(root, ['.rs'])) {
+    rustFiles += 1;
+    for (const literal of rustLiterals(readFileSync(file, 'utf8'))) reachable.add(literal);
+  }
 }
 
 let tsFiles = 0;

@@ -76,7 +76,7 @@ describe('check-no-legacy-engine gate', () => {
   });
 
   it('ignores prose mentions in markdown', () => {
-    // Deliberate hole: ROADMAP.md and the changelogs name these packages.
+    // Deliberate hole: the changelogs name these packages.
     writeFileSync(PROBE_MD, `See \`${SCOPE}${V2}\` for the retired package.\n`, 'utf8');
     expect(runGate().code).toBe(0);
   });

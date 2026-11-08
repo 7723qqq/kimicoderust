@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Stdio MCP server for kimi-datasource.
 //
 // Speaks newline-delimited JSON-RPC 2.0 on stdin/stdout per the MCP "stdio"
