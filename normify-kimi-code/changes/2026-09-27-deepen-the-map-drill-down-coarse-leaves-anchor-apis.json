@@ -17,7 +17,6 @@
       "kimi-code.engine.core.subagent",
       "kimi-code.engine.core.compaction",
       "kimi-code.engine.tools.agent",
-      "kimi-code.engine.tools.team",
       "kimi-code.engine.tools.knowledge",
       "kimi-code.engine.tools.web",
       "kimi-code.engine.server.http",

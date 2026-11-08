@@ -468,11 +468,6 @@ impl NativeToolset {
                     &mut tracker,
                 ))
             }
-            "team" => {
-                let mgr = self.subagent_manager.as_ref()?;
-                let cancel = self.effective_parent_cancel();
-                Some(team_tool::execute_team(mgr, args, cancel.as_ref()).await)
-            }
             "agent" => {
                 let mgr = self.subagent_manager.as_ref()?;
                 agent_tool::execute_agent(

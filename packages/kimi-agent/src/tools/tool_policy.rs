@@ -474,7 +474,6 @@ pub fn native_tool_defs_with_notify(
     defs.push(crate::tools::skill::skill_tool_def());
     defs.push(crate::tools::knowledge_tool::knowledge_tool_def());
     defs.extend(crate::tools::core_tool_defs::memory_tool_defs());
-    defs.push(crate::tools::team_tool::team_tool_def());
     defs.push(crate::tools::workflow::workflow_tool_def());
     if github_available {
         defs.extend(crate::tools::github::github_tool_defs());
@@ -906,7 +905,6 @@ mod tests {
             "WaitFor",
             "Skill",
             "Knowledge",
-            "Team",
             "Workflow",
         ] {
             assert!(

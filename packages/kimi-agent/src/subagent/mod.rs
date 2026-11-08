@@ -7,7 +7,6 @@ pub mod allowlist;
 pub mod btw;
 pub mod fork;
 pub mod manager;
-pub mod persistent;
 pub mod profile_prompt;
 pub mod secondary;
 pub mod types;
@@ -21,10 +20,6 @@ pub use fork::{
     close_trailing_open_tool_exchange, fork_incompatibility,
 };
 pub use manager::SubagentManager;
-pub use persistent::{
-    AgentMention, ConsensusEvaluation, DebateParticipant, DebateStage, PersistentSubagentManager,
-    SubagentConfig, SubagentHandle,
-};
 pub use types::{
     ParentCancel, SubagentDefinition, SubagentInstance, SubagentState, SubagentSummary,
 };

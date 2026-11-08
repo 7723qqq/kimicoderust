@@ -50,7 +50,6 @@ import {
 } from './session';
 import type { SlashCommandHost } from './types';
 import { handleSwarmCommand } from './swarm';
-import { handleTeamCommand } from './team';
 import { handleTowerCommand } from './tower';
 import { handleUndoCommand } from './undo';
 import { handleRemoteControlCommand, handleWebCommand } from './web';
@@ -301,7 +300,6 @@ const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set
   'init',
   'plan',
   'swarm',
-  'team',
   'undo',
   'web',
   'workflow',
@@ -466,9 +464,6 @@ async function handleBuiltInSlashCommand(
       return;
     case 'swarm':
       await handleSwarmCommand(host, args);
-      return;
-    case 'team':
-      await handleTeamCommand(host, args);
       return;
     case 'tower':
       await handleTowerCommand(host, args);

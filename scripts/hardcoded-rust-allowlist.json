@@ -4051,10 +4051,10 @@
       "text": "State write error: [-32005] task wait was interrupted",
       "reason": "dev-surface"
     },
-    "packages/kimi-agent/src/repl/mod.rs:Tool \"{tool_name}\" is not available in the standalone REPL. Do NOT call this tool again — the REPL executes only the native tool set (read/grep/glob/write/edit/bash/fetch_url/web_search, todo/plan/goal/cron/task/skill/knowledge/team, subagents, MCP).": {
+    "packages/kimi-agent/src/repl/mod.rs:Tool \"{tool_name}\" is not available in the standalone REPL. Do NOT call this tool again — the REPL executes only the native tool set (read/grep/glob/write/edit/bash/fetch_url/web_search, todo/plan/goal/cron/task/skill/knowledge, subagents, MCP).": {
       "file": "packages/kimi-agent/src/repl/mod.rs",
-      "text": "Tool \"{tool_name}\" is not available in the standalone REPL. Do NOT call this tool again — the REPL executes only the native tool set (read/grep/glob/write/edit/bash/fetch_url/web_search, todo/plan/goal/cron/task/skill/knowledge/team, subagents, MCP).",
-      "reason": "model-input"
+      "text": "Tool \"{tool_name}\" is not available in the standalone REPL. Do NOT call this tool again — the REPL executes only the native tool set (read/grep/glob/write/edit/bash/fetch_url/web_search, todo/plan/goal/cron/task/skill/knowledge, subagents, MCP).",
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/repl/mod.rs:Undid the last turn's state changes.": {
       "file": "packages/kimi-agent/src/repl/mod.rs",
@@ -6845,14 +6845,12 @@
     "packages/kimi-agent/src/session/sqlite_store.rs:it was deleted after the tool wrote it": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
       "text": "it was deleted after the tool wrote it",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/session/sqlite_store.rs:it was edited after the tool wrote it": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
       "text": "it was edited after the tool wrote it",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/session/sqlite_store.rs:source=digest is the managed chat_title call; use session::title::generate_session_title": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
@@ -7424,61 +7422,6 @@
       "text": "{SUBAGENT_SCOPE_EVICT_TIMEOUT_ENV} must be a positive integer, got {raw:?}.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/subagent/persistent.rs:Debate topic: {}": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "Debate topic: {}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:Failed to record subagent event for {}: {:?}": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "Failed to record subagent event for {}: {:?}",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:Subagent [{}] executed step: Ack '{}'": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "Subagent [{}] executed step: Ack '{}'",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:[Aborted: Turn limit reached]": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "[Aborted: Turn limit reached]",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:[Stage: Closing] Topic: {} Your Role: {} Assigned Stance: {} Debate transcript so far: {} Task: Deliver your closing arguments. Summarize key debates, address major counterarguments, and state your final recommendation.": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "[Stage: Closing] Topic: {} Your Role: {} Assigned Stance: {} Debate transcript so far: {} Task: Deliver your closing arguments. Summarize key debates, address major counterarguments, and state your final recommendation.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:[Stage: Consensus] Topic: {} Full debate transcript: {} Task: Identify common ground and remaining disagreements. Format your response with explicit points: - [x] 共识: <agreed point> - [ ] 分歧: <unresolved conflict>": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "[Stage: Consensus] Topic: {} Full debate transcript: {} Task: Identify common ground and remaining disagreements. Format your response with explicit points: - [x] 共识: <agreed point> - [ ] 分歧: <unresolved conflict>",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:[Stage: FreeDebate] Topic: {} Your Role: {} Assigned Stance: {} Debate transcript so far: {} Task: Challenge or support points made by others (mentioning @agent_id), provide evidence, and defend or refine your stance.": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "[Stage: FreeDebate] Topic: {} Your Role: {} Assigned Stance: {} Debate transcript so far: {} Task: Challenge or support points made by others (mentioning @agent_id), provide evidence, and defend or refine your stance.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:[Stage: Opening] Topic: {} Your Role: {} Assigned Stance: {} Task: Present your opening position clearly, stating your primary arguments and core assumptions.": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "[Stage: Opening] Topic: {} Your Role: {} Assigned Stance: {} Task: Present your opening position clearly, stating your primary arguments and core assumptions.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:[Stage: {:?}] Current context: {}": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "[Stage: {:?}] Current context: {}",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:[Timeout waiting for argument]": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "[Timeout waiting for argument]",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/persistent.rs:{}: [Timeout waiting for response]": {
-      "file": "packages/kimi-agent/src/subagent/persistent.rs",
-      "text": "{}: [Timeout waiting for response]",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/subagent/secondary.rs:Available models (pass via model):": {
       "file": "packages/kimi-agent/src/subagent/secondary.rs",
       "text": "Available models (pass via model):",
@@ -7593,356 +7536,6 @@
       "file": "packages/kimi-agent/src/swarm/service.rs",
       "text": "The subagent was stopped before it finished.",
       "reason": "deferred"
-    },
-    "packages/kimi-agent/src/team/context.rs:(?i)(agree|disagree) with {escaped}": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "(?i)(agree|disagree) with {escaped}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:(?i)(building|expanding) on {escaped}": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "(?i)(building|expanding) on {escaped}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:(?i)\\bbuild(?:ing)? on\\b": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "(?i)\\bbuild(?:ing)? on\\b",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:(?i)\\bpush back\\b": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "(?i)\\bpush back\\b",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:(?i)as {escaped} (said|mentioned|argued|pointed out)": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "(?i)as {escaped} (said|mentioned|argued|pointed out)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:(?i){escaped}['’]s (point|argument|suggestion|idea|proposal)": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "(?i){escaped}['’]s (point|argument|suggestion|idea|proposal)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:Closing Arguments": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "Closing Arguments",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:Consensus & Resolution": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "Consensus & Resolution",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:Free Debate": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "Free Debate",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:Opening Statements": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "Opening Statements",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:[{}] Stance: {} Key points: {}": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "[{}] Stance: {} Key points: {}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/context.rs:regex pattern must compile": {
-      "file": "packages/kimi-agent/src/team/context.rs",
-      "text": "regex pattern must compile",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:- Address the strongest counter-arguments raised against your view": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "- Address the strongest counter-arguments raised against your view",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:- Be concise and impactful": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "- Be concise and impactful",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:- Challenge or support specific points made by other participants": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "- Challenge or support specific points made by other participants",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:- Clarify or refine your position": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "- Clarify or refine your position",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:- Explain why your position should prevail": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "- Explain why your position should prevail",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:- Point out flaws in opposing arguments": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "- Point out flaws in opposing arguments",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:- Provide counter-arguments or additional evidence": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "- Provide counter-arguments or additional evidence",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:- Summarize your position and key evidence": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "- Summarize your position and key evidence",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:1. Points of consensus (what everyone agrees on)": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "1. Points of consensus (what everyone agrees on)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:1. Vote count (how many for each position)": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "1. Vote count (how many for each position)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:1. Your final position on the topic (yes/no/neutral with reasoning)": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "1. Your final position on the topic (yes/no/neutral with reasoning)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:2. Remaining disagreements (where opinions still differ)": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "2. Remaining disagreements (where opinions still differ)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:2. The majority position": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "2. The majority position",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:2. The single most convincing argument from the debate": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "2. The single most convincing argument from the debate",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:3. A suggested compromise or path forward": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "3. A suggested compromise or path forward",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:3. Key arguments that swayed the outcome": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "3. Key arguments that swayed the outcome",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:3. Key insights and takeaways from the debate": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "3. Key insights and takeaways from the debate",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:4. Final recommended decision": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "4. Final recommended decision",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:4. Recommended next steps or action items": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "4. Recommended next steps or action items",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:<phase name=\"{}\" speeches=\"{}\" />": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "<phase name=\"{}\" speeches=\"{}\" />",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:<summary>rounds: {}, speeches: {}, status: {status_text}</summary>": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "<summary>rounds: {}, speeches: {}, status: {status_text}</summary>",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:<summary>speeches: {}, phases: {}, cross_refs: {}, position_changes: {}, status: {}</summary>": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "<summary>speeches: {}, phases: {}, cross_refs: {}, position_changes: {}, status: {}</summary>",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:=== CLOSING ARGUMENTS ===": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "=== CLOSING ARGUMENTS ===",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:=== CURRENT POSITIONS ===": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "=== CURRENT POSITIONS ===",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:=== FREE DEBATE — Round {round} ===": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "=== FREE DEBATE — Round {round} ===",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:=== OPENING STATEMENTS ===": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "=== OPENING STATEMENTS ===",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:=== VOTING PHASE ===": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "=== VOTING PHASE ===",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Agreements detected: {agreements}, Disagreements detected: {disagreements}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Agreements detected: {agreements}, Disagreements detected: {disagreements}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Based on the full debate, please vote on the following:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Based on the full debate, please vote on the following:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Be thorough and persuasive — this is your chance to frame the debate.": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Be thorough and persuasive — this is your chance to frame the debate.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Cross-references detected: {}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Cross-references detected: {}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Current discussion transcript:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Current discussion transcript:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Current positions:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Current positions:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Debate topic: {topic}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Debate topic: {topic}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Discussion topic: {topic}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Discussion topic: {topic}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Final positions: {}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Final positions: {}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Full debate transcript so far:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Full debate transcript so far:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Full debate transcript:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Full debate transcript:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Full discussion transcript:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Full discussion transcript:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Please provide a concise summary of the discussion.": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Please provide a concise summary of the discussion.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Please provide:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Please provide:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Please respond with:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Please respond with:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Present your arguments on the topic.": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Present your arguments on the topic.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Respond to what others have said. You may:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Respond to what others have said. You may:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Tally the votes from this debate and produce a final verdict.": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Tally the votes from this debate and produce a final verdict.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:The debate is concluding. Deliver your closing argument:": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "The debate is concluding. Deliver your closing argument:",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:You are delivering your opening statement. Present your initial stance": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "You are delivering your opening statement. Present your initial stance",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:You are the first to speak. Present your initial thoughts on the topic.": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "You are the first to speak. Present your initial thoughts on the topic.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:Your assigned stance: {stance}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "Your assigned stance: {stance}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:[System] Your role: {role_description}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "[System] Your role: {role_description}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:[System] Your role: {}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "[System] Your role: {}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:[agent error] {error}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "[agent error] {error}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:[{speaker_name}] <vote not cast>": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "[{speaker_name}] <vote not cast>",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:[{}] {} Key points: {}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "[{}] {} Key points: {}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:marker regex must compile": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "marker regex must compile",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:on the topic clearly. State your position, your key arguments, and what": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "on the topic clearly. State your position, your key arguments, and what",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:the tally turn failed: {error}": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "the tally turn failed: {error}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/team/coordinator.rs:you believe is the most important consideration.": {
-      "file": "packages/kimi-agent/src/team/coordinator.rs",
-      "text": "you believe is the most important consideration.",
-      "reason": "model-input"
     },
     "packages/kimi-agent/src/test_support.rs:test_support: could not restore the process cwd to {}: {error}": {
       "file": "packages/kimi-agent/src/test_support.rs",
@@ -8198,8 +7791,7 @@
     "packages/kimi-agent/src/tools/agent_tool/execute.rs:task_id: {task_id}": {
       "file": "packages/kimi-agent/src/tools/agent_tool/execute.rs",
       "text": "task_id: {task_id}",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "format-scaffolding"
     },
     "packages/kimi-agent/src/tools/agent_tool/format.rs:Provider safety policy blocked the response.": {
       "file": "packages/kimi-agent/src/tools/agent_tool/format.rs",
@@ -11796,76 +11388,6 @@
       "text": "{} [wait_warning] This is {} call {} in this turn, and you have already spent {} waiting. {}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/team_tool.rs:Debate mode: assigned stance": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Debate mode: assigned stance",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Debate mode: consensus prompt": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Debate mode: consensus prompt",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Debate mode: include a voting phase": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Debate mode: include a voting phase",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Discussion mode: final summary prompt": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Discussion mode: final summary prompt",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Discussion mode: speeches per round": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Discussion mode: speeches per round",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Invalid Team arguments: `participants` must be a non-empty array.": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Invalid Team arguments: `participants` must be a non-empty array.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Invalid Team arguments: each participant needs `profile_name`.": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Invalid Team arguments: each participant needs `profile_name`.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Max rounds before ending": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Max rounds before ending",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Role description for this participant": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Role description for this participant",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Run a multi-agent discussion or structured debate among subagents to explore a topic, cross-review work, or reach consensus. Use discussion mode for open exploration, debate mode for adversarial positions with consensus detection.": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Run a multi-agent discussion or structured debate among subagents to explore a topic, cross-review work, or reach consensus. Use discussion mode for open exploration, debate mode for adversarial positions with consensus detection.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Subagent profile (e.g. research)": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Subagent profile (e.g. research)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:Team tool requires an injected subagent runtime (llm + callbacks); the host did not provide one.": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "Team tool requires an injected subagent runtime (llm + callbacks); the host did not provide one.",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:The topic or question to discuss": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "The topic or question to discuss",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/team_tool.rs:discussion = roundtable, debate = structured positions": {
-      "file": "packages/kimi-agent/src/tools/team_tool.rs",
-      "text": "discussion = roundtable, debate = structured positions",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/todo_item.rs:Current todo list:": {
       "file": "packages/kimi-agent/src/tools/todo_item.rs",
       "text": "Current todo list:",
@@ -13869,8 +13391,7 @@
     "packages/kimi-agent/src/turn_loop/run_turn.rs:the scheduler answers every scheduled call": {
       "file": "packages/kimi-agent/src/turn_loop/run_turn.rs",
       "text": "the scheduler answers every scheduled call",
-      "reason": "deferred",
-      "note": "UNREVIEWED — needs a category"
+      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/turn_loop/run_turn.rs:time {}/{} (remaining {})": {
       "file": "packages/kimi-agent/src/turn_loop/run_turn.rs",

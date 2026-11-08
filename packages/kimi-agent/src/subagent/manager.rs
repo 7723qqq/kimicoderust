@@ -826,7 +826,7 @@ impl SubagentManager {
         // / plan) so spawn lookups resolve them in every transport path. v2
         // registers these from its profile catalog; the Rust side had
         // `register_builtin_profiles` but it was only called from tests,
-        // leaving TowerSpawn / AgentSwarm / Team / Agent with builtin
+        // leaving TowerSpawn / AgentSwarm / Agent with builtin
         // profiles to fail with "not available" on every host.
         for p in crate::prompt::ProfileCatalog::with_builtins().list() {
             defs.insert(

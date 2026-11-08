@@ -255,7 +255,6 @@ pub mod subagent_tools;
 pub mod swarm_tool;
 pub mod task_format;
 pub mod task_tools;
-pub mod team_tool;
 pub mod todo_item;
 pub mod todo_list;
 pub mod tool_dedupe;
@@ -353,7 +352,6 @@ pub const NATIVE_TOOL_NAMES: &[&str] = &[
     "memory_list",
     "memorydelete",
     "memory_delete",
-    "team",
     "workflow",
     "notifyuser",
     "notify_user",

@@ -34,7 +34,6 @@ pub mod skills;
 pub mod storage;
 pub mod subagent;
 pub mod swarm;
-pub mod team;
 #[cfg(test)]
 mod test_support;
 pub mod tool_input_display;

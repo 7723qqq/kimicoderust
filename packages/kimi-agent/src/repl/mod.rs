@@ -72,7 +72,7 @@ impl HostCallbacks for ReplDummyHostCallbacks {
         let tool_name = req.tool_name;
         Box::pin(async move {
             Err(format!(
-                "Tool \"{tool_name}\" is not available in the standalone REPL. Do NOT call this tool again — the REPL executes only the native tool set (read/grep/glob/write/edit/bash/fetch_url/web_search, todo/plan/goal/cron/task/skill/knowledge/team, subagents, MCP)."
+                "Tool \"{tool_name}\" is not available in the standalone REPL. Do NOT call this tool again — the REPL executes only the native tool set (read/grep/glob/write/edit/bash/fetch_url/web_search, todo/plan/goal/cron/task/skill/knowledge, subagents, MCP)."
             ))
         })
     }
@@ -313,7 +313,6 @@ async fn build_repl_tool_defs(
     defs.push(crate::tools::create_goal::create_goal_tool_def());
     defs.push(crate::tools::skill::skill_tool_def());
     defs.push(crate::tools::knowledge_tool::knowledge_tool_def());
-    defs.push(crate::tools::team_tool::team_tool_def());
     defs.push(crate::tools::swarm_tool::agent_swarm_tool_def(None));
     defs.extend(crate::tools::tower::tower_tool_defs());
     defs

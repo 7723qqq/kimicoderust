@@ -564,17 +564,6 @@ export const en = {
         'AgentSwarm must be the only tool call in a model response. Retry with a single AgentSwarm call by itself, then call any other tools after it returns.',
       agentDeniedInSwarmMode:
         'The Agent tool is not available in swarm mode. Use AgentSwarm to dispatch subagents in parallel instead. If you need a single subagent, use AgentSwarm with one item or one resume_agent_ids entry.',
-      solitaryMultipleDenied:
-        'AgentSwarm/Team must be called one at a time. Multiple calls are not forbidden, but issue them sequentially: call one, wait for its result, then call the next; or merge the work into a single call when one can cover it.',
-      solitaryMultipleDeniedMixed:
-        'AgentSwarm/Team must be called one at a time. Multiple calls are not forbidden, but issue them sequentially: call one, wait for its result, then call the next; or merge the work into a single call when one can cover it. These tools also must not be combined with other tools in the same response.',
-      solitaryMixedDenied:
-        'AgentSwarm/Team must be the only tool call in a model response. Retry with a single call by itself, then call any other tools after it returns.',
-    },
-    team: {
-      launching: 'Team discussion: {{topic}}',
-      launchingDebate: 'Team debate: {{topic}}',
-      agentName: 'Team {{mode}} ({{count}} participants)',
     },
     plugin: {
       cannotInstallLocal: 'Cannot install plugin at {{path}}: {{message}}',
@@ -1242,7 +1231,6 @@ export const en = {
       },
       workflowStatusUsage: 'Usage: /workflow status <runId>',
       workflowCancelUsage: 'Usage: /workflow cancel <runId>',
-      team: 'Start a team discussion among multiple agents',
       secondaryModel: 'Configure the secondary model for subagents',
       multiLlm: 'Configure MultiLLM concurrent providers (Rust engine)',
       model: 'Switch LLM model',
@@ -2912,7 +2900,6 @@ export const en = {
       // tui/commands/btw.ts
       btwStartFailed: 'Failed to start /btw: {{error}}',
       // tui/commands/team.ts
-      teamSwarmEnableFailed: 'Failed to enable swarm mode: {{error}}',
       // tui/commands/info.ts
       infoMcpLoadFailed: 'Failed to load MCP servers: {{error}}',
       // tui/commands/session.ts
@@ -3034,9 +3021,6 @@ export const en = {
       registryTowerOn: 'Turn tower mode on',
       registryTowerOff: 'Turn tower mode off',
       // tui/commands/team.ts
-      teamUsage: 'Usage: /team [--debate] <topic> with <role1>[:stance],<role2>[:stance],...',
-      teamNeedTopic: 'Please provide a discussion topic.',
-      teamNeedRoles: 'Please specify at least 2 roles for the discussion.',
       // tui/commands/workflow.ts
       workflowSearchExample: '/workflow deep-research "latest advances in RAG"',
       workflowListHint:

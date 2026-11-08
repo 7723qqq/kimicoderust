@@ -228,16 +228,6 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: 'idle-only',
   },
   {
-    name: 'team',
-    aliases: [],
-    get description() {
-      return t('tui.slashCommands.team');
-    },
-    priority: 95,
-    argumentHint: '<topic>',
-    availability: 'idle-only',
-  },
-  {
     name: 'workflow',
     aliases: [],
     get description() {
