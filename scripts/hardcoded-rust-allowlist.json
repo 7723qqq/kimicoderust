@@ -10253,6 +10253,11 @@
       "text": "static H1 regex",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/memory_paths.rs:static block-list regex": {
+      "file": "packages/kimi-agent/src/tools/memory_paths.rs",
+      "text": "static block-list regex",
+      "reason": "format-scaffolding"
+    },
     "packages/kimi-agent/src/tools/memory_paths.rs:static frontmatter regex": {
       "file": "packages/kimi-agent/src/tools/memory_paths.rs",
       "text": "static frontmatter regex",
@@ -10262,6 +10267,11 @@
       "file": "packages/kimi-agent/src/tools/memory_paths.rs",
       "text": "static heading regex",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/memory_paths.rs:static inline regex": {
+      "file": "packages/kimi-agent/src/tools/memory_paths.rs",
+      "text": "static inline regex",
+      "reason": "format-scaffolding"
     },
     "packages/kimi-agent/src/tools/memory_store.rs:<memory_listing>": {
       "file": "packages/kimi-agent/src/tools/memory_store.rs",

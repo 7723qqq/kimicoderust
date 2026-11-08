@@ -243,6 +243,74 @@ pub fn build_rel_path(scope: MemoryScope, scope_id: &str, file_name: &str) -> St
     }
 }
 
+/// Parse the `applies_to` frontmatter patterns (v2
+/// `memoryPaths.ts:91-115`, `parseAppliesTo`).
+///
+/// Two forms are accepted, inline `[a, b]` first and a YAML block list second.
+/// An absent frontmatter block yields an empty list. Values are trimmed and
+/// surrounding quotes removed; empty values are dropped. This is the shape
+/// `Memory.write` records as an entry's `appliesTo` when a commit succeeds.
+pub fn parse_applies_to(body: &str) -> Vec<String> {
+    static FRONT: OnceLock<Regex> = OnceLock::new();
+    let front = FRONT
+        .get_or_init(|| {
+            Regex::new(r"(?s)\A---[\s\S]*?\n---").expect("static frontmatter regex")
+        })
+        .find(body)
+        .map(|m| m.as_str())
+        .unwrap_or("");
+    if front.is_empty() {
+        return Vec::new();
+    }
+
+    static INLINE: OnceLock<Regex> = OnceLock::new();
+    let inline = INLINE
+        .get_or_init(|| Regex::new(r"applies_to:\s*\[([^\]]*)\]").expect("static inline regex"));
+    if let Some(caps) = inline.captures(front) {
+        return caps
+            .get(1)
+            .map(|m| m.as_str().split(',').filter_map(unquote).collect())
+            .unwrap_or_default();
+    }
+
+    static LIST: OnceLock<Regex> = OnceLock::new();
+    let list = LIST
+        .get_or_init(|| {
+            Regex::new(r"applies_to:\s*\n((?:\s*-\s*[^\n]+\n?)+)")
+                .expect("static block-list regex")
+        })
+        .captures(front);
+    let Some(caps) = list else {
+        return Vec::new();
+    };
+    caps.get(1)
+        .map(|m| {
+            m.as_str()
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim().trim_start_matches('-').trim();
+                    unquote(trimmed)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn unquote(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let stripped = trimmed
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+        })
+        .unwrap_or(trimmed);
+    let cleaned = stripped.trim_matches('\'').trim_matches('"').trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
 fn normalize_file_name(name: &str) -> String {
     if name.ends_with(".md") {
         name.to_string()
@@ -626,5 +694,35 @@ mod tests {
             build_rel_path(MemoryScope::Session, "xyz", "foo.md"),
             "sessions/xyz/foo.md"
         );
+    }
+
+    #[test]
+    fn parse_applies_to_reads_the_inline_form() {
+        let body = "---\napplies_to: ['src/**/*.ts', \"docs/*.md\",, ]\n---\n# Title";
+        assert_eq!(
+            parse_applies_to(body),
+            vec!["src/**/*.ts".to_string(), "docs/*.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_applies_to_reads_a_block_list() {
+        let body = "---\nintent: why\napplies_to:\n  - 'src/a.rs'\n  - \"src/b.rs\"\n---\nbody";
+        assert_eq!(
+            parse_applies_to(body),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_applies_to_prefers_the_inline_form_when_both_are_present() {
+        let body = "---\napplies_to: [inline.md]\napplies_to:\n  - block.md\n---";
+        assert_eq!(parse_applies_to(body), vec!["inline.md".to_string()]);
+    }
+
+    #[test]
+    fn parse_applies_to_without_frontmatter_is_empty() {
+        assert!(parse_applies_to("# Title\n\nbody").is_empty());
+        assert!(parse_applies_to("---\nintent: only\n---").is_empty());
     }
 }
