@@ -87,50 +87,21 @@ const EDIT_DESCRIPTION: &str = r#"Perform exact replacements in existing files.
 - For mixed endings or lone carriage returns, Read shows carriage returns as \r; include actual \r escapes in those positions.
 "#;
 
-const BASH_DESCRIPTION: &str = r#"Execute a `${SHELL_NAME}` command. Use this for shell semantics — pipes, env, processes, git, package managers, build/test runners, anything genuinely interactive or multi-step.
+const BASH_DESCRIPTION: &str = r#"Execute a `${SHELL_NAME}` command. Use this for shell semantics — pipes, env, and anything the dedicated tools do not cover.
 
-**Translate these to a dedicated tool instead:**
-- `cat` / `head` / `tail` (known path) → `Read`
-- `echo > file` / `cat <<EOF` → `Write`
-- `find` / recursive `ls` to locate files by name pattern → `Glob` (plain `ls <known-directory>` is fine for listing a directory)
+- `ls` / `find` (list files) → `Glob`
 - `grep` / `rg` (search file contents) → `Grep`
 - `echo` / `printf` (talk to the user) → just output text directly
 
-The dedicated tools render in the per-tool permission UI and keep raw stdout out of the conversation; that is why they are worth reaching for whenever one fits.
+Each call runs in a fresh shell: variables and `cd` do not persist, so pass `cwd` or use absolute paths. stdout and stderr are combined and may be truncated; a non-zero exit ends the output with `Command failed with exit code: N`. Do not run interactive commands or commands that never exit. Set `timeout` for possibly long-running commands. A foreground command that hits its timeout is moved to the background instead of being killed, and you are notified when it completes. The user can also move a running foreground command to the background at any time.
 
-**Output:**
-The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command exits non-zero, the output ends with a `Command failed with exit code: N` line; a command killed by its timeout or interrupted by the user ends with its own message instead.
+For long-running builds, tests, watchers, or servers that the conversation should not wait on, set `run_in_background=true` with a short `description`; the call returns a task ID. Set `disable_timeout=true` only when the task should run without a timeout. You are notified automatically when the task completes, so return control to the user instead of waiting on it. Use `TaskOutput` only for a non-blocking snapshot, and `TaskStop` only to cancel.
 
-If `run_in_background=true`, the command will be started as a background task and this tool will return a task ID instead of waiting for command completion. When doing that, you must provide a short `description`. Background commands default to a 600s timeout and `timeout` is capped at 86400s; set `disable_timeout=true` only when the task should run without a timeout. You will be automatically notified when the task completes. After starting one, default to returning control to the user instead of immediately waiting on it. Use `TaskOutput` only for a non-blocking status/output snapshot — do not wait on a task you just launched, since its completion arrives automatically. Use `TaskStop` only if the task must be cancelled. If a human user wants to inspect background tasks themselves, point them to the background-task panel.
-
-**Guidelines for safety and security:**
-- Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls. To run a command in a particular directory, pass the `cwd` argument (or use absolute paths) rather than relying on a `cd` from an earlier call.
-- The tool call will return after the command is finished. You shall not use this tool to execute an interactive command or a command that may run forever. For possibly long-running foreground commands, set the `timeout` argument in seconds. Foreground commands default to 60s and allow up to 300s. When a foreground command hits its timeout it is moved to the background instead of being killed, and you will be automatically notified when it completes. The user can also move a running foreground command to the background at any time.
-- Avoid using `..` to access files or directories outside of the working directory.
-- Avoid modifying files outside of the working directory unless explicitly instructed to do so.
-- Never run commands that require superuser privileges unless explicitly instructed to do so.
-
-**Guidelines for efficiency:**
-- Use `&&` to chain commands that genuinely depend on each other, e.g. `npm install && npm test`. Independent read-only commands (separate `git show`, `ls`, or status checks) should be issued as separate parallel Bash calls in one response, not chained into a single call — chaining serializes their execution and mixes their output. Do not stitch outputs together with `echo` separators.
-- Use `;` to run commands sequentially regardless of success/failure
-- Use `||` for conditional execution (run second command only if first fails)
-- Use pipe operations (`|`) and redirections (`>`, `>>`) to chain input and output between commands
-- Always quote file paths containing spaces with double quotes (e.g., cd "/path with spaces/")
-- Compose multi-step logic in a single call with `if` / `case` / `for` / `while` control flows.
-- Prefer `run_in_background=true` for long-running builds, tests, watchers, or servers when you need the conversation to continue before the command finishes.
-
-**Commands available:**
-The following common command categories are usually available. Availability still depends on the host, so when in doubt run `which <command>` first to confirm a command exists before relying on it.
-- Navigation and inspection: `ls`, `pwd`, `cd`, `stat`, `file`, `du`, `df`, `tree`
-- File and directory management: `cp`, `mv`, `rm`, `mkdir`, `touch`, `ln`, `chmod`, `chown`
-- Text and data processing: `wc`, `sort`, `uniq`, `cut`, `tr`, `diff`, `xargs`
-- Archives and compression: `tar`, `gzip`, `gunzip`, `zip`, `unzip`
-- Networking and transfer: `curl`, `wget`, `ping`, `ssh`, `scp`
-- Version control: `git`; for GitHub-hosted work (PRs, issues, CI runs, API queries) prefer the `gh` CLI when installed — it carries the user's GitHub auth and can return structured JSON
-- Process and system: `ps`, `kill`, `top`, `env`, `date`, `uname`, `whoami`
-- Language and package toolchains: `node`, `npm`, `pnpm`, `yarn`, `python`, `pip` (use whichever the project actually relies on)
+- Use `&&` for commands that depend on each other. Issue independent read-only commands (separate `git show`, `ls`, or status checks) as parallel Bash calls in one response instead of chaining them or stitching their output with `echo` separators.
+- Avoid `..` paths outside the working directory, and do not modify files outside it unless explicitly instructed.
+- Do not use superuser privileges unless explicitly instructed. Run git-mutating commands such as `git commit`, `git push`, `git reset`, and `git rebase` only when the user asks for them.
+- Command availability depends on the host; run `which <command>` before relying on an uncommon one. For GitHub work (PRs, issues, CI runs, API queries), prefer the `gh` CLI when installed.
 "#;
-
 const FETCH_URL_DESCRIPTION: &str = r#"Fetch content from a URL. The content is returned either as the main text extracted from the page, or as the full response body verbatim; a note at the top of the result states which of the two you received, so you can judge how complete it is. Use this when you need to read a specific web page.
 
 Only fully-formed public `http`/`https` URLs are supported; other schemes and private or loopback addresses are not fetched. Very large pages may be truncated or refused. The fetch carries no login or session for the target site, so pages behind authentication (private repositories, internal dashboards) return a login page or an error instead of the real content — if the text you get back looks like a generic landing or sign-in page, treat that as the login wall, not the answer, and reach the content through a credentialed route (an authenticated CLI or MCP tool) instead.
@@ -898,9 +869,10 @@ mod tests {
         let (shell_name, _) = crate::prompt::environment::detect_shell(None);
         assert!(bash.contains(&format!("Execute a `{shell_name}` command")));
         assert!(!bash.contains("${SHELL_NAME}"));
-        assert!(bash.contains("Foreground commands default to 60s and allow up to 300s"));
-        assert!(bash.contains("Background commands default to a 600s timeout"));
-        assert!(bash.contains("`timeout` is capped at 86400s"));
+        assert!(bash.contains("moved to the background instead of being killed"));
+        assert!(bash.contains("set `run_in_background=true` with a short `description`"));
+        assert!(bash.contains("Issue independent read-only commands"));
+        assert!(!bash.contains("Foreground commands default to 60s"));
 
         // Glob: the v2 template mentions the 100-match cap.
         assert!(get("Glob").contains("first 100 matching paths"));

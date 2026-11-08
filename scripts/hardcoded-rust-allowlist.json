@@ -8103,29 +8103,9 @@
       "reason": "model-input",
       "note": "model-facing tool-result wording, ported verbatim from v2 shellToolResults.ts"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:**Commands available:**": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "**Commands available:**",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:**Guidelines for efficiency:**": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "**Guidelines for efficiency:**",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:**Guidelines for safety and security:**": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "**Guidelines for safety and security:**",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:**How to use:**": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "**How to use:**",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:**Translate these to a dedicated tool instead:**": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "**Translate these to a dedicated tool instead:**",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:**When to use:**": {
@@ -8174,24 +8154,9 @@
       "text": "- After a successful `Edit`/`Write`, do not re-read solely to prove the write landed. When the task depends on an exact file, API, or output shape, inspect the final external contract before finishing.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Always quote file paths containing spaces with double quotes (e.g., cd \"/path with spaces/\")": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Avoid `..` paths outside the working directory, and do not modify files outside it unless explicitly instructed.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Always quote file paths containing spaces with double quotes (e.g., cd \"/path with spaces/\")",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Archives and compression: `tar`, `gzip`, `gunzip`, `zip`, `unzip`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Archives and compression: `tar`, `gzip`, `gunzip`, `zip`, `unzip`",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Avoid modifying files outside of the working directory unless explicitly instructed to do so.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Avoid modifying files outside of the working directory unless explicitly instructed to do so.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Avoid using `..` to access files or directories outside of the working directory.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Avoid using `..` to access files or directories outside of the working directory.",
+      "text": "- Avoid `..` paths outside the working directory, and do not modify files outside it unless explicitly instructed.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Batch the update with your next tool calls when possible.": {
@@ -8199,9 +8164,9 @@
       "text": "- Batch the update with your next tool calls when possible.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Compose multi-step logic in a single call with `if` / `case` / `for` / `while` control flows.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Command availability depends on the host; run `which <command>` before relying on an uncommon one. For GitHub work (PRs, issues, CI runs, API queries), prefer the `gh` CLI when installed.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Compose multi-step logic in a single call with `if` / `case` / `for` / `while` control flows.",
+      "text": "- Command availability depends on the host; run `which <command>` before relying on an uncommon one. For GitHub work (PRs, issues, CI runs, API queries), prefer the `gh` CLI when installed.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Do not add an agent name or source prefix; the UI supplies it.": {
@@ -8219,19 +8184,14 @@
       "text": "- Do not use an update to ask questions, request decisions, or deliver the final answer. Subagents must leave questions for the parent agent in their handoff.",
       "reason": "model-input"
     },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Do not use superuser privileges unless explicitly instructed. Run git-mutating commands such as `git commit`, `git push`, `git reset`, and `git rebase` only when the user asks for them.": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "- Do not use superuser privileges unless explicitly instructed. Run git-mutating commands such as `git commit`, `git push`, `git reset`, and `git rebase` only when the user asks for them.",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Drop the line-number prefix and tab; match only file content.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Drop the line-number prefix and tab; match only file content.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls. To run a command in a particular directory, pass the `cwd` argument (or use absolute paths) rather than relying on a `cd` from an earlier call.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls. To run a command in a particular directory, pass the `cwd` argument (or use absolute paths) rather than relying on a `cd` from an earlier call.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- File and directory management: `cp`, `mv`, `rm`, `mkdir`, `touch`, `ln`, `chmod`, `chown`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- File and directory management: `cp`, `mv`, `rm`, `mkdir`, `touch`, `ln`, `chmod`, `chown`",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- For mixed endings or lone carriage returns, Read shows carriage returns as \\r; include actual \\r escapes in those positions.": {
@@ -8259,11 +8219,6 @@
       "text": "- If automatic compression cannot safely produce an image within model limits, the tool returns an error and does not send the original image. Follow the error: use Bash or an available image-processing tool to create a smaller copy, then read that copy. Do not retry the unchanged file.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Language and package toolchains: `node`, `npm`, `pnpm`, `yarn`, `python`, `pip` (use whichever the project actually relies on)": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Language and package toolchains: `node`, `npm`, `pnpm`, `yarn`, `python`, `pip` (use whichever the project actually relies on)",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Missing parent directories are created automatically (like `mkdir(parents=True, exist_ok=True)`).": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Missing parent directories are created automatically (like `mkdir(parents=True, exist_ok=True)`).",
@@ -8279,26 +8234,11 @@
       "text": "- Mode defaults to overwrite; append adds content at EOF without adding a newline.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Navigation and inspection: `ls`, `pwd`, `cd`, `stat`, `file`, `du`, `df`, `tree`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Navigation and inspection: `ls`, `pwd`, `cd`, `stat`, `file`, `du`, `df`, `tree`",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Negative line_offset reads from the end of the file (for example, -100 reads the last 100 lines).",
       "reason": "model-input",
       "note": "tool description text, ported verbatim from v2 read.md / zod describe"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Networking and transfer: `curl`, `wget`, `ping`, `ssh`, `scp`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Networking and transfer: `curl`, `wget`, `ping`, `ssh`, `scp`",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Never run commands that require superuser privileges unless explicitly instructed to do so.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Never run commands that require superuser privileges unless explicitly instructed to do so.",
-      "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Output format: `<line-number>\\t<content>` per line.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -8310,16 +8250,6 @@
       "text": "- Page larger files with `line_offset` (1-based start line) and `n_lines`. Omit `n_lines` to read toward the end of the file; the page still ends on the `max_chars` budget.",
       "reason": "model-input",
       "note": "tool description text, ported verbatim from v2 read.md / zod describe"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Prefer `run_in_background=true` for long-running builds, tests, watchers, or servers when you need the conversation to continue before the command finishes.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Prefer `run_in_background=true` for long-running builds, tests, watchers, or servers when you need the conversation to continue before the command finishes.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Process and system: `ps`, `kill`, `top`, `env`, `date`, `uname`, `whoami`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Process and system: `ps`, `kill`, `top`, `env`, `date`, `uname`, `whoami`",
-      "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Pure CRLF files are displayed with LF line endings; `Edit` matches this output and preserves CRLF when writing back.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -8357,11 +8287,6 @@
       "text": "- Take `old_string` and `new_string` from the Read output view.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Text and data processing: `wc`, `sort`, `uniq`, `cut`, `tr`, `diff`, `xargs`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Text and data processing: `wc`, `sort`, `uniq`, `cut`, `tr`, `diff`, `xargs`",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- This tool informs the end user; it does not automatically send a message to your parent agent. Keep all important findings in your final reply or final handoff to the parent.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- This tool informs the end user; it does not automatically send a message to your parent agent. Keep all important findings in your final reply or final handoff to the parent.",
@@ -8377,29 +8302,9 @@
       "text": "- Use Write only when the file does not exist, you intend a complete replacement, or the new contents have little continuity with the old contents.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use `&&` to chain commands that genuinely depend on each other, e.g. `npm install && npm test`. Independent read-only commands (separate `git show`, `ls`, or status checks) should be issued as separate parallel Bash calls in one response, not chained into a single call — chaining serializes their execution and mixes their output. Do not stitch outputs together with `echo` separators.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use `&&` for commands that depend on each other. Issue independent read-only commands (separate `git show`, `ls`, or status checks) as parallel Bash calls in one response instead of chaining them or stitching their output with `echo` separators.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Use `&&` to chain commands that genuinely depend on each other, e.g. `npm install && npm test`. Independent read-only commands (separate `git show`, `ls`, or status checks) should be issued as separate parallel Bash calls in one response, not chained into a single call — chaining serializes their execution and mixes their output. Do not stitch outputs together with `echo` separators.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use `;` to run commands sequentially regardless of success/failure": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Use `;` to run commands sequentially regardless of success/failure",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use `||` for conditional execution (run second command only if first fails)": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Use `||` for conditional execution (run second command only if first fails)",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use pipe operations (`|`) and redirections (`>`, `>>`) to chain input and output between commands": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Use pipe operations (`|`) and redirections (`>`, `>>`) to chain input and output between commands",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Version control: `git`; for GitHub-hosted work (PRs, issues, CI runs, API queries) prefer the `gh` CLI when installed — it carries the user's GitHub auth and can return structured JSON": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Version control: `git`; for GitHub-hosted work (PRs, issues, CI runs, API queries) prefer the `gh` CLI when installed — it carries the user's GitHub auth and can return structured JSON",
+      "text": "- Use `&&` for commands that depend on each other. Issue independent read-only commands (separate `git show`, `ls`, or status checks) as parallel Bash calls in one response instead of chaining them or stitching their output with `echo` separators.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- When working as a subagent, describe only your own subtask. Its completion does not mean the whole task is complete.": {
@@ -8437,29 +8342,19 @@
       "text": "- `*.{ts,tsx}` — brace expansion is supported",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `cat` / `head` / `tail` (known path) → `Read`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `cat` / `head` / `tail` (known path) → `Read`",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `echo > file` / `cat <<EOF` → `Write`": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `echo > file` / `cat <<EOF` → `Write`",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `echo` / `printf` (talk to the user) → just output text directly": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- `echo` / `printf` (talk to the user) → just output text directly",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `find` / recursive `ls` to locate files by name pattern → `Glob` (plain `ls <known-directory>` is fine for listing a directory)": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `find` / recursive `ls` to locate files by name pattern → `Glob` (plain `ls <known-directory>` is fine for listing a directory)",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `grep` / `rg` (search file contents) → `Grep`": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- `grep` / `rg` (search file contents) → `Grep`",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `ls` / `find` (list files) → `Glob`": {
+      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
+      "text": "- `ls` / `find` (list files) → `Glob`",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `node_modules/**/*.js`, `.venv/**/*.py`, `__pycache__/**`, `target/**` can produce thousands of results that truncate at the match cap and waste context. Prefer specific subpaths like `node_modules/react/src/**/*.js`.": {
@@ -8486,11 +8381,6 @@
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- `{src,test}/**/*.ts` — cartesian brace expansion is supported too",
       "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:/path with spaces/": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "/path with spaces/",
-      "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:0-based character column (for definition, references, hover).": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -8587,9 +8477,9 @@
       "text": "Exact content to replace from the Read output view, without the line-number prefix. Use LF for pure CRLF files; use actual \\\\r escapes where Read shows \\\\r.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:Execute a `${SHELL_NAME}` command. Use this for shell semantics — pipes, env, processes, git, package managers, build/test runners, anything genuinely interactive or multi-step.": {
+    "packages/kimi-agent/src/tools/core_tool_defs.rs:Execute a `${SHELL_NAME}` command. Use this for shell semantics — pipes, env, and anything the dedicated tools do not cover.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "Execute a `${SHELL_NAME}` command. Use this for shell semantics — pipes, env, processes, git, package managers, build/test runners, anything genuinely interactive or multi-step.",
+      "text": "Execute a `${SHELL_NAME}` command. Use this for shell semantics — pipes, env, and anything the dedicated tools do not cover.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Fetch content from a URL. The content is returned either as the main text extracted from the page, or as the full response body verbatim; a note at the top of the result states which of the two you received, so you can judge how complete it is. Use this when you need to read a specific web page.": {
@@ -8907,19 +8797,9 @@
       "text": "The command to execute.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:The dedicated tools render in the per-tool permission UI and keep raw stdout out of the conversation; that is why they are worth reaching for whenever one fits.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "The dedicated tools render in the per-tool permission UI and keep raw stdout out of the conversation; that is why they are worth reaching for whenever one fits.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:The file's full new content, frontmatter included.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "The file's full new content, frontmatter included.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:The following common command categories are usually available. Availability still depends on the host, so when in doubt run `which <command>` first to confirm a command exists before relying on it.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "The following common command categories are usually available. Availability still depends on the host, so when in doubt run `which <command>` first to confirm a command exists before relying on it.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:The line number to start reading from. Omit to start at line 1. Negative values read from the end of the file (for example, -100 reads the last 100 lines).": {
@@ -8942,11 +8822,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:The query text to search for.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "The query text to search for.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command exits non-zero, the output ends with a `Command failed with exit code: N` line; a command killed by its timeout or interrupted by the user ends with its own message instead.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command exits non-zero, the output ends with a `Command failed with exit code: N` line; a command killed by its timeout or interrupted by the user ends with its own message instead.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:The version `memory_read` returned, or \"new\" for a path that is not in the listing.": {
