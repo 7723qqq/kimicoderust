@@ -1103,6 +1103,8 @@ export const en = {
       argsNotJson:
         'Invalid {{tool}} arguments: the arguments are not valid JSON ({{detail}}).',
       argsNotObject: 'Invalid {{tool}} arguments: the arguments must be a JSON object.',
+      argsInvalidSchema:
+        'Invalid {{tool}} arguments: {{detail}}.',
     },
     tui: {
       turnStoppedFiltered: 'Turn stopped: provider safety policy blocked the response.',

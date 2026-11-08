@@ -19,6 +19,8 @@ mod injection_telemetry_tools;
 #[cfg(test)]
 mod overflow_compaction;
 #[cfg(test)]
+mod preflight_order;
+#[cfg(test)]
 mod progress_reminder;
 #[cfg(test)]
 mod steering_compaction;

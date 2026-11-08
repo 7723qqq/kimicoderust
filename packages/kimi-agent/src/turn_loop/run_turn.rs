@@ -2027,12 +2027,12 @@ pub fn run_turn<'a>(
                     // force-stopped at 12 (`toolDedupe.test.ts:1131`). Answering
                     // it outside the plan — what this used to do — hid the loop
                     // from the breaker and treated every repeat as the first.
-                    let mut refusals: Vec<Option<String>> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            unusable_tool_arguments(tc).map(|reason| reason.message(&tc.name))
-                        })
-                        .collect();
+                    //
+                    // It is built *after* the gates that remove calls from the
+                    // batch: the vector is indexed by position, and the dedup
+                    // plan below is built from the surviving calls, so a refusal
+                    // recorded before a `retain` would be read against the wrong
+                    // call and leave the plan one entry short.
 
                     // v2 `AgentSwarmService`'s first gate: in swarm mode the
                     // single-subagent `Agent` tool is refused, so the model uses
@@ -2104,6 +2104,17 @@ pub fn run_turn<'a>(
                         // turn ends `max_steps`, which is the honest outcome.
                         continue;
                     }
+
+                    // Built here, after every gate that can remove a call from the
+                    // batch, so `refusals[i]` names `tool_calls[i]` and the dedup
+                    // plan built from those same calls stays index-aligned.
+                    let mut refusals: Vec<Option<String>> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            unusable_tool_arguments(tc, &step_tool_defs, &tool_defs)
+                                .map(|reason| reason.message(&tc.name))
+                        })
+                        .collect();
 
                     // Tool-call dedup plan (v2 `toolDedupeService`, G-6 #2):
                     // identical calls inside this step never execute twice —
@@ -2896,13 +2907,17 @@ enum UnusableArguments {
     NotJson(String),
     /// The payload decoded, but tool arguments are always a JSON object.
     NotObject,
+    /// The arguments decoded and are an object, but they do not satisfy the
+    /// tool's declared schema (v2 `validateExecutableToolArgs`).
+    Schema(String),
 }
 
 impl UnusableArguments {
     /// The model-facing sentence. It follows the `Invalid <tool> arguments: …`
     /// family the per-tool validators already use, so one failure reads like the
-    /// next. `detail` stays as the decoder reported it — v2 likewise hands the
-    /// provider error text through rather than rewriting it.
+    /// next. `detail` stays as the decoder (or the schema validator) reported
+    /// it — v2 likewise hands the underlying error text through rather than
+    /// rewriting it.
     fn message(&self, tool_name: &str) -> String {
         match self {
             Self::NotJson(detail) => crate::i18n::LocalizedText::with_params(
@@ -2913,17 +2928,57 @@ impl UnusableArguments {
                 "engine.tools.argsNotObject",
                 crate::i18n::i18n_params!["tool" => tool_name],
             ),
+            Self::Schema(detail) => crate::i18n::LocalizedText::with_params(
+                "engine.tools.argsInvalidSchema",
+                crate::i18n::i18n_params!["tool" => tool_name, "detail" => detail],
+            ),
         }
         .render()
     }
 }
 
 /// v2 `preflightToolCall`: why this call cannot run, or `None` when it can.
-fn unusable_tool_arguments(call: &ToolCall) -> Option<UnusableArguments> {
+///
+/// The schema gate is v2's last check before execution (`toolExecutorService.ts`
+/// `validateExecutableToolArgs`) and applies only to a tool the tables declare:
+/// a name with no definition is left to the missing-tool path, and an absent or
+/// empty schema accepts anything, the same way v2 compiles Ajv over the empty
+/// object it substitutes.
+///
+/// `step_defs` is what the model was shown for this step; `turn_defs` is the
+/// snapshot the turn started from. The step table is consulted first because it
+/// is the one the model saw, and the snapshot is the fallback for a host whose
+/// `list_tools` answers empty — without it, a host that never implements that
+/// seam would silently disable validation.
+fn unusable_tool_arguments(
+    call: &ToolCall,
+    step_defs: &[crate::rpc::types::ToolInfo],
+    turn_defs: &[crate::rpc::types::ToolInfo],
+) -> Option<UnusableArguments> {
     if let Some(failure) = &call.args_parse_error {
         return Some(UnusableArguments::NotJson(failure.error.clone()));
     }
-    (!call.arguments.is_object()).then_some(UnusableArguments::NotObject)
+    if !call.arguments.is_object() {
+        return Some(UnusableArguments::NotObject);
+    }
+    let definition = find_tool_definition(step_defs, &call.name)
+        .or_else(|| find_tool_definition(turn_defs, &call.name))?;
+    crate::tools::args_validate::validate(&definition.input_schema, &call.arguments)
+        .err()
+        .map(UnusableArguments::Schema)
+}
+
+/// Exact name first, then the case-insensitive spelling the dispatcher accepts.
+fn find_tool_definition<'a>(
+    defs: &'a [crate::rpc::types::ToolInfo],
+    name: &str,
+) -> Option<&'a crate::rpc::types::ToolInfo> {
+    defs.iter()
+        .find(|definition| definition.name == name)
+        .or_else(|| {
+            defs.iter()
+                .find(|definition| definition.name.eq_ignore_ascii_case(name))
+        })
 }
 
 #[cfg(test)]

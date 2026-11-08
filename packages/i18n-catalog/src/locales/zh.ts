@@ -1016,6 +1016,7 @@ export const zh = {
       argRequired: '{{tool}} 参数无效：缺少 `{{field}}`。',
       argsNotJson: '{{tool}} 参数无效：参数不是合法的 JSON（{{detail}}）。',
       argsNotObject: '{{tool}} 参数无效：参数必须是 JSON 对象。',
+      argsInvalidSchema: '{{tool}} 参数无效：{{detail}}。',
     },
     tui: {
       turnStoppedFiltered: '本轮已停止：供应商安全策略拦截了响应。',

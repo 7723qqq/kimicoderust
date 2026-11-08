@@ -175,7 +175,22 @@ Next slice candidate: the v2 `runtime/` capability layer (`fs/process/watch/term
 
 ## File-level spot checks (v2 `src/tool/*`)
 
-- `args-validator.ts`: v2 JSON-schema validation via Ajv. Rust does not validate args against schema in-engine (recorded divergence; v2 behavior is "reject + reason"; engine only pre-flights parse/unusable object). Keep as TRACKED, not a default.
+- `args-validator.ts`: v2 compiles one Ajv validator per tool and refuses a
+  non-conforming call with `Invalid args for tool "<name>": <detail>`, every
+  error joined by `; `. Ported in `tools/args_validate.rs` as a **guarded
+  subset**: draft 07/2019/2020 selection is irrelevant here because the engine
+  reads one schema at a time and understands the keywords it implements; a
+  keyword it does not implement is ignored, matching Ajv under `strict: false`.
+  The subset cannot silently rot:
+  `every_keyword_the_engines_own_tools_use_is_implemented` walks every built-in
+  tool schema and fails on a keyword that is neither implemented nor an
+  annotation — `format` is deliberately in neither list, because Ajv does
+  enforce it through `addFormats`. Recorded differences: `anyOf`/`oneOf`/`allOf`
+  report the branch verdict instead of Ajv's nested per-branch trace, and an
+  unresolvable external `$ref` is skipped rather than rejected (the engine
+  cannot fetch it). Wired at the same gate as v2, after the swarm guard:
+  `turn_loop/run_turn.rs::unusable_tool_arguments`, pinned end to end by
+  `a_schema_violating_call_is_refused_before_the_tool_runs`.
 - `input-schema.ts`: host/`kosong` side (zod→draft-7), Rust only consumes `input_schema` from wire.
 - `native-glob-match.ts`: Rust native glob matcher exists (`grep_types`/glob logic), behavior parity wired behind Rust tools.
 - `output-accumulator.ts`: Rust `tool_result_truncation.rs::ToolResultTruncator` maps the retained/total budget semantics; matched by tests.
@@ -1312,20 +1327,20 @@ Next slice candidate: the v2 `runtime/` capability layer (`fs/process/watch/term
 | `state/state.ts` | `storage/state_store.rs` (module: Rust counterpart as above) | PARTIAL/NA (DI) | see top-level slice row |
 | `state/stateContribution.ts` | `storage/state_store.rs` (module: Rust counterpart as above) | PARTIAL/NA (DI) | see top-level slice row |
 
-### `tool/` (10 files) — PORTED (tracked: ajv schema validation)
+### `tool/` (10 files) — PORTED (guarded subset: `tools/args_validate.rs`)
 
 | v2 file | Rust counterpart (module boundary) | status | tests |
 |---|---|---|---|
-| `tool/args-validator.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/input-schema.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/native-glob-match.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/output-accumulator.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/path-access.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/result-builder.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/rule-match.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/tool-args-parse.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/toolContract.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/toolInputDisplay.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
+| `tool/args-validator.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/input-schema.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/native-glob-match.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/output-accumulator.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/path-access.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/result-builder.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/rule-match.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/tool-args-parse.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/toolContract.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/toolInputDisplay.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
 
 ### `wire/` (12 files) — PARTIAL/NA journal model
 
@@ -2494,20 +2509,20 @@ Next slice candidate: the v2 `runtime/` capability layer (`fs/process/watch/term
 | `state/state.ts` | `storage/state_store.rs` (module: Rust counterpart as above) | PARTIAL/NA (DI) | see top-level slice row |
 | `state/stateContribution.ts` | `storage/state_store.rs` (module: Rust counterpart as above) | PARTIAL/NA (DI) | see top-level slice row |
 
-### `tool/` (10 files) — PORTED (tracked: ajv schema validation)
+### `tool/` (10 files) — PORTED (guarded subset: `tools/args_validate.rs`)
 
 | v2 file | Rust counterpart (module boundary) | status | tests |
 |---|---|---|---|
-| `tool/args-validator.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/input-schema.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/native-glob-match.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/output-accumulator.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/path-access.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/result-builder.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/rule-match.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/tool-args-parse.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/toolContract.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
-| `tool/toolInputDisplay.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (tracked: ajv schema validation) | see top-level slice row |
+| `tool/args-validator.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/input-schema.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/native-glob-match.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/output-accumulator.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/path-access.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/result-builder.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/rule-match.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/tool-args-parse.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/toolContract.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
+| `tool/toolInputDisplay.ts` | `tools/*` (module: Rust counterpart as above) | PORTED (guarded subset: `tools/args_validate.rs`) | see top-level slice row |
 
 ### `wire/` (12 files) — PARTIAL/NA journal model
 

@@ -8328,6 +8328,101 @@
       "text": "{resume_id}\"), NOT task_id (\"{task_id}\").",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT be valid": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT be valid",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have additional property '{name}'": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have additional property '{name}'",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have fewer than {min} characters": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have fewer than {min} characters",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have fewer than {min} items": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have fewer than {min} items",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have fewer than {min} properties": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have fewer than {min} properties",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have more than {max} characters": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have more than {max} characters",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have more than {max} items": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have more than {max} items",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have more than {max} properties": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have more than {max} properties",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be < {maximum}": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must be < {maximum}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be <= {maximum}": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must be <= {maximum}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be > {minimum}": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must be > {minimum}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be >= {minimum}": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must be >= {minimum}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be equal to constant": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must be equal to constant",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be equal to one of the allowed values": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must be equal to one of the allowed values",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be {}": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must be {}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must have required property '{name}'": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must have required property '{name}'",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must match a schema in anyOf": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must match a schema in anyOf",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must match exactly one schema in oneOf": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must match exactly one schema in oneOf",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must match pattern \"{pattern}\"": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must match pattern \"{pattern}\"",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/tools/ask_user_question.rs:2-4 meaningful, distinct options. Do NOT include an 'Other' option — the system adds one automatically.": {
       "file": "packages/kimi-agent/src/tools/ask_user_question.rs",
       "text": "2-4 meaningful, distinct options. Do NOT include an 'Other' option — the system adds one automatically.",
