@@ -270,6 +270,7 @@ export type KimiErrorCode =
   | 'session.state_invalid'
   | 'session.fork_active_turn'
   | 'session.undo_unavailable'
+  | 'session.stale'
   | 'session.export_not_found'
   | 'session.export_missing_version'
   | 'session.export_output_conflict'
@@ -765,6 +766,11 @@ export interface TurnEndedEvent {
    * host-driven turns that do not run through the engine.
    */
   readonly traceId?: string;
+  /**
+   * v2 `TurnEnded.stopReason` (`loopService.ts:2217`): the reason a tool forced
+   * the turn to stop (`repeat_breaker`). Present only on a completed turn.
+   */
+  readonly stopReason?: string;
 }
 
 /**
@@ -1053,6 +1059,24 @@ export interface PromptSubmittedEvent {
   readonly createdAt: string;
 }
 
+/**
+ * v2 `PromptQueued` (`agent/prompt/promptEvents.ts`): a user prompt joined the
+ * session queue behind the active turn. `queueLength` counts the entries
+ * waiting when it was enqueued, including this one.
+ */
+export interface PromptQueuedEvent {
+  readonly type: 'prompt.queued';
+  readonly promptId: string;
+  readonly content: readonly MessageContent[];
+  readonly queueLength: number;
+}
+
+/** v2 `PromptStarted`: a queued prompt was promoted and its turn launched. */
+export interface PromptStartedEvent {
+  readonly type: 'prompt.started';
+  readonly promptId: string;
+}
+
 export interface PromptCompletedEvent {
   readonly type: 'prompt.completed';
   readonly promptId: string;
@@ -1158,6 +1182,8 @@ export type AgentEvent =
   | BackgroundTaskTerminatedEvent
   | CronFiredEvent
   | PromptSubmittedEvent
+  | PromptQueuedEvent
+  | PromptStartedEvent
   | PromptCompletedEvent
   | PromptAbortedEvent
   | PromptSteeredEvent
@@ -1493,6 +1519,7 @@ export const kimiErrorCodeSchema = z.enum([
   'prompt.id_conflict',
   'prompt.not_found',
   'session.busy',
+  'session.stale',
   'shell.git_bash_not_found',
   'workspace.not_found',
   'terminal.not_found',
@@ -1858,6 +1885,7 @@ export const turnEndedEventSchema = z.object({
   durationMs: z.number().optional(),
   interruptReason: turnInterruptReasonSchema.optional(),
   traceId: z.string().optional(),
+  stopReason: z.string().optional(),
 }) satisfies z.ZodType<TurnEndedEvent>;
 
 export const turnCancelEventSchema = z.object({
@@ -2090,6 +2118,18 @@ export const promptSubmittedEventSchema = z.object({
   createdAt: isoDateTimeSchema,
 }) satisfies z.ZodType<PromptSubmittedEvent>;
 
+export const promptQueuedEventSchema = z.object({
+  type: z.literal('prompt.queued'),
+  promptId: z.string(),
+  content: z.array(messageContentSchema),
+  queueLength: z.number(),
+}) satisfies z.ZodType<PromptQueuedEvent>;
+
+export const promptStartedEventSchema = z.object({
+  type: z.literal('prompt.started'),
+  promptId: z.string(),
+}) satisfies z.ZodType<PromptStartedEvent>;
+
 export const promptCompletedEventSchema = z.object({
   type: z.literal('prompt.completed'),
   promptId: z.string(),
@@ -2199,6 +2239,8 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   backgroundTaskTerminatedEventSchema,
   cronFiredEventSchema,
   promptSubmittedEventSchema,
+  promptQueuedEventSchema,
+  promptStartedEventSchema,
   promptCompletedEventSchema,
   promptAbortedEventSchema,
   promptSteeredEventSchema,

@@ -93,6 +93,8 @@ describe('normalizeEngineTurnId', () => {
 interface SeenEvent {
   readonly type: string;
   readonly turnId: unknown;
+  /** The whole event, for assertions about the payload v2 declares. */
+  readonly event: Event;
 }
 
 describe('turn ids in the events the SDK emits', () => {
@@ -108,7 +110,7 @@ describe('turn ids in the events the SDK emits', () => {
     harness = createKimiHarnessNative({ homeDir, identity: TEST_IDENTITY });
     const session = await harness.createSession({ workDir: homeDir });
     session.onEvent((event: Event) => {
-      seen.push({ type: event.type, turnId: (event as { turnId?: unknown }).turnId });
+      seen.push({ type: event.type, turnId: (event as { turnId?: unknown }).turnId, event });
     });
   });
 
@@ -192,5 +194,53 @@ describe('turn ids in the events the SDK emits', () => {
       ['turn.step.started', 9],
       ['turn.ended', 9],
     ]);
+  });
+
+  it('projects the step payload v2 declares', () => {
+    turnEvent({ type: 'turn.started', turn_id: 'turn-5', origin: { kind: 'user' } });
+    emitEvent({ type: 'llm.step.begin', step: 1, step_id: 'turn-5-step-1' });
+    emitEvent({
+      type: 'llm.step.retrying',
+      step: 1,
+      step_id: 'turn-5-step-1',
+      failed_attempt: 1,
+      next_attempt: 2,
+      max_attempts: 10,
+      delay_ms: 500,
+      error_name: 'RateLimitError',
+      error_message: 'llm http status 429',
+      status_code: 429,
+    });
+    emitEvent({
+      type: 'llm.step.end',
+      turn_id: 'turn-5',
+      step: 1,
+      step_id: 'turn-5-step-1',
+      finish_reason: 'stop',
+      provider_finish_reason: 'stop',
+      raw_finish_reason: 'end_turn',
+    });
+    turnEvent({ type: 'turn.ended', reason: 'completed' });
+
+    const byType = (type: string): Event | undefined =>
+      seen.find((entry) => entry.type === type)?.event;
+    expect(byType('turn.step.started')).toMatchObject({ stepId: 'turn-5-step-1' });
+    expect(byType('turn.step.retrying')).toMatchObject({
+      turnId: 5,
+      step: 1,
+      stepId: 'turn-5-step-1',
+      failedAttempt: 1,
+      nextAttempt: 2,
+      maxAttempts: 10,
+      delayMs: 500,
+      errorName: 'RateLimitError',
+      errorMessage: 'llm http status 429',
+      statusCode: 429,
+    });
+    expect(byType('turn.step.completed')).toMatchObject({
+      stepId: 'turn-5-step-1',
+      providerFinishReason: 'stop',
+      rawFinishReason: 'end_turn',
+    });
   });
 });

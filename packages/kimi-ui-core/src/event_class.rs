@@ -127,7 +127,6 @@ pub const PROJECTED_EVENTS: &[&str] = &[
     "turn.ended",
     "assistant.delta",
     "thinking.delta",
-    "turn.step.stream_reset",
     "stream.segment",
     "llm.delta",
     "tool.call.started",

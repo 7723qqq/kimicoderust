@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import type { EngineSessionHandle, SessionPrompt } from '@moonshot-ai/kimi-agent/session-handle';
@@ -618,6 +618,38 @@ export function normalizeRequiredWorkDir(operation: string, workDir: unknown): s
     throw new KimiError(ErrorCodes.REQUEST_WORK_DIR_REQUIRED, `${operation} requires workDir`);
   }
   return posixPath(resolve(workDir));
+}
+
+/**
+ * v2 `sessionManagerService.assertUsableWorkDir`: a local session root must
+ * exist and be a directory. A missing or non-directory literal path is
+ * retried through `realpath` before failing, so a platform alias that only
+ * resolves to a directory is accepted.
+ */
+export function assertUsableWorkDir(workDir: string): void {
+  let isDirectory: boolean;
+  try {
+    isDirectory = statSync(workDir).isDirectory();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      throw new KimiError(ErrorCodes.FS_PATH_NOT_FOUND, `workspace root ${workDir} does not exist`);
+    }
+    throw error;
+  }
+  if (!isDirectory) {
+    try {
+      isDirectory = statSync(realpathSync(workDir)).isDirectory();
+    } catch {
+      // Keep the literal result; the failure below reports it.
+    }
+  }
+  if (!isDirectory) {
+    throw new KimiError(
+      ErrorCodes.FS_PATH_NOT_FOUND,
+      `workspace root ${workDir} is not a directory`,
+    );
+  }
 }
 
 /**

@@ -32,6 +32,7 @@ export const ErrorCodes = {
   SESSION_QUESTION_HANDLER_ERROR: 'session.question_handler_error',
   SESSION_INIT_FAILED: 'session.init_failed',
   SESSION_BUSY: 'session.busy',
+  SESSION_STALE: 'session.stale',
   SESSION_UNDO_UNAVAILABLE: 'session.undo_unavailable',
 
   AGENT_NOT_FOUND: 'agent.not_found',
@@ -80,6 +81,7 @@ export const ErrorCodes = {
   REQUEST_PROMPT_INPUT_EMPTY: 'request.prompt_input_empty',
 
   SHELL_GIT_BASH_NOT_FOUND: 'shell.git_bash_not_found',
+  FS_PATH_NOT_FOUND: 'fs.path_not_found',
 
   NOT_IMPLEMENTED: 'not_implemented',
   INTERNAL: 'internal',
@@ -172,7 +174,12 @@ export const KIMI_ERROR_INFO = {
     public: true,
     action: 'Check the requested count against the available user turns.',
   },
-
+  'session.stale': {
+    title: 'Session was updated by another client',
+    retryable: false,
+    public: true,
+    action: 'Reload the session to load the latest updates, then retry.',
+  },
   'session.export_not_found': {
     title: 'Session export directory missing',
     retryable: false,
@@ -471,7 +478,12 @@ export const KIMI_ERROR_INFO = {
     public: true,
     action: 'Install Git for Windows from https://gitforwindows.org/ or set KIMI_SHELL_PATH to a bash.exe.',
   },
-
+  'fs.path_not_found': {
+    title: 'Path not found',
+    retryable: false,
+    public: true,
+    action: 'Check the path exists and is a directory.',
+  },
   not_implemented: {
     title: 'Not implemented',
     retryable: false,

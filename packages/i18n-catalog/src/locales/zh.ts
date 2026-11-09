@@ -535,7 +535,7 @@ export const zh = {
       enterFailed: '进入计划模式失败。',
       enterFailedDetail: '进入计划模式失败: {{message}}',
       exitOnlyInPlanMode:
-        'ExitPlanMode 只能在计划模式激活时调用。请先使用 EnterPlanMode（或 /plan）。',
+        'ExitPlanMode 只能在计划模式激活时调用。只有用户可以开启计划模式。',
       exitFailed: '退出计划模式失败。',
       exitFailedDetail: '退出计划模式失败: {{message}}',
       readFailed: '读取计划文件失败。',
@@ -776,9 +776,11 @@ export const zh = {
     compaction: {
       cancelled: '压缩已取消',
       emptySummary: '压缩响应中没有可用的摘要。',
+      truncated: '压缩响应在生成完整摘要前被截断。',
       overflowFailed: '压缩在 {{max_attempts}} 次尝试后仍未能将上下文降至模型窗口以下。',
     },
     permission: {
+    compactionAuthorizationRequired: '压缩需要授权。',
       autoModeCannotAsk: '自动模式无法提出交互式问题',
       deniedByUserRule: '已被用户规则拒绝：{{rule}}：{{why}}',
       deniedByUserRuleNoWhy: '已被用户规则拒绝：{{rule}}',
@@ -804,9 +806,27 @@ export const zh = {
     tools: {
       memoryAction: 'Memory: {{action}}',
       unknownMemoryAction: '未知的 memory 操作: {{action}}',
+      sandbox: {
+        writeBlockedReadOnly:
+          '沙箱模式 "{{mode}}" 禁止写入文件系统。设置 `[sandbox] mode = "off"`（或 "workspace-write"）以允许写入。',
+        writeBlockedOutsideWorkspace:
+          '沙箱模式 "{{mode}}" 禁止在工作区根目录 "{{workspace}}" 之外写入。目标路径 "{{path}}" 在其之外。',
+        codeExecutionBlocked:
+          '沙箱模式 "{{mode}}" 禁止代码执行（run_code）。设置 `[sandbox] mode = "off"` 以允许执行。',
+        toolBlockedReadOnly:
+          '沙箱模式 "{{mode}}" 只允许只读工具；"{{tool}}" 可能修改文件或系统状态，已被拒绝。设置 `[sandbox] mode = "off"` 以允许。',
+        toolBlockedUndeclared:
+          '沙箱模式 "{{mode}}" 拒绝 "{{tool}}"，因为该工具未声明是否有副作用（fail closed）。设置 `[sandbox] mode = "off"` 以允许。',
+        shellBlockedReadOnly:
+          '沙箱模式 "{{mode}}" 拒绝 shell 命令（"{{tool}}"），因为无法证明 shell 命令无写入。设置 `[sandbox] mode = "off"` 以运行 shell 命令。',
+        shellBlockedNoBackend:
+          '沙箱模式 "{{mode}}" 需要操作系统沙箱后端来限制 shell 命令（"{{tool}}"），但当前主机不可用 —— 拒绝运行（fail closed）。设置 `[sandbox] mode = "off"` 以无沙箱运行。',
+        writeBlockedUnverifiable:
+          '沙箱模式 "{{mode}}" 只允许工作区内的文件写入；"{{tool}}" 未声明写入哪些文件，已被拒绝（fail closed）。设置 `[sandbox] mode = "off"` 以允许。',
+      },
       // 原生文件工具与 Bash 的失败面——用户出问题时会停下来读的那些文案。
       // 信息性页脚（"Total lines in file"、"Showing matches" 等）暂不在此列。
-      disabled: "工具 '{{tool_name}}' 已被 [tools] 配置禁用，无法运行。",
+      disabled: '工具 "{{tool_name}}" 已被当前工具策略禁用',
       read: {
         pathRequired: '"path" 为必填项，且必须是字符串。',
         lineOffsetInvalid: '"line_offset" 必须是整数，当前值为 {{v}}。',
@@ -817,6 +837,7 @@ export const zh = {
         notAFile: '"{{path}}" 不是文件。',
         cannotOpen: '"{{path}}" 无法打开。',
         cannotRead: '"{{path}}" 无法读取。',
+        cannotReadDetail: '无法读取 "{{path}}"：{{e}}。',
         notUtf8: '"{{path}}" 不是可读的 UTF-8 文本，只能读取文本文件。',
         notUtf8Or16:
           '"{{path}}" 不是有效的 UTF-8 或 UTF-16 文本，只能读取这两种编码的文件；其他编码（如 GBK）需先转换为 UTF-8（例如使用 `iconv`）。',
@@ -841,10 +862,17 @@ export const zh = {
         filteredSensitive: '已过滤 {{filtered_sensitive}} 个敏感文件。',
         noMoreMatches: '当前结果集中 offset={{offset}} 处已无更多匹配（共 {{total}} 个匹配）。',
         noFilesMatched: '没有文件匹配 {{pattern}}',
+        unreadable: '有 {{count}} 个文件无法读取，已跳过：{{list}}。匹配结果可能不完整。',
+        walkErrors: '搜索期间有 {{count}} 个路径无法遍历，匹配结果可能不完整。',
+        lossyUtf8:
+          '有 {{count}} 个命中文件包含非法 UTF-8，已用替换字符解码；跨越被替换序列的匹配可能被漏掉。',
       },
       glob: {
         patternRequired: '"pattern" 为必填项，且必须是字符串。',
         pathNotExist: '"{{p}}" 不存在。',
+        walkErrors: '遍历期间有 {{count}} 个路径无法访问，文件列表可能不完整。',
+        walkTruncated:
+          '遍历在 {{entries}} 个条目或 {{seconds}} 秒处停止，当前结果不完整。请缩小 pattern 或 path。',
         // 与 en 同：分页结果报告是 fork 自有文案（v2 的 glob 无对应物），
         // 而紧邻它的两行续页提示保持英文——那是告诉模型怎么驱动工具，属于协议而非界面。
         showingMatches: '显示第 {{from}}–{{to}} 条匹配，共 {{total}} 条。',
@@ -863,16 +891,27 @@ export const zh = {
         outsideWorkspace: '"{{path}}" 在工作区之外，无法编辑。',
         notExist: '"{{path}}" 不存在。',
         notUtf8: '"{{path}}" 不是可读的 UTF-8 文本，只能编辑文本文件。',
+        cannotReadDetail: '无法读取 "{{path}}"：{{e}}。',
         oldStringNotFound: '在 {{path}} 中找不到 old_string',
         oldStringMatchedMultiple:
           'old_string 在 {{path}} 中匹配了 {{occurrence_count}} 次（预期恰好 1 次；请扩大字符串范围或传入 replace_all）',
         cannotWrite: '"{{path}}" 写入失败：{{error}}',
-        edited: '已编辑 {{display}}',
+        edited: '已编辑 {{path}}（{{occurrence_count}} {{occurrence_word}}）',
       },
       bash: {
         commandFailed: '命令执行失败：{{e}}',
+        cwdUnavailable: '无法解析工作目录 "{{cwd}}"：{{e}}',
+        waitFailed: '命令已启动，但等待其结束失败：{{e}}',
+        killedBySignal: '命令被信号 {{signal}} 终止。',
+        terminatedBySignalUnknown: '命令被信号终止。',
         timedOut: '超时：{{command}}',
         killedByTimeout: '命令因超时被终止（{{timeout_s}} 秒）',
+        outputTruncated:
+          '输出已在 {{mib}} MiB 处截断，另有 {{bytes}} 字节被丢弃。请将大量输出重定向到文件（例如 `command > out.txt`）后分段读取。',
+        outputReadFailed: '无法读取命令输出流：{{e}}。上面的输出可能不完整。',
+        backgroundStartFailed:
+          '命令在 {{timeout_s}} 秒后超时，但无法转入后台：{{e}}。命令已被停止。',
+        backgroundStartRefused: '后台任务无法启动：{{e}}。',
       },
       // `AgentSwarm` 的启动形态校验失败文案（v2 `createAgentSwarmSpecs`）。
       // 用户和模型都会读到的结果文本，因此本地化；工具描述刻意保持英文——
@@ -974,7 +1013,24 @@ export const zh = {
         statsFailed: '知识库统计失败：{{e}}',
         importFailed: '知识库导入失败：{{e}}',
       },
+      listDirectory: {
+        unreadableEntries: '（{{count}} 个条目无法读取）',
+      },
       memory: {
+        writtenNotCommitted: '记忆条目 "{{title}}"（{{type}}）已写入 {{path}}，但尚未提交。',
+        writeNeedsReference: '写入 {{path}} 需要引用一个已存在的条目。',
+        mainAgentOnly: '记忆工具仅主代理可用。',
+        associativeMemoryEnabled: '联想记忆已开启。开启期间记忆工具不可用。',
+        deletedNotCommitted: '记忆条目 {{path}} 已删除但尚未提交。',
+        logHeader: '记忆历史（{{count}} 次提交）：',
+        logLine: '{{sha}} {{date}} {{message}}',
+        revertFailed: '回退到 {{sha}} 失败。',
+        reverted: '已回退到 {{sha}}。',
+        searchQueryRequired: 'Search 需要 `query` 参数。',
+        noEntriesFound: '未找到匹配查询的记忆条目："{{query}}"',
+        foundEntries: '找到 {{count}} 条记忆：\n',
+        writtenCommitted: '记忆已写入 {{path}}（sha {{sha}}）\ntitle: {{title}}\ntype: {{type}}',
+        writtenCommittedUnknownSha: '记忆已写入 {{path}}\ntitle: {{title}}\ntype: {{type}}',
         readPathRequired: '读取需要 `path` 参数。',
         notFound: '未找到 memory 文件: {{path}}',
         writePathRequired: '写入需要 `path` 参数（文件名）。',
@@ -1007,6 +1063,7 @@ export const zh = {
       boolInvalid: '"{{key}}" 必须是布尔值，当前值为 {{value}}。',
       nonNegativeIntInvalid: '"{{key}}" 必须是非负整数，当前值为 {{value}}。',
       argMustBeString: '{{tool}} 参数无效：`{{field}}` 必须是字符串。',
+      argMissing: '{{tool}} 参数无效：缺少必填项 `{{field}}`。',
       argMustBeBoolean: '{{tool}} 参数无效：`{{field}}` 必须是布尔值。',
       argMustBeNumber: '{{tool}} 参数无效：`{{field}}` 必须是数字。',
       argMustBeArray: '{{tool}} 参数无效：`{{field}}` 必须是数组。',

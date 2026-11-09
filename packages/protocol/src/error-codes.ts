@@ -117,6 +117,8 @@ export const ErrorCode = {
   PROMPT_ID_CONFLICT: 40927,
   /** remote control 已在运行，拒绝重复启动 */
   REMOTE_CONTROL_ALREADY_RUNNING: 40928,
+  /** session journal 已被另一个 client 写入，当前视图过期，需重载后再继续（v2 `session.stale`） */
+  SESSION_STALE: 40932,
 
   /** approval 60s 超时 */
   APPROVAL_EXPIRED: 41001,
@@ -223,6 +225,7 @@ export const ErrorCodeReason: Readonly<Record<ErrorCode, string>> = {
   [ErrorCode.PROVIDER_ALREADY_EXISTS]: 'provider.already_exists',
   [ErrorCode.PROMPT_ID_CONFLICT]: 'prompt.id_conflict',
   [ErrorCode.REMOTE_CONTROL_ALREADY_RUNNING]: 'remote_control.already_running',
+  [ErrorCode.SESSION_STALE]: 'session.stale',
 
   [ErrorCode.APPROVAL_EXPIRED]: 'approval.expired',
   [ErrorCode.QUESTION_EXPIRED]: 'question.expired',

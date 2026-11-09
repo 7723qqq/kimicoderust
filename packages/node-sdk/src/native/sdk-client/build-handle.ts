@@ -6,13 +6,14 @@ import type {
   CronJobOrigin,
   GoalSnapshot as ProtocolGoalSnapshot,
   TaskInfo,
+  TurnInterruptReason,
   TurnSteerEvent,
 } from '@moonshot-ai/protocol';
 
 import { type AgentFileDefinition } from '#/agent-file';
 import type { KimiAuthFacade } from '#/auth';
 import { loadRuntimeConfigLenient } from '#/config-local';
-import { ErrorCodes, KimiError } from '#/error-protocol';
+import { ErrorCodes, KimiError, normalizeNapiError, wrapNapiHandle } from '#/error-protocol';
 import type { QuestionItem, ToolInputDisplay } from '#/events';
 import { type SetSessionPlanModeRpcInput } from '#/rpc';
 
@@ -312,6 +313,23 @@ export async function buildSessionHandle(
           type: 'turn.step.started',
           turnId: meta.currentTurnId,
           step: stepSeq,
+          ...(typeof parsed.step_id === 'string' ? { stepId: parsed.step_id } : {}),
+        });
+      } else if (parsed.type === 'llm.step.retrying') {
+        deps.receiveEvent({
+          sessionId,
+          agentId: eventAgentId,
+          type: 'turn.step.retrying',
+          turnId: meta.currentTurnId,
+          step: stepSeq,
+          ...(typeof parsed.step_id === 'string' ? { stepId: parsed.step_id } : {}),
+          failedAttempt: Number(parsed.failed_attempt ?? 0),
+          nextAttempt: Number(parsed.next_attempt ?? 0),
+          maxAttempts: Number(parsed.max_attempts ?? 0),
+          delayMs: Number(parsed.delay_ms ?? 0),
+          errorName: String(parsed.error_name ?? ''),
+          errorMessage: String(parsed.error_message ?? ''),
+          ...(typeof parsed.status_code === 'number' ? { statusCode: parsed.status_code } : {}),
         });
       } else if (parsed.type === 'llm.step.interrupted') {
         // v2 `TurnStepInterrupted` (loopService.ts:2301-2313): a step that
@@ -327,6 +345,7 @@ export async function buildSessionHandle(
           // The engine numbers steps from zero; the protocol ordinal matches
           // the turn.step.started this closes, which is stepSeq.
           step: stepSeq,
+          ...(typeof parsed.step_id === 'string' ? { stepId: parsed.step_id } : {}),
           reason: String(parsed.reason ?? 'error'),
           ...(typeof parsed.message === 'string' && parsed.message.length > 0
             ? { message: parsed.message }
@@ -367,9 +386,16 @@ export async function buildSessionHandle(
             type: 'turn.step.completed',
             turnId: meta.currentTurnId,
             step: stepSeq,
+            ...(typeof parsed.step_id === 'string' ? { stepId: parsed.step_id } : {}),
             ...(usage !== undefined ? { usage } : {}),
             ...(typeof parsed.finish_reason === 'string'
               ? { finishReason: parsed.finish_reason }
+              : {}),
+            ...(typeof parsed.provider_finish_reason === 'string'
+              ? { providerFinishReason: parsed.provider_finish_reason }
+              : {}),
+            ...(typeof parsed.raw_finish_reason === 'string'
+              ? { rawFinishReason: parsed.raw_finish_reason }
               : {}),
             ...(firstTokenLatencyMs !== undefined
               ? { llmFirstTokenLatencyMs: firstTokenLatencyMs }
@@ -975,9 +1001,19 @@ export async function buildSessionHandle(
           ...((parsed.durationMs ?? parsed.duration_ms)
             ? { durationMs: parsed.durationMs ?? parsed.duration_ms }
             : {}),
+          // v2 `turn.ended`: why a non-completed turn was interrupted and, for
+          // the repeat breaker, the forced stop reason.
+          ...(typeof parsed.interruptReason === 'string'
+            ? { interruptReason: parsed.interruptReason as TurnInterruptReason }
+            : {}),
+          ...(typeof parsed.stopReason === 'string' ? { stopReason: parsed.stopReason } : {}),
           // v2 #3907: the survey payload ties a rating to the exact turn via
           // this id (engine-minted `turn-<id>`).
-          ...(parsed.trace_id ? { traceId: parsed.trace_id } : {}),
+          ...(typeof parsed.traceId === 'string'
+            ? { traceId: parsed.traceId }
+            : parsed.trace_id
+              ? { traceId: parsed.trace_id }
+              : {}),
         });
         const probe = cacheAgg.settle();
         if (probe !== undefined) {
@@ -1240,5 +1276,10 @@ export async function buildSessionHandle(
     },
   };
 
-  return EngineSessionHandle.create(params, { ...callbacks, authToken });
+  try {
+    const handle = await EngineSessionHandle.create(params, { ...callbacks, authToken });
+    return wrapNapiHandle(handle);
+  } catch (error) {
+    throw normalizeNapiError(error);
+  }
 }

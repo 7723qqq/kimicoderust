@@ -82,7 +82,6 @@ export const serverHelloPayloadSchema = z.object({
    * advisory and not require it.
    */
   heartbeat_ms: z.number().int().positive().optional(),
-  max_event_buffer_size: z.number().int().positive(),
   capabilities: z.object({
     event_batching: z.boolean(),
     compression: z.boolean(),

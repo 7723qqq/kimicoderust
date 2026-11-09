@@ -201,6 +201,7 @@ import {
   posixPath,
   expandCommandArguments,
   normalizeRequiredWorkDir,
+  assertUsableWorkDir,
   assertSessionIdSegment,
   MAX_TITLE_LENGTH,
   promptMetadataTextFromText,
@@ -340,6 +341,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
 
   override async createSession(input: CreateSessionOptions): Promise<SessionSummary> {
     const workDir = normalizeRequiredWorkDir('createSession', input.workDir);
+    assertUsableWorkDir(workDir);
     // A client-chosen id becomes the session directory name; reject anything
     // that is not a single path segment before it reaches join().
     if (input.id !== undefined) assertSessionIdSegment(input.id);

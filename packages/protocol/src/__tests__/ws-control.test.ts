@@ -162,7 +162,6 @@ describe('ws-control — §3.1 server_hello', () => {
         ws_connection_id: 'conn_local',
         protocol_version: 2,
         heartbeat_ms: 30000,
-        max_event_buffer_size: 1000,
         capabilities: { event_batching: false, compression: false },
       },
     });
@@ -176,7 +175,6 @@ describe('ws-control — §3.1 server_hello', () => {
       payload: {
         ws_connection_id: 'conn_local',
         protocol_version: 2,
-        max_event_buffer_size: 1000,
         capabilities: { event_batching: false, compression: false },
       },
     });
@@ -190,7 +188,6 @@ describe('ws-control — §3.1 server_hello', () => {
       payload: {
         ws_connection_id: 'conn_local',
         heartbeat_ms: 30000,
-        max_event_buffer_size: 1000,
         capabilities: { event_batching: false, compression: false },
       },
     });
@@ -205,7 +202,6 @@ describe('ws-control — §3.1 server_hello', () => {
         ws_connection_id: 'conn_local',
         protocol_version: 2,
         heartbeat_ms: 30000,
-        max_event_buffer_size: 1000,
       },
     });
     expect(result.success).toBe(false);

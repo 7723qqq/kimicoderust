@@ -7,6 +7,7 @@ export {
   type KimiErrorInfo,
 } from './error-codes';
 export { KimiError, type KimiErrorOptions } from './kimi-error';
+export { decodeNapiEnvelope, normalizeNapiError, wrapNapiHandle } from './napi-envelope';
 export {
   fromKimiErrorPayload,
   isKimiError,

@@ -1,6 +1,5 @@
 /**
  *   GET    /v1/models                    -     data: ListModelsResponse
- *                                              (alias: GET /v1/model-catalog)
  *   GET    /v1/providers                 -     data: ListProvidersResponse
  *   POST   /v1/providers                 body: CreateProviderRequest
  *                                        data: CreateProviderResponse (HTTP 201)
