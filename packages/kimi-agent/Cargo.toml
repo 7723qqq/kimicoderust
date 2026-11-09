@@ -20,11 +20,11 @@ required-features = ["cli"]
 default = ["napi", "workflow-js"]
 napi = ["dep:napi", "dep:napi-derive"]
 cli = []
-# The Workflow tool's embedded JS engine (QuickJS via rquickjs). On by default
-# so built-in workflow scripts run; `--no-default-features --features cli`
-# yields a pure-Rust build with no C dependency, where `run` reports the engine
-# is unavailable while `list`/`status`/`cancel` keep working.
-workflow-js = ["dep:rquickjs"]
+# The Workflow tool's embedded JS engine. QuickJS (rquickjs) is a hard
+# dependency: JSON Schema `pattern` validation compiles and runs patterns
+# through QuickJS so matching follows Ajv's JS `RegExp` semantics in every
+# build, including `--no-default-features`.
+workflow-js = []
 
 [dependencies]
 napi = { version = "2", features = ["async", "tokio_rt", "napi8", "serde"], optional = true }
@@ -34,7 +34,7 @@ serde_json = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 fastrand = "2"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "io-util", "io-std", "process", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "io-util", "io-std", "process", "time", "fs"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
@@ -61,6 +61,11 @@ ignore = "0.4"
 once_cell = "1"
 scraper = "0.22"
 url = "2"
+# The memory search tokenizer mirrors v2's NFKC folding. Already in the
+# dependency graph through `url` → `idna` → `idna_adapter`; matching that
+# feature set (baked data only, no UTF-16 helpers) keeps the lockfile
+# unchanged.
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -76,7 +81,7 @@ ureq = { version = "2", features = ["json"] }
 parking_lot = "0.12"
 async-trait = "0.1"
 which = "6.0"
-rquickjs = { version = "0.9", features = ["full-async", "futures", "macro", "array-buffer"], optional = true }
+rquickjs = { version = "0.9", features = ["full-async", "futures", "macro", "array-buffer"] }
 portable-pty = "0.9"
 # Plugin archives: a catalog `source` that is a GitHub repo or a zip URL is
 # downloaded and extracted into the managed plugin root.
@@ -85,6 +90,7 @@ serde_yaml = { version = "0.9", default-features = false }
 # Shared UI contract vocabulary (EntryId / EntryOp / stream-segment types;
 # design reports/design/RUST-UI-DECOUPLING.md). engine → shared direction.
 kimi-ui-core = { path = "../kimi-ui-core" }
+kimi-core = { path = "../kimi-core" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -93,8 +99,12 @@ libc = "0.2"
 napi-build = "2"
 
 [dev-dependencies]
+kimi-core = { path = "../kimi-core", features = ["test-util"] }
 serde_json = "1"
 tempfile = "3"
+# `#[tokio::test(start_paused = true)]` for tests that would otherwise sleep out
+# a retry/backoff delay (`turn_loop/turn_step.rs`).
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 lto = true

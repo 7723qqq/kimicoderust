@@ -1319,8 +1319,10 @@ dependencies = [
  "getrandom 0.4.3",
  "globset",
  "httparse",
+ "icu_normalizer",
  "ignore",
  "image",
+ "kimi-core",
  "kimi-ui-core",
  "libc",
  "memchr",
@@ -1356,6 +1358,18 @@ dependencies = [
  "which",
  "whoami",
  "zip",
+]
+
+[[package]]
+name = "kimi-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

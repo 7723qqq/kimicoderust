@@ -1,0 +1,16 @@
+[package]
+name = "kimi-core"
+version = "0.1.0"
+edition = "2024"
+description = "Leaf types and primitives of the Rust agent engine: errors, environment probing, turn events, frontmatter, tool display metadata."
+
+[features]
+test-util = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["time", "sync"] }
+tracing = "0.1"
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }

@@ -97,11 +97,14 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const CRATE_SRC = join(ROOT, 'packages', 'kimi-agent', 'src');
+const CRATE_ROOTS = [
+  { abs: join(ROOT, 'packages', 'kimi-agent', 'src'), rel: 'packages/kimi-agent/src', rootModule: 'lib' },
+  { abs: join(ROOT, 'packages', 'kimi-core', 'src'), rel: 'packages/kimi-core/src', rootModule: 'kimi_core' },
+];
 const BASELINE = join(ROOT, 'scripts', 'rust-module-deps-baseline.json');
 
 const BASELINE_NOTE =
-  'Intra-crate module dependency graph of packages/kimi-agent, keyed `from -> to` at ' +
+  'Module dependency graph of packages/kimi-agent and packages/kimi-core, keyed `from -> to` at ' +
   'top-level-module granularity. Two-way ratchet: a new unrecorded pair fails, and so does a ' +
   'recorded one that is gone. Re-record with `bun run check:rust-module-deps -- --update`; see ' +
   'the script header for the extraction rules and the blind spots.';
@@ -223,11 +226,18 @@ const moduleOf = (relPath) => {
   return head.endsWith('.rs') ? head.slice(0, -3) : head;
 };
 
+const moduleOfFile = (root, file) => {
+  const rel = relative(root.abs, file).split('\\').join('/');
+  return rel === 'lib.rs' || rel === 'main.rs' ? root.rootModule : moduleOf(rel);
+};
+
 // ── extraction ──────────────────────────────────────────────────────────────
 
 const IDENT = /[A-Za-z_][A-Za-z0-9_]*/y;
 const USE_CRATE = /\buse\s+crate\s*::\s*/g;
 const INLINE_CRATE = /(?:^|[^:\w$])crate\s*::\s*([A-Za-z_][A-Za-z0-9_]*)/g;
+const USE_KIMI_CORE = /\buse\s+kimi_core\s*::\s*/g;
+const INLINE_KIMI_CORE = /(?:^|[^:\w$])kimi_core\s*::\s*([A-Za-z_][A-Za-z0-9_]*)/g;
 
 /** The idents at the top level of a `{…}` use-group, resolving nested groups to their top segment. */
 function groupTargets(text, openIdx) {
@@ -272,34 +282,44 @@ function groupTargets(text, openIdx) {
  * Every `crate::<mod>` reference in one module's source, as target -> line numbers.
  * Pure over its inputs so the extractor's own cases below can pin it.
  */
-function extractFromSource(src, modules, from) {
+function extractFromSource(src, ownModules, from, coreModules = ownModules) {
   const code = stripNonCode(src);
   const found = new Map();
-  const push = (target, index) => {
-    if (!modules.has(target) || target === from) return;
+  const push = (target, index, pool) => {
+    if (!pool.has(target) || target === from) return;
     const line = countNewlines(code.slice(0, index)) + 1;
     const lines = found.get(target) ?? [];
     if (!lines.includes(line)) lines.push(line);
     found.set(target, lines);
   };
 
-  USE_CRATE.lastIndex = 0;
   let m;
-  while ((m = USE_CRATE.exec(code)) !== null) {
-    const at = m.index + m[0].length;
-    if (code[at] === '{') {
-      const { targets, end } = groupTargets(code, at);
-      for (const target of targets) push(target, m.index);
-      USE_CRATE.lastIndex = end;
-      continue;
+  for (const [useRe, pool] of [
+    [USE_CRATE, ownModules],
+    [USE_KIMI_CORE, coreModules],
+  ]) {
+    useRe.lastIndex = 0;
+    while ((m = useRe.exec(code)) !== null) {
+      const at = m.index + m[0].length;
+      if (code[at] === '{') {
+        const { targets, end } = groupTargets(code, at);
+        for (const target of targets) push(target, m.index, pool);
+        useRe.lastIndex = end;
+        continue;
+      }
+      IDENT.lastIndex = at;
+      const ident = IDENT.exec(code);
+      if (ident) push(ident[0], m.index, pool);
     }
-    IDENT.lastIndex = at;
-    const ident = IDENT.exec(code);
-    if (ident) push(ident[0], m.index);
   }
 
-  INLINE_CRATE.lastIndex = 0;
-  while ((m = INLINE_CRATE.exec(code)) !== null) push(m[1], m.index);
+  for (const [inlineRe, pool] of [
+    [INLINE_CRATE, ownModules],
+    [INLINE_KIMI_CORE, coreModules],
+  ]) {
+    inlineRe.lastIndex = 0;
+    while ((m = inlineRe.exec(code)) !== null) push(m[1], m.index, pool);
+  }
 
   return found;
 }
@@ -331,6 +351,22 @@ const EXTRACTOR_CASES = [
   { why: 'raw string literal does not count', src: 'let s = r#"crate::alpha::Thing"#;', expect: [] },
   { why: 'macro metavariable does not count', src: '$crate::alpha!(x);', expect: [] },
   { why: 'a different crate does not count', src: 'mycrate::alpha::go();', expect: [] },
+  {
+    why: 'a core-crate use statement counts',
+    src: 'use kimi_core::alpha::Thing;',
+    expect: ['m -> alpha'],
+  },
+  {
+    why: 'a core-crate use group counts',
+    src: 'use kimi_core::{beta, gamma::types::X};',
+    expect: ['m -> beta', 'm -> gamma'],
+  },
+  {
+    why: 'a core-crate inline path counts',
+    src: 'let x = kimi_core::delta::Thing;',
+    expect: ['m -> delta'],
+  },
+  { why: 'a lookalike core prefix does not count', src: 'mykimi_core::alpha::go();', expect: [] },
   { why: 'inline path counts', src: 'let x = crate::delta::Thing::new();', expect: ['m -> delta'] },
   {
     why: 'repeated inline sites collapse to one pair',
@@ -399,23 +435,55 @@ function checkLiveTree(found) {
 }
 
 function collectGraph() {
-  const files = [...walk(CRATE_SRC)];
-  const modules = new Set(files.map((file) => moduleOf(relative(CRATE_SRC, file).split('\\').join('/'))));
+  const roots = CRATE_ROOTS.map((root) => ({
+    ...root,
+    files: [...walk(root.abs)],
+  }));
+  const modulesByRoot = new Map();
+  const moduleOwner = new Map();
+  const problems = [];
+  for (const root of roots) {
+    const own = new Set();
+    for (const file of root.files) {
+      const mod = moduleOfFile(root, file);
+      own.add(mod);
+      const owner = moduleOwner.get(mod);
+      if (owner !== undefined && owner !== root.rel) {
+        problems.push(
+          `top-level module '${mod}' exists under both ${owner} and ${root.rel}; the graph would ` +
+            `merge two distinct modules, so rename one before recording a baseline`,
+        );
+        continue;
+      }
+      moduleOwner.set(mod, root.rel);
+    }
+    modulesByRoot.set(root.rel, own);
+  }
+  const modules = new Set(moduleOwner.keys());
+  const coreRoot = CRATE_ROOTS.find((root) => root.rootModule === 'kimi_core');
+  const coreRel = coreRoot ? coreRoot.rel : CRATE_ROOTS[0].rel;
   const sites = new Map();
   let siteCount = 0;
-  for (const file of files) {
-    const rel = relative(CRATE_SRC, file).split('\\').join('/');
-    const from = moduleOf(rel);
-    const found = extractFromSource(readFileSync(file, 'utf-8'), modules, from);
-    for (const [target, lines] of found) {
-      const key = `${from} -> ${target}`;
-      const where = sites.get(key) ?? [];
-      for (const line of lines) where.push(`packages/kimi-agent/src/${rel}:${line}`);
-      sites.set(key, where);
-      siteCount += lines.length;
+  let fileCount = 0;
+  for (const root of roots) {
+    for (const file of root.files) {
+      fileCount++;
+      const rel = relative(root.abs, file).split('\\').join('/');
+      const from = moduleOfFile(root, file);
+      const ownOnly = modulesByRoot.get(root.rel);
+      const cross = modulesByRoot.get(coreRel) ?? ownOnly;
+      const own = new Set([...ownOnly, ...cross]);
+      const found = extractFromSource(readFileSync(file, 'utf-8'), own, from, cross);
+      for (const [target, lines] of found) {
+        const key = `${from} -> ${target}`;
+        const where = sites.get(key) ?? [];
+        for (const line of lines) where.push(`${root.rel}/${rel}:${line}`);
+        sites.set(key, where);
+        siteCount += lines.length;
+      }
     }
   }
-  return { files: files.length, modules, sites, siteCount };
+  return { files: fileCount, modules, sites, siteCount, problems };
 }
 
 /**
@@ -452,13 +520,14 @@ function writeBaseline(edges, stats) {
   const payload = {
     note: BASELINE_NOTE,
     generatedAt: new Date().toISOString().slice(0, 10),
-    source: 'packages/kimi-agent/src',
+    source: 'packages/kimi-agent/src + packages/kimi-core/src',
     extraction: {
       granularity: 'top-level module: first path segment under src/ (directory name or .rs file stem)',
       patterns: [
         'use crate::<mod>::… (single-path use statement)',
         'use crate::{a, b::c, …} (grouped use; nested groups resolve to their top segment)',
         'crate::<mod>::… (inline path in expression or type position)',
+        'kimi_core::<mod>::… and use kimi_core::{…} (cross-crate path into packages/kimi-core)',
       ],
       excludes: [
         'comments (line, doc, block) and string / raw-string literals',
@@ -486,10 +555,16 @@ function main() {
   const found = stats.sites;
   const recorded = loadBaseline();
 
+  if (stats.problems.length > 0) {
+    console.error('\nFAIL: crate roots overlap:');
+    for (const problem of stats.problems) console.error(`  ${problem}`);
+    process.exit(1);
+  }
+
   console.log(
-    `check-rust-module-deps: ${stats.files} .rs files under packages/kimi-agent/src, ` +
-      `${stats.modules.size} top-level modules, ${found.size} distinct module pairs ` +
-      `(${stats.siteCount} reference sites)`,
+    `check-rust-module-deps: ${stats.files} .rs files under packages/kimi-agent/src + ` +
+      `packages/kimi-core/src, ${stats.modules.size} top-level modules, ${found.size} distinct ` +
+      `module pairs (${stats.siteCount} reference sites)`,
   );
   console.log(`  extractor self-check: ${cases}/${cases} cases passed`);
 

@@ -55,7 +55,10 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const CRATE = join(ROOT, 'packages', 'kimi-agent', 'src');
+const CRATES = [
+  join(ROOT, 'packages', 'kimi-agent', 'src'),
+  join(ROOT, 'packages', 'kimi-core', 'src'),
+];
 const ALLOWLIST = join(ROOT, 'scripts', 'hardcoded-rust-allowlist.json');
 
 /**
@@ -644,7 +647,7 @@ function main() {
   const seed = process.argv.includes('--seed');
   const list = process.argv.includes('--list');
 
-  const files = [...walk(CRATE)];
+  const files = CRATES.flatMap((crate) => [...walk(crate)]);
   // A split-out test module is test code whose `#[cfg(test)]` sits in the
   // parent: exclude those files before either pass reads them.
   const testModules = externalTestModuleFiles(files);
@@ -684,7 +687,7 @@ function main() {
   }
 
   console.log(
-    `scanned ${scanned.length} .rs files under packages/kimi-agent/src` +
+    `scanned ${scanned.length} .rs files under packages/kimi-agent/src + packages/kimi-core/src` +
       ` (${files.length - scanned.length} external test module(s) skipped)`,
   );
   console.log(`prose literals: ${all.length} (${all.length - hardcoded.length} on the catalog seam)`);

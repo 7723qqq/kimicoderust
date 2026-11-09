@@ -1,38 +1,14 @@
-//! YAML frontmatter extraction.
-//!
-//! Ports v2 `_base/text/frontmatter.ts` (`parseFrontmatter`), which wraps
-//! `js-yaml` and splits a document into its parsed mapping and its body. The
-//! two hand-rolled parsers this replaces (`skills/mod.rs` and
-//! `tools/tower/frontmatter.rs`) each read `key: value` line by line, which is
-//! not YAML: it mis-read folded scalars, dropped block lists, kept inline
-//! comments, and flattened nested maps into empty parent keys.
-//!
-//! v2's own error behaviour is preserved: a document that opens a fence but
-//! never closes it is an error, not a document without frontmatter, and YAML
-//! that fails to parse surfaces its message rather than being silently ignored.
 
 use serde_json::{Map, Value};
 
 const FENCE: &str = "---";
 
-/// A document's frontmatter mapping and the text after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frontmatter {
-    /// The parsed frontmatter. Empty when the document has no frontmatter
-    /// block, or when the block is empty. Never a non-object: a frontmatter
-    /// whose top level is not a mapping is an error (v2 throws
-    /// `must be a mapping at the top level`).
     pub data: Map<String, Value>,
-    /// Everything after the closing fence, or the whole document when there is
-    /// no frontmatter.
     pub body: String,
 }
 
-/// Split `text` into its frontmatter mapping and body.
-///
-/// Returns `Err` when a fence is opened but never closed, when the YAML is
-/// malformed, or when the top level is not a mapping — the three cases v2
-/// rejects rather than degrading.
 pub fn parse_frontmatter(text: &str) -> Result<Frontmatter, String> {
     let lines: Vec<&str> = text.lines().collect();
     if lines.first().map(|l| l.trim()) != Some(FENCE) {

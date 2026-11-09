@@ -9,10 +9,12 @@ pub mod compaction;
 pub mod config;
 pub mod cron;
 pub mod default_workspace;
-pub mod env;
+pub use kimi_core::env;
+pub mod environment;
 pub mod events;
-pub mod frontmatter;
+pub use kimi_core::frontmatter;
 pub mod goal;
+pub mod hooks;
 pub mod i18n;
 pub mod injection;
 pub mod knowledge;
@@ -23,6 +25,7 @@ pub mod napi_bindings;
 pub mod native;
 pub mod permission;
 pub mod pipeline;
+pub use kimi_core::primitives;
 pub mod project_local_config;
 pub mod prompt;
 pub mod region;
@@ -36,10 +39,10 @@ pub mod subagent;
 pub mod swarm;
 #[cfg(test)]
 mod test_support;
-pub mod tool_input_display;
+pub use kimi_core::tool_input_display;
 pub mod tool_result_truncation;
 pub mod tools;
-pub mod turn_events;
+pub use kimi_core::turn_events;
 pub mod turn_loop;
 pub mod workflow;
 pub mod workspace_trust;
@@ -90,8 +93,29 @@ pub fn event_store_message_to_llm(msg: crate::native::event_store::Message) -> L
         }
     }
 
-    let blocks: Vec<crate::rpc::types::ContentBlock> =
-        serde_json::from_value(msg.blocks).unwrap_or_default();
+    // v2's provider lowerers skip a content part they do not recognize and
+    // keep the rest (`human/llm/requester/bases/*/lower.ts`); dropping the
+    // whole array here erased a multimodal message's body with no trace.
+    let blocks: Vec<crate::rpc::types::ContentBlock> = match msg.blocks {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| match serde_json::from_value(item) {
+                Ok(block) => Some(block),
+                Err(error) => {
+                    tracing::warn!(%error, "dropping a content block whose shape does not decode");
+                    None
+                }
+            })
+            .collect(),
+        other => {
+            tracing::warn!(
+                shape = ?other,
+                "dropping a message's content blocks: the value is not an array"
+            );
+            Vec::new()
+        }
+    };
 
     LLMMessage {
         role: role.to_string(),
@@ -185,8 +209,7 @@ impl crate::callbacks::HostCallbacks for NativeHostCallbacks {
             let Some(state) = state else {
                 return Err("host does not support state bridge".into());
             };
-            let outcome = state.apply_write(&request.domain, &request.value)?;
-            state.write_domain(&request.domain, &outcome.stored)?;
+            let outcome = state.apply_write_and_persist(&request.domain, &request.value)?;
             Ok(crate::rpc::types::StateWriteResponse {
                 ok: true,
                 value: outcome.response,
@@ -438,6 +461,7 @@ impl KimiEngine {
                     agent_tool_veto: None,
                     tools_veto: None,
                     todo_tool_veto: None,
+                    before_execute: None,
                     tower_worktree_root: None,
                     tower_enabled: crate::tools::tower::paths::tower_enabled(
                         crate::tools::tower::paths::tower_env_switch(),
@@ -615,6 +639,46 @@ mod engine_tests {
         assert!(err.contains("state bridge"), "{err}");
     }
 
+    /// A stored message whose blocks do not all decode keeps the blocks that
+    /// do: a single malformed block must not erase a multimodal message's body
+    /// (v2 lowerers skip the unknown part and keep the rest).
+    #[test]
+    fn unparseable_content_blocks_are_dropped_individually() {
+        let mixed = crate::native::event_store::Message {
+            role: crate::native::event_store::MessageRole::User,
+            content: "hello".into(),
+            blocks: serde_json::json!([
+                { "type": "text", "text": "hi" },
+                { "type": "image" },
+                { "type": "image_url", "url": "https://example.test/a.png" }
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let converted = event_store_message_to_llm(mixed);
+        assert_eq!(converted.content, "hello");
+        assert_eq!(converted.blocks.len(), 2);
+        assert!(matches!(
+            converted.blocks[0],
+            crate::rpc::types::ContentBlock::Text { .. }
+        ));
+        assert!(matches!(
+            converted.blocks[1],
+            crate::rpc::types::ContentBlock::ImageUrl { .. }
+        ));
+
+        let not_an_array = crate::native::event_store::Message {
+            role: crate::native::event_store::MessageRole::User,
+            content: "plain".into(),
+            blocks: serde_json::json!("not-a-block-list"),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let converted = event_store_message_to_llm(not_an_array);
+        assert_eq!(converted.content, "plain");
+        assert!(converted.blocks.is_empty());
+    }
+
     #[tokio::test]
     async fn mcp_tools_join_the_pure_native_table() {
         let dir = tempfile::tempdir().unwrap();
@@ -657,6 +721,7 @@ mod engine_tests {
             stale_guard: None,
             goal_guard: None,
             hook_guard: None,
+            before_execute: None,
             agent_tool_veto: None,
             tools_veto: None,
             todo_tool_veto: None,
@@ -682,7 +747,11 @@ mod engine_tests {
     #[tokio::test]
     async fn test_kimi_engine_run_once_flow() {
         let store = Arc::new(SqliteEventStore::new_in_memory().unwrap());
-        let root = std::env::current_dir().unwrap();
+        // A private workspace: the process cwd is shared with the whole test
+        // binary and other suites repoint it (`CwdScope`), so borrowing it as
+        // the engine root made this test depend on scheduling.
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().to_path_buf();
         let permission = Arc::new(PermissionEngine::with_workspace(
             crate::permission::PolicySnapshot::default(),
             Some(root.to_string_lossy().to_string()),
@@ -742,7 +811,8 @@ mod engine_tests {
     #[tokio::test]
     async fn test_kimi_engine_real_run_turn_execution() {
         let store = Arc::new(SqliteEventStore::new_in_memory().unwrap());
-        let root = std::env::current_dir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().to_path_buf();
         let permission = Arc::new(PermissionEngine::with_workspace(
             crate::permission::PolicySnapshot::default(),
             Some(root.to_string_lossy().to_string()),
@@ -841,7 +911,11 @@ mod engine_tests {
     #[tokio::test]
     async fn test_kimi_engine_multistep_native_tool_execution() {
         let store = Arc::new(SqliteEventStore::new_in_memory().unwrap());
-        let root = std::env::current_dir().unwrap();
+        // The mock asks for `package.json` relatively; give the turn a private
+        // workspace holding one instead of reading through the process cwd.
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().to_path_buf();
+        std::fs::write(root.join("package.json"), "{\"name\":\"probe\"}\n").unwrap();
         let permission = Arc::new(PermissionEngine::with_workspace(
             crate::permission::PolicySnapshot::default(),
             Some(root.to_string_lossy().to_string()),

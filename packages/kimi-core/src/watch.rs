@@ -1,42 +1,16 @@
-//! Per-turn watchdog (v2 `AgentLoopService.armTurnWatch` /
-//! `disarmTurnWatch`, upstream #4280 diagnostics half, `67325c1b25`).
-//!
-//! A running turn that produces no observable progress for
-//! [`TURN_WATCH_WARN_MS`] is reported once per silent window, so a wedged
-//! loop surfaces in the log instead of stalling for hours with zero
-//! diagnostics — the incident the upstream change answers. The sampler wakes
-//! every [`TURN_WATCH_CHECK_MS`]; a signature change resets the silence
-//! clock, and the warn throttle reuses the warn window, mirroring upstream's
-//! repeat period.
-//!
-//! The signature (v2 `signatureOf`) is the turn's observable progress: step
-//! transitions, streamed deltas, tool-call activity, and the loop's phase.
-//! Producers are plain atomic stores on [`TurnWatchState`], so the hot paths
-//! (one store per streamed delta) never take a lock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-/// How often the watchdog samples the turn's progress signature (v2
-/// `TURN_WATCH_CHECK_MS`).
 pub const TURN_WATCH_CHECK_MS: u64 = 60_000;
 
-/// How long the signature may stay unchanged before a warning fires — and the
-/// minimum gap between repeated warnings (upstream reuses
-/// `TURN_WATCH_WARN_MS` for the repeat throttle).
 pub const TURN_WATCH_WARN_MS: u64 = 10 * 60_000;
 
-/// What the running turn is doing right now (v2 `engine.turn.phase`): part of
-/// the progress signature, and reported in the warning so a stalled turn
-/// says where it stalled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TurnPhase {
-    /// Awaiting (or streaming from) the provider's response.
     Llm = 0,
-    /// Executing the step's scheduled tool calls.
     Tools = 1,
-    /// Compacting the working history before the next request.
     Compacting = 2,
 }
 
@@ -58,9 +32,6 @@ impl TurnPhase {
     }
 }
 
-/// The turn's observable-progress signature, written by the loop and the LLM
-/// transport and sampled by the watchdog (v2 `signatureOf`'s arms: steps,
-/// streaming partials, machine phase, active tool calls).
 #[derive(Default)]
 pub struct TurnWatchState {
     steps: AtomicU64,
@@ -70,25 +41,18 @@ pub struct TurnWatchState {
 }
 
 impl TurnWatchState {
-    /// The loop reached a new step (v2 `active.steps`).
     pub fn note_steps(&self, steps: u64) {
         self.steps.store(steps, Ordering::Relaxed);
     }
 
-    /// The transport streamed one more fragment for this turn (v2
-    /// `active.partials.length`). Installed on the transport per turn through
-    /// [`crate::turn_loop::types::LLM::set_turn_watch`].
     pub fn note_partial(&self) {
         self.partials.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A tool batch started or finished (the churn v2's
-    /// `activeToolCalls.length` would show).
     pub fn note_tool_activity(&self) {
         self.tool_marks.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The loop entered a new phase (v2 `engine.turn.phase`).
     pub fn set_phase(&self, phase: TurnPhase) {
         self.phase.store(phase as u8, Ordering::Relaxed);
     }
@@ -103,8 +67,6 @@ impl TurnWatchState {
     }
 }
 
-/// One sample of the signature; any field change is progress (v2 joins the
-/// arms into one comparable string).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Signature {
     steps: u64,
@@ -113,8 +75,6 @@ struct Signature {
     phase: u8,
 }
 
-/// The warn decision, kept pure so the tests drive it with a fake clock; the
-/// driver below only feeds it a monotonic millisecond source.
 struct WatchCore {
     signature: Option<Signature>,
     since_ms: i64,
@@ -130,8 +90,6 @@ impl WatchCore {
         }
     }
 
-    /// Sample the current signature at `now_ms`. Returns the silence duration
-    /// when a warning should fire this sample.
     fn check(&mut self, signature: Signature, now_ms: i64) -> Option<i64> {
         let Some(last) = self.signature else {
             self.signature = Some(signature);
@@ -155,16 +113,11 @@ impl WatchCore {
     }
 }
 
-/// The running watchdog for one turn (v2 `turnWatch`). Dropping aborts the
-/// sampler — the loop keeps one per `run_turn` invocation and lets it drop at
-/// every exit path, which is `disarmTurnWatch` on `endTurn` / dispose.
 pub struct TurnWatchdog {
     task: tokio::task::JoinHandle<()>,
 }
 
 impl TurnWatchdog {
-    /// Arm the watchdog for the turn now starting (v2 `beginActiveTurn` →
-    /// `armTurnWatch`).
     pub fn arm(agent_id: &str, turn_id: &str, state: Arc<TurnWatchState>) -> Self {
         let agent_id = agent_id.to_string();
         let turn_id = turn_id.to_string();

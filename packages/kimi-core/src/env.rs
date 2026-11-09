@@ -1,9 +1,4 @@
-//! Environment-variable switch parsing (v2 `_base/utils/env.ts`
-//! `parseBooleanEnv`).
 
-/// v2 `parseBooleanEnv`: `1` / `true` / `yes` / `on` are truthy and
-/// `0` / `false` / `no` / `off` falsy (case-insensitive, surrounding
-/// whitespace ignored); an unset, empty, or unrecognized value is neither.
 pub fn parse_bool_env(value: Option<&str>) -> Option<bool> {
     match value?.trim().to_ascii_lowercase().as_str() {
         "" => None,
@@ -13,27 +8,16 @@ pub fn parse_bool_env(value: Option<&str>) -> Option<bool> {
     }
 }
 
-/// Env switch that defaults ON (v2 `parseBooleanEnv(...) !== false`): only an
-/// explicit falsy value disables it — unset, empty, or unrecognized keeps it
-/// on.
 pub fn env_switch_default_on(name: &str) -> bool {
     parse_bool_env(std::env::var(name).ok().as_deref()) != Some(false)
 }
 
-/// Env switch that defaults OFF (v2 `parseBooleanEnv(...) === true`): only an
-/// explicit truthy value enables it.
 pub fn env_switch_default_off(name: &str) -> bool {
     parse_bool_env(std::env::var(name).ok().as_deref()) == Some(true)
 }
 
-/// Serializes tests that read or write process-global environment variables.
-/// Environment variables are one mutable map per process, so two tests
-/// touching the same name race each other (one removes the value the other
-/// just armed); hold this lock for the entire window, including the
-/// save/restore. A `tokio` mutex so an async test can hold it across `.await`
-/// without tripping `clippy::await_holding_lock`.
-#[cfg(test)]
-pub(crate) static ENV_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+#[cfg(any(test, feature = "test-util"))]
+pub static ENV_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[cfg(test)]

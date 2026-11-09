@@ -1,49 +1,24 @@
-//! Per-request LLM timing (v2 `ModelRequestTiming`,
-//! `llm-adapter/model/model-requester-impl.ts`).
-//!
-//! Measured by the native HTTP transport around one chat request and carried
-//! on [`crate::turn_loop::types::LLMChatResponse`] so the turn loop can put it
-//! on the step-end event, where the transcript projector folds it into the
-//! step (upstream #3938). The host-proxy path has no transport to measure and
-//! reports `None`.
 
 use serde::{Deserialize, Serialize};
 
-/// Wall-clock breakdown of one LLM request, in milliseconds.
-///
-/// Field semantics mirror v2 `buildModelRequestTiming`: latencies are clamped
-/// at zero, and the optional fields stay `None` when their mark is unknown
-/// (the request never reached the wire, or the stream never produced a first
-/// event).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LlmTiming {
-    /// Request start → first stream event (v2 `firstTokenLatencyMs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_token_latency_ms: Option<i64>,
-    /// First stream event → stream end (v2 `streamDurationMs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_duration_ms: Option<i64>,
-    /// Request start → request sent (v2 `requestBuildMs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_build_ms: Option<i64>,
-    /// Request sent → first stream event (v2 `serverFirstTokenMs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_first_token_ms: Option<i64>,
-    /// Server-side decode time (v2 `serverDecodeMs`, from stream decode
-    /// stats the fork's SSE reader does not produce — stays `None`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_decode_ms: Option<i64>,
-    /// Client-side consume time (v2 `clientConsumeMs`, same source).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_consume_ms: Option<i64>,
 }
 
 impl LlmTiming {
-    /// Build the timing from the marks the transport took, applying v2's
-    /// formulas (`model-requester-impl.ts:383-403`): every latency is
-    /// `max(0, later - earlier)`, and the build/server split only exists once
-    /// the request actually reached the wire.
     pub fn from_marks(
         started_ms: i64,
         sent_ms: Option<i64>,
@@ -65,8 +40,6 @@ impl LlmTiming {
         }
     }
 
-    /// Whether any field is set (a response with no marks reports `None`
-    /// rather than an all-`None` timing).
     pub fn is_empty(&self) -> bool {
         self.first_token_latency_ms.is_none()
             && self.stream_duration_ms.is_none()
