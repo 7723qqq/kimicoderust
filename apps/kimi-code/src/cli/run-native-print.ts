@@ -11,6 +11,7 @@ import {
   type KimiHarnessOptions,
 } from '@moonshot-ai/kimi-code-sdk';
 
+import { reloadOnStale } from '../utils/session-reload';
 import { createCliTelemetryBootstrap } from './telemetry';
 import { createKimiCodeHostIdentity } from './version';
 import type { CLIOptions } from './options';
@@ -106,7 +107,10 @@ export async function runNativePrint(
     });
 
     if (opts.prompt) {
-      await session.prompt(opts.prompt);
+      // Another client may have appended to the journal between resume and
+      // submit; reload once and retry instead of failing the run (v2
+      // `reloadOnStale`).
+      await reloadOnStale(session, () => session.prompt(opts.prompt!));
       // Turn failures surface through `turn.ended`, not the submission promise
       // (v1/v2 semantics): rethrow here so a failed run exits non-zero instead
       // of printing nothing and exiting 0.

@@ -115,7 +115,7 @@ export async function waitForServerReady(
   pollIntervalMs = SERVER_READY_POLL_INTERVAL_MS,
 ): Promise<void> {
   const start = Date.now();
-  const healthUrl = `${origin}/api/v1/health`;
+  const healthUrl = `${origin}/api/v1/healthz`;
 
   while (Date.now() - start < timeoutMs) {
     try {
