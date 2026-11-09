@@ -26,7 +26,7 @@
           "description": "ACP stdio protocol server"
         }
       ],
-      "fingerprint": "2fa844e8fdfd61da"
+      "fingerprint": "44d88981aee1dcd8"
     },
     {
       "id": "node-sdk",
@@ -49,7 +49,7 @@
           "description": "Public SDK package"
         }
       ],
-      "fingerprint": "e5210ee907faa853"
+      "fingerprint": "d5597650a9f55915"
     },
     {
       "id": "kimi-code",
@@ -80,7 +80,7 @@
           "description": "Terminal UI"
         }
       ],
-      "fingerprint": "27a5387981db4f15"
+      "fingerprint": "4031d0e4041f647d"
     },
     {
       "id": "kosong",
@@ -109,7 +109,7 @@
       "deps": [
         "transcript"
       ],
-      "fingerprint": "000d0e0ec490b59d"
+      "fingerprint": "6a2dd9ac4969436a"
     },
     {
       "id": "transcript",
@@ -143,7 +143,7 @@
       "source": "packages/i18n-catalog/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "a281221561bcd5e9"
+      "fingerprint": "fb233b3dd7834d26"
     },
     {
       "id": "i18n-runtime",
@@ -194,7 +194,7 @@
       "source": "packages/kimi-ui-core/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "8c4570a14c0648ef"
+      "fingerprint": "e05ed35cdeaf1359"
     },
     {
       "id": "kimi-tui-app",

@@ -91,6 +91,12 @@
       "text": "the ACP client channel closed with requests still in flight",
       "reason": "diagnostic"
     },
+    "packages/kimi-agent/src/acp/channel.rs:waiting for the ACP client to answer": {
+      "file": "packages/kimi-agent/src/acp/channel.rs",
+      "text": "waiting for the ACP client to answer",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/acp/channel.rs:{method} cancelled before the ACP client answered": {
       "file": "packages/kimi-agent/src/acp/channel.rs",
       "text": "{method} cancelled before the ACP client answered",
@@ -116,19 +122,9 @@
       "text": "A turn is in flight; compaction refused.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/acp/mod.rs:ACP request did not stop before the drain bound; aborting it": {
-      "file": "packages/kimi-agent/src/acp/mod.rs",
-      "text": "ACP request did not stop before the drain bound; aborting it",
-      "reason": "diagnostic"
-    },
     "packages/kimi-agent/src/acp/mod.rs:ACP request task ended abnormally": {
       "file": "packages/kimi-agent/src/acp/mod.rs",
       "text": "ACP request task ended abnormally",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/acp/mod.rs:ACP shutdown": {
-      "file": "packages/kimi-agent/src/acp/mod.rs",
-      "text": "ACP shutdown",
       "reason": "diagnostic"
     },
     "packages/kimi-agent/src/acp/mod.rs:ACP stdin closed; cancelling an in-flight turn": {
@@ -670,6 +666,12 @@
       "file": "packages/kimi-agent/src/compaction/mod.rs",
       "text": "You are a conversation summarizer. Produce a concise, self-contained summary.",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/compaction/mod.rs:[snipped tool result —": {
+      "file": "packages/kimi-agent/src/compaction/mod.rs",
+      "text": "[snipped tool result —",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/config/mod.rs:Failed to read config at {}: {e}": {
       "file": "packages/kimi-agent/src/config/mod.rs",
@@ -1257,6 +1259,264 @@
       "reason": "deferred",
       "note": "transcript Status entry body rendered by the TS transcript layer; translation pending"
     },
+    "packages/kimi-agent/src/goal/judge.rs:## Completion Criterion": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "## Completion Criterion",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:## Evaluation Framework": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "## Evaluation Framework",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:## Evaluation Instructions": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "## Evaluation Instructions",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:## Goal Objective": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "## Goal Objective",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:## Output Format": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "## Output Format",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- \"The assistant said it was done\" is NOT evidence. Look for tool outputs.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- \"The assistant said it was done\" is NOT evidence. Look for tool outputs.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- A partially completed goal is NOT complete.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- A partially completed goal is NOT complete.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- ALL conditions have DIRECT evidence → {\"ok\": true}": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- ALL conditions have DIRECT evidence → {\"ok\": true}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- Any condition has only INFERRED or MISSING evidence → {\"ok\": false}": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- Any condition has only INFERRED or MISSING evidence → {\"ok\": false}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- Command outputs (exit codes, stdout/stderr)": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- Command outputs (exit codes, stdout/stderr)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- DIRECT: a tool result or command output that unambiguously proves the condition": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- DIRECT: a tool result or command output that unambiguously proves the condition",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- Do not invent evidence that is not in the transcript.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- Do not invent evidence that is not in the transcript.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- Explicit confirmations from tool execution": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- Explicit confirmations from tool execution",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- File contents shown in tool results": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- File contents shown in tool results",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- Goal is self-contradictory or impossible → {\"ok\": false, \"impossible\": true}": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- Goal is self-contradictory or impossible → {\"ok\": false, \"impossible\": true}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- INFERRED: the condition is likely met based on context but not explicitly shown": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- INFERRED: the condition is likely met based on context but not explicitly shown",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- MISSING: no evidence found in the transcript": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- MISSING: no evidence found in the transcript",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- Test results (pass/fail counts)": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- Test results (pass/fail counts)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:- When in doubt, return {\"ok\": false}.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "- When in doubt, return {\"ok\": false}.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:1. **Decompose** the completion criterion into individual checkable conditions.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "1. **Decompose** the completion criterion into individual checkable conditions.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:2. **For each condition**, search the transcript for DIRECT evidence:": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "2. **For each condition**, search the transcript for DIRECT evidence:",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:3. **Classify evidence**:": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "3. **Classify evidence**:",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:4. **Verdict rules**:": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "4. **Verdict rules**:",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Based on the conversation transcript above, produce your verdict as a single JSON object.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Based on the conversation transcript above, produce your verdict as a single JSON object.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Completion criterion: {criterion}": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Completion criterion: {criterion}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Condition X not verified: expected ... but transcript shows ...": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Condition X not verified: expected ... but transcript shows ...",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Each condition verified: (1) ... [evidence: ...], (2) ... [evidence: ...]": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Each condition verified: (1) ... [evidence: ...], (2) ... [evidence: ...]",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Goal cannot be achieved because ...": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Goal cannot be achieved because ...",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:If any condition lacks direct evidence, the goal is NOT complete.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "If any condition lacks direct evidence, the goal is NOT complete.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Judge evaluation failed (network/timeout) — allowing completion.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Judge evaluation failed (network/timeout) — allowing completion.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Judge response could not be parsed after retry — allowing completion. Response: {preview}": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Judge response could not be parsed after retry — allowing completion. Response: {preview}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:No explicit completion criterion was provided. Judge whether the objective": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "No explicit completion criterion was provided. Judge whether the objective",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Return ONLY a JSON object (no markdown fences, no extra text):": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Return ONLY a JSON object (no markdown fences, no extra text):",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:The assistant said it was done": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "The assistant said it was done",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:The goal objective is: {}": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "The goal objective is: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:You MUST verify EACH condition in the completion criterion independently.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "You MUST verify EACH condition in the completion criterion independently.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:You are a judge. Return ONLY a JSON object with fields \"ok\" (boolean) and \"reason\" (string). No other text.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "You are a judge. Return ONLY a JSON object with fields \"ok\" (boolean) and \"reason\" (string). No other text.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:You are an independent judge evaluating whether a goal has been completed.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "You are an independent judge evaluating whether a goal has been completed.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:Your role is to verify — with concrete evidence — that the stated goal and its": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "Your role is to verify — with concrete evidence — that the stated goal and its",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:completion criterion have been fully satisfied. You are NOT the assistant; you": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "completion criterion have been fully satisfied. You are NOT the assistant; you",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:has been fully achieved based on the transcript evidence.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "has been fully achieved based on the transcript evidence.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:must NOT defer to the assistant's self-assessment.": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "must NOT defer to the assistant's self-assessment.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/goal/judge.rs:ok\": true/false, \"reason\": \"...\"}": {
+      "file": "packages/kimi-agent/src/goal/judge.rs",
+      "text": "ok\": true/false, \"reason\": \"...\"}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/goal/mod.rs:<untrusted_completion_criterion> {} </untrusted_completion_criterion>": {
       "file": "packages/kimi-agent/src/goal/mod.rs",
       "text": "<untrusted_completion_criterion> {} </untrusted_completion_criterion>",
@@ -1584,6 +1844,12 @@
       "text": "Do NOT use AskUserQuestion to ask about plan approval or reference \"the plan\" — the user cannot see the plan until you call ExitPlanMode.",
       "reason": "model-input"
     },
+    "packages/kimi-agent/src/injection/goal_plan.rs:Hard constraints:": {
+      "file": "packages/kimi-agent/src/injection/goal_plan.rs",
+      "text": "Hard constraints:",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/injection/goal_plan.rs:If you are waiting for background sub-agents or bash tasks to finish, call WaitFor to wait for them inside this turn instead of ending the turn; ending the turn just gets you re-invoked again and again. You can also use the waiting time to do useful parallel work. Either way, make sure every goal turn is productive.": {
       "file": "packages/kimi-agent/src/injection/goal_plan.rs",
       "text": "If you are waiting for background sub-agents or bash tasks to finish, call WaitFor to wait for them inside this turn instead of ending the turn; ending the turn just gets you re-invoked again and again. You can also use the waiting time to do useful parallel work. Either way, make sure every goal turn is productive.",
@@ -1840,10 +2106,11 @@
       "text": "- Do NOT call AskUserQuestion while auto mode is active; decide and continue.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/injection/permission_mode.rs:- ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed.": {
+    "packages/kimi-agent/src/injection/permission_mode.rs:- Plan mode is the exception: ExitPlanMode still waits for the user to review the plan. Settle open questions yourself and list them under Assumptions in the plan.": {
       "file": "packages/kimi-agent/src/injection/permission_mode.rs",
-      "text": "- ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed.",
-      "reason": "model-input"
+      "text": "- Plan mode is the exception: ExitPlanMode still waits for the user to review the plan. Settle open questions yourself and list them under Assumptions in the plan.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/injection/permission_mode.rs:Auto permission mode is active.": {
       "file": "packages/kimi-agent/src/injection/permission_mode.rs",
@@ -1864,6 +2131,42 @@
       "file": "packages/kimi-agent/src/injection/permission_mode.rs",
       "text": "Auto permission mode is no longer active. Tool approvals and permission checks are back to the current mode.",
       "reason": "model-input"
+    },
+    "packages/kimi-agent/src/injection/plugin.rs:<plugin-instructions plugin=\"{}\"> {} </plugin-instructions> {content}": {
+      "file": "packages/kimi-agent/src/injection/plugin.rs",
+      "text": "<plugin-instructions plugin=\"{}\"> {} </plugin-instructions> {content}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/injection/plugin.rs:<plugin_session_start plugin=\"{}\" skill=\"{}\"> {} </plugin_session_start>": {
+      "file": "packages/kimi-agent/src/injection/plugin.rs",
+      "text": "<plugin_session_start plugin=\"{}\" skill=\"{}\"> {} </plugin_session_start>",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/injection/plugin.rs:Plugin \"{id}\" was {verb}. This session keeps the prompt and tools it started with; run /new or /reload to apply the change, and tell the user if they expect it now.": {
+      "file": "packages/kimi-agent/src/injection/plugin.rs",
+      "text": "Plugin \"{id}\" was {verb}. This session keeps the prompt and tools it started with; run /new or /reload to apply the change, and tell the user if they expect it now.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/injection/plugin.rs:There are currently no active plugin session starts. This supersedes any earlier plugin_session_start reminder in this session.": {
+      "file": "packages/kimi-agent/src/injection/plugin.rs",
+      "text": "There are currently no active plugin session starts. This supersedes any earlier plugin_session_start reminder in this session.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/injection/plugin.rs:This supersedes any earlier plugin_session_start reminder in this session.": {
+      "file": "packages/kimi-agent/src/injection/plugin.rs",
+      "text": "This supersedes any earlier plugin_session_start reminder in this session.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/injection/plugin.rs:plugin sessionStart skill not found": {
+      "file": "packages/kimi-agent/src/injection/plugin.rs",
+      "text": "plugin sessionStart skill not found",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/injection/swarm_mode.rs:## Swarm Mode": {
       "file": "packages/kimi-agent/src/injection/swarm_mode.rs",
@@ -2160,7 +2463,11 @@
       "text": "reading the transcript side channel",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/llm/antigravity.rs:reading transcript metadata: {error}": {       "file": "packages/kimi-agent/src/llm/antigravity.rs",       "text": "reading transcript metadata: {error}",       "reason": "diagnostic"     },
+    "packages/kimi-agent/src/llm/antigravity.rs:reading transcript metadata: {error}": {
+      "file": "packages/kimi-agent/src/llm/antigravity.rs",
+      "text": "reading transcript metadata: {error}",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/llm/antigravity.rs:reading transcript: {error}": {
       "file": "packages/kimi-agent/src/llm/antigravity.rs",
       "text": "reading transcript: {error}",
@@ -2266,7 +2573,11 @@
       "text": "{} unknown event(s), first: {}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/llm/files_upload.rs:<body could not be read: {error}>": {       "file": "packages/kimi-agent/src/llm/files_upload.rs",       "text": "<body could not be read: {error}>",       "reason": "deferred"     },
+    "packages/kimi-agent/src/llm/files_upload.rs:<body could not be read: {error}>": {
+      "file": "packages/kimi-agent/src/llm/files_upload.rs",
+      "text": "<body could not be read: {error}>",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/llm/files_upload.rs:Content-Disposition: form-data; name=\"purpose\"\\r \\r": {
       "file": "packages/kimi-agent/src/llm/files_upload.rs",
       "text": "Content-Disposition: form-data; name=\"purpose\"\\r \\r",
@@ -2282,7 +2593,11 @@
       "text": "media upload failed: {error}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/llm/files_upload.rs:media upload response body could not be read: {error}": {       "file": "packages/kimi-agent/src/llm/files_upload.rs",       "text": "media upload response body could not be read: {error}",       "reason": "deferred"     },
+    "packages/kimi-agent/src/llm/files_upload.rs:media upload response body could not be read: {error}": {
+      "file": "packages/kimi-agent/src/llm/files_upload.rs",
+      "text": "media upload response body could not be read: {error}",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/llm/files_upload.rs:media upload returned no file id: {text}": {
       "file": "packages/kimi-agent/src/llm/files_upload.rs",
       "text": "media upload returned no file id: {text}",
@@ -2318,7 +2633,11 @@
       "text": "Bearer {token}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/llm/http.rs:[body unreadable: {reason}]": {       "file": "packages/kimi-agent/src/llm/http.rs",       "text": "[body unreadable: {reason}]",       "reason": "deferred"     },
+    "packages/kimi-agent/src/llm/http.rs:[body unreadable: {reason}]": {
+      "file": "packages/kimi-agent/src/llm/http.rs",
+      "text": "[body unreadable: {reason}]",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/llm/http.rs:[native-http-timing] total={}ms headers={}ms first_event={}ms events={} model={}": {
       "file": "packages/kimi-agent/src/llm/http.rs",
       "text": "[native-http-timing] total={}ms headers={}ms first_event={}ms events={} model={}",
@@ -2429,10 +2748,82 @@
       "text": "sse decode error",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/llm/image_policy.rs:\"{name}\" uses unsupported image format {mime_type}": {
+      "file": "packages/kimi-agent/src/llm/image_policy.rs",
+      "text": "\"{name}\" uses unsupported image format {mime_type}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/image_policy.rs:[Image omitted: {what}. The current model provider accepts only {} — convert it to PNG or JPEG and try again.]": {
+      "file": "packages/kimi-agent/src/llm/image_policy.rs",
+      "text": "[Image omitted: {what}. The current model provider accepts only {} — convert it to PNG or JPEG and try again.]",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/image_policy.rs:unsupported image format {mime_type}": {
+      "file": "packages/kimi-agent/src/llm/image_policy.rs",
+      "text": "unsupported image format {mime_type}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/kimi_schema.rs:Cannot infer JSON Schema type from non-JSON enum or const value.": {
+      "file": "packages/kimi-agent/src/llm/kimi_schema.rs",
+      "text": "Cannot infer JSON Schema type from non-JSON enum or const value.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/kimi_schema.rs:JSON Schema root must normalize to an object.": {
+      "file": "packages/kimi-agent/src/llm/kimi_schema.rs",
+      "text": "JSON Schema root must normalize to an object.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/kimi_schema.rs:Mixed JSON Schema enum or const types are not supported by Kimi tool schemas.": {
+      "file": "packages/kimi-agent/src/llm/kimi_schema.rs",
+      "text": "Mixed JSON Schema enum or const types are not supported by Kimi tool schemas.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/llm/media_budget.rs:Conversation media exceeded the {} MB per-request budget; {} older media item(s) were omitted{}": {
       "file": "packages/kimi-agent/src/llm/media_budget.rs",
       "text": "Conversation media exceeded the {} MB per-request budget; {} older media item(s) were omitted{}",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/llm/media_budget.rs:[audio omitted for provider compatibility; re-read the file to hear it]": {
+      "file": "packages/kimi-agent/src/llm/media_budget.rs",
+      "text": "[audio omitted for provider compatibility; re-read the file to hear it]",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/media_budget.rs:[audio omitted: dropped to fit the provider request size limit; re-read the file to hear it]": {
+      "file": "packages/kimi-agent/src/llm/media_budget.rs",
+      "text": "[audio omitted: dropped to fit the provider request size limit; re-read the file to hear it]",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/media_budget.rs:[image omitted for provider compatibility; re-read the file to view it or get conversion guidance]": {
+      "file": "packages/kimi-agent/src/llm/media_budget.rs",
+      "text": "[image omitted for provider compatibility; re-read the file to view it or get conversion guidance]",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/media_budget.rs:[image omitted: dropped to fit the provider request size limit; re-read the file to view it]": {
+      "file": "packages/kimi-agent/src/llm/media_budget.rs",
+      "text": "[image omitted: dropped to fit the provider request size limit; re-read the file to view it]",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/media_budget.rs:[video omitted for provider compatibility; re-read the file to view it]": {
+      "file": "packages/kimi-agent/src/llm/media_budget.rs",
+      "text": "[video omitted for provider compatibility; re-read the file to view it]",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/media_budget.rs:[video omitted: dropped to fit the provider request size limit; re-read the file to view it]": {
+      "file": "packages/kimi-agent/src/llm/media_budget.rs",
+      "text": "[video omitted: dropped to fit the provider request size limit; re-read the file to view it]",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/llm/media_budget.rs:[{} omitted: dropped to fit the request media budget]": {
       "file": "packages/kimi-agent/src/llm/media_budget.rs",
@@ -2549,15 +2940,31 @@
       "text": "[video omitted: the uploaded file is no longer available]",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/llm/media_resolver.rs:cannot read media file {file_id} (status {status}, code {code}): {message}": {       "file": "packages/kimi-agent/src/llm/media_resolver.rs",       "text": "cannot read media file {file_id} (status {status}, code {code}): {message}",       "reason": "deferred"     },
+    "packages/kimi-agent/src/llm/media_resolver.rs:cannot read media file {file_id} (status {status}, code {code}): {message}": {
+      "file": "packages/kimi-agent/src/llm/media_resolver.rs",
+      "text": "cannot read media file {file_id} (status {status}, code {code}): {message}",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/llm/media_resolver.rs:failed to persist the media upload cache entry": {
       "file": "packages/kimi-agent/src/llm/media_resolver.rs",
       "text": "failed to persist the media upload cache entry",
       "reason": "diagnostic"
     },
-    "packages/kimi-agent/src/llm/media_resolver.rs:failed to read the media file metadata for its display path": {       "file": "packages/kimi-agent/src/llm/media_resolver.rs",       "text": "failed to read the media file metadata for its display path",       "reason": "diagnostic"     },
-    "packages/kimi-agent/src/llm/media_resolver.rs:failed to read the persisted media upload cache entry": {       "file": "packages/kimi-agent/src/llm/media_resolver.rs",       "text": "failed to read the persisted media upload cache entry",       "reason": "diagnostic"     },
-    "packages/kimi-agent/src/llm/media_resolver.rs:failed to read the media blob; degrading to a path tag": {       "file": "packages/kimi-agent/src/llm/media_resolver.rs",       "text": "failed to read the media blob; degrading to a path tag",       "reason": "diagnostic"     },
+    "packages/kimi-agent/src/llm/media_resolver.rs:failed to read the media blob; degrading to a path tag": {
+      "file": "packages/kimi-agent/src/llm/media_resolver.rs",
+      "text": "failed to read the media blob; degrading to a path tag",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/llm/media_resolver.rs:failed to read the media file metadata for its display path": {
+      "file": "packages/kimi-agent/src/llm/media_resolver.rs",
+      "text": "failed to read the media file metadata for its display path",
+      "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/llm/media_resolver.rs:failed to read the persisted media upload cache entry": {
+      "file": "packages/kimi-agent/src/llm/media_resolver.rs",
+      "text": "failed to read the persisted media upload cache entry",
+      "reason": "diagnostic"
+    },
     "packages/kimi-agent/src/llm/multi.rs:MultiLLM: {} returned an empty completion ({}ms); holding it as a fallback": {
       "file": "packages/kimi-agent/src/llm/multi.rs",
       "text": "MultiLLM: {} returned an empty completion ({}ms); holding it as a fallback",
@@ -2578,6 +2985,30 @@
       "text": "join error: {e}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/llm/openai.rs:(audio omitted: not supported by this provider)": {
+      "file": "packages/kimi-agent/src/llm/openai.rs",
+      "text": "(audio omitted: not supported by this provider)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/openai.rs:(see attached media)": {
+      "file": "packages/kimi-agent/src/llm/openai.rs",
+      "text": "(see attached media)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/openai.rs:(video omitted: not supported by this provider)": {
+      "file": "packages/kimi-agent/src/llm/openai.rs",
+      "text": "(video omitted: not supported by this provider)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/openai.rs:Attached media from tool result:": {
+      "file": "packages/kimi-agent/src/llm/openai.rs",
+      "text": "Attached media from tool result:",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/llm/openai.rs:openai response missing choices[0]": {
       "file": "packages/kimi-agent/src/llm/openai.rs",
       "text": "openai response missing choices[0]",
@@ -2592,6 +3023,18 @@
       "file": "packages/kimi-agent/src/llm/openai.rs",
       "text": "openai tool_call missing function",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/llm/openai_responses.rs:(audio omitted: unsupported audio format)": {
+      "file": "packages/kimi-agent/src/llm/openai_responses.rs",
+      "text": "(audio omitted: unsupported audio format)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/llm/openai_responses.rs:(video omitted: not supported by this provider)": {
+      "file": "packages/kimi-agent/src/llm/openai_responses.rs",
+      "text": "(video omitted: not supported by this provider)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/llm/openai_responses.rs:failed: {err_msg}": {
       "file": "packages/kimi-agent/src/llm/openai_responses.rs",
@@ -2813,11 +3256,6 @@
       "text": "checked by the caller",
       "reason": "dev-surface"
     },
-    "packages/kimi-agent/src/main.rs:closing terminal processes": {
-      "file": "packages/kimi-agent/src/main.rs",
-      "text": "closing terminal processes",
-      "reason": "dev-surface"
-    },
     "packages/kimi-agent/src/main.rs:cron-fired turn failed": {
       "file": "packages/kimi-agent/src/main.rs",
       "text": "cron-fired turn failed",
@@ -2843,20 +3281,11 @@
       "text": "kimi-agent shutdown: drained turn {session}#{turn}",
       "reason": "dev-surface"
     },
-    "packages/kimi-agent/src/main.rs:kimi-agent shutdown: force-stopped turn {session}#{turn} after {}s (still running at the drain bound)": {
+    "packages/kimi-agent/src/main.rs:kimi-agent shutdown: {} turn(s) drained": {
       "file": "packages/kimi-agent/src/main.rs",
-      "text": "kimi-agent shutdown: force-stopped turn {session}#{turn} after {}s (still running at the drain bound)",
-      "reason": "dev-surface"
-    },
-    "packages/kimi-agent/src/main.rs:kimi-agent shutdown: {timeout}": {
-      "file": "packages/kimi-agent/src/main.rs",
-      "text": "kimi-agent shutdown: {timeout}",
-      "reason": "dev-surface"
-    },
-    "packages/kimi-agent/src/main.rs:kimi-agent shutdown: {} turn(s) drained, {} turn(s) force-stopped": {
-      "file": "packages/kimi-agent/src/main.rs",
-      "text": "kimi-agent shutdown: {} turn(s) drained, {} turn(s) force-stopped",
-      "reason": "dev-surface"
+      "text": "kimi-agent shutdown: {} turn(s) drained",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/main.rs:no background task runner is active for this session": {
       "file": "packages/kimi-agent/src/main.rs",
@@ -2878,19 +3307,9 @@
       "text": "no outcome pending for {} turn {}",
       "reason": "dev-surface"
     },
-    "packages/kimi-agent/src/main.rs:server shutdown cleanup": {
-      "file": "packages/kimi-agent/src/main.rs",
-      "text": "server shutdown cleanup",
-      "reason": "dev-surface"
-    },
     "packages/kimi-agent/src/main.rs:session settle did not finish before the drain bound": {
       "file": "packages/kimi-agent/src/main.rs",
       "text": "session settle did not finish before the drain bound",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/main.rs:task stop did not settle the task": {
-      "file": "packages/kimi-agent/src/main.rs",
-      "text": "task stop did not settle the task",
       "reason": "diagnostic"
     },
     "packages/kimi-agent/src/main.rs:unknown admission mode: {other}": {
@@ -3067,6 +3486,12 @@
       "reason": "wire-token",
       "note": "JSON-RPC error message for a server-initiated method the engine has no handler for (SDK Client default)."
     },
+    "packages/kimi-agent/src/mcp/http.rs:a fresh ledger accepts registrations": {
+      "file": "packages/kimi-agent/src/mcp/http.rs",
+      "text": "a fresh ledger accepts registrations",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/mcp/http.rs:application/json, text/event-stream": {
       "file": "packages/kimi-agent/src/mcp/http.rs",
       "text": "application/json, text/event-stream",
@@ -3082,11 +3507,6 @@
       "text": "\"{}\" -> {} (collides with server \"{other_server}\")",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/mcp/manager.rs:<mcp-result-extras> {} </mcp-result-extras>": {
-      "file": "packages/kimi-agent/src/mcp/manager.rs",
-      "text": "<mcp-result-extras> {} </mcp-result-extras>",
-      "reason": "format-scaffolding"
-    },
     "packages/kimi-agent/src/mcp/manager.rs:Bearer {token}": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "Bearer {token}",
@@ -3101,6 +3521,12 @@
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "MCP execution error: {e}",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:MCP initial load wait expired": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "MCP initial load wait expired",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/mcp/manager.rs:MCP server \"{name}\" closed unexpectedly": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
@@ -3168,6 +3594,12 @@
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "Unknown MCP server: {name}",
       "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:a fresh ledger accepts registrations": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "a fresh ledger accepts registrations",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/mcp/manager.rs:mcp oauth token invalidation failed": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
@@ -3354,6 +3786,18 @@
       "text": "Invalid MCP OAuth store key: \"{name}\"",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/output.rs:<mcp-result-extras> {extras} </mcp-result-extras>": {
+      "file": "packages/kimi-agent/src/mcp/output.rs",
+      "text": "<mcp-result-extras> {extras} </mcp-result-extras>",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/mcp/output.rs:<mcp_tool_result name=\"{qualified_tool_name}\">": {
+      "file": "packages/kimi-agent/src/mcp/output.rs",
+      "text": "<mcp_tool_result name=\"{qualified_tool_name}\">",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/mcp/output.rs:<missing uri>": {
       "file": "packages/kimi-agent/src/mcp/output.rs",
       "text": "<missing uri>",
@@ -3504,6 +3948,12 @@
       "text": "No target post URL configured for MCP SSE",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/sse.rs:a fresh ledger accepts registrations": {
+      "file": "packages/kimi-agent/src/mcp/sse.rs",
+      "text": "a fresh ledger accepts registrations",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/napi_bindings/callbacks.rs:ask_question parse: {e}": {
       "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "ask_question parse: {e}",
@@ -3603,6 +4053,12 @@
       "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
       "text": "tool schema parse failed for tool `{}`: {error}",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/napi_bindings/callbacks.rs:waiting for the host to answer": {
+      "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
+      "text": "waiting for the host to answer",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/napi_bindings/callbacks.rs:{label} call: {status:?}": {
       "file": "packages/kimi-agent/src/napi_bindings/callbacks.rs",
@@ -5187,11 +5643,6 @@
       "text": "session is alive",
       "reason": "dev-surface"
     },
-    "packages/kimi-agent/src/repl/mod.rs:task stop did not settle the task": {
-      "file": "packages/kimi-agent/src/repl/mod.rs",
-      "text": "task stop did not settle the task",
-      "reason": "diagnostic"
-    },
     "packages/kimi-agent/src/repl/mod.rs:⏰ [cron] {} — press Enter to run it.": {
       "file": "packages/kimi-agent/src/repl/mod.rs",
       "text": "⏰ [cron] {} — press Enter to run it.",
@@ -5642,10 +6093,11 @@
       "text": "The AGENTS.md instruction file(s) below changed on disk after they were injected into the system prompt: {} Read the current file(s) and follow the latest contents; the copies injected in the system prompt are stale.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/server/engine.rs:The AGENTS.md instruction file(s) below were created or became readable after the system prompt was built: {} Read them and follow their instructions for the affected paths.": {
+    "packages/kimi-agent/src/server/engine.rs:The following AGENTS.md file(s) exist in your workspace but were not included in your system prompt: {} Read them before making changes in those directories.": {
       "file": "packages/kimi-agent/src/server/engine.rs",
-      "text": "The AGENTS.md instruction file(s) below were created or became readable after the system prompt was built: {} Read them and follow their instructions for the affected paths.",
-      "reason": "model-input"
+      "text": "The following AGENTS.md file(s) exist in your workspace but were not included in your system prompt: {} Read them before making changes in those directories.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/server/engine.rs:could not persist compaction usage": {
       "file": "packages/kimi-agent/src/server/engine.rs",
@@ -5748,11 +6200,6 @@
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "turn failed: {why}",
       "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/engine.rs:waiting for in-flight turns to finish": {
-      "file": "packages/kimi-agent/src/server/engine.rs",
-      "text": "waiting for in-flight turns to finish",
-      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/server/file_launch.rs:Unsupported app \"{other}\": expected one of {}": {
       "file": "packages/kimi-agent/src/server/file_launch.rs",
@@ -6163,11 +6610,6 @@
       "file": "packages/kimi-agent/src/server/http.rs",
       "text": "{name}: {value}\\r",
       "reason": "deferred"
-    },
-    "packages/kimi-agent/src/server/hub.rs:event queue full: closing the connection with 1013; the client must resume from its cursor": {
-      "file": "packages/kimi-agent/src/server/hub.rs",
-      "text": "event queue full: closing the connection with 1013; the client must resume from its cursor",
-      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/server/hub.rs:lane was just ensured": {
       "file": "packages/kimi-agent/src/server/hub.rs",
@@ -7923,6 +8365,12 @@
       "text": "<cron-fire jobId=\"{}\" cron=\"{}\" recurring=\"{}\" coalescedCount=\"{coalesced_count}\" stale=\"{stale}\"> <prompt> {} </prompt> </cron-fire>",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/session/mod.rs:ErrorPayload is serializable": {
+      "file": "packages/kimi-agent/src/session/mod.rs",
+      "text": "ErrorPayload is serializable",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/session/mod.rs:Provider safety policy blocked the response.": {
       "file": "packages/kimi-agent/src/session/mod.rs",
       "text": "Provider safety policy blocked the response.",
@@ -7974,11 +8422,6 @@
       "text": "print steer max turns reached ({}), finishing",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/session/mod.rs:session teardown left background tasks unsettled": {
-      "file": "packages/kimi-agent/src/session/mod.rs",
-      "text": "session teardown left background tasks unsettled",
-      "reason": "diagnostic"
-    },
     "packages/kimi-agent/src/session/mod.rs:state checkpoint failed; undo cannot restore this turn's state": {
       "file": "packages/kimi-agent/src/session/mod.rs",
       "text": "state checkpoint failed; undo cannot restore this turn's state",
@@ -7988,21 +8431,6 @@
       "file": "packages/kimi-agent/src/session/mod.rs",
       "text": "the session was dropped before it reached that state",
       "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/session/mod.rs:waiting for the active, pending and held turns to drain": {
-      "file": "packages/kimi-agent/src/session/mod.rs",
-      "text": "waiting for the active, pending and held turns to drain",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/session/mod.rs:waiting for the pump to exit and drop the conversation": {
-      "file": "packages/kimi-agent/src/session/mod.rs",
-      "text": "waiting for the pump to exit and drop the conversation",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/session/mod.rs:{header} Background task {} ({}) finished: {}": {
-      "file": "packages/kimi-agent/src/session/mod.rs",
-      "text": "{header} Background task {} ({}) finished: {}",
-      "reason": "deferred"
     },
     "packages/kimi-agent/src/session/patch.rs:Cannot remove root element": {
       "file": "packages/kimi-agent/src/session/patch.rs",
@@ -8216,11 +8644,6 @@
     "packages/kimi-agent/src/session/sqlite_store.rs:wire event seq {seq}": {
       "file": "packages/kimi-agent/src/session/sqlite_store.rs",
       "text": "wire event seq {seq}",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/session/sqlite_store.rs:wire read hit its row cap; the oldest rows were kept": {
-      "file": "packages/kimi-agent/src/session/sqlite_store.rs",
-      "text": "wire read hit its row cap; the oldest rows were kept",
       "reason": "diagnostic"
     },
     "packages/kimi-agent/src/session/sqlite_store.rs:wire read skipped records whose payload did not parse": {
@@ -8776,6 +9199,12 @@
       "reason": "wire-token",
       "note": "v2 stopAllOnExit wording; lands on the task entry as stopReason (ROADMAP §16)"
     },
+    "packages/kimi-agent/src/storage/task_runner.rs:Showing the last {preview_bytes} bytes. No persisted full output is available.": {
+      "file": "packages/kimi-agent/src/storage/task_runner.rs",
+      "text": "Showing the last {preview_bytes} bytes. No persisted full output is available.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/storage/task_runner.rs:Stopped by TaskStop": {
       "file": "packages/kimi-agent/src/storage/task_runner.rs",
       "text": "Stopped by TaskStop",
@@ -8791,6 +9220,12 @@
       "text": "The user exited the application after your last turn, so your background tasks from the previous session lost contact:",
       "reason": "model-input"
     },
+    "packages/kimi-agent/src/storage/task_runner.rs:Title: Background {kind} {status}": {
+      "file": "packages/kimi-agent/src/storage/task_runner.rs",
+      "text": "Title: Background {kind} {status}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/storage/task_runner.rs:Too many background tasks are already running (limit {cap}).": {
       "file": "packages/kimi-agent/src/storage/task_runner.rs",
       "text": "Too many background tasks are already running (limit {cap}).",
@@ -8800,6 +9235,18 @@
       "file": "packages/kimi-agent/src/storage/task_runner.rs",
       "text": "[earlier text truncated]",
       "reason": "format-scaffolding"
+    },
+    "packages/kimi-agent/src/storage/task_runner.rs:aborted by the user": {
+      "file": "packages/kimi-agent/src/storage/task_runner.rs",
+      "text": "aborted by the user",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/storage/task_runner.rs:agent_id=\"{}\"": {
+      "file": "packages/kimi-agent/src/storage/task_runner.rs",
+      "text": "agent_id=\"{}\"",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/storage/task_runner.rs:loop consumed drained notifications": {
       "file": "packages/kimi-agent/src/storage/task_runner.rs",
@@ -8841,14 +9288,15 @@
       "text": "reattach scan: task domain is unreadable; skipping the scan",
       "reason": "diagnostic"
     },
+    "packages/kimi-agent/src/storage/task_runner.rs:stopped by user": {
+      "file": "packages/kimi-agent/src/storage/task_runner.rs",
+      "text": "stopped by user",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/storage/task_runner.rs:stopping task {id}": {
       "file": "packages/kimi-agent/src/storage/task_runner.rs",
       "text": "stopping task {id}",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/storage/task_runner.rs:stopping tasks for session {session_id}": {
-      "file": "packages/kimi-agent/src/storage/task_runner.rs",
-      "text": "stopping tasks for session {session_id}",
       "reason": "diagnostic"
     },
     "packages/kimi-agent/src/storage/task_runner.rs:task already exists: {id}": {
@@ -8871,11 +9319,6 @@
       "text": "task terminal event dropped: agent lifecycle inactive",
       "reason": "diagnostic"
     },
-    "packages/kimi-agent/src/storage/task_runner.rs:task {id} settles": {
-      "file": "packages/kimi-agent/src/storage/task_runner.rs",
-      "text": "task {id} settles",
-      "reason": "diagnostic"
-    },
     "packages/kimi-agent/src/storage/task_runner.rs:waiting for task {id} to settle": {
       "file": "packages/kimi-agent/src/storage/task_runner.rs",
       "text": "waiting for task {id} to settle",
@@ -8885,6 +9328,18 @@
       "file": "packages/kimi-agent/src/storage/task_runner.rs",
       "text": "waiting for the task to reach a yield point",
       "reason": "diagnostic"
+    },
+    "packages/kimi-agent/src/storage/task_runner.rs:{} was stopped by user.": {
+      "file": "packages/kimi-agent/src/storage/task_runner.rs",
+      "text": "{} was stopped by user.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/storage/task_runner.rs:{} {}. Reason: {reason}": {
+      "file": "packages/kimi-agent/src/storage/task_runner.rs",
+      "text": "{} {}. Reason: {reason}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/subagent/allowlist.rs:Subagent type \"{name}\" is not allowed for this agent. Allowed subagent types: {allowed}.": {
       "file": "packages/kimi-agent/src/subagent/allowlist.rs",
@@ -9031,11 +9486,6 @@
       "file": "packages/kimi-agent/src/subagent/manager.rs",
       "text": "You are {}. Complete the user's task accurately.",
       "reason": "deferred"
-    },
-    "packages/kimi-agent/src/subagent/manager.rs:a subagent's background task did not settle during kill": {
-      "file": "packages/kimi-agent/src/subagent/manager.rs",
-      "text": "a subagent's background task did not settle during kill",
-      "reason": "model-input"
     },
     "packages/kimi-agent/src/subagent/manager.rs:agent profile snapshot ignored: a same-name profile already won the catalog": {
       "file": "packages/kimi-agent/src/subagent/manager.rs",
@@ -9596,10 +10046,35 @@
       "text": "{resume_id}\"), NOT task_id (\"{task_id}\").",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/args_validate.rs:argument validation stopped at the nesting limit; deeper fields are unchecked": {
+    "packages/kimi-agent/src/tools/args_format.rs:ajv-formats pattern is a compile-time constant": {
+      "file": "packages/kimi-agent/src/tools/args_format.rs",
+      "text": "ajv-formats pattern is a compile-time constant",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:Invalid regular expression: /{pattern}/u: {reason}": {
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
-      "text": "argument validation stopped at the nesting limit; deeper fields are unchecked",
-      "reason": "diagnostic"
+      "text": "Invalid regular expression: /{pattern}/u: {reason}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:Maximum call stack size exceeded": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "Maximum call stack size exceeded",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:can't resolve reference {reference} from id #": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "can't resolve reference {reference} from id #",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}boolean schema is false": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}boolean schema is false",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT be valid": {
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
@@ -9610,6 +10085,12 @@
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
       "text": "{prefix}must NOT have additional property '{name}'",
       "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have duplicate items (items ## {j} and {i} are identical)": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have duplicate items (items ## {j} and {i} are identical)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have fewer than {min} characters": {
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
@@ -9625,6 +10106,12 @@
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
       "text": "{prefix}must NOT have fewer than {min} properties",
       "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have more than {covered} items": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must NOT have more than {covered} items",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must NOT have more than {max} characters": {
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
@@ -9671,15 +10158,45 @@
       "text": "{prefix}must be equal to one of the allowed values",
       "reason": "tool-protocol"
     },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be multiple of {limit_value}": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must be multiple of {limit_value}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must be {}": {
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
       "text": "{prefix}must be {}",
       "reason": "tool-protocol"
     },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must contain at least {min} and no more than {max} valid item(s)": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must contain at least {min} and no more than {max} valid item(s)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must contain at least {min} valid item(s)": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must contain at least {min} valid item(s)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must have required property '{name}'": {
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
       "text": "{prefix}must have required property '{name}'",
       "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must have {} {} when property {property} is present": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must have {} {} when property {property} is present",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must match \"{clause}\" schema": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must match \"{clause}\" schema",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must match a schema in anyOf": {
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
@@ -9691,10 +10208,22 @@
       "text": "{prefix}must match exactly one schema in oneOf",
       "reason": "tool-protocol"
     },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must match format \"{name}\"": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}must match format \"{name}\"",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/tools/args_validate.rs:{prefix}must match pattern \"{pattern}\"": {
       "file": "packages/kimi-agent/src/tools/args_validate.rs",
       "text": "{prefix}must match pattern \"{pattern}\"",
       "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/args_validate.rs:{prefix}property name must be valid": {
+      "file": "packages/kimi-agent/src/tools/args_validate.rs",
+      "text": "{prefix}property name must be valid",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/tools/ask_user_question.rs:2-4 meaningful, distinct options. Do NOT include an 'Other' option — the system adds one automatically.": {
       "file": "packages/kimi-agent/src/tools/ask_user_question.rs",
@@ -9798,11 +10327,6 @@
       "file": "packages/kimi-agent/src/tools/bash_exec.rs",
       "text": "timeout must be ≤ {BASH_MAX_SECONDS}s (foreground)",
       "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/before_execute.rs:beforeExecute listener failed; failing open": {
-      "file": "packages/kimi-agent/src/tools/before_execute.rs",
-      "text": "beforeExecute listener failed; failing open",
-      "reason": "diagnostic"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:# lsp — semantic navigation over a language server": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
@@ -10696,19 +11220,9 @@
       "text": "The session_query tool is available to the main agent only.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/dispatch.rs:plan mode entered": {
-      "file": "packages/kimi-agent/src/tools/dispatch.rs",
-      "text": "plan mode entered",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/tools/dispatch.rs:{} Mode mutex: spec mode could not be exited ({error}); treat spec mode as still active.": {
       "file": "packages/kimi-agent/src/tools/dispatch.rs",
       "text": "{} Mode mutex: spec mode could not be exited ({error}); treat spec mode as still active.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/dispatch.rs:{}: spec mode could not be exited before plan mode entry ({error}).": {
-      "file": "packages/kimi-agent/src/tools/dispatch.rs",
-      "text": "{}: spec mode could not be exited before plan mode entry ({error}).",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/exit_plan_mode.rs:Approve the plan (plan file: {path}) and exit plan mode?": {
@@ -10880,11 +11394,6 @@
       "file": "packages/kimi-agent/src/tools/external_hooks.rs",
       "text": "hook stdin was not available",
       "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/tools/external_hooks.rs:user prompt submit hook": {
-      "file": "packages/kimi-agent/src/tools/external_hooks.rs",
-      "text": "user prompt submit hook",
-      "reason": "wire-token"
     },
     "packages/kimi-agent/src/tools/fetch_url.rs:If you use it in your answer, cite this page as a markdown link, e.g. [title](url).": {
       "file": "packages/kimi-agent/src/tools/fetch_url.rs",
@@ -12124,11 +12633,6 @@
       "text": "memory git command failed",
       "reason": "diagnostic"
     },
-    "packages/kimi-agent/src/tools/memory_repo.rs:memory git command failed to wait": {
-      "file": "packages/kimi-agent/src/tools/memory_repo.rs",
-      "text": "memory git command failed to wait",
-      "reason": "diagnostic"
-    },
     "packages/kimi-agent/src/tools/memory_repo.rs:static ref regex": {
       "file": "packages/kimi-agent/src/tools/memory_repo.rs",
       "text": "static ref regex",
@@ -12189,6 +12693,12 @@
       "text": "Mode mutex: swarm mode was active, so it was exited before tower init.",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/mode_mutex.rs:Paused after tower mode entered": {
+      "file": "packages/kimi-agent/src/tools/mode_mutex.rs",
+      "text": "Paused after tower mode entered",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/tools/mode_mutex.rs:mission {} is paused by the mode mutex (plan mode or a swarm took over) — spawning workers and merging stay blocked so the modes cannot diverge. Resume it with TowerMission status=active when the current work no longer conflicts.": {
       "file": "packages/kimi-agent/src/tools/mode_mutex.rs",
       "text": "mission {} is paused by the mode mutex (plan mode or a swarm took over) — spawning workers and merging stay blocked so the modes cannot diverge. Resume it with TowerMission status=active when the current work no longer conflicts.",
@@ -12209,51 +12719,6 @@
       "text": "(no plan file selected yet)",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/plan_mode.rs:1. Use read-only tools (Read, Grep, Glob) to investigate the codebase. Use Bash only when needed.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "1. Use read-only tools (Read, Grep, Glob) to investigate the codebase. Use Bash only when needed.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:2. Design a concrete, step-by-step plan.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "2. Design a concrete, step-by-step plan.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:3. Wait for the host to provide a plan file path before calling ExitPlanMode.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "3. Wait for the host to provide a plan file path before calling ExitPlanMode.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:3. Write the plan to the plan file with Write or Edit.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "3. Write the plan to the plan file with Write or Edit.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:4. When the plan is ready, call ExitPlanMode for user approval.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "4. When the plan is ready, call ExitPlanMode for user approval.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:Do NOT edit files other than the plan file while plan mode is active.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "Do NOT edit files other than the plan file while plan mode is active.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:Do NOT use Write or Edit while plan mode is active in this host; no plan file path is available.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "Do NOT use Write or Edit while plan mode is active in this host; no plan file path is available.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:Invalid EnterPlanMode arguments: the tool takes no arguments.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "Invalid EnterPlanMode arguments: the tool takes no arguments.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:Plan file: {path}": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "Plan file: {path}",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/tools/plan_mode.rs:Plan mode is active. You may only write to the current plan file: {plan_path}. Call ExitPlanMode to exit plan mode before editing other files.": {
       "file": "packages/kimi-agent/src/tools/plan_mode.rs",
       "text": "Plan mode is active. You may only write to the current plan file: {plan_path}. Call ExitPlanMode to exit plan mode before editing other files.",
@@ -12264,29 +12729,9 @@
       "text": "Plan mode is active. You may only write to the current plan file: {}. Call ExitPlanMode to exit plan mode before editing other files.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/plan_mode.rs:Plan mode is already active. Use ExitPlanMode when the plan is ready.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "Plan mode is already active. Use ExitPlanMode when the plan is ready.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:Plan mode is now active. Your workflow:": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "Plan mode is now active. Your workflow:",
-      "reason": "tool-protocol"
-    },
     "packages/kimi-agent/src/tools/plan_mode.rs:TaskStop is not available in plan mode. Call ExitPlanMode to exit plan mode before stopping a background task.": {
       "file": "packages/kimi-agent/src/tools/plan_mode.rs",
       "text": "TaskStop is not available in plan mode. Call ExitPlanMode to exit plan mode before stopping a background task.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:The connected client does not support the state bridge. Do NOT call this tool again — the host cannot activate plan mode.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot activate plan mode.",
-      "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/plan_mode.rs:Use Bash only when needed; Bash follows the normal permission mode and rules.": {
-      "file": "packages/kimi-agent/src/tools/plan_mode.rs",
-      "text": "Use Bash only when needed; Bash follows the normal permission mode and rules.",
       "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/tools/plan_mode.rs:{} is not available in plan mode because it would mutate scheduled work that runs after plan exit. Call ExitPlanMode first.": {
@@ -12399,6 +12844,12 @@
       "text": "Whether to run the script as a background task.",
       "reason": "model-input"
     },
+    "packages/kimi-agent/src/tools/powershell.rs:timeout must be ≤ {max}s": {
+      "file": "packages/kimi-agent/src/tools/powershell.rs",
+      "text": "timeout must be ≤ {max}s",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/tools/project_identity.rs:static drive regex": {
       "file": "packages/kimi-agent/src/tools/project_identity.rs",
       "text": "static drive regex",
@@ -12434,6 +12885,12 @@
       "text": "<image path=\"{}\" mime=\"{mime}\" size=\"{byte_size}\" />",
       "reason": "format-scaffolding"
     },
+    "packages/kimi-agent/src/tools/read_media.rs:<image path=\"{}\">": {
+      "file": "packages/kimi-agent/src/tools/read_media.rs",
+      "text": "<image path=\"{}\">",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/tools/read_media.rs:<image path=\"{}\"> </image>": {
       "file": "packages/kimi-agent/src/tools/read_media.rs",
       "text": "<image path=\"{}\"> </image>",
@@ -12443,6 +12900,12 @@
       "file": "packages/kimi-agent/src/tools/read_media.rs",
       "text": "<video path=\"{}\" mime=\"{mime}\" size=\"{byte_size}\" />",
       "reason": "format-scaffolding"
+    },
+    "packages/kimi-agent/src/tools/read_media.rs:<video path=\"{}\">": {
+      "file": "packages/kimi-agent/src/tools/read_media.rs",
+      "text": "<video path=\"{}\">",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/tools/read_media.rs:Cropping a region is not supported for video files.": {
       "file": "packages/kimi-agent/src/tools/read_media.rs",
@@ -12509,6 +12972,66 @@
       "text": "{bytes} bytes",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/regex_js.rs:(function (source, flags) {{ try {{ globalThis.__kimiRegex.push(new RegExp(source, flags)); return \"ok:\" + (globalThis.__kimiRegex.length - 1); }} catch (error) {{ return \"err:\" + String(error && error.message); }} }})({source}, {flags})": {
+      "file": "packages/kimi-agent/src/tools/regex_js.rs",
+      "text": "(function (source, flags) {{ try {{ globalThis.__kimiRegex.push(new RegExp(source, flags)); return \"ok:\" + (globalThis.__kimiRegex.length - 1); }} catch (error) {{ return \"err:\" + String(error && error.message); }} }})({source}, {flags})",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/regex_js.rs:globalThis.__kimiRegex = [];": {
+      "file": "packages/kimi-agent/src/tools/regex_js.rs",
+      "text": "globalThis.__kimiRegex = [];",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/regex_js.rs:globalThis.__kimiRegexTest = function (index, text) {": {
+      "file": "packages/kimi-agent/src/tools/regex_js.rs",
+      "text": "globalThis.__kimiRegexTest = function (index, text) {",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/regex_js.rs:globalThis.__kimiRegexTest({index}, {source})": {
+      "file": "packages/kimi-agent/src/tools/regex_js.rs",
+      "text": "globalThis.__kimiRegexTest({index}, {source})",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/regex_js.rs:regex.lastIndex = 0;": {
+      "file": "packages/kimi-agent/src/tools/regex_js.rs",
+      "text": "regex.lastIndex = 0;",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/regex_js.rs:return regex.test(text);": {
+      "file": "packages/kimi-agent/src/tools/regex_js.rs",
+      "text": "return regex.test(text);",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/regex_js.rs:the regular expression engine is unavailable": {
+      "file": "packages/kimi-agent/src/tools/regex_js.rs",
+      "text": "the regular expression engine is unavailable",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/regex_js.rs:var regex = globalThis.__kimiRegex[index];": {
+      "file": "packages/kimi-agent/src/tools/regex_js.rs",
+      "text": "var regex = globalThis.__kimiRegex[index];",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/resolve.rs:File path cannot be empty.": {
+      "file": "packages/kimi-agent/src/tools/resolve.rs",
+      "text": "File path cannot be empty.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/resolve.rs:column_offset is only supported for forward reads. Use a positive line_offset or the forward Next Read arguments.": {
+      "file": "packages/kimi-agent/src/tools/resolve.rs",
+      "text": "column_offset is only supported for forward reads. Use a positive line_offset or the forward Next Read arguments.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/tools/run_code.rs:Execution budget in milliseconds before the worker is terminated (default 30000).": {
       "file": "packages/kimi-agent/src/tools/run_code.rs",
       "text": "Execution budget in milliseconds before the worker is terminated (default 30000).",
@@ -12529,10 +13052,11 @@
       "text": "could not start the run_code worker: {error}",
       "reason": "diagnostic"
     },
-    "packages/kimi-agent/src/tools/run_code.rs:program did not finish within {timeout_ms}ms (+{}s worker grace); the worker thread may still be running": {
+    "packages/kimi-agent/src/tools/run_code.rs:program did not finish within {timeout_ms}ms; the worker thread may still be running": {
       "file": "packages/kimi-agent/src/tools/run_code.rs",
-      "text": "program did not finish within {timeout_ms}ms (+{}s worker grace); the worker thread may still be running",
-      "reason": "tool-protocol"
+      "text": "program did not finish within {timeout_ms}ms; the worker thread may still be running",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/tools/run_code.rs:the run_code worker stopped without reporting a result": {
       "file": "packages/kimi-agent/src/tools/run_code.rs",
@@ -12559,34 +13083,9 @@
       "text": "\"off\", \"read-only\" (or \"readonly\"), \"workspace-write\" (or \"workspacewrite\")",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/sandbox.rs:Sandbox mode \"{}\" blocks code execution (run_code / Bash). Set `[sandbox] mode = \"off\"` to allow it.": {
-      "file": "packages/kimi-agent/src/tools/sandbox.rs",
-      "text": "Sandbox mode \"{}\" blocks code execution (run_code / Bash). Set `[sandbox] mode = \"off\"` to allow it.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/sandbox.rs:Sandbox mode \"{}\" blocks running code with a working directory outside the authorized roots ({}). cwd \"{}\" is outside them.": {
-      "file": "packages/kimi-agent/src/tools/sandbox.rs",
-      "text": "Sandbox mode \"{}\" blocks running code with a working directory outside the authorized roots ({}). cwd \"{}\" is outside them.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/sandbox.rs:Sandbox mode \"{}\" blocks shell writes outside the authorized roots ({}). Target path \"{}\" is outside them.": {
-      "file": "packages/kimi-agent/src/tools/sandbox.rs",
-      "text": "Sandbox mode \"{}\" blocks shell writes outside the authorized roots ({}). Target path \"{}\" is outside them.",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/tools/sandbox.rs:Sandbox mode \"{}\" blocks writes outside the authorized roots ({}). Target path \"{}\" is outside them.": {
       "file": "packages/kimi-agent/src/tools/sandbox.rs",
       "text": "Sandbox mode \"{}\" blocks writes outside the authorized roots ({}). Target path \"{}\" is outside them.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/sandbox.rs:Sandbox mode \"{}\" blocks writes outside the workspace root \"{}\". Target path \"{}\" is outside it.": {
-      "file": "packages/kimi-agent/src/tools/sandbox.rs",
-      "text": "Sandbox mode \"{}\" blocks writes outside the workspace root \"{}\". Target path \"{}\" is outside it.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/sandbox.rs:Sandbox mode \"{}\" blocks writes to the filesystem. Set `[sandbox] mode = \"off\"` (or \"workspace-write\") to allow writes.": {
-      "file": "packages/kimi-agent/src/tools/sandbox.rs",
-      "text": "Sandbox mode \"{}\" blocks writes to the filesystem. Set `[sandbox] mode = \"off\"` (or \"workspace-write\") to allow writes.",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/sandbox.rs:unknown sandbox mode {s:?} (accepted: {})": {
@@ -12618,11 +13117,6 @@
       "file": "packages/kimi-agent/src/tools/search.rs",
       "text": "[Output truncated at {GREP_MAX_OUTPUT_BYTES} bytes — the result set is incomplete. Narrow the pattern, path, or glob filters and re-run to recover complete results.]",
       "reason": "tool-protocol"
-    },
-    "packages/kimi-agent/src/tools/search.rs:[truncated — refine the pattern or scope to see more]": {
-      "file": "packages/kimi-agent/src/tools/search.rs",
-      "text": "[truncated — refine the pattern or scope to see more]",
-      "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/search.rs:invalid glob pattern: {pattern}": {
       "file": "packages/kimi-agent/src/tools/search.rs",
@@ -12842,11 +13336,6 @@
     "packages/kimi-agent/src/tools/session_query.rs:reading session {session_id}": {
       "file": "packages/kimi-agent/src/tools/session_query.rs",
       "text": "reading session {session_id}",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/session_query.rs:reading the session index": {
-      "file": "packages/kimi-agent/src/tools/session_query.rs",
-      "text": "reading the session index",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/session_query.rs:session {detail}": {
@@ -13650,11 +14139,6 @@
       "text": "{} [wait_warning] This is {} call {} in this turn, and you have already spent {} waiting. {}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/tool_policy.rs:tool policy glob could not be compiled; falling back to a literal name comparison": {
-      "file": "packages/kimi-agent/src/tools/tool_policy.rs",
-      "text": "tool policy glob could not be compiled; falling back to a literal name comparison",
-      "reason": "diagnostic"
-    },
     "packages/kimi-agent/src/tools/todo_item.rs:Current todo list:": {
       "file": "packages/kimi-agent/src/tools/todo_item.rs",
       "text": "Current todo list:",
@@ -13815,6 +14299,12 @@
       "text": "When \"{}\" is finished, mark it done and set the next item in_progress; that update can go in the same response as your next tool call.",
       "reason": "tool-protocol"
     },
+    "packages/kimi-agent/src/tools/tool_display.rs:(dry run)": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "(dry run)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
     "packages/kimi-agent/src/tools/tool_display.rs:, include_ignored: true": {
       "file": "packages/kimi-agent/src/tools/tool_display.rs",
       "text": ", include_ignored: true",
@@ -13827,17 +14317,281 @@
       "reason": "deferred",
       "note": "tool-input display detail (v2 formatToolDisplay); product UI copy, localization not yet done"
     },
-    "packages/kimi-agent/src/tools/tool_select_state.rs:<tools_added> {} </tools_added>": {
-      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
-      "text": "<tools_added> {} </tools_added>",
-      "reason": "format-scaffolding",
-      "note": "XML tag template for the v2 tools_added/tools_removed announcement blocks."
+    "packages/kimi-agent/src/tools/tool_display.rs:Ask user question": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Ask user question",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
-    "packages/kimi-agent/src/tools/tool_select_state.rs:<tools_removed> {} </tools_removed>": {
+    "packages/kimi-agent/src/tools/tool_display.rs:Asking user questions": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Asking user questions",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Completing tower mission and storing its notification": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Completing tower mission and storing its notification",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Creating a goal": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Creating a goal",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Deleting cron {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Deleting cron {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Filing tower {} finding: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Filing tower {} finding: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Initializing tower workspace": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Initializing tower workspace",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Invoke skill {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Invoke skill {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Launching agent swarm: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Launching agent swarm: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Launching background": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Launching background",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Listing background tasks": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Listing background tasks",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Listing scheduled cron jobs": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Listing scheduled cron jobs",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Merging tower branch: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Merging tower branch: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Notifying the user": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Notifying the user",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Planning {} tower mission(s)": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Planning {} tower mission(s)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Presenting plan and exiting plan mode": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Presenting plan and exiting plan mode",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Presenting spec and exiting spec mode": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Presenting spec and exiting spec mode",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Reading output of task {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Reading output of task {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Reading the current goal": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Reading the current goal",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Reading the repository map": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Reading the repository map",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Reading tower inbox": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Reading tower inbox",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Reading tower status": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Reading tower status",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Rebasing tower mission onto base: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Rebasing tower mission onto base: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Requesting to enter spec mode": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Requesting to enter spec mode",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Running LSP {} at {}:{}:{}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Running LSP {} at {}:{}:{}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Running code in an isolated subprocess": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Running code in an isolated subprocess",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Running: {preview}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Running: {preview}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Searching for '{}' in {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Searching for '{}' in {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Searching tools for \"{query}\"": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Searching tools for \"{query}\"",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Sending tower message to {}: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Sending tower message to {}: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Session query: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Session query: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Setting goal budget: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Setting goal budget: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Setting goal status: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Setting goal status: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Spawning tower {} \"{}\"": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Spawning tower {} \"{}\"",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Starting background question: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Starting background question: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Starting background: {preview}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Starting background: {preview}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Stopping task {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Stopping task {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Submitting tower review for {}: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Submitting tower review for {}: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:Tearing down tower workspace{suffix}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "Tearing down tower workspace{suffix}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:{label} (+{} more)": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "{label} (+{} more)",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_display.rs:{prefix} {profile} agent: {}": {
+      "file": "packages/kimi-agent/src/tools/tool_display.rs",
+      "text": "{prefix} {profile} agent: {}",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_policy.rs:tool policy glob could not be compiled; no tool may match this pattern": {
+      "file": "packages/kimi-agent/src/tools/tool_policy.rs",
+      "text": "tool policy glob could not be compiled; no tool may match this pattern",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:<tools_relevant> No tool descriptions matched the current request. </tools_relevant>": {
       "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
-      "text": "<tools_removed> {} </tools_removed>",
-      "reason": "format-scaffolding",
-      "note": "XML tag template for the v2 tools_added/tools_removed announcement blocks."
+      "text": "<tools_relevant> No tool descriptions matched the current request. </tools_relevant>",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:<tools_relevant> {} </tools_relevant>": {
+      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
+      "text": "<tools_relevant> {} </tools_relevant>",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:count > 1 implies a position": {
+      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
+      "text": "count > 1 implies a position",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:{block} {guidance} A newer <tools_relevant> block replaces older ones.": {
+      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
+      "text": "{block} {guidance} A newer <tools_relevant> block replaces older ones.",
+      "reason": "deferred",
+      "note": "UNREVIEWED — needs a category"
     },
     "packages/kimi-agent/src/tools/tower/bash_guard.rs:`git clean` with force and -x/-X is not allowed when its scope covers the tower main checkout — it would delete .tower/comms, the tower protocol state, which git does not track and cannot restore. Run the clean inside your own tower worktree or a temporary `git worktree add` checkout instead; {TOWER_GUARD_ESCAPE}": {
       "file": "packages/kimi-agent/src/tools/tower/bash_guard.rs",
@@ -16103,11 +16857,6 @@
       "text": "Tool task join error: {e}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/turn_loop/tool_scheduler.rs:tool scheduler semaphore closed": {
-      "file": "packages/kimi-agent/src/turn_loop/tool_scheduler.rs",
-      "text": "tool scheduler semaphore closed",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/turn_loop/turn_step.rs:(retry-after": {
       "file": "packages/kimi-agent/src/turn_loop/turn_step.rs",
       "text": "(retry-after",
@@ -16153,11 +16902,6 @@
       "text": "Wall time: {}",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/workflow/code_runtime.rs:clearing the interrupt handler": {
-      "file": "packages/kimi-agent/src/workflow/code_runtime.rs",
-      "text": "clearing the interrupt handler",
-      "reason": "diagnostic"
-    },
     "packages/kimi-agent/src/workflow/code_runtime.rs:program completion must be JSON-serializable": {
       "file": "packages/kimi-agent/src/workflow/code_runtime.rs",
       "text": "program completion must be JSON-serializable",
@@ -16186,11 +16930,6 @@
     "packages/kimi-agent/src/workflow/code_runtime.rs:the sandbox returned malformed output: {error}": {
       "file": "packages/kimi-agent/src/workflow/code_runtime.rs",
       "text": "the sandbox returned malformed output: {error}",
-      "reason": "diagnostic"
-    },
-    "packages/kimi-agent/src/workflow/code_runtime.rs:waiting for the QuickJS runtime to idle": {
-      "file": "packages/kimi-agent/src/workflow/code_runtime.rs",
-      "text": "waiting for the QuickJS runtime to idle",
       "reason": "diagnostic"
     },
     "packages/kimi-agent/src/workflow/code_runtime.rs:waiting for the program to finish": {
@@ -16315,6 +17054,5 @@
       "text": "turn watchdog: no new events from the running turn",
       "reason": "diagnostic"
     }
-  },
-  "stale_attribution": "2026-11-09 复核：scan:hardcoded:rust 本次报告的 stale 条目（记录的字面量已不在源码，本次 39 条）全部位于本批未触碰的文件：acp/mod.rs、main.rs、primitives/teardown.rs、repl/mod.rs、server/engine.rs、session/mod.rs、storage/task_runner.rs、subagent/manager.rs（repl/mod.rs 与 subagent/manager.rs 仅在本线更早的 A 批删过 EnterPlanMode 引用，与这些 task-settle 文案无关）。这些文件的文字都是 drain / teardown 上限拆除后的残留（如 'ACP shutdown'、'waiting for in-flight turns to finish'、'teardown: ... step(s) completed'），与另一窗口移除 SESSION_DRAIN_WAIT / TEARDOWN_WAIT 等上界的工作一致；同批新增的 unrecorded（本次 9 条；acp/channel.rs、main.rs、mcp/http.rs、mcp/manager.rs、mcp/sse.rs、napi_bindings/callbacks.rs、primitives/teardown.rs、tools/run_code.rs 的新 stage 文案）也出自同一批改动，并随该窗口继续推进而变化。按要求只写归因，不增删 entries；本说明会被 --update 重写丢弃，仅作当前状态记录。" 
+  }
 }

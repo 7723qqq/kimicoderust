@@ -215,13 +215,6 @@
     },
     {
       "category": "rust-owned-unemitted",
-      "code": 40928,
-      "name": "REMOTE_CONTROL_ALREADY_RUNNING",
-      "rustState": "constant-only",
-      "attribution": "TS declares the code and Rust has its constant, but neither side has a production emission; this is an ownership record, not a porting task."
-    },
-    {
-      "category": "rust-owned-unemitted",
       "code": 41001,
       "name": "APPROVAL_EXPIRED",
       "rustState": "no-rust-constant",

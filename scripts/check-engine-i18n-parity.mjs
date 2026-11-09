@@ -285,7 +285,12 @@ const engineKeysInCatalog = [...enKeys].filter((k) => k.startsWith(`${ENGINE_NAM
 const KEY_SINKS = [
   {
     // tools::arg_error / arg_error_text(tool, field, message_key)
-    call: /\barg_error(?:_text)?\s*\(\s*"[^"]*"\s*,\s*"[^"]*"\s*,\s*"([^"]+)"/g,
+    // `tool` and `field` may be literals or forwarded parameters: a parse
+    // helper shared by several tools takes the tool name as an argument
+    // (`parse_options(args, tool)`), and its key is just as real as an inline
+    // one. Accept either spelling so the shared helper does not report its
+    // catalog key as an orphan.
+    call: /\barg_error(?:_text)?\s*\(\s*(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*"([^"]+)"/g,
     boundNames: ['tool', 'field'],
     parameterized: true,
   },

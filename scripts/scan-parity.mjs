@@ -29,6 +29,7 @@ import { join, resolve } from 'node:path';
 const ROOT = resolve(import.meta.dirname, '..');
 const PROTOCOL_REST_DIR = join(ROOT, 'packages/protocol/src/rest');
 const AGENT = join(ROOT, 'packages/kimi-agent');
+const CORE = join(ROOT, 'packages/kimi-core');
 
 const WsEventContract = JSON.parse(
   readFileSync(join(AGENT, 'ws-event-contract.json'), 'utf8'),
@@ -349,6 +350,7 @@ function collectRustStructFields(structName) {
   const text =
     read(join(AGENT, 'src/config/mod.rs')) +
     read(join(AGENT, 'src/rpc/types.rs')) +
+    read(join(CORE, 'src/types.rs')) +
     readTree(join(AGENT, 'src/llm'), '.rs');
   const struct = text.match(new RegExp(`pub struct ${structName} \\{([\\s\\S]*?)\\n\\}`))?.[1] ?? '';
   /** @type {Set<string>} */

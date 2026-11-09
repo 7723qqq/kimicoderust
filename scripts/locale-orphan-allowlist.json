@@ -1,7 +1,7 @@
 {
   "note": "Locale keys no consumer can name, recorded as accepted debt. Reachability is over-approximated (any Rust string literal, any t('…') argument), so this list can contain a key built at runtime; it cannot contain a key that is genuinely used. Regenerate with `bun scripts/check-locale-orphans.mjs --update`. See scripts/check-locale-orphans.mjs for the model and its limits.",
-  "recordedAt": "2026-11-08",
-  "catalogKeys": 2360,
+  "recordedAt": "2026-11-09",
+  "catalogKeys": 2413,
   "orphans": [
     "background.fullOutputSaved",
     "background.outputFile",
