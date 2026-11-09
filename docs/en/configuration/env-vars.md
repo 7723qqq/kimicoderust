@@ -175,6 +175,9 @@ Switches that control the behavior of subsystems such as telemetry, background t
 | `KIMI_WEB_FETCH_BASE_URL` | Web fetch (`FetchURL`) service API URL; higher priority than the config file; credentials not forwarded. Without an endpoint, signed-in users get the managed Kimi OAuth fetch service before direct local requests | Non-blank string; blank values are ignored |
 | `KIMI_WEB_FETCH_API_KEY` | Web fetch (`FetchURL`) service API key; replaces both the configured key and the OAuth credential | Non-blank string; blank values are ignored |
 | `KIMI_CODE_EXPERIMENTAL_FLAG` | Enable all registered experimental features for this process | `1`, `true`, `yes`, `on` |
+| `KIMI_CODE_EXPERIMENTAL_LSP` | Register the experimental `lsp` tool; the tool is absent unless this is set | Truthy: `1`/`true`/`yes`/`on` |
+| `KIMI_CODE_EXPERIMENTAL_ASSOCIATIVE_MEMORY` | Suppress the `Memory` tool and use the associative-memory path instead | Truthy: `1`/`true`/`yes`/`on` |
+| `KIMI_CODE_EXPERIMENTAL_GIT_MEMORY` | Require each `Memory` write to cite a resolvable commit, and commit every memory write and delete | Truthy: `1`/`true`/`yes`/`on` |
 | `KIMI_SHELL_PATH` | Override the Git Bash path on Windows (used when auto-detection fails) | Absolute path |
 | `KIMI_MODEL_MAX_COMPLETION_TOKENS` | Hard cap on `max_completion_tokens` per LLM step; applies to the `kimi` provider only | Positive integer; `0` or negative disables clamping |
 | `KIMI_MODEL_TEMPERATURE` | Sampling temperature for every request; `kimi` provider only (global, independent of `KIMI_MODEL_NAME`) | Number, e.g. `0.3` |

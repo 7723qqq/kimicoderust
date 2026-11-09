@@ -13,7 +13,7 @@ export KIMI_CODE_HOME=/path/to/kimi-home
 The config file path then becomes `$KIMI_CODE_HOME/config.toml`. Regardless of where the directory lives, the file name is always `config.toml`.
 
 ::: tip
-TOML field names always use snake_case, for example `default_model` and `max_context_size`. If a key contains `.`, you must quote it (for example `[models."gpt-4.1"]`); otherwise TOML treats `.` as a nested table separator.
+Most TOML field names use snake_case, for example `default_model` and `max_context_size`. A few sections mirror the TypeScript schema and use camelCase — notably `[read]` (`defaultMaxChars`, `maxChars`) and each server under `[lsp.servers]` (`extensionToLanguage`, `initializeTimeoutMs`). If a key contains `.`, you must quote it (for example `[models."gpt-4.1"]`); otherwise TOML treats `.` as a nested table separator.
 :::
 
 ## Complete example
@@ -111,6 +111,11 @@ Fields in the config file fall into two categories: **top-level scalars** that d
 | [`background`](#background) | `table` | — | Background task runtime parameters |
 | [`tools`](#tools) | `table` | — | Global tool switch |
 | [`image`](#image) | `table` | — | Image compression parameters |
+| [`read`](#read) | `table` | — | `Read` tool character limits |
+| [`subagent`](#subagent) | `table` | — | Subagent runtime parameters |
+| [`swarm`](#swarm) | `table` | — | Swarm runtime parameters |
+| [`lsp`](#lsp) | `table` | — | Language servers for the experimental `lsp` tool |
+| [`environments`](#environments) | `table` | `{}` | Declared execution environments; this engine serves only the built-in `local` |
 | [`workspace`](#workspace-trust) | `table` | — | Workspace settings, including the trust gate |
 | [`services`](#services) | `table` | — | Built-in external service configuration |
 | [`permission`](#permission) | `table` | — | Initial permission rules |
@@ -450,27 +455,81 @@ Like the `tools` / `disallowedTools` fields of an agent file, this section shape
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `default_max_chars` | `integer` | `100000` | Character budget when the tool call omits `max_chars` |
-| `max_chars` | `integer` | `500000` | Maximum character budget a tool call may request |
+| `defaultMaxChars` | `integer` | `100000` | Character budget when the tool call omits `max_chars` |
+| `maxChars` | `integer` | `500000` | Maximum character budget a tool call may request |
 
 ```toml
 [read]
-default_max_chars = 100000
-max_chars = 500000
+defaultMaxChars = 100000
+maxChars = 500000
 ```
 
-Both values must be positive integers. A call's `max_chars` overrides the default, but is capped at the configured maximum; the result reports the effective budget. If the configured default exceeds the maximum, the maximum also limits default reads. Raise `default_max_chars` when you want larger documents to be returned in one call without the agent requesting a larger budget.
+The section is read directly from the loaded TOML and uses camelCase keys. Both values must be positive integers. A call's `max_chars` overrides the default, but is capped at the configured maximum; the result reports the effective budget. If the configured default exceeds the maximum, the maximum also limits default reads. Raise `defaultMaxChars` when you want larger documents to be returned in one call without the agent requesting a larger budget.
 
 ## `image`
 
-`image` controls how images are compressed before being sent to the model, across every ingestion point (pasted images, `ReadMediaFile` reads, images in MCP tool results, and so on).
+`image` controls how images are compressed before being sent to the model, across every ingestion point (pasted images, image reads through the `Read` tool, images in MCP tool results, and so on).
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `max_edge_px` | `integer` | `2000` | Longest-edge ceiling in pixels; larger images scale down proportionally. Raising it preserves more detail at the cost of larger request bodies |
-| `read_byte_budget` | `integer` | `262144` (256 KB) | Per-image byte budget for images the model reads for itself (`ReadMediaFile` default reads); `region` and `full_resolution` read-backs are exempt |
+| `read_byte_budget` | `integer` | `262144` (256 KB) | Per-image byte budget for images the model reads for itself (`Read` default reads); `region` and `full_resolution` read-backs are exempt |
 
 `max_edge_px` can be overridden by the `KIMI_IMAGE_MAX_EDGE_PX` environment variable and `read_byte_budget` by `KIMI_IMAGE_READ_BYTE_BUDGET`; both take higher priority than `config.toml`.
+
+## `lsp`
+
+`lsp` declares the language servers used by the experimental [`lsp` tool](../reference/tools.md#language-server). The section is read directly from `config.toml` and is ignored unless `KIMI_CODE_EXPERIMENTAL_LSP=1` is set.
+
+```toml
+[lsp.servers.rust-analyzer]
+command = "rust-analyzer"
+args = []
+extensionToLanguage = { rs = "rust" }
+initializeTimeoutMs = 10000
+```
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `command` | `string` | Yes | Server executable to start |
+| `args` | `array<string>` | No | Command-line arguments |
+| `env` | `table<string, string>` | No | Extra environment variables for the server process |
+| `extensionToLanguage` | `table<string, string>` | No | File extension without the dot (`rs`) → LSP language id (`rust`); without it the server never matches a file |
+| `initializationOptions` | `table` | No | Passed through in the LSP `initialize` request |
+| `initializeTimeoutMs` | `integer` | No | Startup and `initialize` timeout; default `10000` |
+| `shutdownTimeoutMs` | `integer` | No | Graceful `shutdown` timeout before killing; default `5000` |
+| `killGraceMs` | `integer` | No | Grace between termination and forced kill; default `2000` |
+| `cancelGraceMs` | `integer` | No | Grace before discarding a cancelled request; default `2000` |
+
+Servers are keyed by an arbitrary name and started on demand. The tool only serves files inside the session workspace whose extension is declared in `extensionToLanguage`.
+
+## `environments`
+
+`environments` declares named execution environments. The `local` environment is built in and is the only one this engine can run; declarations are validated for forward compatibility, and selecting one fails instead of silently falling back to local.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `default` | `string` | Id used when a session names none. It must reference a declared entry; omit it (or the whole section) to use the built-in `local` |
+| `<id>` | `table` | A declared entry: `type` (`ssh`, `docker`, or `command`), `defaultCwd`, `env`, plus transport-specific keys such as `host`, `container`, `context`, `command`, `args`, and `remoteBin` |
+
+`local` and `default` are reserved ids and cannot be used as entry names. `type = "local"` is rejected because the local environment is built in, and any other unrecognized `type` is rejected with the list of valid transports.
+
+| Configuration | Result |
+| --- | --- |
+| No `[environments]` section | Uses the built-in `local`; sessions create and resume normally |
+| Entries declared, no `default` | Configuration is valid; sessions still bind to `local` |
+| `default` points at a declared entry | Session creation or resume fails with `environment.unavailable`, naming the transport, because this engine implements no remote transport |
+| An entry uses `type = "local"` | Fails with `environment.declaration_invalid`: the local environment is built in and cannot be declared |
+| An entry uses an unknown `type` (for example `podman`) | Fails with `environment.declaration_invalid`, listing `ssh`, `docker`, and `command` |
+| An invalid or reserved id, or a `default` that names no declared entry | Fails with `environment.declaration_invalid` (duplicate keys are rejected earlier by the TOML parser) |
+
+Errors surface at two different points. **Semantic errors** — `type = "local"`, an unknown or missing `type`, an invalid or reserved id, or a dangling `default` — keep the section parsed: the server reports `event.config.warning` at startup with `Invalid config section 'environments': <detail>; new sessions will fail until it is fixed`, and creating or resuming a session still fails with `environment.declaration_invalid`. **Structural errors** — an entry that is not a table, or a `default` that is not a string — drop the section entirely with a warning and no "new sessions will fail" notice, because the engine then treats the section as absent.
+
+`default = "local"` is invalid: `default` must name a declared entry. To run locally, omit the `default` key or the whole section.
+
+::: warning Unrecognized sections
+Each top-level section is validated independently. A section that the engine does not recognize is ignored and reported as a startup warning instead of being silently dropped, and a recognized section whose structure does not parse falls back to its defaults with a warning. Semantic checks that run after parsing, such as the `[environments]` rules above, report their own startup warning and keep the section parsed.
+:::
 
 ## `database`
 
@@ -558,7 +617,7 @@ You can also set `dangerous_command_guard = false` under `[permission]` to turn 
 | `pattern` | `string` | Yes | Match pattern in the form `ToolName` or `ToolName(arg-pattern)`, e.g. `Read` or `Bash(rm -rf*)` |
 | `reason` | `string` | No | Rule description for debugging and auditing |
 
-Built-in tool names are listed in [Built-in tools](../reference/tools.md). Most built-in tools that accept rule arguments define their own matching subject, such as `Bash(command-pattern)` or `Read(path-pattern)`. `AgentSwarm`, MCP tools, and custom tools can only be matched by tool name; argument patterns are not supported for them.
+Built-in tool names are listed in [Built-in tools](../reference/tools.md). Most built-in tools that accept rule arguments define their own matching subject, such as `Bash(command-pattern)` or `Read(path-pattern)`. `AgentSwarm`, MCP tools, and custom tools can only be matched by tool name; argument patterns are not supported for them. `Read` and the legacy name `ReadMediaFile` are interchangeable in rules: a rule written for either name also matches calls to the other.
 
 ```toml
 [[permission.rules]]

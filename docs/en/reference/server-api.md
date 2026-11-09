@@ -689,7 +689,7 @@ On success, `data` is the updated [session object](#the-session-object).
 
 #### `POST /api/v1/sessions/{session_id}/title/generate`
 
-Generates a title from the session's prompts through the managed provider's `chat_title` tool and applies it, broadcasting `session.meta.updated`. Generation requires the managed OAuth login; without `force`, a session that already has a custom or generated title is reported unavailable instead of being overwritten.
+Generates a title from the session's prompts and applies it, broadcasting `session.meta.updated`. Every `source` is summarized by a model: a managed OAuth model calls the hosted `chat_title` tool, and any other model runs a short generation request through the session's own LLM. Without `force`, a session that already has a custom or generated title returns its existing title and changes nothing; a custom title is never overwritten by automatic generation.
 
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
@@ -697,10 +697,11 @@ Generates a title from the session's prompts through the managed provider's `cha
 | `force` | body | boolean | Regenerate even when a custom or generated title exists. Default `false` |
 | `source` | body | string | Title input: `user_prompts` (default) / `first_turn` / `digest` |
 
-On success, `data` is `{ title }` — the title now applied to the session.
+On success, `data` is `{ title }` — the title now applied to the session, or `null` when there is no prompt content or no usable model. With `force`, an existing title is regenerated and replaced.
 
 - `40401`: session not found
-- `40923`: generation unavailable — the flag is off, there is no managed OAuth login or no prompt content yet, an existing title without `force`, or the backend request failed
+- `40001`: the model request failed
+- `50001`: the generated title could not be persisted
 
 #### `POST /api/v1/sessions/{session_id}:{action}`
 
@@ -708,7 +709,7 @@ Session actions are dispatched through one route: the path tail is parsed as `{s
 
 #### `POST /api/v1/sessions/{session_id}:fork`
 
-Copies the session — its transcript, agent state, and files — into a new session in the same workspace, and broadcasts `event.session.created`. Forking is rejected while any of the session's agents has an active turn.
+Copies the session — its transcript, agent state, and files — into a new session in the same workspace, and broadcasts `event.session.created`. Forking is rejected while any of the session's agents has an active turn. The fork inherits the source's title kind (a custom title stays custom), `forkedFrom`, working directory, environment binding, agent roster, and custom metadata; body `metadata` is merged on top.
 
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
@@ -759,7 +760,7 @@ On success, `data` is `{ agent_id }` — the id of the new child agent.
 
 #### `POST /api/v1/sessions/{session_id}:archive`
 
-Marks the session archived: it disappears from the default session list (it stays listed with `include_archive` or `archived_only`), and the server broadcasts the global `event.session.archived` event.
+Marks the session archived: it disappears from the default session list (it stays listed with `include_archive` or `archived_only`). Archiving also evicts the session's live event lane — its numbering restarts under a fresh epoch, so no client can resume the archived session's stream — and clears any pending idle-reclaim bookkeeping.
 
 On success, `data` is `{ archived: true }`.
 
@@ -2424,7 +2425,6 @@ The only endpoint is `ws://<host>:<port>/api/v1/ws`; authentication happens at t
   "payload": {
     "ws_connection_id": "conn_01JZX4...",
     "protocol_version": 2,
-    "max_event_buffer_size": 1000,
     "capabilities": { "event_batching": false, "compression": false }
   }
 }

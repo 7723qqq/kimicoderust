@@ -69,7 +69,7 @@ kimi --session
 - **`/new`**（别名 `/clear`）：切换到新会话，丢弃当前上下文。
 - **`/sessions`**（别名 `/resume`）：浏览并恢复历史会话。
 - **`/fork`**：派生当前会话（详见下文）。
-- **`/title <text>`**（别名 `/rename`）：设置会话标题方便识别；不带参数时显示当前标题。
+- **`/title <text>`**（别名 `/rename`）：设置会话标题方便识别；不带参数时显示当前标题。用该命令设置的标题属于自定义标题，自动生成标题不会覆盖它。
 
 ## 上下文压缩
 
@@ -84,6 +84,8 @@ kimi --session
 ```
 /compact 保留与数据库迁移相关的讨论
 ```
+
+上下文 gauge 计入系统提示和全部工具 schema，而不只是对话消息。压缩请求的用量在 usage 中单独记账（Agent 状态上的 `compactionTotal` 与 `compactionByModel`），但其 token 仍计入会话总量；当前轮次的用量不包含这部分。
 
 ## 派生会话
 

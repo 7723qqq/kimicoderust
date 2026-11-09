@@ -35,6 +35,7 @@
 | 工具 | 默认审批 | 说明 |
 | --- | --- | --- |
 | `Bash` | 需审批 | 执行 Shell 命令 |
+| `PowerShell` | 需审批 | 执行 Windows PowerShell 脚本（仅 Windows） |
 
 **`Bash`** 是权限要求最严格的工具，也是功能最通用的工具。参数：
 
@@ -46,6 +47,8 @@
 - `disable_timeout`：后台任务是否取消超时限制
 
 前台模式会阻塞当前轮次，直到命令结束或超时；命令运行期间，TUI 会把 stdout 和 stderr 流式显示在正在运行的 `Bash` 工具卡片中。前台命令超时后默认不会被终止，而是转为后台任务继续运行（受 600 秒默认后台超时约束）；如需恢复超时即终止的行为，将 `[background]` 的 [`bash_auto_background_on_timeout`](../configuration/config-files.md#background) 设为 `false`。600 秒的默认后台超时可通过 [`bash_task_timeout_s`](../configuration/config-files.md#background) 配置（`0` = 无超时），且在 print 模式（`kimi -p`）下默认无超时。后台模式立即返回任务 ID，任务结束时自动通知 Agent。stdin 始终被关闭，交互式命令会立即收到 EOF。任务被停止或后台超时时采用两阶段终止策略（SIGTERM → 5 秒宽限期 → SIGKILL），确保进程可靠结束。Windows 平台自动探测 Shell（PowerShell 7 → Windows PowerShell → Git Bash 或 MSYS2 bash），可用 `KIMI_SHELL_PATH` 或 [`[shell] preference`](../configuration/config-files.md#shell) 配置固定；Windows 上的 bash 调用会在 `PATH` 前注入 `/usr/local/bin:/usr/bin:/bin`，确保 MSYS2/Git Bash 工具始终可用。
+
+**`PowerShell`** 仅在 Windows 上注册，排在 `Bash` 之后。它直接以 PowerShell 进程执行脚本——优先 PowerShell 7（`pwsh`），否则退回 Windows PowerShell 5.1——并把脚本作为单个 `-EncodedCommand` 参数传入，因此引号与编码由工具处理，非 ASCII 输出按 UTF-8 解码。它接受与 `Bash` 相同的 `command`、`cwd`、`timeout`、`run_in_background`、`description` 和 `disable_timeout` 参数。注册表、服务、计划任务、COM/WinRM、事件日志、ACL、证书存储等 Windows 原生任务应使用该工具，而不是通过 `Bash` 调用 `powershell.exe` 或 `pwsh`，后者会重新编码输出并可能破坏非 ASCII 文本。
 
 ## 网络类
 
@@ -95,8 +98,19 @@ Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只�
 | 工具 | 默认审批 | 说明 |
 | --- | --- | --- |
 | `Knowledge` | 自动放行 | 读写本地知识库 |
+| `Memory` | 需审批 | 跨会话搜索和管理持久记忆 |
 
 **`Knowledge`** 与本地知识库交互——一个结构化的持久项目笔记存储，Agent 可跨会话回忆。
+
+**`Memory`** 是单个工具，通过 `action` 选择 `search`、`read`、`write`、`list`、`delete`、`log` 或 `revert`。条目是 `~/.kimi-code/memory/` 下的 Markdown 文档，分为 `global`、`project` 和 `session` 三种 scope。`write` 默认写入 `project`；`search` 未指定 `scope` 时覆盖全部 scope；`list` 默认列出全部。`project` 的身份优先取自仓库的 `origin` remote，其次取仓库根目录。`log` 列出记忆仓库最近的提交，`revert` 按完整 SHA 回滚一次提交。设置 `KIMI_CODE_EXPERIMENTAL_GIT_MEMORY=1` 后，每次写入都必须引用可解析的提交，且每次写入和删除都会以 `remember:`、`update:` 或 `forget:` 提交；设置 `KIMI_CODE_EXPERIMENTAL_ASSOCIATIVE_MEMORY=1` 会停用该工具，改走关联记忆路径。该工具仅对 main agent 开放。
+
+## 语言服务器
+
+| 工具 | 默认审批 | 说明 |
+| --- | --- | --- |
+| `lsp` | 自动放行 | 通过已配置的语言服务器执行语义查询 |
+
+**`lsp`** 是实验性工具，默认关闭；设置 `KIMI_CODE_EXPERIMENTAL_LSP=1` 启用，并在 [`[lsp]`](../configuration/config-files.md#lsp) 下声明服务器。它接受 `operation`（`goToDefinition`、`findReferences`、`goToImplementation` 或 `hover`）、`file_path`，以及从 1 开始的 `line` 和 `character` 位置（UTF-16 码元）。文件必须位于会话工作区内，且其扩展名要由已配置的服务器覆盖。
 
 ## 协作类
 
@@ -106,7 +120,6 @@ Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只�
 | --- | --- | --- |
 | `Agent` | 自动放行 | 派生 subagent 执行子任务 |
 | `AgentSwarm` | swarm mode 中自动放行，否则需审批 | 启动基于 item 的 subagent，或恢复已有 subagent |
-| `Team` | swarm mode 中自动放行，否则需审批 | 召集多个 Agent 进行圆桌讨论或结构化辩论 |
 | `AskUserQuestion` | 自动放行 | 向用户提问以获取结构化输入 |
 | `NotifyUser` | 自动放行 | 在轮次进行中向用户展示一条简短的进展更新 |
 | `Skill` | 自动放行 | 调用已注册的 inline Skill |
@@ -114,8 +127,6 @@ Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只�
 **`Agent`** 将子任务委托给 subagent 执行。必填参数：`prompt`（完整任务描述）和 `description`（3–5 个词的简短说明）。可选参数：`subagent_type`（默认 `coder`）、`resume`（恢复已有 Agent 的 ID，与 `subagent_type` 互斥）、`run_in_background`（默认 false）和 `model`（在配置 [subagent 模型池](../configuration/config-files.md#subagent-模型池) 后可用——`[secondary_model.models]` 表或仅一行 `default_model`：池中别名，或 `"primary"` 表示调用方自己运行的模型；resume 时无效）。未传入时 subagent 绑定池的 `default_model`；未配置模型池时，subagent 一律继承调用方模型。Agent 任务默认 2 小时超时，可通过 `config.toml` 的 `[subagent] timeout_ms`（`0` = 无超时，或 `KIMI_SUBAGENT_TIMEOUT_MS` 环境变量）配置，且在 print 模式（`kimi -p`）下默认无超时。前台模式下父 Agent 等待 subagent 完成再继续；后台模式立即返回任务 ID，完成时通过合成 User 消息自动回到 main agent。多个前台 `Agent` 调用在同一步运行时，TUI 会合并展示，并为每个 subagent 显示运行、等待、完成或失败状态以及已耗时长。subagent 体系细节见 [Agent 与 subagent](../customization/agents.md)。
 
 **`AgentSwarm`** 可以从共享的 `prompt_template` 和 `items` 数组启动 subagent，也可以通过 `resume_agent_ids` 恢复已有 subagent，或在一次调用中同时使用两者。模板必须包含 `{{item}}` 占位符；每个 item 会替换该占位符，并启动一个新的 subagent。传入 `subagent_type` 可以指定整个 swarm 中所有新启动的 subagent 使用的 profile；省略时默认使用 `coder`。传入 `model`（在配置 [subagent 模型池](../configuration/config-files.md#subagent-模型池) 后可用——`[secondary_model.models]` 表或仅一行 `default_model`）可以让新启动的 subagent 运行在池中别名指定的模型或调用方自己的模型（`"primary"`）上。未传入时新启动的 subagent 绑定池的 `default_model`；未配置模型池时则继承调用方模型。恢复的 subagent 保持其原有模型。不传 `resume_agent_ids` 时，本工具要求至少 2 个 item；传入 `resume_agent_ids` 时，可以恢复 1 个或多个已有 subagent。本工具最多支持 128 个 subagent，会等待全部 subagent 完成，并返回聚合报告。每个 subagent 默认 2 小时超时，可通过 `config.toml` 的 [`[swarm] timeout_ms`](../configuration/config-files.md#swarm)（`0` = 无超时，或 `KIMI_CODE_SWARM_TIMEOUT_MS` 环境变量）配置，且在 print 模式（`kimi -p`）下默认无超时；超时的 subagent 会被中止，并在聚合报告中标记为失败。在 TUI 中，前台 swarm 会在输入框上方显示实时 `Agent swarm` 进度面板。若一次模型响应调用 `AgentSwarm`，该调用必须是该响应中的唯一工具调用；如需运行多个 swarm，应先调用一个 `AgentSwarm` 并等待结果，再调用下一个，若单个模板可以覆盖这些工作，也可以合并为一个 swarm。在 `manual` 权限模式下，未处于 swarm mode 时调用 `AgentSwarm` 会触发审批，除非已有权限规则允许；swarm mode 已开启时，`AgentSwarm` 本身会自动放行。权限规则只能按工具名 `AgentSwarm` 匹配，不支持 `AgentSwarm(swarm)` 这类参数模式。默认情况下，本工具会逐步提升并发且不设上限（立即启动 5 个 subagent，之后每 700 毫秒再启动 1 个）；将 `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` 设为正整数可限制该阶段同时运行的 subagent 数量，不设置则表示不限制。若设置为非正整数的值，本次 AgentSwarm 调用会立即失败。
-
-**`Team`** 召集多个 Agent 进行圆桌讨论（`mode` 为 `discussion`，默认）或结构化辩论（`mode` 为 `debate`），适合需要多视角分析、交叉评审或达成共识的场景。传入 `topic`（讨论话题）与 `participants` 数组——每项含 `profileName`（Agent profile，默认 `coder`）、`roleDescription`（角色描述）与辩论专用的 `assignedStance`（立场）。`maxRounds` 控制轮数；`summaryPrompt` 可选，提供时生成总结或共识报告；`enableVoting` 可为辩论启用投票。每个参与者都能看到完整讨论记录并轮流发言，结果包含完整记录、总结与 token 用量。`Team` 与 `AgentSwarm` 一样属于排他工具——一次模型响应中必须单独调用。在 `manual` 权限模式下，未处于 swarm mode 时调用 `Team` 会触发审批；swarm mode 已开启时自动放行。也可以使用 `/team <topic> with <role1>,<role2>` 命令直接发起。
 
 **`AskUserQuestion`** 以结构化多选题的形式向用户提问，适用于需要消歧或选择方案的场景。`questions` 参数接受 1–4 道题，每道题需提供 `question`（以 `?` 结尾）、`options`（2–4 个选项，每项含 `label` 和 `description`）以及可选的 `header`（最多 12 字符）和 `multi_select`（默认 false）。系统自动附加"其他"选项。`background` 为 true 时启动后台问题任务并立即返回任务 ID；问题在本轮结束后仍保持待答，用户作答后答案会以通知形式直接送回 Agent。宿主未实现交互式提问能力时返回失败提示，Agent 应改为在文本回复中直接提问。
 

@@ -560,7 +560,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `GET /api/v1/sessions/{session_id}` | 读取单个会话 |
 | `GET /api/v1/sessions/{session_id}/profile` | 读取会话档案 |
 | `POST /api/v1/sessions/{session_id}/profile` | 更新标题、元数据、Agent 配置 |
-| `POST /api/v1/sessions/{session_id}/title/generate` | 通过托管的 `chat_title` 工具生成标题 |
+| `POST /api/v1/sessions/{session_id}/title/generate` | 通过模型概括生成标题 |
 | `POST /api/v1/sessions/{session_id}:{action}` | 会话动作：`fork` / `compact` / `undo` / `abort` / `btw` / `archive` / `restore` |
 | `GET /api/v1/sessions/{session_id}/children` | 列出子会话 |
 | `POST /api/v1/sessions/{session_id}/children` | 创建子会话（fork 并打标） |
@@ -689,7 +689,7 @@ schema 还接受 `agent_config` 内的 `system_prompt`、`tools`、`mcp_servers`
 
 #### `POST /api/v1/sessions/{session_id}/title/generate`
 
-通过托管供应商的 `chat_title` 工具根据会话的提示词生成标题并应用，同时广播 `session.meta.updated`。生成需要托管 OAuth 登录；未提供 `force` 时，已有自定义标题或已生成标题的会话会上报为不可用，而不会被覆盖。
+根据会话的提示词生成标题并应用，同时广播 `session.meta.updated`。所有 `source` 都由模型概括：托管 OAuth 模型调用托管的 `chat_title` 工具，其他模型则通过会话自身的 LLM 发起一次短生成请求。未提供 `force` 时，已有自定义标题或已生成标题的会话会直接返回现有标题，不做任何改动；自动生成永远不会覆盖自定义标题。
 
 | 参数 | 位置 | 类型 | 说明 |
 | --- | --- | --- | --- |
@@ -697,10 +697,11 @@ schema 还接受 `agent_config` 内的 `system_prompt`、`tools`、`mcp_servers`
 | `force` | body | boolean | 即使已有自定义或生成的标题也重新生成。默认 `false` |
 | `source` | body | string | 标题输入：`user_prompts`（默认）/ `first_turn` / `digest` |
 
-成功时，`data` 为 `{ title }`——当前应用到会话的标题。
+成功时，`data` 为 `{ title }`——当前应用到会话的标题；没有提示词内容或没有可用模型时为 `null`。提供 `force` 时会重新生成并替换现有标题。
 
 - `40401`：会话不存在
-- `40923`：生成不可用——开关未开启、没有托管 OAuth 登录或尚无任何提示词内容、已有标题但未提供 `force`，或后端请求失败
+- `40001`：模型请求失败
+- `50001`：生成的标题无法持久化
 
 #### `POST /api/v1/sessions/{session_id}:{action}`
 
@@ -708,7 +709,7 @@ schema 还接受 `agent_config` 内的 `system_prompt`、`tools`、`mcp_servers`
 
 #### `POST /api/v1/sessions/{session_id}:fork`
 
-将会话——其转录、Agent 状态与文件——复制到同一工作区中的新会话，并广播 `event.session.created`。当会话中任一 Agent 有进行中的轮次时，fork 会被拒绝。
+将会话——其转录、Agent 状态与文件——复制到同一工作区中的新会话，并广播 `event.session.created`。当会话中任一 Agent 有进行中的轮次时，fork 会被拒绝。派生会话继承源会话的标题类型（自定义标题仍为自定义）、`forkedFrom`、工作目录、环境绑定、Agent roster 与自定义 metadata；请求体中的 `metadata` 会合并覆盖。
 
 | 参数 | 位置 | 类型 | 说明 |
 | --- | --- | --- | --- |
@@ -759,7 +760,7 @@ schema 还接受 `agent_config` 内的 `system_prompt`、`tools`、`mcp_servers`
 
 #### `POST /api/v1/sessions/{session_id}:archive`
 
-将会话标记为已归档：它从默认会话列表中消失（使用 `include_archive` 或 `archived_only` 时仍会列出），并且服务端广播全局 `event.session.archived` 事件。
+将会话标记为已归档：它从默认会话列表中消失（使用 `include_archive` 或 `archived_only` 时仍会列出）。归档还会逐出该会话的实时事件通道——编号在新 epoch 下重新开始，因此客户端无法再恢复已归档会话的事件流——并清理待处理的空闲回收记录。
 
 成功时，`data` 为 `{ archived: true }`。
 
@@ -2424,7 +2425,6 @@ locator 寻址的目录（脱敏配置），外加对每个 OAuth 候选的批�
   "payload": {
     "ws_connection_id": "conn_01JZX4...",
     "protocol_version": 2,
-    "max_event_buffer_size": 1000,
     "capabilities": { "event_batching": false, "compression": false }
   }
 }

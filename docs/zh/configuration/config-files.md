@@ -13,7 +13,7 @@ export KIMI_CODE_HOME=/path/to/kimi-home
 此时配置文件路径变为 `$KIMI_CODE_HOME/config.toml`。无论目录在哪里，文件名固定是 `config.toml`。
 
 ::: tip
-TOML 字段名一律用下划线（snake_case），如 `default_model`、`max_context_size`。字段名里若含 `.`，需用引号包住，例如 `[models."gpt-4.1"]`；否则 TOML 会把 `.` 解释为嵌套表分隔符。
+大多数 TOML 字段名使用下划线（snake_case），如 `default_model`、`max_context_size`。少数节直接沿用 TypeScript 侧的 schema，使用 camelCase——主要是 `[read]`（`defaultMaxChars`、`maxChars`）和 `[lsp.servers]` 下的每台服务器（`extensionToLanguage`、`initializeTimeoutMs`）。字段名里若含 `.`，需用引号包住，例如 `[models."gpt-4.1"]`；否则 TOML 会把 `.` 解释为嵌套表分隔符。
 :::
 
 ## 完整示例
@@ -111,6 +111,11 @@ timeout = 5
 | [`background`](#background) | `table` | — | 后台任务运行参数 |
 | [`tools`](#tools) | `table` | — | 全局工具开关 |
 | [`image`](#image) | `table` | — | 图片压缩参数 |
+| [`read`](#read) | `table` | — | `Read` 工具字符额度 |
+| [`subagent`](#subagent) | `table` | — | subagent 运行参数 |
+| [`swarm`](#swarm) | `table` | — | swarm 运行参数 |
+| [`lsp`](#lsp) | `table` | — | 实验性 `lsp` 工具的 language server |
+| [`environments`](#environments) | `table` | `{}` | 声明的执行环境；当前引擎仅支持内置 `local` |
 | [`workspace`](#workspace-trust) | `table` | — | 工作区设置，包括信任机制 |
 | [`services`](#services) | `table` | — | 内置外部服务配置 |
 | [`permission`](#permission) | `table` | — | 初始权限规则 |
@@ -449,27 +454,81 @@ disabled = ["EnterPlanMode", "ExitPlanMode", "mcp__github__*"]
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `default_max_chars` | `integer` | `100000` | 工具调用未指定 `max_chars` 时的字符额度 |
-| `max_chars` | `integer` | `500000` | 单次工具调用可申请的最大字符额度 |
+| `defaultMaxChars` | `integer` | `100000` | 工具调用未指定 `max_chars` 时的字符额度 |
+| `maxChars` | `integer` | `500000` | 单次工具调用可申请的最大字符额度 |
 
 ```toml
 [read]
-default_max_chars = 100000
-max_chars = 500000
+defaultMaxChars = 100000
+maxChars = 500000
 ```
 
-两个值都必须是正整数。调用中的 `max_chars` 覆盖默认值，但不会超过配置的最大值；结果会说明实际生效的额度。如果配置的默认值超过最大值，默认读取也会按最大值执行。如果希望较大的文档默认就能一次返回，无需 Agent 主动申请更大额度，可以提高 `default_max_chars`。
+该节直接从加载后的 TOML 读取，键名为 camelCase。两个值都必须是正整数。调用中的 `max_chars` 覆盖默认值，但不会超过配置的最大值；结果会说明实际生效的额度。如果配置的默认值超过最大值，默认读取也会按最大值执行。如果希望较大的文档默认就能一次返回，无需 Agent 主动申请更大额度，可以提高 `defaultMaxChars`。
 
 ## `image`
 
-`image` 控制图片发送给模型前的压缩行为，对所有图片入口生效（粘贴图片、`ReadMediaFile` 读图、MCP 工具结果里的图片等）。
+`image` 控制图片发送给模型前的压缩行为，对所有图片入口生效（粘贴图片、通过 `Read` 工具读图、MCP 工具结果里的图片等）。
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `max_edge_px` | `integer` | `2000` | 图片最长边上限（像素）。超过时按比例缩小到该值以内；调大可保留更多细节，代价是更大的请求体积 |
-| `read_byte_budget` | `integer` | `262144`（256 KB） | 模型自行读取图片的单图字节预算（`ReadMediaFile` 默认读取）；`region` 与 `full_resolution` 回读不受此限制 |
+| `read_byte_budget` | `integer` | `262144`（256 KB） | 模型自行读取图片的单图字节预算（`Read` 默认读取）；`region` 与 `full_resolution` 回读不受此限制 |
 
 `max_edge_px` 可被环境变量 `KIMI_IMAGE_MAX_EDGE_PX` 覆盖，`read_byte_budget` 可被 `KIMI_IMAGE_READ_BYTE_BUDGET` 覆盖，优先级均高于配置文件。
+
+## `lsp`
+
+`lsp` 声明实验性 [`lsp` 工具](../reference/tools.md#语言服务器) 使用的 language server。该节直接从 `config.toml` 读取；未设置 `KIMI_CODE_EXPERIMENTAL_LSP=1` 时不会生效。
+
+```toml
+[lsp.servers.rust-analyzer]
+command = "rust-analyzer"
+args = []
+extensionToLanguage = { rs = "rust" }
+initializeTimeoutMs = 10000
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `command` | `string` | 是 | 要启动的服务器可执行文件 |
+| `args` | `array<string>` | 否 | 命令行参数 |
+| `env` | `table<string, string>` | 否 | 服务器进程的额外环境变量 |
+| `extensionToLanguage` | `table<string, string>` | 否 | 不含点号的扩展名（`rs`）→ LSP 语言 id（`rust`）；缺失时该服务器不会匹配任何文件 |
+| `initializationOptions` | `table` | 否 | 原样传入 LSP `initialize` 请求 |
+| `initializeTimeoutMs` | `integer` | 否 | 启动与 `initialize` 超时；默认 `10000` |
+| `shutdownTimeoutMs` | `integer` | 否 | 优雅 `shutdown` 超时，超时后强制结束；默认 `5000` |
+| `killGraceMs` | `integer` | 否 | 发出终止信号到强制 kill 之间的宽限期；默认 `2000` |
+| `cancelGraceMs` | `integer` | 否 | 取消请求后丢弃前的宽限期；默认 `2000` |
+
+服务器以任意名称作为 key，按需启动。工具只处理会话工作区内、且扩展名在 `extensionToLanguage` 中声明过的文件。
+
+## `environments`
+
+`environments` 声明具名执行环境。`local` 是内置环境，也是当前引擎唯一能运行的环境；声明会被校验以保持前向兼容，选中声明条目时会失败，而不会静默回退到本地。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `default` | `string` | 会话未指定环境时使用的 id。必须指向某个声明条目；省略该项（或整个节）即使用内置 `local` |
+| `<id>` | `table` | 声明条目：`type`（`ssh`、`docker` 或 `command`）、`defaultCwd`、`env`，以及 `host`、`container`、`context`、`command`、`args`、`remoteBin` 等传输专用键 |
+
+`local` 与 `default` 是保留 id，不能用作条目名。`type = "local"` 会被拒绝，因为本地环境是内置的；其他无法识别的 `type` 也会被拒绝，并列出合法的传输类型。
+
+| 配置 | 结果 |
+| --- | --- |
+| 无 `[environments]` 节 | 使用内置 `local`；会话可正常创建与恢复 |
+| 声明了条目但未设 `default` | 配置合法；会话仍绑定 `local` |
+| `default` 指向某个声明条目 | 创建或恢复会话失败，报 `environment.unavailable` 并点名该传输，因为当前引擎没有实现远端传输 |
+| 任一条目 `type = "local"` | 报 `environment.declaration_invalid`：本地环境是内置的，不能被声明 |
+| 任一条目使用未知 `type`（如 `podman`） | 报 `environment.declaration_invalid`，并列出 `ssh`、`docker`、`command` |
+| 非法或保留 id，或 `default` 指向不存在的条目 | 报 `environment.declaration_invalid`（重复键会更早被 TOML 解析器拒绝） |
+
+错误的暴露时机分两种。**语义错误**（`type = "local"`、未知或缺失的 `type`、非法或保留 id、悬空的 `default`）会保留该节的解析结果：服务端在启动时发出 `event.config.warning`，文案为 `Invalid config section 'environments': <detail>; new sessions will fail until it is fixed`；创建或恢复会话时仍以 `environment.declaration_invalid` 失败。**结构性错误**（条目不是 table，或 `default` 不是字符串）会直接丢弃该节并告警，不会出现「新会话将失败」的提示，因为此时引擎按回退语义把该节视为不存在。
+
+`default = "local"` 是非法配置：`default` 必须指向某个声明条目。想要在本地运行，请省略 `default` 键或整个节。
+
+::: warning 未识别的节
+每个顶层节独立校验。引擎不认识的节会被忽略并在启动时告警，而不是静默丢弃；已识别但结构无法解析的节会回退到默认值并告警。解析之后执行的语义校验（如上面的 `[environments]` 规则）会发出自己的启动告警，并保留该节的解析结果。
+:::
 
 ## `database`
 
@@ -557,7 +616,7 @@ api_key = "sk-xxx"
 | `pattern` | `string` | 是 | 匹配模式，格式为 `工具名` 或 `工具名(参数模式)`，如 `Read`、`Bash(rm -rf*)` |
 | `reason` | `string` | 否 | 规则说明，仅用于调试和审计 |
 
-内置工具名见[内置工具](../reference/tools.md)。大多数支持规则参数的内置工具会定义自己的匹配对象，例如 `Bash(command-pattern)` 或 `Read(path-pattern)`。`AgentSwarm`、MCP 工具和自定义工具只能按工具名匹配，不支持参数模式。
+内置工具名见[内置工具](../reference/tools.md)。大多数支持规则参数的内置工具会定义自己的匹配对象，例如 `Bash(command-pattern)` 或 `Read(path-pattern)`。`AgentSwarm`、MCP 工具和自定义工具只能按工具名匹配，不支持参数模式。`Read` 与旧名称 `ReadMediaFile` 在规则中互通：为任一名称编写的规则也会匹配另一名称的调用。
 
 ```toml
 [[permission.rules]]

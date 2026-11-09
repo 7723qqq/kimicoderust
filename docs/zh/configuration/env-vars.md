@@ -175,6 +175,9 @@ kimi
 | `KIMI_WEB_FETCH_BASE_URL` | 网页抓取（`FetchURL`）服务的 API URL，优先级高于配置文件；未指定端点时已登录用户走 Kimi OAuth 托管抓取，再回退本地直连；凭据不发往该端点 | 非空字符串；空白值被忽略 |
 | `KIMI_WEB_FETCH_API_KEY` | 网页抓取（`FetchURL`）服务的 API 密钥；设置后同时替换配置中的 API 密钥和 OAuth 凭据 | 非空字符串；空白值被忽略 |
 | `KIMI_CODE_EXPERIMENTAL_FLAG` | 在当前进程启用所有已注册的实验功能 | `1`、`true`、`yes`、`on` |
+| `KIMI_CODE_EXPERIMENTAL_LSP` | 注册实验性 `lsp` 工具；未设置时该工具不存在 | 真值：`1`/`true`/`yes`/`on` |
+| `KIMI_CODE_EXPERIMENTAL_ASSOCIATIVE_MEMORY` | 停用 `Memory` 工具，改走关联记忆路径 | 真值：`1`/`true`/`yes`/`on` |
+| `KIMI_CODE_EXPERIMENTAL_GIT_MEMORY` | 要求每次 `Memory` 写入引用可解析的提交，并提交每次记忆写入与删除 | 真值：`1`/`true`/`yes`/`on` |
 | `KIMI_SHELL_PATH` | Windows 上覆盖 Git Bash 路径（自动探测失败时使用） | 绝对路径 |
 | `KIMI_MODEL_MAX_COMPLETION_TOKENS` | 单步 LLM 请求的 `max_completion_tokens` 硬上限，仅对 `kimi` 供应商生效 | 正整数；`0` 或负数禁用 clamp |
 | `KIMI_MODEL_TEMPERATURE` | 每次请求的采样温度，仅对 `kimi` 供应商生效（全局生效，不依赖 `KIMI_MODEL_NAME`） | 数字，如 `0.3` |

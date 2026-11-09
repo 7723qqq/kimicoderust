@@ -69,7 +69,7 @@ You can manage sessions without leaving the terminal. The following slash comman
 - **`/new`** (alias `/clear`): switch to a new session, discarding the current context.
 - **`/sessions`** (alias `/resume`): browse and resume a previous session.
 - **`/fork`**: fork the current session (see below).
-- **`/title <text>`** (alias `/rename`): set a session title for easier identification; without arguments, displays the current title.
+- **`/title <text>`** (alias `/rename`): set a session title for easier identification; without arguments, displays the current title. A title set this way is a custom title, and automatic title generation never overwrites it.
 
 ## Context compression
 
@@ -84,6 +84,8 @@ You can pass a hint to tell the model what to prioritize when compressing:
 ```
 /compact Keep the discussion about database migrations
 ```
+
+The context gauge includes the system prompt and every tool schema, not only the conversation messages. Compaction requests are recorded separately in usage (`compactionTotal` and `compactionByModel` on the agent status), but their tokens still count toward the session total; the current turn's usage does not include them.
 
 ## Forking a session
 
