@@ -10,9 +10,9 @@ description:
   en: >
       AI session titles: generation and persistence.
       
-revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
-updated_at: "2026-11-07T06:10:41.654Z"
-fingerprint: b9f350ffc43567b6ade40fc704f50ac5f84696fc1cf1aebd2fc3d6eec5ed511d
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.297Z"
+fingerprint: 33cc5c5bb4c71fb5eb709b6ab6b563ac46018f87871c4625692ab8a8ed392e1d
 source:
   - path: "packages/kimi-agent/src/session/title.rs"
 apis: []

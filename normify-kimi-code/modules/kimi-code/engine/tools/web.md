@@ -10,9 +10,9 @@ description:
   en: >
       Registered tool names: WebSearch, FetchURL, SwitchSearchEngine, NotifyUser and the GitHub* family.
       
-revision: 64d16e71bf166ad916efc1a3dba5662fbadab1b7
-updated_at: "2026-11-08T09:03:28.955Z"
-fingerprint: a7d0733d076fb8b1cd95acff4a9a23180e7a125369ae03058aa9ba2fce318b32
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.323Z"
+fingerprint: 579fcacccafa42390f0a54c9e92c987108c76c984a7ca9b841ac80518407998e
 source:
   - path: "packages/kimi-agent/src/tools/web_search.rs"
   - path: "packages/kimi-agent/src/tools/fetch_url.rs"

@@ -10,8 +10,8 @@ description:
   en: >
       Plugin archives: download, unzip, detect the plugin root and stage into the managed directory.
       
-revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
-updated_at: "2026-11-07T18:30:37.926Z"
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.310Z"
 fingerprint: 695953746b1d97fcb76f50c81154a6117cef28e8283cabc37915f94d0814843e
 source:
   - path: "packages/kimi-agent/src/server/plugin_archive.rs"

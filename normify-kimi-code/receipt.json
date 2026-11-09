@@ -2,12 +2,12 @@
   "schema_version": 1,
   "ok": true,
   "project": "normify-kimi-code",
-  "compiled_at": "2026-10-04T09:09:19.532Z",
+  "compiled_at": "2026-11-09T19:52:52.944Z",
   "stats": {
     "tree_count": 1,
-    "module_count": 74,
-    "leaf_count": 54,
-    "api_count": 38,
+    "module_count": 73,
+    "leaf_count": 53,
+    "api_count": 34,
     "dep_count": 29,
     "cross_tree_dep_count": 0,
     "max_depth": 5,
@@ -26,19 +26,19 @@
   },
   "artifacts": {
     "tree.json": {
-      "sha256": "f33fc3d2cf594857787b1dc20df893d22b4cb5e35668685d4104cbddbb794304",
-      "bytes": 121513
+      "sha256": "a7e7175a3e454edf307b33558a2f2e1a12a05a31e9fd466ba3fad0b9084c4494",
+      "bytes": 129144
     },
     "outline.md": {
-      "sha256": "b615fd98bde3f1ee913f980bed8d5b32468d5557449aa43bab2c3127b15855b8",
-      "bytes": 14084
+      "sha256": "c1a73a1d13a63e24231e2308b31e214bc3a04d17b1ebe8433eee0e43e4963263",
+      "bytes": 14023
     },
     "api-index.json": {
-      "sha256": "03dc4d863e7b765ea7ee9d7e2c0faacf1012a1582441ede488b18fc9533455d4",
-      "bytes": 2053
+      "sha256": "e5e4a041a768cc35a5432671c23b53bf1ce5abb96d9ae828a6bc1590a0bd4f49",
+      "bytes": 1842
     },
     "receipt.json": {
-      "sha256": "ebc8e358f234a1ba0353c576bd02306e1fc0ef24b0ec3f57ca1ac358d1a20b4d",
+      "sha256": "045476fc864efe87f3f6bbf4b1b18865b5676c8cdaf5247e2858c656a3505245",
       "bytes": 1028
     }
   }

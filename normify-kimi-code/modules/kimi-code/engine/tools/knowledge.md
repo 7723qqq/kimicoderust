@@ -5,19 +5,22 @@ parent: kimi-code.engine.tools
 name: {zh: "知识与记忆", en: "Knowledge & memory"}
 description:
   zh: >
-      注册工具名：Skill、Knowledge、memory_read/write/append/delete/list/str_replace、Lsp。
+      注册工具名：Skill、Knowledge、Memory（统一 action：search/read/write/list/delete/log/revert）、session_query（wire 事件检索）、lsp（实验性，默认关闭）。
       
   en: >
-      Registered tool names: Skill, Knowledge, memory_read/write/append/delete/list/str_replace, Lsp.
+      Registered tool names: Skill, Knowledge, Memory (unified action: search/read/write/list/delete/log/revert), session_query (wire-event search), lsp (experimental, off by default).
       
-revision: f2246f4566a96c23287b8275992af4d9968ce808
-updated_at: "2026-11-08T16:24:59.613Z"
-fingerprint: 5d055663299f23c11fdcd23d2e615756aafb1cef74f973750241885e1a664e8f
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.322Z"
+fingerprint: 738b3e9e791a5eea29001b0b1accda425dee662905af8f2bee30ea2509060eca
 source:
   - path: "packages/kimi-agent/src/tools/skill.rs"
   - path: "packages/kimi-agent/src/tools/memory_tool.rs"
+  - path: "packages/kimi-agent/src/tools/memory_action.rs"
+  - path: "packages/kimi-agent/src/tools/memory_repo.rs"
   - path: "packages/kimi-agent/src/tools/memory_store.rs"
   - path: "packages/kimi-agent/src/tools/lsp_tool.rs"
+  - path: "packages/kimi-agent/src/tools/session_query.rs"
 apis:
   - protocol: rpc
     path: "Skill"
@@ -38,30 +41,21 @@ apis:
           Query the knowledge base
           
   - protocol: rpc
-    path: "memory_read"
+    path: "Memory"
     description:
       zh: >
-          读取 agent 记忆
+          搜索与管理跨会话记忆（action：search/read/write/list/delete/log/revert）
           
       en: >
-          Read agent memory
+          Search and manage cross-session memory (action: search/read/write/list/delete/log/revert)
           
   - protocol: rpc
-    path: "memory_write"
+    path: "lsp"
     description:
       zh: >
-          写入 agent 记忆
+          语言服务查询（实验性，默认关闭）
           
       en: >
-          Write agent memory
-          
-  - protocol: rpc
-    path: "Lsp"
-    description:
-      zh: >
-          语言服务查询
-          
-      en: >
-          Language-server queries
+          Language-server queries (experimental, off by default)
           
 ---

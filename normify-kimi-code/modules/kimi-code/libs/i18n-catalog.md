@@ -10,8 +10,8 @@ description:
   en: >
       The single source of every bilingual string: the en.ts / zh.ts trees, compiled by generate-locale-json.cjs into the engine's embedded locales/*.json.
       
-revision: 932e017600564470d7e43d7b25bb49896c06cca1
-updated_at: "2026-11-01T08:11:48.009Z"
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.323Z"
 fingerprint: 78252d1586237153cf097a025497f17d348d1fa77e29d2d7cb43c0d1fcdd9a4d
 source:
   - path: "packages/i18n-catalog/src/index.ts"

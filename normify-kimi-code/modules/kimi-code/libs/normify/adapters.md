@@ -10,8 +10,8 @@ description:
   en: >
       Host adapters: the 31-tool registry, the MCP server and the standalone CLI.
       
-revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
-updated_at: "2026-11-06T22:57:55.045Z"
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.325Z"
 fingerprint: a0c49a239c9328d787283398cd8efd93443570e6f17fb1945537de4be8e40e5b
 source:
   - path: "packages/normify/src/tools.ts"

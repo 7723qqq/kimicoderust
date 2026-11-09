@@ -10,8 +10,8 @@ description:
   en: >
       Activity view: tool calls and turn events on the session timeline.
       
-revision: 932e017600564470d7e43d7b25bb49896c06cca1
-updated_at: "2026-11-01T08:11:47.959Z"
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.287Z"
 fingerprint: 7d69faf0d94d250d97f9802d78fbc5ab55f782b879395c2d7d2b52a845ea14c3
 source:
   - path: "apps/kimi-inspect/src/activity/store.ts"

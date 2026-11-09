@@ -10,9 +10,9 @@ description:
   en: >
       Transcript projection: the journal fold, per-project transcript views and the activity feed.
       
-revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
-updated_at: "2026-11-07T10:50:41.091Z"
-fingerprint: dbaf67058de5a8bbf4c80df93a5ceefaada933b2006a49d5e0210d487ece5582
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.316Z"
+fingerprint: 95d338412f0ecf017ed658722da79afb631a11617ada42a516421b63eb5e7cc1
 source:
   - path: "packages/kimi-agent/src/server/transcript.rs"
   - path: "packages/kimi-agent/src/server/transcript/project.rs"

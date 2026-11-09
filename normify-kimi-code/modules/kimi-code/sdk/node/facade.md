@@ -10,8 +10,8 @@ description:
   en: >
       The public facade: KimiHarness, session wrapper, agent-file discovery and marketplace/config helpers.
       
-revision: 3b18eb137f8d3057962e2f89ee9e34901ced8df4
-updated_at: "2026-11-06T22:57:55.047Z"
+revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
+updated_at: "2026-11-09T19:52:51.326Z"
 fingerprint: 144eede413240e1f2efc76c6f08081045a62d2dae65eaa153732a729949aee5a
 source:
   - path: "packages/node-sdk/src/kimi-harness.ts"
