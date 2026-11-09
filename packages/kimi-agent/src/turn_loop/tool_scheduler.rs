@@ -83,9 +83,6 @@ pub fn schedule_tool_calls(tool_calls: Vec<ScheduledToolCall>) -> Vec<Vec<Schedu
 /// Output message for tools skipped after a previous tool stops the turn or batch (v2 toolExecutorService.ts:450).
 pub const SKIPPED_TOOL_OUTPUT: &str = "Tool skipped because a previous tool call stopped the turn.";
 
-/// Cap on tool calls running concurrently within one batch.
-const MAX_PARALLEL_TOOLS: usize = 16;
-
 /// Execute all scheduled tool calls in order, respecting conflict boundaries.
 ///
 /// Calls from the same batch run concurrently; batches run serially, so
@@ -112,26 +109,38 @@ pub struct ScheduledToolOutcome {
 ///
 /// `cancellation` is polled between calls: a turn that is cancelled mid-batch
 /// stops launching work instead of running the batch out.
+///
+/// `run_count` carries v2's `stopBatchAfterThis` prediction
+/// (`toolExecutorService.ts:203-221`): calls after the predicted stop never
+/// execute and settle with [`SKIPPED_TOOL_OUTPUT`], while the call that
+/// triggered it still runs. `None` runs the whole list.
 #[tracing::instrument(name = "execute_scheduled", skip_all, fields(batch_size = scheduled.len()))]
 pub async fn execute_scheduled<F, Fut>(
     cancellation: Option<&Arc<AtomicBool>>,
-    scheduled: Vec<ScheduledToolCall>,
+    mut scheduled: Vec<ScheduledToolCall>,
     execute_fn: F,
+    run_count: Option<usize>,
 ) -> Result<ScheduledToolOutcome, Box<dyn std::error::Error>>
 where
     F: Fn(ToolCall) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<ExecutableToolResult, String>> + Send,
 {
+    let skipped_tail = match run_count {
+        Some(count) if count < scheduled.len() => scheduled.split_off(count),
+        _ => Vec::new(),
+    };
     let batches = schedule_tool_calls(scheduled);
     if batches.is_empty() {
+        let mut results = Vec::new();
+        let mut durations_ms = Vec::new();
+        push_skipped(&skipped_tail, &mut results, &mut durations_ms);
         return Ok(ScheduledToolOutcome {
-            results: Vec::new(),
-            durations_ms: Vec::new(),
+            results,
+            durations_ms,
             cancelled: false,
         });
     }
     let execute_fn = Arc::new(execute_fn);
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_TOOLS));
     let mut all_results = Vec::with_capacity(batches.iter().map(Vec::len).sum());
     let mut all_durations = Vec::with_capacity(all_results.capacity());
     let mut batch_stopped = false;
@@ -149,6 +158,8 @@ where
             // system failure to retry.
             for scheduled in batch {
                 all_results.push(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: aborted_tool_output(&scheduled.tool_call.name),
@@ -158,6 +169,7 @@ where
                 });
                 all_durations.push(None);
             }
+            push_skipped(&skipped_tail, &mut all_results, &mut all_durations);
             return Ok(ScheduledToolOutcome {
                 results: all_results,
                 durations_ms: all_durations,
@@ -167,6 +179,8 @@ where
         if batch_stopped {
             for _ in batch {
                 all_results.push(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: SKIPPED_TOOL_OUTPUT.to_string(),
@@ -183,15 +197,9 @@ where
         for scheduled in batch {
             let tc = scheduled.tool_call;
             let execute_fn = execute_fn.clone();
-            let semaphore = semaphore.clone();
             handles.push(tokio::spawn(async move {
-                // A batch can be arbitrarily large and every call does I/O.
-                let Ok(_permit) = semaphore.acquire_owned().await else {
-                    return Err("tool scheduler semaphore closed".to_string());
-                };
-                // v2 measures the duration in the tool executor, around the
-                // call itself (upstream #3966); the permit wait is queueing,
-                // not execution, so the clock starts after it.
+                // v2 runs the whole batch through `Promise.allSettled`
+                // (`toolExecutorService.ts:494-503`) with no concurrency limit.
                 let started = std::time::Instant::now();
                 let result = execute_fn(tc).await;
                 result.map(|result| (result, started.elapsed().as_millis() as u64))
@@ -251,6 +259,8 @@ where
                         break;
                     }
                     all_results.push(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: e,
@@ -266,6 +276,8 @@ where
                         break;
                     }
                     all_results.push(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: format!("Tool task join error: {e}"),
@@ -299,6 +311,8 @@ where
                         }
                         GraceJoin::WonRace(Ok(Err(e))) => {
                             all_results.push(ExecutableToolResult {
+                                spill: None,
+                                parts: Vec::new(),
                                 delivery: None,
                                 stop_turn: false,
                                 content: e,
@@ -310,6 +324,8 @@ where
                         }
                         GraceJoin::WonRace(Err(e)) => {
                             all_results.push(ExecutableToolResult {
+                                spill: None,
+                                parts: Vec::new(),
                                 delivery: None,
                                 stop_turn: false,
                                 content: format!("Tool task join error: {e}"),
@@ -322,6 +338,8 @@ where
                         // No grace left, or the call never finished inside it.
                         GraceJoin::Settled(_) | GraceJoin::Abandoned => {
                             all_results.push(ExecutableToolResult {
+                                spill: None,
+                                parts: Vec::new(),
                                 delivery: None,
                                 stop_turn: false,
                                 content: aborted_tool_output(&name),
@@ -351,6 +369,8 @@ where
                 let index = all_results.len();
                 let name = call_names.get(index).cloned().unwrap_or_default();
                 all_results.push(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: aborted_tool_output(&name),
@@ -360,6 +380,7 @@ where
                 });
                 all_durations.push(None);
             }
+            push_skipped(&skipped_tail, &mut all_results, &mut all_durations);
             return Ok(ScheduledToolOutcome {
                 results: all_results,
                 durations_ms: all_durations,
@@ -367,11 +388,35 @@ where
             });
         }
     }
+    push_skipped(&skipped_tail, &mut all_results, &mut all_durations);
     Ok(ScheduledToolOutcome {
         results: all_results,
         durations_ms: all_durations,
         cancelled: false,
     })
+}
+
+/// v2 `prepareSkippedToolCall` (`toolExecutorService.ts:448-457`): calls after
+/// a predicted `stopBatchAfterThis` never execute and carry the skipped text,
+/// so the model sees one deliberate stop instead of silently missing results.
+fn push_skipped(
+    skipped: &[ScheduledToolCall],
+    results: &mut Vec<ExecutableToolResult>,
+    durations: &mut Vec<Option<u64>>,
+) {
+    for _ in skipped {
+        results.push(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
+            delivery: None,
+            stop_turn: false,
+            content: SKIPPED_TOOL_OUTPUT.to_string(),
+            is_error: true,
+            note: None,
+            display: None,
+        });
+        durations.push(None);
+    }
 }
 
 /// v2 `abortedToolOutput` (toolExecutorService.ts:938-943): the cancellation
@@ -1233,6 +1278,8 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     active.fetch_sub(1, Ordering::SeqCst);
                     Ok(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: "ok".into(),
@@ -1243,7 +1290,7 @@ mod tests {
                 }
             }
         };
-        let results = execute_scheduled(None, scheduled, executor)
+        let results = execute_scheduled(None, scheduled, executor, None)
             .await
             .unwrap()
             .results;
@@ -1297,6 +1344,8 @@ mod tests {
         ];
         let executor = move |tc: ToolCall| async move {
             Ok(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: tc.id.clone(),
@@ -1305,7 +1354,7 @@ mod tests {
                 display: None,
             })
         };
-        let results = execute_scheduled(None, scheduled, executor)
+        let results = execute_scheduled(None, scheduled, executor, None)
             .await
             .unwrap()
             .results;
@@ -1334,6 +1383,8 @@ mod tests {
         }];
         let executor = move |_tc: ToolCall| async move {
             Ok(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: "ok".into(),
@@ -1344,7 +1395,7 @@ mod tests {
         };
         // v2 `abortedToolOutput`: the cancelled call settles with an error
         // result (never executes), and the outcome carries the cancelled flag.
-        let outcome = execute_scheduled(Some(&cancel), scheduled, executor)
+        let outcome = execute_scheduled(Some(&cancel), scheduled, executor, None)
             .await
             .expect("a cancelled turn settles, it does not error the batch");
         assert!(outcome.cancelled);
@@ -1376,6 +1427,8 @@ mod tests {
         let executor = move |_tc: ToolCall| async move {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             Ok(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: "too late".into(),
@@ -1391,7 +1444,7 @@ mod tests {
             canceller.store(true, Ordering::Relaxed);
         });
         let started = std::time::Instant::now();
-        let outcome = execute_scheduled(Some(&cancel), scheduled, executor)
+        let outcome = execute_scheduled(Some(&cancel), scheduled, executor, None)
             .await
             .expect("cancellation must win over the hung tool");
         assert!(outcome.cancelled);
@@ -1406,6 +1459,8 @@ mod tests {
 
     fn ok_result(content: &str) -> ExecutableToolResult {
         ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: content.into(),
@@ -1446,7 +1501,7 @@ mod tests {
             Ok(ok_result("the real answer"))
         };
 
-        let outcome = execute_scheduled(Some(&cancel), one_call("bash", vec![]), executor)
+        let outcome = execute_scheduled(Some(&cancel), one_call("bash", vec![]), executor, None)
             .await
             .expect("the grace resolves the batch");
 
@@ -1478,7 +1533,7 @@ mod tests {
         };
 
         let started = std::time::Instant::now();
-        let outcome = execute_scheduled(Some(&cancel), one_call("bash", vec![]), executor)
+        let outcome = execute_scheduled(Some(&cancel), one_call("bash", vec![]), executor, None)
             .await
             .expect("the grace resolves the batch");
         let elapsed = started.elapsed();
@@ -1541,7 +1596,7 @@ mod tests {
         };
 
         let started = std::time::Instant::now();
-        let outcome = execute_scheduled(Some(&cancel), scheduled, executor)
+        let outcome = execute_scheduled(Some(&cancel), scheduled, executor, None)
             .await
             .expect("the grace resolves the batch");
         let elapsed = started.elapsed();
@@ -1592,6 +1647,8 @@ mod tests {
                 Err("transport failed".to_string())
             } else {
                 Ok(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: "ok-2".into(),
@@ -1601,7 +1658,7 @@ mod tests {
                 })
             }
         };
-        let results = execute_scheduled(None, scheduled, executor)
+        let results = execute_scheduled(None, scheduled, executor, None)
             .await
             .unwrap()
             .results;
@@ -1664,6 +1721,8 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     active.fetch_sub(1, Ordering::SeqCst);
                     Ok(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: "ok".into(),
@@ -1674,7 +1733,7 @@ mod tests {
                 }
             }
         };
-        let results = execute_scheduled(None, scheduled, executor)
+        let results = execute_scheduled(None, scheduled, executor, None)
             .await
             .unwrap()
             .results;
@@ -1688,16 +1747,23 @@ mod tests {
     /// Empty schedule yields an empty result.
     #[tokio::test]
     async fn test_execute_scheduled_empty() {
-        let results = execute_scheduled(None, vec![], |_tc: ToolCall| async move {
-            Ok(ExecutableToolResult {
-                delivery: None,
-                stop_turn: false,
-                content: "x".into(),
-                is_error: false,
-                note: None,
-                display: None,
-            })
-        })
+        let results = execute_scheduled(
+            None,
+            vec![],
+            |_tc: ToolCall| async move {
+                Ok(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
+                    delivery: None,
+                    stop_turn: false,
+                    content: "x".into(),
+                    is_error: false,
+                    note: None,
+                    display: None,
+                })
+            },
+            None,
+        )
         .await
         .unwrap()
         .results;
@@ -1739,21 +1805,99 @@ mod tests {
                 accesses: vec![write_file_access("/f.txt")],
             },
         ];
-        let results = execute_scheduled(None, scheduled, |tc: ToolCall| async move {
-            Ok(ExecutableToolResult {
-                delivery: None,
-                stop_turn: false,
-                content: tc.id,
-                is_error: false,
-                note: None,
-                display: None,
-            })
-        })
+        let results = execute_scheduled(
+            None,
+            scheduled,
+            |tc: ToolCall| async move {
+                Ok(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
+                    delivery: None,
+                    stop_turn: false,
+                    content: tc.id,
+                    is_error: false,
+                    note: None,
+                    display: None,
+                })
+            },
+            None,
+        )
         .await
         .unwrap()
         .results;
         let ids: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
         assert_eq!(ids, vec!["1", "2", "3"]);
+    }
+
+    /// v2 `stopBatchAfterThis` (`toolExecutorService.ts:203-221`): calls
+    /// positioned after the predicted stop never execute and settle with the
+    /// skipped text, while the call that predicted it still runs.
+    #[tokio::test]
+    async fn test_execute_scheduled_predicted_stop_skips_the_tail() {
+        let scheduled = vec![
+            ScheduledToolCall {
+                tool_call: ToolCall {
+                    id: "1".into(),
+                    name: "UpdateGoal".into(),
+                    arguments: serde_json::json!({}),
+                    extras: None,
+                    args_parse_error: None,
+                },
+                accesses: vec![all_access()],
+            },
+            ScheduledToolCall {
+                tool_call: ToolCall {
+                    id: "2".into(),
+                    name: "write".into(),
+                    arguments: serde_json::json!({}),
+                    extras: None,
+                    args_parse_error: None,
+                },
+                accesses: vec![write_file_access("/g.txt")],
+            },
+            ScheduledToolCall {
+                tool_call: ToolCall {
+                    id: "3".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({}),
+                    extras: None,
+                    args_parse_error: None,
+                },
+                accesses: vec![],
+            },
+        ];
+        let executed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = executed.clone();
+        let results = execute_scheduled(
+            None,
+            scheduled,
+            move |tc: ToolCall| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(tc.id.clone());
+                    Ok(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
+                        delivery: None,
+                        stop_turn: false,
+                        content: tc.id,
+                        is_error: false,
+                        note: None,
+                        display: None,
+                    })
+                }
+            },
+            Some(1),
+        )
+        .await
+        .unwrap()
+        .results;
+
+        assert_eq!(*executed.lock().unwrap(), vec!["1".to_string()]);
+        assert_eq!(results[0].content, "1");
+        assert_eq!(results[1].content, SKIPPED_TOOL_OUTPUT);
+        assert!(results[1].is_error);
+        assert_eq!(results[2].content, SKIPPED_TOOL_OUTPUT);
     }
 
     /// Upstream #3966: every executed call carries its wall-clock duration,
@@ -1783,27 +1927,36 @@ mod tests {
                 accesses: vec![all_access()],
             },
         ];
-        let outcome = execute_scheduled(None, scheduled, |tc: ToolCall| async move {
-            if tc.id == "1" {
-                Ok(ExecutableToolResult {
-                    delivery: None,
-                    stop_turn: true,
-                    content: "stop".into(),
-                    is_error: false,
-                    note: None,
-                    display: None,
-                })
-            } else {
-                Ok(ExecutableToolResult {
-                    delivery: None,
-                    stop_turn: false,
-                    content: "skipped".into(),
-                    is_error: true,
-                    note: None,
-                    display: None,
-                })
-            }
-        })
+        let outcome = execute_scheduled(
+            None,
+            scheduled,
+            |tc: ToolCall| async move {
+                if tc.id == "1" {
+                    Ok(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
+                        delivery: None,
+                        stop_turn: true,
+                        content: "stop".into(),
+                        is_error: false,
+                        note: None,
+                        display: None,
+                    })
+                } else {
+                    Ok(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
+                        delivery: None,
+                        stop_turn: false,
+                        content: "skipped".into(),
+                        is_error: true,
+                        note: None,
+                        display: None,
+                    })
+                }
+            },
+            None,
+        )
         .await
         .unwrap();
         assert_eq!(outcome.results.len(), 2);
@@ -1843,27 +1996,36 @@ mod tests {
                 accesses: vec![write_file_access("/plan.md")],
             },
         ];
-        let results = execute_scheduled(None, scheduled, |tc: ToolCall| async move {
-            if tc.id == "1" {
-                Ok(ExecutableToolResult {
-                    delivery: None,
-                    stop_turn: true,
-                    content: "plan exited".into(),
-                    is_error: false,
-                    note: None,
-                    display: None,
-                })
-            } else {
-                Ok(ExecutableToolResult {
-                    delivery: None,
-                    stop_turn: false,
-                    content: "written".into(),
-                    is_error: false,
-                    note: None,
-                    display: None,
-                })
-            }
-        })
+        let results = execute_scheduled(
+            None,
+            scheduled,
+            |tc: ToolCall| async move {
+                if tc.id == "1" {
+                    Ok(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
+                        delivery: None,
+                        stop_turn: true,
+                        content: "plan exited".into(),
+                        is_error: false,
+                        note: None,
+                        display: None,
+                    })
+                } else {
+                    Ok(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
+                        delivery: None,
+                        stop_turn: false,
+                        content: "written".into(),
+                        is_error: false,
+                        note: None,
+                        display: None,
+                    })
+                }
+            },
+            None,
+        )
         .await
         .unwrap()
         .results;

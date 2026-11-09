@@ -3,32 +3,38 @@
 //! Evaluates tool execution permissions locally in Rust based on a
 //! `PolicySnapshot` injected from the host per turn.
 //!
-//! Mirrors the 13-policy chain in `agent-core-v2/src/agent/permissionPolicy/permissionPolicyService.ts`
+//! Mirrors the 15-policy chain in `agent-core-v2/src/agent/permissionPolicy/permissionPolicyService.ts`
 //! including v2's DangerousCommandAsk mode gating (skipped under auto, and its
 //! `[permission] dangerousCommandGuard` off-switch):
 //!   1. AutoModeAskUserQuestionDeny
 //!   2. UserConfiguredDeny
-//!   3. DangerousCommandAsk (skipped in auto; a *dangerous* command asks in
+//!   3. CompactionAuthorizationGuard (irreversible Bash after a compaction)
+//!   4. DangerousCommandAsk (skipped in auto; a *dangerous* command asks in
 //!      manual and yolo alike, an *unanalyzable* one asks except in yolo;
 //!      headless sessions and `dangerousCommandGuard: false` skip the policy)
-//!   4. AutoModeApprove
-//!   5. SessionApprovalHistory
-//!   6. UserConfiguredAsk
-//!   7. UserConfiguredAllow
-//!   8. SensitiveFileAccessAsk
-//!   9. GitControlPathAccessAsk
-//!  10. YoloModeApprove
-//!  11. DefaultToolApprove (Read-only tools)
-//!  12. GitCwdWriteApprove
-//!  13. FallbackAsk
+//!   5. AutoModeApprove
+//!   6. SessionApprovalHistory
+//!   7. UserConfiguredAsk
+//!   8. UserConfiguredAllow
+//!   9. SensitiveFileAccessAsk
+//!  10. GitControlPathAccessAsk
+//!  11. GuardianReview (asynchronous/LLM-backed; in `callbacks::execute_tool`)
+//!  12. YoloModeApprove
+//!  13. DefaultToolApprove (Read-only tools)
+//!  14. GitCwdWriteApprove
+//!  15. FallbackAsk
 
 use globset::{Glob, GlobBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::RwLock;
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 use crate::i18n::{LocalizedText, i18n_params};
 use crate::native::permission_engine::dangerous_command::{DangerousVerdict, analyze_bash_command};
+use crate::turn_loop::types::LLMMessage;
+
+pub mod guardian;
 
 /// The tools that run without an approval prompt in every permission mode
 /// (v2 `DEFAULT_APPROVE_TOOLS`, `default-tool-approve.ts`). Both spellings of
@@ -68,10 +74,15 @@ const DEFAULT_APPROVE_TOOLS: &[&str] = &[
     "notifyuser",
     "notify_user",
     "skill",
-    "enterplanmode",
-    "enter_plan_mode",
     "exitplanmode",
     "exit_plan_mode",
+    // v2 `default-tool-approve.ts` lists EnterSpecMode / ExitSpecMode next to
+    // the plan pair: the tools only change mode state, and ExitSpecMode's own
+    // review gate is the user confirmation.
+    "enterspecmode",
+    "enter_spec_mode",
+    "exitspecmode",
+    "exit_spec_mode",
     "creategoal",
     "create_goal",
     "getgoal",
@@ -86,15 +97,20 @@ const DEFAULT_APPROVE_TOOLS: &[&str] = &[
     // `FallbackAsk`, so a read-only call prompted in every non-Yolo mode —
     // the same drift the comment above already documents.
     "lsp",
-    "memoryread",
-    "memory_read",
-    "memorylist",
-    "memory_list",
     "towerstatus",
     "tower_status",
     "towerinbox",
     "tower_inbox",
 ];
+
+/// v2 `IRREVERSIBLE_COMMAND`
+/// (`policies/compaction-authorization-guard.ts:5-6`), verbatim.
+static IRREVERSIBLE_COMMAND: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+            r"(?i)\b(git\s+push|git\s+merge|git\s+reset\s+--hard|gh\s+pr\s+merge|gh\s+api\b[\s\S]*?-X\s+(PUT|DELETE|PATCH)|branch\s+protection|ruleset|deploy|kubectl\s+delete|rm\s+-rf|DROP\s+(TABLE|DATABASE)|TRUNCATE\b|DELETE\s+FROM)\b",
+        )
+        .expect("the irreversible-command regex is a compile-time constant")
+});
 
 /// Permission mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -114,24 +130,164 @@ pub enum PermissionMode {
     Unknown,
 }
 
+/// Per-agent permission modes for subagent scopes (v2
+/// `IAgentPermissionModeService` per agent plus
+/// `IAgentLifecycleService.broadcastPermissionMode`). The session mode is the
+/// default every agent inherits; a bound mode is the agent's own value and is
+/// never overwritten by a session switch — that is what pins a tower worker
+/// to `auto` while the user toggles the session between manual and yolo.
+#[derive(Debug, Default)]
+pub struct AgentPermissionModes {
+    session: RwLock<Option<PermissionMode>>,
+    bound: RwLock<HashMap<String, PermissionMode>>,
+}
+
+impl AgentPermissionModes {
+    /// Record the session mode: the value a mode switch broadcasts to every
+    /// agent that has no binding of its own (v2 `broadcastPermissionMode`).
+    pub fn set_session_mode(&self, mode: PermissionMode) {
+        *self.session.write().unwrap_or_else(|e| e.into_inner()) = Some(mode);
+    }
+
+    pub fn session_mode(&self) -> Option<PermissionMode> {
+        *self.session.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Bind one agent to `mode` (v2 `IAgentPermissionModeService.setMode`).
+    /// A bound agent is skipped by later broadcasts.
+    pub fn bind(&self, agent_id: &str, mode: PermissionMode) {
+        self.bound
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(agent_id.to_string(), mode);
+    }
+
+    pub fn is_bound(&self, agent_id: &str) -> bool {
+        self.bound
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(agent_id)
+    }
+
+    /// The mode `agent_id` runs under: its own binding wins over the session
+    /// default (v2's restored value taking precedence over the config default).
+    pub fn mode_for(&self, agent_id: &str) -> Option<PermissionMode> {
+        self.bound
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(agent_id)
+            .copied()
+            .or_else(|| self.session_mode())
+    }
+}
+
+/// Shared handle installed on the permission engine and held by the subagent
+/// manager.
+pub type SharedAgentPermissionModes = std::sync::Arc<AgentPermissionModes>;
+
 /// A user-configured external hook (v2 `HookDefSchema`): an event name, an
 /// optional regex `matcher` (empty = match all), the command to run, an
 /// optional timeout in seconds (1-600, default 30), an optional working
 /// directory, and optional extra environment variables (merged over the
 /// inherited environment).
+///
+/// Validated like v2's `HookDefSchema.strict()` (`configSection.ts:10-19`):
+/// the event must be one of the 20 `HOOK_EVENT_TYPES`, `command`/`cwd` must be
+/// non-empty, `timeout` is rejected outside 1-600 instead of clamped, and
+/// unknown fields are refused. A bad entry therefore fails the whole `[hooks]`
+/// section with a diagnostic instead of silently running a mistyped guardrail.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookDef {
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_hook_event")]
     pub event: String,
     #[serde(default)]
     pub matcher: String,
+    #[serde(deserialize_with = "deserialize_hook_command")]
     pub command: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hook_timeout")]
     pub timeout: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hook_cwd")]
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: Option<std::collections::HashMap<String, String>>,
+}
+
+/// v2 `HOOK_EVENT_TYPES` (`features/externalHooks/internal/types.ts:3-24`).
+pub const HOOK_EVENT_TYPES: &[&str] = &[
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "PermissionResult",
+    "UserPromptSubmit",
+    "UserPromptQueued",
+    "TurnStarted",
+    "Stop",
+    "StopFailure",
+    "Interrupt",
+    "SessionStart",
+    "SessionEnd",
+    "SessionHeartbeat",
+    "SubagentStart",
+    "SubagentStop",
+    "TaskStarted",
+    "PreCompact",
+    "PostCompact",
+    "Notification",
+];
+
+fn deserialize_hook_event<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let event = String::deserialize(deserializer)?;
+    if HOOK_EVENT_TYPES.contains(&event.as_str()) {
+        Ok(event)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "unknown hook event '{event}'; expected one of {}",
+            HOOK_EVENT_TYPES.join(", ")
+        )))
+    }
+}
+
+fn deserialize_hook_command<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let command = String::deserialize(deserializer)?;
+    if command.trim().is_empty() {
+        return Err(serde::de::Error::custom("hook command must not be empty"));
+    }
+    Ok(command)
+}
+
+/// v2 `HookDefSchema` rejects rather than clamps an out-of-range timeout.
+fn deserialize_hook_timeout<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let timeout = Option::<u64>::deserialize(deserializer)?;
+    match timeout {
+        Some(seconds) if !(1..=600).contains(&seconds) => Err(serde::de::Error::custom(format!(
+            "hook timeout must be between 1 and 600 seconds, got {seconds}"
+        ))),
+        other => Ok(other),
+    }
+}
+
+fn deserialize_hook_cwd<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let cwd = Option::<String>::deserialize(deserializer)?;
+    match cwd {
+        Some(ref dir) if dir.trim().is_empty() => Err(serde::de::Error::custom(
+            "hook cwd must not be empty when present",
+        )),
+        other => Ok(other),
+    }
 }
 
 /// Snapshot of permission configuration passed from host at step boundary.
@@ -292,18 +448,52 @@ pub fn parse_permission_pattern(pattern: &str) -> Option<ParsedRule> {
     })
 }
 
+/// How a tool's own v2 `matchesRule` compares the rule's argument with the
+/// call's subject (`tool/rule-match.ts`). The two strategies differ in more
+/// than the value they pick: `matchesPathRuleSubject` folds case and resolves
+/// the subject against the cwd (`pathGlobMatch` defaults
+/// `caseInsensitivePaths: true`), while `matchesGlobRuleSubject` compares a
+/// plain, case-sensitive glob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSubjectKind {
+    Path,
+    Glob,
+}
+
+/// The value a tool's `matchesRule` compares and the strategy it uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuleSubject {
+    value: String,
+    kind: RuleSubjectKind,
+}
+
+/// v2 `LEGACY_TOOL_NAME_ALIASES` (`permissionRules/matchesRule.ts:67-75`): the
+/// fold of `ReadMediaFile` into `Read` kept the old spelling matchable, so a
+/// rule a user wrote before the fold still constrains the surviving tool.
+///
+/// v2 only consults the table from the surviving name, because the legacy tool
+/// no longer exists there. This engine still answers the legacy spelling (it is
+/// in [`DEFAULT_APPROVE_TOOLS`]), so the same table is consulted from that side
+/// too: a `Read(...)` deny rule must constrain a `ReadMediaFile` call, not only
+/// the other way round. Both spellings of the legacy name are listed because
+/// [`PermissionEngine::evaluate`] lowercases without squashing underscores.
+const LEGACY_TOOL_NAME_ALIASES: &[(&str, &[&str])] =
+    &[("read", &["readmediafile", "read_media_file"])];
+
 /// Precompiled permission rule for zero-allocation fast-path evaluation.
 ///
 /// Mirrors v2 `matchPermissionRule` (`permissionRules/matchesRule.ts`):
-/// the tool name is a glob, `*` matches every tool, and the argument pattern
-/// is matched by the tool-specific strategy — here approximated by a
-/// case-insensitive glob with `./` stripping (v2 `pathGlobMatch` with its
-/// default `caseInsensitivePaths: true`) plus `!` negation.
+/// the tool name is a glob (`*` matches every tool, legacy spellings included),
+/// and the argument pattern is compiled under both of v2's strategies so the
+/// call site can pick the one its tool declares, plus `!` negation.
 #[derive(Debug, Clone)]
 pub struct CompiledRule {
     pub raw_rule: String,
     tool_glob: Option<globset::GlobMatcher>,
-    arg_glob: Option<globset::GlobMatcher>,
+    /// The argument pattern as `matchesPathRuleSubject` compares it.
+    arg_glob_path: Option<globset::GlobMatcher>,
+    /// The argument pattern as `matchesGlobRuleSubject` compares it.
+    arg_glob_plain: Option<globset::GlobMatcher>,
     negation: Negation,
 }
 
@@ -315,36 +505,61 @@ impl CompiledRule {
         } else {
             Some(compile_tool_glob(&parsed.tool_name)?)
         };
-        let (arg_glob, negation) = match parsed.arg_pattern {
-            None => (None, Negation::Positive),
+        let (arg_glob_path, arg_glob_plain, negation) = match parsed.arg_pattern {
+            None => (None, None, Negation::Positive),
             Some(ref pat) => {
                 let (pattern, negation) = match pat.strip_prefix('!') {
                     Some(rest) => (rest, Negation::Negated),
                     None => (pat.as_str(), Negation::Positive),
                 };
-                (Some(compile_subject_glob(pattern)?), negation)
+                (
+                    Some(compile_subject_glob(pattern, true)?),
+                    Some(compile_subject_glob(pattern, false)?),
+                    negation,
+                )
             }
         };
         Some(Self {
             raw_rule: raw_rule.to_string(),
             tool_glob,
-            arg_glob,
+            arg_glob_path,
+            arg_glob_plain,
             negation,
         })
     }
 
+    /// v2 `ruleMatchesToolName`: the pattern itself, or — for a tool that was
+    /// folded into another — either spelling of the alias pair.
+    fn tool_name_matches(&self, tool_lower: &str) -> bool {
+        let Some(matcher) = &self.tool_glob else {
+            return true;
+        };
+        if matcher.is_match(tool_lower) {
+            return true;
+        }
+        LEGACY_TOOL_NAME_ALIASES.iter().any(|(surviving, legacy)| {
+            (*surviving == tool_lower && legacy.iter().any(|name| matcher.is_match(*name)))
+                || (legacy.contains(&tool_lower) && matcher.is_match(*surviving))
+        })
+    }
+
     #[inline]
-    pub fn matches(&self, tool_name: &str, subject: Option<&str>) -> bool {
-        if let Some(matcher) = &self.tool_glob
-            && !matcher.is_match(tool_name.to_ascii_lowercase())
-        {
+    fn matches(&self, tool_name: &str, subject: Option<&str>, kind: RuleSubjectKind) -> bool {
+        let tool_lower = tool_name.to_ascii_lowercase();
+        if !self.tool_name_matches(&tool_lower) {
             return false;
         }
-        let hit = match (&self.arg_glob, subject) {
+        let arg_glob = match kind {
+            RuleSubjectKind::Path => &self.arg_glob_path,
+            RuleSubjectKind::Glob => &self.arg_glob_plain,
+        };
+        let hit = match (arg_glob, subject) {
             (None, _) => true,
             (Some(matcher), Some(subj)) => {
                 matcher.is_match(subj) || matcher.is_match(strip_leading_dot_slash(subj))
             }
+            // An argument rule cannot be satisfied by a tool that declares no
+            // subject: v2's `execution.matchesRule?.(...)` is `undefined`.
             (Some(_), None) => false,
         };
         match self.negation {
@@ -360,14 +575,14 @@ fn strip_leading_dot_slash(value: &str) -> &str {
     value.strip_prefix("./").unwrap_or(value)
 }
 
-/// Compile a glob the way v2 compiles rule patterns: `pathGlobMatch` defaults
-/// `caseInsensitivePaths` to true, so a rule matches a differently-cased
-/// subject on any platform.
-fn compile_subject_glob(pattern: &str) -> Option<globset::GlobMatcher> {
+/// Compile a glob the way v2 compiles rule patterns. `pathGlobMatch` defaults
+/// `caseInsensitivePaths` to true, so a path rule matches a differently-cased
+/// subject on any platform; `globMatch` (the plain strategy) keeps case.
+fn compile_subject_glob(pattern: &str, case_insensitive: bool) -> Option<globset::GlobMatcher> {
     // `*` stays cross-directory, like picomatch's default in v2, so `*.rs`
     // matches `src/main.rs` in a rule and `rm -rf *` matches `rm -rf /`.
     GlobBuilder::new(pattern)
-        .case_insensitive(true)
+        .case_insensitive(case_insensitive)
         .build()
         .ok()
         .map(|glob| glob.compile_matcher())
@@ -378,6 +593,20 @@ fn compile_tool_glob(tool_name: &str) -> Option<globset::GlobMatcher> {
     Glob::new(&tool_name.to_ascii_lowercase())
         .ok()
         .map(|glob| glob.compile_matcher())
+}
+
+/// A permission rule that failed to compile and is therefore inert.
+///
+/// Fail-open is the deliberate choice: a single malformed deny rule must not
+/// make every tool call fail. The rule is still surfaced through
+/// [`PermissionEngine::invalid_rules`] and a `warn!` at construction, so the
+/// degradation is visible rather than silent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidPermissionRule {
+    /// Which rule list it came from: `deny`, `ask`, `allow` or `session`.
+    pub kind: &'static str,
+    /// The raw rule text as the snapshot carried it.
+    pub rule: String,
 }
 
 /// Local permission engine evaluating tool calls against a `PolicySnapshot`.
@@ -399,13 +628,36 @@ pub struct PermissionEngine {
     /// what the engine records itself, so the approval survives a host that
     /// keeps no copy of its own (and works for a UI that has no host to ask).
     session_records: RwLock<Vec<CompiledRule>>,
+    /// Rules the engine could not compile. They stay inert: dropping a
+    /// malformed rule is fail-open by design (one bad pattern must not lock
+    /// every tool), but the drop is recorded and warned about instead of
+    /// vanishing — otherwise a user cannot tell why a rule "doesn't work".
+    invalid_rules: Vec<InvalidPermissionRule>,
     /// The session workspace root (v2 `ISessionWorkspaceContext.workDir`) and
     /// the host-authorized `additionalDirs` — `GitCwdWriteApprove`'s
     /// containment gate. Empty for an engine built without them; that policy
     /// then falls back to the snapshot's `git_cwd` alone.
     workspace_root: Option<String>,
     additional_dirs: Vec<String>,
+    /// The live session history (v2's `IAgentContextMemoryService`) that
+    /// history-dependent policies read: `CompactionAuthorizationGuard` checks
+    /// it for a compaction summary, and the guardian review takes its
+    /// transcript from it. Installed once after construction by the entry
+    /// point that owns the session; without it those policies never fire.
+    conversation: OnceLock<ConversationProvider>,
+    /// The guardian review service, installed by the pipeline builder once the
+    /// LLM exists (v2's DI-injected `IAgentGuardianService`).
+    guardian: OnceLock<std::sync::Arc<guardian::GuardianReviewer>>,
+    /// Per-agent permission modes (v2 `IAgentPermissionModeService` per agent
+    /// scope). Installed by the entry point that owns the session; without it
+    /// every tool call evaluates under the engine's own mode.
+    agent_modes: OnceLock<SharedAgentPermissionModes>,
 }
+
+/// Reads the session's current message history. Called per permission
+/// evaluation, so a mid-turn compaction is visible to the next tool call
+/// (v2 reads its context memory live in the same way).
+pub type ConversationProvider = std::sync::Arc<dyn Fn() -> Vec<LLMMessage> + Send + Sync>;
 
 impl PermissionEngine {
     pub fn new(snapshot: PolicySnapshot) -> Self {
@@ -422,26 +674,13 @@ impl PermissionEngine {
         workspace_root: Option<String>,
         additional_dirs: Vec<String>,
     ) -> Self {
-        let compiled_deny = snapshot
-            .deny_rules
-            .iter()
-            .filter_map(|r| CompiledRule::compile(r))
-            .collect();
-        let compiled_ask = snapshot
-            .ask_rules
-            .iter()
-            .filter_map(|r| CompiledRule::compile(r))
-            .collect();
-        let compiled_allow = snapshot
-            .allow_rules
-            .iter()
-            .filter_map(|r| CompiledRule::compile(r))
-            .collect();
-        let compiled_session = snapshot
-            .session_approvals
-            .iter()
-            .filter_map(|r| CompiledRule::compile(r))
-            .collect();
+        let mut invalid_rules = Vec::new();
+        let compiled_deny = Self::compile_rules(&snapshot.deny_rules, "deny", &mut invalid_rules);
+        let compiled_ask = Self::compile_rules(&snapshot.ask_rules, "ask", &mut invalid_rules);
+        let compiled_allow =
+            Self::compile_rules(&snapshot.allow_rules, "allow", &mut invalid_rules);
+        let compiled_session =
+            Self::compile_rules(&snapshot.session_approvals, "session", &mut invalid_rules);
 
         let mode = snapshot.mode;
         Self {
@@ -452,9 +691,48 @@ impl PermissionEngine {
             compiled_allow,
             compiled_session,
             session_records: RwLock::new(Vec::new()),
+            invalid_rules,
             workspace_root,
             additional_dirs,
+            conversation: OnceLock::new(),
+            guardian: OnceLock::new(),
+            agent_modes: OnceLock::new(),
         }
+    }
+
+    /// Compile one rule bucket, recording (and warning about) every rule whose
+    /// pattern is malformed. A malformed rule is dropped — fail-open, so one
+    /// typo cannot lock every tool — but never silently.
+    fn compile_rules(
+        rules: &[String],
+        kind: &'static str,
+        invalid: &mut Vec<InvalidPermissionRule>,
+    ) -> Vec<CompiledRule> {
+        rules
+            .iter()
+            .filter_map(|rule| match CompiledRule::compile(rule) {
+                Some(compiled) => Some(compiled),
+                None => {
+                    tracing::warn!(
+                        kind,
+                        rule = %rule,
+                        "permission rule failed to compile; it is inert (fail-open)"
+                    );
+                    invalid.push(InvalidPermissionRule {
+                        kind,
+                        rule: rule.clone(),
+                    });
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Rules whose pattern did not compile. They are inert; this is the
+    /// observable count a host or test can surface instead of the drop being
+    /// invisible.
+    pub fn invalid_rules(&self) -> &[InvalidPermissionRule] {
+        &self.invalid_rules
     }
 
     /// Record `rule` as approved for the rest of this session.
@@ -510,6 +788,54 @@ impl PermissionEngine {
         *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
     }
 
+    /// Install the per-agent permission mode registry (v2
+    /// `IAgentPermissionModeService` per agent scope). Set once by the entry
+    /// point that owns the session, alongside the subagent manager that shares
+    /// the same handle.
+    pub fn set_agent_permission_modes(&self, modes: SharedAgentPermissionModes) {
+        let _ = self.agent_modes.set(modes);
+    }
+
+    pub fn agent_permission_modes(&self) -> Option<&SharedAgentPermissionModes> {
+        self.agent_modes.get()
+    }
+
+    /// Install the live conversation reader. Set once: a session's history
+    /// lives for the session's lifetime, so a second provider would be a
+    /// mistake, not an update.
+    pub fn set_conversation_provider(&self, provider: ConversationProvider) {
+        let _ = self.conversation.set(provider);
+    }
+
+    /// The session history as of this call. Empty when no provider is
+    /// installed (the engine then behaves as a context-free policy chain).
+    pub fn conversation_snapshot(&self) -> Vec<LLMMessage> {
+        self.conversation
+            .get()
+            .map(|provider| provider())
+            .unwrap_or_default()
+    }
+
+    /// Whether the session currently carries a compaction summary (v2
+    /// `CompactionAuthorizationGuard`: `message.origin?.kind ===
+    /// 'compaction_summary'`).
+    pub fn has_compaction_summary(&self) -> bool {
+        self.conversation.get().is_some_and(|provider| {
+            provider()
+                .iter()
+                .any(crate::compaction::is_compaction_summary_message)
+        })
+    }
+
+    /// Install the guardian review service (v2 DI registration).
+    pub fn set_guardian_reviewer(&self, reviewer: std::sync::Arc<guardian::GuardianReviewer>) {
+        let _ = self.guardian.set(reviewer);
+    }
+
+    pub fn guardian_reviewer(&self) -> Option<&std::sync::Arc<guardian::GuardianReviewer>> {
+        self.guardian.get()
+    }
+
     /// The workspace cwd `GitCwdWriteApprove` resolves against — v2's
     /// `ISessionWorkspaceContext.workDir`, which both `git-cwd-write-approve.ts`
     /// and its `findWorkTree(cwd)` gate read. The host-set `workspace_root`
@@ -524,19 +850,54 @@ impl PermissionEngine {
     }
 
     pub fn evaluate(&self, tool_name: &str, args: &Value) -> LocalPermissionVerdict {
+        self.evaluate_in_mode(tool_name, args, self.mode())
+    }
+
+    /// Evaluate as one agent runs: a bound mode (tower worker pinned to
+    /// `auto`) or the inherited session mode wins over the engine's own mode
+    /// (v2 `IAgentPermissionModeService` living per agent scope). Called by
+    /// the tool-call layer with the executing `agent_id`.
+    pub fn evaluate_for_agent(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        args: &Value,
+    ) -> LocalPermissionVerdict {
+        match self
+            .agent_modes
+            .get()
+            .and_then(|modes| modes.mode_for(agent_id))
+        {
+            Some(mode) => self.evaluate_in_mode(tool_name, args, mode),
+            None => self.evaluate(tool_name, args),
+        }
+    }
+
+    fn evaluate_in_mode(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        mode: PermissionMode,
+    ) -> LocalPermissionVerdict {
         let tool_lower = tool_name.to_ascii_lowercase();
-        let target_subject = extract_rule_subject(&tool_lower, args);
-        // Rule matching sees the raw spelling, the lexically resolved path and
-        // the realpath: a deny rule for `/etc/passwd` must also match
-        // `/etc/../etc/passwd`, and one for the workspace file must match a
-        // symlink that resolves outside it.
-        let rule_subjects =
-            rule_subject_variants(&tool_lower, target_subject.clone(), self.workspace_dir());
-        let path_subject = rule_subjects.last().cloned();
+        let subject = extract_rule_subject(&tool_lower, args);
+        // Rule matching sees the raw spelling and the lexically resolved path,
+        // the same variants v2 `pathVariants` builds (`rule-match.ts:49-60`):
+        // a deny rule for `/etc/passwd` must also match `/etc/../etc/passwd`.
+        // A glob subject is compared as written. Symlinks are not resolved
+        // here — v2 does that once per file-tool execution
+        // (`tool/realpath-access.ts`), which this engine mirrors in
+        // `tools/file_ops.rs::file_access_refusal`.
+        let subject_variants = rule_subject_variants(subject.as_ref(), self.workspace_dir());
+        let rule_subjects = subject_variants.variants;
+        // Security checks below (`GitControlPathAccessAsk`, sensitive files,
+        // workspace containment) use the lexically resolved path, never the raw
+        // spelling and never "whichever sorts last".
+        let path_subject = subject_variants.resolved;
         let file_access = file_accesses(&tool_lower, args);
 
         // 1. AutoModeAskUserQuestionDeny
-        if self.mode() == PermissionMode::Auto
+        if mode == PermissionMode::Auto
             && matches!(tool_lower.as_str(), "askuserquestion" | "ask_user_question")
         {
             return LocalPermissionVerdict {
@@ -548,8 +909,12 @@ impl PermissionEngine {
         }
 
         // 2. UserConfiguredDeny
-        if let Some(rule) = Self::matches_any_rule(&self.compiled_deny, &tool_lower, &rule_subjects)
-        {
+        if let Some(rule) = Self::matches_any_rule(
+            &self.compiled_deny,
+            &tool_lower,
+            subject.as_ref(),
+            &rule_subjects,
+        ) {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Deny,
                 policy_name: "UserConfiguredDeny".into(),
@@ -578,7 +943,29 @@ impl PermissionEngine {
             };
         }
 
-        // 3. DangerousCommandAsk (v2 `dangerous-command-ask.ts`, under
+        // 3. CompactionAuthorizationGuard (v2 `policies/
+        //    compaction-authorization-guard.ts:19-24`). A session whose context
+        //    was compacted has lost the verbatim record of what the user
+        //    authorized; an irreversible Bash command then asks in every mode
+        //    — yolo included — instead of riding the compaction summary as if
+        //    it were an approval. Inert without a conversation provider.
+        if self.has_compaction_summary()
+            && tool_lower == "bash"
+            && let Some(command) = args.get("command").and_then(Value::as_str)
+            && IRREVERSIBLE_COMMAND.is_match(command)
+        {
+            return LocalPermissionVerdict {
+                decision: VerdictDecision::Ask,
+                policy_name: "CompactionAuthorizationGuard".into(),
+                session_approval_rule: None,
+                reason: Some(
+                    LocalizedText::new("engine.permission.compactionAuthorizationRequired")
+                        .render(),
+                ),
+            };
+        }
+
+        // 4. DangerousCommandAsk (v2 `dangerous-command-ask.ts`, under
         //    `agent/permissionPolicy/policies/`). Mode gating
         //    mirrors v2 exactly, in v2's own order: the whole policy is skipped
         //    in auto (`if (mode === 'auto') return undefined` comes *before* the
@@ -592,9 +979,9 @@ impl PermissionEngine {
         //    `isDangerousCommandGuardEnabled`).
         if !self.snapshot.non_interactive
             && self.snapshot.dangerous_command_guard
-            && self.mode() != PermissionMode::Auto
+            && mode != PermissionMode::Auto
             && tool_lower == "bash"
-            && let Some(command) = target_subject.as_deref()
+            && let Some(command) = subject.as_ref().map(|subject| subject.value.as_str())
         {
             match analyze_bash_command(command) {
                 // yolo is not an exemption for a *known* dangerous command:
@@ -609,7 +996,7 @@ impl PermissionEngine {
                         ),
                     };
                 }
-                DangerousVerdict::Unanalyzable(_) if self.mode() != PermissionMode::Yolo => {
+                DangerousVerdict::Unanalyzable(_) if mode != PermissionMode::Yolo => {
                     return LocalPermissionVerdict {
                         decision: VerdictDecision::Ask,
                         policy_name: "DangerousCommandAsk".into(),
@@ -624,8 +1011,8 @@ impl PermissionEngine {
             }
         }
 
-        // 4. AutoModeApprove
-        if self.mode() == PermissionMode::Auto {
+        // 5. AutoModeApprove
+        if mode == PermissionMode::Auto {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Allow,
                 policy_name: "AutoModeApprove".into(),
@@ -634,7 +1021,7 @@ impl PermissionEngine {
             };
         }
 
-        // 5. SessionApprovalHistory — the rules a host restored in the snapshot
+        // 6. SessionApprovalHistory — the rules a host restored in the snapshot
         //    plus the ones this engine recorded while answering approvals. The
         //    engine-side record is what makes the choice survive a host that
         //    keeps no list of its own.
@@ -643,9 +1030,16 @@ impl PermissionEngine {
                 .session_records
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            Self::matches_any_rule(&records, &tool_lower, &rule_subjects).or_else(|| {
-                Self::matches_any_rule(&self.compiled_session, &tool_lower, &rule_subjects)
-            })
+            Self::matches_any_rule(&records, &tool_lower, subject.as_ref(), &rule_subjects).or_else(
+                || {
+                    Self::matches_any_rule(
+                        &self.compiled_session,
+                        &tool_lower,
+                        subject.as_ref(),
+                        &rule_subjects,
+                    )
+                },
+            )
         };
         if let Some(rule) = session_rule {
             return LocalPermissionVerdict {
@@ -662,9 +1056,13 @@ impl PermissionEngine {
             };
         }
 
-        // 6. UserConfiguredAsk
-        if let Some(rule) = Self::matches_any_rule(&self.compiled_ask, &tool_lower, &rule_subjects)
-        {
+        // 7. UserConfiguredAsk
+        if let Some(rule) = Self::matches_any_rule(
+            &self.compiled_ask,
+            &tool_lower,
+            subject.as_ref(),
+            &rule_subjects,
+        ) {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Ask,
                 policy_name: "UserConfiguredAsk".into(),
@@ -683,10 +1081,13 @@ impl PermissionEngine {
             };
         }
 
-        // 7. UserConfiguredAllow
-        if let Some(rule) =
-            Self::matches_any_rule(&self.compiled_allow, &tool_lower, &rule_subjects)
-        {
+        // 8. UserConfiguredAllow
+        if let Some(rule) = Self::matches_any_rule(
+            &self.compiled_allow,
+            &tool_lower,
+            subject.as_ref(),
+            &rule_subjects,
+        ) {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Allow,
                 policy_name: "UserConfiguredAllow".into(),
@@ -701,7 +1102,7 @@ impl PermissionEngine {
             };
         }
 
-        // 8. SensitiveFileAccessAsk (v2 `sensitive-file-access-ask.ts`, gated
+        // 9. SensitiveFileAccessAsk (v2 `sensitive-file-access-ask.ts`, gated
         //    by the same `[permission] dangerousCommandGuard` switch as
         //    DangerousCommandAsk since #4250).
         if self.snapshot.dangerous_command_guard
@@ -723,7 +1124,7 @@ impl PermissionEngine {
             };
         }
 
-        // 9. GitControlPathAccessAsk (v2 `git-control-path-access-ask.ts`, same
+        // 10. GitControlPathAccessAsk (v2 `git-control-path-access-ask.ts`, same
         //    guard switch).
         if self.snapshot.dangerous_command_guard
             && let Some(path) = file_access.iter().find(|path| is_git_control_path(path))
@@ -742,8 +1143,13 @@ impl PermissionEngine {
             };
         }
 
-        // 10. YoloModeApprove
-        if self.mode() == PermissionMode::Yolo {
+        // 11. GuardianReview (v2 `policies/guardian-review.ts`): asynchronous
+        //     and LLM-backed, so it runs in the callback layer between this
+        //     chain's `YoloModeApprove` and the approval gate rather than here
+        //     (see `permission/guardian.rs` and `callbacks::execute_tool`).
+
+        // 12. YoloModeApprove
+        if mode == PermissionMode::Yolo {
             return LocalPermissionVerdict {
                 decision: VerdictDecision::Allow,
                 policy_name: "YoloModeApprove".into(),
@@ -752,7 +1158,7 @@ impl PermissionEngine {
             };
         }
 
-        // 11. DefaultToolApprove (v2 `DEFAULT_APPROVE_TOOLS`,
+        // 13. DefaultToolApprove (v2 `DEFAULT_APPROVE_TOOLS`,
         //     default-tool-approve.ts): the tools that run without an approval
         //     prompt in every permission mode. The fork's list had drifted to
         //     the read-only file tools alone, so TodoList, the plan tools, the
@@ -771,7 +1177,7 @@ impl PermissionEngine {
             };
         }
 
-        // 12. GitCwdWriteApprove (v2 `git-cwd-write-approve.ts`): a Write / Edit
+        // 14. GitCwdWriteApprove (v2 `git-cwd-write-approve.ts`): a Write / Edit
         //     whose target lands inside the workspace runs without a prompt.
         //     v2's gates, all of them: the Write/Edit tool pair, `pathClass ===
         //     'posix'`, the target inside `{workspaceDir, additionalDirs}`, and
@@ -805,7 +1211,7 @@ impl PermissionEngine {
             };
         }
 
-        // 13. FallbackAsk
+        // 15. FallbackAsk
         LocalPermissionVerdict {
             decision: VerdictDecision::Ask,
             policy_name: "FallbackAsk".into(),
@@ -824,18 +1230,19 @@ impl PermissionEngine {
     fn matches_any_rule(
         rules: &[CompiledRule],
         tool_lower: &str,
-        subjects: &[String],
+        subject: Option<&RuleSubject>,
+        subject_variants: &[String],
     ) -> Option<String> {
         for rule in rules {
             // A tool-only rule (`Bash*`, with no argument pattern) matches even
             // when the call carries no subject; with a subject, any spelling of
-            // the target can satisfy the argument pattern.
-            let matched = if subjects.is_empty() {
-                rule.matches(tool_lower, None)
-            } else {
-                subjects
+            // the target can satisfy the argument pattern, compared the way the
+            // tool's own `matchesRule` compares it.
+            let matched = match subject {
+                Some(subject) => subject_variants
                     .iter()
-                    .any(|subject| rule.matches(tool_lower, Some(subject.as_str())))
+                    .any(|variant| rule.matches(tool_lower, Some(variant.as_str()), subject.kind)),
+                None => rule.matches(tool_lower, None, RuleSubjectKind::Glob),
             };
             if matched {
                 return Some(rule.raw_rule.clone());
@@ -845,20 +1252,64 @@ impl PermissionEngine {
     }
 }
 
-/// The subject spellings a rule can match: the raw argument, the lexically
-/// resolved absolute path, and its realpath. A deny rule for `/etc/passwd`
-/// otherwise missed `/etc/../etc/passwd`; an allow rule for the workspace
-/// missed a symlinked target outside it.
-fn rule_subject_variants(tool_lower: &str, raw: Option<String>, cwd: Option<&str>) -> Vec<String> {
-    let Some(raw) = raw else {
-        return Vec::new();
+/// Spellings of one subject: every variant a rule may match, plus the path the
+/// security checks should use.
+///
+/// `resolved` is the lexically resolved path (v2 `canonicalizePath`,
+/// `path-access.ts:137-164`), never the raw spelling and never "whichever
+/// sorts last". It resolves no symlinks: v2's permission policies compare the
+/// paths each tool declares, and the realpath gate runs in the tool layer.
+struct RuleSubjectVariants {
+    variants: Vec<String>,
+    resolved: Option<String>,
+}
+
+impl RuleSubjectVariants {
+    fn empty() -> Self {
+        Self {
+            variants: Vec::new(),
+            resolved: None,
+        }
+    }
+}
+
+/// Warn once when a path subject cannot be resolved against a workspace cwd:
+/// only the raw spelling stays available, so relative-path rules silently stop
+/// matching. One line per process is enough to make the degradation visible.
+static CWD_MISSING_WARNED: std::sync::Once = std::sync::Once::new();
+/// Same, for a lexical resolution failure (unsupported spelling, invalid path).
+static SUBJECT_RESOLVE_WARNED: std::sync::Once = std::sync::Once::new();
+
+/// The subject spellings a rule can match: the raw argument and the lexically
+/// resolved absolute path, mirroring v2 `pathVariants` (`rule-match.ts:49-60`).
+/// A deny rule for `/etc/passwd` otherwise missed `/etc/../etc/passwd`.
+/// Canonicalisation is lexical only — `fs::canonicalize` here would stat the
+/// filesystem on every tool call already evaluated (`fs` on a cold UNC share
+/// cost seconds), and v2 resolves real paths once per file-tool execution
+/// rather than per rule subject.
+fn rule_subject_variants(subject: Option<&RuleSubject>, cwd: Option<&str>) -> RuleSubjectVariants {
+    let Some(subject) = subject else {
+        return RuleSubjectVariants::empty();
     };
+    let raw = subject.value.clone();
     let mut variants = vec![raw.clone()];
-    if !matches!(tool_lower, "read" | "write" | "edit" | "grep" | "glob") {
-        return variants;
+    if subject.kind != RuleSubjectKind::Path {
+        return RuleSubjectVariants {
+            variants,
+            resolved: None,
+        };
     }
     let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
-        return variants;
+        CWD_MISSING_WARNED.call_once(|| {
+            tracing::warn!(
+                subject = %raw,
+                "permission path subject has no workspace cwd; only the raw spelling is matched, so relative rules may not apply"
+            );
+        });
+        return RuleSubjectVariants {
+            variants,
+            resolved: None,
+        };
     };
     let path_class = if cwd.starts_with('/') {
         crate::native::path_access::PathClass::Posix
@@ -871,12 +1322,19 @@ fn rule_subject_variants(tool_lower: &str, raw: Option<String>, cwd: Option<&str
     let expanded = crate::native::path_access::expand_user_path(&raw, home.as_deref(), path_class);
     let Ok(lexical) = crate::native::path_access::canonicalize_path(&expanded, cwd, path_class)
     else {
-        return variants;
+        SUBJECT_RESOLVE_WARNED.call_once(|| {
+            tracing::warn!(
+                subject = %raw,
+                "permission path subject could not be resolved; only the raw spelling is matched"
+            );
+        });
+        return RuleSubjectVariants {
+            variants,
+            resolved: None,
+        };
     };
     variants.push(lexical.clone());
-    if let Ok(canonical) = std::fs::canonicalize(&lexical) {
-        variants.push(strip_verbatim_prefix(&canonical.to_string_lossy()));
-    }
+    let resolved = lexical;
     // Rules are commonly written with `/` even on Windows; match both
     // spellings of the resolved path.
     let slash_variants: Vec<String> = variants
@@ -887,22 +1345,9 @@ fn rule_subject_variants(tool_lower: &str, raw: Option<String>, cwd: Option<&str
     variants.extend(slash_variants);
     variants.sort();
     variants.dedup();
-    variants
-}
-
-/// Windows `canonicalize` returns a `\\?\` (or `\\?\UNC\`) verbatim path;
-/// rules are written in the normal spelling.
-fn strip_verbatim_prefix(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
-        format!("\\\\{rest}")
-    } else if let Some(rest) = path.strip_prefix("\\\\?\\") {
-        rest.to_string()
-    } else if let Some(rest) = path.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = path.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        path.to_string()
+    RuleSubjectVariants {
+        variants,
+        resolved: Some(resolved),
     }
 }
 
@@ -917,10 +1362,16 @@ fn strip_verbatim_prefix(path: &str) -> String {
 /// `/repo/.git/config` prompt — in yolo too, where #8/#9 run before
 /// `YoloModeApprove`.
 ///
-/// So only tools whose `path` argument names a file contribute here. The list
-/// is the path-shaped half of [`extract_rule_subject`]; `memory_read` accepts
-/// an array of paths, and v2 checks every declared access, so this returns all
-/// of them.
+/// v2's declaration also carries the operation, but neither #8 nor #9 looks at
+/// it — a read-only probe is an access like any other. So the split is recorded
+/// where it belongs rather than collapsed into "write":
+///   * read-only — `Read`, `Grep`, `Glob`, the legacy media read, and the
+///     fork's `Lsp` code-intelligence probe (`core_tool_defs.rs:561-594`),
+///     plus the `Memory` actions that only look (`read` / `search` / `list`);
+///   * mutating — `Write`, `Edit`, and the `Memory` actions that create,
+///     change or delete a file (`memory_action.rs:67-99`).
+/// `Memory` only carries `path` on its file-bearing actions, so reading that
+/// argument cannot drag a list/search into the policy.
 fn file_accesses(tool_lower: &str, args: &Value) -> Vec<String> {
     if !matches!(
         tool_lower,
@@ -930,18 +1381,9 @@ fn file_accesses(tool_lower: &str, args: &Value) -> Vec<String> {
             | "grep"
             | "glob"
             | "lsp"
-            | "memoryread"
-            | "memory_read"
-            | "memorywrite"
-            | "memory_write"
-            | "memorystrreplace"
-            | "memory_str_replace"
-            | "memoryappend"
-            | "memory_append"
-            | "memorydelete"
-            | "memory_delete"
             | "readmediafile"
             | "read_media_file"
+            | "memory"
     ) {
         return Vec::new();
     }
@@ -957,27 +1399,70 @@ fn file_accesses(tool_lower: &str, args: &Value) -> Vec<String> {
     }
 }
 
-fn extract_rule_subject(tool_lower: &str, args: &Value) -> Option<String> {
+/// The subject a tool's own v2 `matchesRule` compares, and the strategy it
+/// uses. `None` is v2's `execution.matchesRule === undefined`: an argument rule
+/// on such a tool never matches (`permissionRules/matchesRule.ts:100-102`).
+fn extract_rule_subject(tool_lower: &str, args: &Value) -> Option<RuleSubject> {
+    let string_arg = |name: &str| args.get(name).and_then(Value::as_str).map(str::to_string);
+    let glob = |value: String| RuleSubject {
+        value,
+        kind: RuleSubjectKind::Glob,
+    };
+    let path = |value: String| RuleSubject {
+        value,
+        kind: RuleSubjectKind::Path,
+    };
+
     match tool_lower {
-        "read" | "write" | "edit" => args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        "grep" | "glob" => args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        "fetchurl" | "fetch_url" => args.get("url").and_then(|v| v.as_str()).map(str::to_string),
-        "websearch" | "web_search" => args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        "bash" => args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
+        // v2 `readTool.ts:324-329` / `writeTool.ts:64` / `editTool.ts:63`:
+        // `matchesPathRuleSubject(path, …)`.
+        "read" | "write" | "edit" => string_arg("path").map(path),
+        // The media branch of `Read` compares its path with the plain glob
+        // strategy (`readTool.ts:402`). The legacy spelling is that branch
+        // under its pre-fold name, so it is matched the same way.
+        "readmediafile" | "read_media_file" => string_arg("path").map(glob),
+        // v2 Grep / Glob rules match the *search pattern*, not the directory
+        // (`grepTool.ts:119`, `globTool.ts:133`).
+        "grep" | "glob" => string_arg("pattern").map(glob),
+        "fetchurl" | "fetch_url" => string_arg("url").map(glob),
+        "websearch" | "web_search" => string_arg("query").map(glob),
+        // v2 `powershellTool.ts` `matchesRule` matches the rule's argument
+        // against the script with the same glob semantics Bash uses for its
+        // command, so `PowerShell(Get-Service)` is a usable session rule.
+        "bash" | "powershell" => string_arg("command").map(glob),
+        // v2 `skillTool.ts:50`: the skill name. `skill.rs:538-539` also accepts
+        // the legacy `name` key, and a rule must bind the name the call used.
+        "skill" => string_arg("skill").or_else(|| string_arg("name")).map(glob),
+        // v2 `agentTool.ts:301-320` rules match the resolved profile name. A
+        // `fork` call reuses the *caller's* profile, which this layer cannot
+        // read — such a call declares no subject rather than a wrong one.
+        "agent" => match string_arg("subagent_type") {
+            Some(profile) => Some(glob(profile)),
+            None if args.get("fork").and_then(Value::as_bool) == Some(true) => None,
+            None => Some(glob(
+                crate::tools::agent_tool::DEFAULT_PROFILE_NAME.to_string(),
+            )),
+        },
+        // v2 `taskOutputTool.ts:59`, `taskStopTool.ts:29`, `taskWaitTool.ts:150`,
+        // `taskListTool.ts:29-33`.
+        "taskoutput" | "task_output" | "taskstop" | "task_stop" => string_arg("task_id").map(glob),
+        "taskwait" | "task_wait" | "waitfor" | "wait_for" => Some(glob(
+            string_arg("task_id").unwrap_or_else(|| "any".to_string()),
+        )),
+        "tasklist" | "task_list" => Some(glob(
+            match args.get("active_only").and_then(Value::as_bool) {
+                Some(false) => "all",
+                _ => "active",
+            }
+            .to_string(),
+        )),
+        // The fork's own path tools. `Lsp` names a workspace file, so its path
+        // resolves like Read's; a `Memory` path is relative to the memory
+        // store, not the cwd, so it is compared as written.
+        "lsp" => string_arg("path").map(path),
+        "memory" => string_arg("path").map(glob),
         _ if crate::tools::github::is_github_tool(tool_lower) => {
-            crate::tools::github::rule_subject(tool_lower, args)
+            crate::tools::github::rule_subject(tool_lower, args).map(glob)
         }
         _ => None,
     }
@@ -1116,6 +1601,131 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// v2 `HookDefSchema.strict()` (`externalHooks/configSection.ts:10-19`):
+    /// a mistyped event, an out-of-range timeout, an empty command and an
+    /// unknown field are configuration errors, not silent no-ops.
+    #[test]
+    fn hook_def_is_validated_like_v2() {
+        let valid: HookDef = serde_json::from_value(json!({
+            "event": "PreToolUse",
+            "command": "echo hi",
+            "timeout": 30
+        }))
+        .unwrap();
+        assert_eq!(valid.event, "PreToolUse");
+
+        for (label, value) in [
+            (
+                "unknown event",
+                json!({ "event": "NotAnEvent", "command": "echo hi" }),
+            ),
+            (
+                "timeout below range",
+                json!({ "event": "PreToolUse", "command": "echo hi", "timeout": 0 }),
+            ),
+            (
+                "timeout above range",
+                json!({ "event": "PreToolUse", "command": "echo hi", "timeout": 601 }),
+            ),
+            (
+                "empty command",
+                json!({ "event": "PreToolUse", "command": "  " }),
+            ),
+            (
+                "unknown field",
+                json!({ "event": "PreToolUse", "command": "echo hi", "extra": true }),
+            ),
+        ] {
+            assert!(
+                serde_json::from_value::<HookDef>(value).is_err(),
+                "{label} must be rejected"
+            );
+        }
+    }
+
+    /// A malformed rule must not lock every tool (fail-open), but it must not
+    /// vanish either: the engine records it so the drop is observable.
+    #[test]
+    fn uncompilable_rules_are_recorded_instead_of_dropped_silently() {
+        let mut snapshot = PolicySnapshot::default();
+        snapshot.deny_rules = vec!["Bash(".to_string(), "Bash".to_string()];
+        snapshot.allow_rules = vec!["[".to_string()];
+        let engine = PermissionEngine::new(snapshot);
+
+        assert_eq!(
+            engine.invalid_rules(),
+            &[
+                InvalidPermissionRule {
+                    kind: "deny",
+                    rule: "Bash(".to_string(),
+                },
+                InvalidPermissionRule {
+                    kind: "allow",
+                    rule: "[".to_string(),
+                },
+            ],
+            "the valid `Bash` deny rule still compiles; only the two malformed \
+             rules are listed"
+        );
+    }
+
+    /// v2 `CompactionAuthorizationGuard`: once the context holds a compaction
+    /// summary, an irreversible Bash command asks even under yolo; other
+    /// commands and uncompacted sessions keep the normal chain.
+    #[test]
+    fn compaction_authorization_guard_asks_only_for_irreversible_bash_after_compaction() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Yolo,
+            ..Default::default()
+        });
+        assert_eq!(
+            engine
+                .evaluate("Bash", &json!({ "command": "git push origin main" }))
+                .policy_name,
+            "YoloModeApprove",
+            "a session without a compaction summary is untouched"
+        );
+
+        let mut summary = LLMMessage::new("user", "the conversation was compacted");
+        summary.origin = Some(json!({ "kind": "compaction_summary" }));
+        engine.set_conversation_provider(std::sync::Arc::new(move || vec![summary.clone()]));
+
+        let verdict = engine.evaluate("Bash", &json!({ "command": "git push origin main" }));
+        assert_eq!(verdict.decision, VerdictDecision::Ask);
+        assert_eq!(verdict.policy_name, "CompactionAuthorizationGuard");
+        assert!(verdict.reason.is_some());
+
+        for command in [
+            "git reset --hard HEAD~1",
+            "rm -rf build",
+            "gh pr merge 12",
+            "kubectl delete pod x",
+        ] {
+            assert_eq!(
+                engine
+                    .evaluate("Bash", &json!({ "command": command }))
+                    .policy_name,
+                "CompactionAuthorizationGuard",
+                "{command} is irreversible"
+            );
+        }
+
+        assert_eq!(
+            engine
+                .evaluate("Bash", &json!({ "command": "cargo test" }))
+                .policy_name,
+            "YoloModeApprove",
+            "an ordinary command is not affected"
+        );
+        assert_eq!(
+            engine
+                .evaluate("Read", &json!({ "path": "src/main.rs" }))
+                .policy_name,
+            "YoloModeApprove",
+            "the guard is Bash-only"
+        );
+    }
+
     #[test]
     fn test_yolo_mode_approves_mutating_tools() {
         let engine = PermissionEngine::new(PolicySnapshot {
@@ -1217,8 +1827,9 @@ mod tests {
         assert_eq!(verdict.policy_name, "YoloModeApprove");
     }
 
-    /// Every path-shaped tool contributes a file access, `memory_read`'s array
-    /// form included (v2 checks every declared access, not just the first).
+    /// Every path-shaped tool contributes a file access, the fork's own ones
+    /// included: `Lsp` and the probing `Memory` actions read the target, the
+    /// rest create or change it, and #8/#9 treat both alike.
     #[test]
     fn test_path_shaped_tools_declare_file_accesses() {
         let engine = PermissionEngine::new(PolicySnapshot {
@@ -1234,11 +1845,8 @@ mod tests {
             "Grep",
             "Glob",
             "lsp",
-            "memory_write",
-            "memory_str_replace",
-            "memory_append",
-            "memory_delete",
             "ReadMediaFile",
+            "Memory",
         ] {
             let verdict = engine.evaluate(tool, &json!({ "path": sensitive }));
             assert_eq!(
@@ -1253,19 +1861,6 @@ mod tests {
             // approval turns into a tool-wide grant.
             assert_eq!(verdict.session_approval_rule, None);
         }
-
-        let verdict = engine.evaluate(
-            "memory_read",
-            &json!({ "path": ["notes.md", "/workspace/project/.env"] }),
-        );
-        assert_eq!(verdict.decision, VerdictDecision::Ask);
-        assert_eq!(verdict.policy_name, "SensitiveFileAccessAsk");
-        assert_eq!(
-            verdict.reason,
-            Some(format!(
-                "Access to sensitive file requires approval: {sensitive}"
-            ))
-        );
     }
 
     /// v2 #4250: `[permission] dangerousCommandGuard = false` disables every
@@ -1447,10 +2042,6 @@ mod tests {
             // an entry here they fell through to `FallbackAsk` and prompted in
             // every non-Yolo mode — a prompt v2's read-only policy never shows.
             ("lsp", json!({ "action": "hover", "path": "src/lib.rs" })),
-            ("memory_read", json!({ "path": "style.md" })),
-            ("memoryread", json!({})),
-            ("memory_list", json!({})),
-            ("memorylist", json!({ "cursor": "page-2" })),
             ("tower_status", json!({})),
             ("towerstatus", json!({})),
             ("tower_inbox", json!({ "limit": 10 })),
@@ -2311,6 +2902,145 @@ mod tests {
         assert_eq!(verdict.policy_name, "UserConfiguredDeny");
     }
 
+    /// v2 `LEGACY_TOOL_NAME_ALIASES` (`permissionRules/matchesRule.ts:67-75`):
+    /// the fold of `ReadMediaFile` into `Read` kept the old spelling matchable,
+    /// so neither spelling of a `Read` rule can be side-stepped by calling the
+    /// other tool.
+    #[test]
+    fn test_read_and_read_media_file_are_legacy_aliases() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Auto,
+            deny_rules: vec!["Read(secret.txt)".into()],
+            ..Default::default()
+        });
+        let verdict = engine.evaluate("ReadMediaFile", &json!({ "path": "secret.txt" }));
+        assert_eq!(verdict.decision, VerdictDecision::Deny);
+        assert_eq!(verdict.policy_name, "UserConfiguredDeny");
+        // The alias widens the tool name, not the argument pattern.
+        let verdict = engine.evaluate("ReadMediaFile", &json!({ "path": "public.txt" }));
+        assert_eq!(verdict.decision, VerdictDecision::Allow);
+        assert_eq!(verdict.policy_name, "AutoModeApprove");
+
+        // v2's own direction: a rule written under the legacy name still
+        // constrains the surviving tool.
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Auto,
+            deny_rules: vec!["ReadMediaFile(secret.txt)".into()],
+            ..Default::default()
+        });
+        let verdict = engine.evaluate("Read", &json!({ "path": "secret.txt" }));
+        assert_eq!(verdict.decision, VerdictDecision::Deny);
+        assert_eq!(verdict.policy_name, "UserConfiguredDeny");
+    }
+
+    /// v2 requires an argument rule to match the subject the **tool** declares
+    /// (`permissionRules/matchesRule.ts:100`): Grep / Glob match the search
+    /// pattern, the task tools the id / list scope, Skill the skill name and
+    /// Agent the resolved profile. The fork's own path tools declare one too.
+    #[test]
+    fn test_argument_rules_match_the_tool_declared_subject() {
+        let engine = |rule: &str| {
+            PermissionEngine::new(PolicySnapshot {
+                mode: PermissionMode::Auto,
+                deny_rules: vec![rule.into()],
+                ..Default::default()
+            })
+        };
+        let denied = |rule: &str, tool: &str, args: Value| {
+            let verdict = engine(rule).evaluate(tool, &args);
+            (verdict.decision, verdict.policy_name)
+        };
+
+        // Grep / Glob rules bind the pattern, not the directory.
+        assert_eq!(
+            denied("Grep(src/**)", "Grep", json!({ "pattern": "src/**" })),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+        assert_eq!(
+            denied(
+                "Glob(*.rs)",
+                "Glob",
+                json!({ "pattern": "*.rs", "path": "src" })
+            ),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+
+        assert_eq!(
+            denied("Skill(commit)", "Skill", json!({ "skill": "commit" })),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+        assert_eq!(
+            denied(
+                "TaskOutput(task-1)",
+                "TaskOutput",
+                json!({ "task_id": "task-1" })
+            ),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+        // v2 `taskWaitTool.ts:150` uses `task_id ?? 'any'`.
+        assert_eq!(
+            denied("WaitFor(any)", "WaitFor", json!({})),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+        // v2 `taskListTool.ts:29`: `active_only ?? true` selects the scope.
+        assert_eq!(
+            denied("TaskList(all)", "TaskList", json!({ "active_only": false })),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+        assert_eq!(
+            denied("Agent(coder)", "Agent", json!({ "prompt": "x" })),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+
+        // The fork's own path tools are no longer exempt from path rules.
+        assert_eq!(
+            denied(
+                "Lsp(src/lib.rs)",
+                "Lsp",
+                json!({ "action": "hover", "path": "src/lib.rs" })
+            ),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+        assert_eq!(
+            denied(
+                "Memory(global/prefs.md)",
+                "Memory",
+                json!({ "action": "read", "path": "global/prefs.md" })
+            ),
+            (VerdictDecision::Deny, "UserConfiguredDeny".to_string())
+        );
+    }
+
+    /// The two ways an argument rule can miss are different and both must stay
+    /// silent: the subject exists but the pattern does not match it, or the tool
+    /// declares no subject at all — v2's `execution.matchesRule?.(...)` is
+    /// `undefined`, so the rule can never fire.
+    #[test]
+    fn test_unmatched_argument_rule_and_inapplicable_rule_both_miss() {
+        let engine = |rule: &str| {
+            PermissionEngine::new(PolicySnapshot {
+                mode: PermissionMode::Auto,
+                deny_rules: vec![rule.into()],
+                ..Default::default()
+            })
+        };
+
+        // Argument carried, pattern unmatched.
+        let verdict = engine("Skill(commit)").evaluate("Skill", &json!({ "skill": "review" }));
+        assert_eq!(verdict.decision, VerdictDecision::Allow);
+        assert_eq!(verdict.policy_name, "AutoModeApprove");
+
+        // No matcher declared: the tool's arguments cannot satisfy the rule.
+        let verdict = engine("TodoList(done)").evaluate("TodoList", &json!({ "items": ["x"] }));
+        assert_eq!(verdict.decision, VerdictDecision::Allow);
+        assert_eq!(verdict.policy_name, "AutoModeApprove");
+
+        // The same rule without arguments is a plain tool-name rule.
+        let verdict = engine("TodoList").evaluate("TodoList", &json!({}));
+        assert_eq!(verdict.decision, VerdictDecision::Deny);
+        assert_eq!(verdict.policy_name, "UserConfiguredDeny");
+    }
+
     /// v2 `matchRuleSubjects`: a leading `!` negates the argument pattern, so
     /// `Bash(!rm *)` denies every command except the ones starting with `rm`.
     /// The engine used to refuse such patterns outright, which silently
@@ -2434,35 +3164,42 @@ mod tests {
 
     #[test]
     fn test_compiled_rule_semantics() {
+        let path = RuleSubjectKind::Path;
+
         // Tool-only rule
         let rule = CompiledRule::compile("Write").unwrap();
-        assert!(rule.matches("write", Some("src/main.rs")));
-        assert!(rule.matches("write", None));
-        assert!(rule.matches("WRITE", Some("anything")));
-        assert!(!rule.matches("read", Some("src/main.rs")));
+        assert!(rule.matches("write", Some("src/main.rs"), path));
+        assert!(rule.matches("write", None, path));
+        assert!(rule.matches("WRITE", Some("anything"), path));
+        assert!(!rule.matches("read", Some("src/main.rs"), path));
 
         // Rule with glob pattern
         let rule = CompiledRule::compile("Write(src/*.rs)").unwrap();
-        assert!(rule.matches("write", Some("src/main.rs")));
-        assert!(!rule.matches("write", Some("tests/test.rs")));
-        assert!(!rule.matches("write", None));
-        assert!(!rule.matches("read", Some("src/main.rs")));
+        assert!(rule.matches("write", Some("src/main.rs"), path));
+        assert!(!rule.matches("write", Some("tests/test.rs"), path));
+        assert!(!rule.matches("write", None, path));
+        assert!(!rule.matches("read", Some("src/main.rs"), path));
 
         // A `./`-prefixed target matches a rule written without it (v2
         // `stripLeadingDotSlash`).
-        assert!(rule.matches("write", Some("./src/main.rs")));
+        assert!(rule.matches("write", Some("./src/main.rs"), path));
 
         // Wildcard tool rule `*(*.rs)`
         let rule = CompiledRule::compile("*(*.rs)").unwrap();
-        assert!(rule.matches("write", Some("src/main.rs")));
-        assert!(rule.matches("read", Some("src/main.rs")));
-        assert!(rule.matches("edit", Some("src/lib.rs")));
-        assert!(!rule.matches("write", Some("src/main.py")));
+        assert!(rule.matches("write", Some("src/main.rs"), path));
+        assert!(rule.matches("read", Some("src/main.rs"), path));
+        assert!(rule.matches("edit", Some("src/lib.rs"), path));
+        assert!(!rule.matches("write", Some("src/main.py"), path));
 
         // `**` crosses directory boundaries; both match inside `src`.
         let rule = CompiledRule::compile("Write(src/**)").unwrap();
-        assert!(rule.matches("write", Some("src/deep/nested/main.rs")));
-        assert!(!rule.matches("write", Some("tests/test.rs")));
+        assert!(rule.matches("write", Some("src/deep/nested/main.rs"), path));
+        assert!(!rule.matches("write", Some("tests/test.rs"), path));
+
+        // The plain strategy keeps case (v2 `globMatch` has no `nocase`).
+        let rule = CompiledRule::compile("Bash(cargo *)").unwrap();
+        assert!(rule.matches("bash", Some("cargo build"), RuleSubjectKind::Glob));
+        assert!(!rule.matches("bash", Some("Cargo build"), RuleSubjectKind::Glob));
 
         // Invalid glob pattern should fail compilation fast (not silently match everything)
         assert!(CompiledRule::compile("Write([unclosed").is_none());
@@ -2613,53 +3350,101 @@ mod tests {
 
     #[test]
     fn test_extract_rule_subject() {
-        // Path-bearing tools
+        let subject = |tool: &str, args: Value| {
+            extract_rule_subject(tool, &args).map(|subject| (subject.value, subject.kind))
+        };
+        let glob = |value: &str| Some((value.to_string(), RuleSubjectKind::Glob));
+        let path = |value: &str| Some((value.to_string(), RuleSubjectKind::Path));
+
+        // v2 path-strategy tools
         assert_eq!(
-            extract_rule_subject("read", &json!({ "path": "src/main.rs" })).as_deref(),
-            Some("src/main.rs")
+            subject("read", json!({ "path": "src/main.rs" })),
+            path("src/main.rs")
         );
         assert_eq!(
-            extract_rule_subject("write", &json!({ "path": "src/main.rs" })).as_deref(),
-            Some("src/main.rs")
+            subject("write", json!({ "path": "src/main.rs" })),
+            path("src/main.rs")
         );
         assert_eq!(
-            extract_rule_subject("edit", &json!({ "path": "src/main.rs" })).as_deref(),
-            Some("src/main.rs")
+            subject("edit", json!({ "path": "src/main.rs" })),
+            path("src/main.rs")
+        );
+
+        // v2 `grepTool.ts:119` / `globTool.ts:133` bind the search pattern.
+        assert_eq!(
+            subject("grep", json!({ "pattern": "fn main", "path": "src/lib" })),
+            glob("fn main")
         );
         assert_eq!(
-            extract_rule_subject("grep", &json!({ "path": "src/lib" })).as_deref(),
-            Some("src/lib")
-        );
-        assert_eq!(
-            extract_rule_subject("glob", &json!({ "path": "tests" })).as_deref(),
-            Some("tests")
+            subject("glob", json!({ "pattern": "*.rs", "path": "tests" })),
+            glob("*.rs")
         );
 
         // URL-bearing tools
         assert_eq!(
-            extract_rule_subject("fetchurl", &json!({ "url": "https://api.test/data" })).as_deref(),
-            Some("https://api.test/data")
+            subject("fetchurl", json!({ "url": "https://api.test/data" })),
+            glob("https://api.test/data")
         );
         assert_eq!(
-            extract_rule_subject("fetch_url", &json!({ "url": "https://api.test/data" }))
-                .as_deref(),
-            Some("https://api.test/data")
+            subject("fetch_url", json!({ "url": "https://api.test/data" })),
+            glob("https://api.test/data")
         );
 
         // Query-bearing tools
         assert_eq!(
-            extract_rule_subject("websearch", &json!({ "query": "rust docs" })).as_deref(),
-            Some("rust docs")
+            subject("websearch", json!({ "query": "rust docs" })),
+            glob("rust docs")
         );
         assert_eq!(
-            extract_rule_subject("web_search", &json!({ "query": "rust docs" })).as_deref(),
-            Some("rust docs")
+            subject("web_search", json!({ "query": "rust docs" })),
+            glob("rust docs")
         );
 
         // Command-bearing tools
         assert_eq!(
-            extract_rule_subject("bash", &json!({ "command": "cargo test" })).as_deref(),
-            Some("cargo test")
+            subject("bash", json!({ "command": "cargo test" })),
+            glob("cargo test")
+        );
+        // v2 `powershellTool.ts` `matchesRule` uses the same subject: the
+        // script text, matched by the rule's glob.
+        assert_eq!(
+            subject("powershell", json!({ "command": "Get-Service" })),
+            glob("Get-Service")
+        );
+
+        // Skill / task subjects
+        assert_eq!(
+            subject("skill", json!({ "skill": "commit" })),
+            glob("commit")
+        );
+        assert_eq!(
+            subject("skill", json!({ "name": "legacy" })),
+            glob("legacy")
+        );
+        assert_eq!(
+            subject("taskoutput", json!({ "task_id": "t-1" })),
+            glob("t-1")
+        );
+        assert_eq!(subject("waitfor", json!({})), glob("any"));
+        assert_eq!(subject("waitfor", json!({ "task_id": "t-1" })), glob("t-1"));
+        assert_eq!(subject("tasklist", json!({})), glob("active"));
+        assert_eq!(
+            subject("tasklist", json!({ "active_only": false })),
+            glob("all")
+        );
+
+        // The fork's own path tools
+        assert_eq!(
+            subject("lsp", json!({ "path": "src/lib.rs" })),
+            path("src/lib.rs")
+        );
+        assert_eq!(
+            subject("memory", json!({ "path": "global/prefs.md" })),
+            glob("global/prefs.md")
+        );
+        assert_eq!(
+            subject("readmediafile", json!({ "path": "a.png" })),
+            glob("a.png")
         );
 
         // Missing field or non-string field returns None
@@ -2774,6 +3559,36 @@ mod tests {
         let benign = engine.evaluate("bash", &json!({ "command": "git status" }));
         assert_eq!(benign.decision, VerdictDecision::Allow);
         assert_eq!(benign.policy_name, "SessionApprovalHistory");
+    }
+
+    /// v2 `powershellTool.ts`: the tool carries an approval rule subject
+    /// (`command`) but is absent from `DEFAULT_APPROVE_TOOLS` and from
+    /// `dangerous-command-ask.ts` (that guard matches the literal name
+    /// `Bash`). A `PowerShell(...)` session rule therefore covers exactly the
+    /// scripts it names, an unapproved script asks, and a script that *reads*
+    /// like a destructive bash command is not analyzed as one.
+    #[test]
+    fn powershell_rules_cover_scripts_without_the_bash_guard() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Manual,
+            session_approvals: vec!["PowerShell(Get-Service)".into()],
+            ..Default::default()
+        });
+
+        let approved = engine.evaluate("PowerShell", &json!({ "command": "Get-Service" }));
+        assert_eq!(approved.decision, VerdictDecision::Allow);
+        assert_eq!(approved.policy_name, "SessionApprovalHistory");
+
+        let unapproved = engine.evaluate("PowerShell", &json!({ "command": "Get-Process" }));
+        assert_eq!(unapproved.decision, VerdictDecision::Ask);
+        assert_eq!(unapproved.policy_name, "FallbackAsk");
+
+        // The bash analyzer never runs on a PowerShell script: v2's guard is
+        // keyed to the tool name, so this is an ordinary prompt, not
+        // `DangerousCommandAsk`.
+        let looks_destructive = engine.evaluate("PowerShell", &json!({ "command": "rm -rf /" }));
+        assert_eq!(looks_destructive.decision, VerdictDecision::Ask);
+        assert_eq!(looks_destructive.policy_name, "FallbackAsk");
     }
 
     /// v2 "does not use git-cwd approval in auto mode"
@@ -3065,5 +3880,47 @@ mod tests {
         let auto = engine.evaluate("Bash", &json!({ "command": "sudo rm -rf /" }));
         assert_eq!(auto.decision, VerdictDecision::Allow);
         assert_eq!(auto.policy_name, "AutoModeApprove");
+    }
+
+    /// v2 `broadcastPermissionMode` skips agents pinned to their own mode: a
+    /// session switch reaches unbound agents, a tower worker stays on `auto`.
+    #[test]
+    fn broadcast_skips_pinned_agent_permission_modes() {
+        let modes = std::sync::Arc::new(AgentPermissionModes::default());
+        modes.set_session_mode(PermissionMode::Manual);
+        modes.bind("agent-7", PermissionMode::Auto);
+
+        assert_eq!(modes.mode_for("agent-7"), Some(PermissionMode::Auto));
+        assert_eq!(modes.mode_for("agent-8"), Some(PermissionMode::Manual));
+
+        // The user toggles the session to yolo: the unbound agent follows, the
+        // pinned one does not.
+        modes.set_session_mode(PermissionMode::Yolo);
+        assert_eq!(modes.mode_for("agent-7"), Some(PermissionMode::Auto));
+        assert_eq!(modes.mode_for("agent-8"), Some(PermissionMode::Yolo));
+    }
+
+    /// The engine evaluates each call under the executing agent's mode, even
+    /// when its own session mode differs.
+    #[test]
+    fn evaluate_for_agent_uses_the_agents_own_mode() {
+        let engine = PermissionEngine::new(PolicySnapshot {
+            mode: PermissionMode::Manual,
+            ..Default::default()
+        });
+        let modes = std::sync::Arc::new(AgentPermissionModes::default());
+        modes.set_session_mode(PermissionMode::Manual);
+        modes.bind("tower-worker-1", PermissionMode::Auto);
+        engine.set_agent_permission_modes(modes);
+
+        let write = json!({ "path": "src/main.rs" });
+        assert_eq!(
+            engine.evaluate_for_agent("main", "Write", &write).decision,
+            VerdictDecision::Ask,
+            "the main agent keeps the session mode"
+        );
+        let pinned = engine.evaluate_for_agent("tower-worker-1", "Write", &write);
+        assert_eq!(pinned.decision, VerdictDecision::Allow);
+        assert_eq!(pinned.policy_name, "AutoModeApprove");
     }
 }

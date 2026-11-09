@@ -626,8 +626,49 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
             // one is an error rather than a silent no-op — the caller's next
             // step is a session-scoped call that would fail anyway. 400, not
             // 404: this surface reserves 404 for an unknown method.
-            match server.store().get_session(session_id).ok().flatten() {
-                Some(session) => json!({ "id": session.session_id, "resumed": true }),
+            // v2 `resume` funnels every resume of one id through the same
+            // lifecycle chain (`serializeLifecycle`): two concurrent resumes
+            // must not interleave their scope rebuild / watermark reset.
+            let slot = server.resume_slot(session_id);
+            let _guard = slot.lock().await;
+            let session = match server.store().get_session(session_id) {
+                Ok(session) => session,
+                Err(error) => {
+                    return Some(HttpResponse::envelope_err(
+                        500,
+                        crate::server::envelope::error_codes::INTERNAL_ERROR,
+                        format!("Database error: {error}"),
+                        &req_id,
+                    ));
+                }
+            };
+            // v2 `sessionMetadataService.load`: importing a session written by
+            // an earlier build folds the legacy title/workDir fields into the
+            // normalized columns and writes the document back before anyone
+            // reads it. A failed import must not fail the resume (v2 logs it
+            // and keeps the load).
+            if let Err(error) = server.store().migrate_legacy_session_metadata(session_id) {
+                tracing::warn!(
+                    session_id,
+                    %error,
+                    "Failed to migrate legacy session metadata"
+                );
+            }
+            match session {
+                Some(session) => {
+                    // v2 `resume`: a closed session comes back with
+                    // `reclaimed`, and the reopened scope's first read is the
+                    // truth, so the journal watermark restarts here.
+                    if let Some(engine) = server.engine() {
+                        engine.observe_journal_head(session_id);
+                    }
+                    let reclaimed = server.take_reclaimed(session_id);
+                    json!({
+                        "id": session.session_id,
+                        "resumed": true,
+                        "reason": if reclaimed { Some("reclaimed") } else { None },
+                    })
+                }
                 None => {
                     return Some(HttpResponse::envelope_err(
                         400,
@@ -1263,6 +1304,10 @@ mod tests {
                 oauth: None,
                 source: None,
                 custom_headers: None,
+                binary_path: None,
+                antigravity: None,
+                model_source: None,
+                env: None,
             },
         );
         *server.config_override.lock().await = Some(config);

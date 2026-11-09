@@ -5,13 +5,6 @@ pub(super) fn emit_subagent_event(
     callbacks.emit_event(event);
 }
 
-/// The spawned + started event pair (P59 extraction: identical at every launch
-/// site — foreground, resume, background, and the `AgentSwarm` launcher).
-///
-/// `swarm_index` is `Some(n)` for a member of an `AgentSwarm` batch and `None`
-/// for a standalone subagent. The host's swarm progress component sorts and
-/// labels its members by this position, and it is the only place the index
-/// reaches it — the batch launcher holds no other channel to the UI.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_spawned_started(
     callbacks: &dyn crate::callbacks::HostCallbacks,
@@ -23,11 +16,6 @@ pub fn emit_spawned_started(
     swarm_index: Option<usize>,
     prompt: &str,
 ) {
-    // v2 `emitAgentRunSpawned` carries `parentAgentId` / `callerAgentId` on
-    // every `subagent.spawned` (mirrorAgentRun.ts:141-142): the child is
-    // announced as belonging to whoever spawned it. Without them a swarm
-    // member is indistinguishable from an `Agent` subagent on the wire, which
-    // is what made a swarm look like "N Agent calls".
     let caller = crate::tools::CALLER_AGENT_ID
         .try_with(|id| id.clone())
         .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
@@ -49,9 +37,7 @@ pub fn emit_spawned_started(
         callbacks,
         serde_json::json!({ "type": "subagent.started", "subagent_id": agent_id }),
     );
-    // v2 session-level `SubagentStart` hook (sessionExternalHooksService):
-    // matcher is the profile name; the prompt rides along for the hook
-    // script's stdin.
+
     if let Some(guard) = callbacks.hook_guard() {
         let guard = guard.clone();
         let agent_name = profile_name.to_string();
@@ -106,10 +92,6 @@ pub(crate) fn emit_failed(
     }
 }
 
-/// A subagent the user interrupted is not a failure: v2 emitted a distinct
-/// `subagent.cancelled` event for it, which the TUI renders as a cancelled
-/// member rather than a failed one. Emitted in addition to the tool result's
-/// interruption text, which stays the model-visible outcome.
 pub(crate) fn emit_cancelled(
     callbacks: &dyn crate::callbacks::HostCallbacks,
     agent_id: &str,

@@ -9,6 +9,8 @@ mod events_fs_terminal_subagents;
 #[cfg(test)]
 mod files_mcp_fs;
 #[cfg(test)]
+mod loop_snapshot;
+#[cfg(test)]
 mod mcp_auth_transcript;
 #[cfg(test)]
 mod meta_config_fork;

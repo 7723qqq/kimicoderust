@@ -399,6 +399,28 @@ pub struct JsNativeLlmConfig {
     /// The effort value that encodes "thinking off" on the wire
     /// (`[models.<alias>].off_effort`).
     pub off_effort: Option<String>,
+    /// v2 `responseFormat` as a serialized JSON string (napi objects cannot
+    /// carry `serde_json::Value`); absent leaves the request body untouched.
+    pub response_format: Option<String>,
+    /// v2 `sampling` (`temperature` / `topP`); absent means provider default.
+    pub sampling: Option<JsNativeSampling>,
+    /// v2 `determinism`: presence requests a seed, `seed` pins it.
+    pub determinism: Option<JsNativeDeterminism>,
+    /// v2 `extraParams` as a serialized JSON string, split per protocol.
+    pub extra_params: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsNativeSampling {
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsNativeDeterminism {
+    pub seed: Option<i64>,
 }
 
 /// One host-resolved `[services.moonshot_*]` entry (v2 `configSection.ts`):

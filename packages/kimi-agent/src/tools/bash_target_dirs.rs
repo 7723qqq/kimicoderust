@@ -1,55 +1,12 @@
-//! The AGENTS.md reminder's bash-operand half, implemented in the engine.
-//!
-//! Ported one-for-one from `packages/node-sdk/src/native/sdk-client/bash-target-dirs.ts`
-//! (itself a port of v2 `agent/agentsMdReminder/bashTargets.ts`): which
-//! directories a Bash call's *listing* operands resolve to, in first-seen order,
-//! so the reminder can name the `AGENTS.md` files those directories carry.
-//!
-//! # Reference, and the one deliberate difference
-//!
-//! The host parses with the fork's TypeScript reimplementation of
-//! tree-sitter-bash 0.25; this module uses that grammar directly. Trees agree on
-//! the documented corpus except where the reimplementation records a deviation
-//! (`packages/tree-sitter-bash/test/helpers/known-differences.ts`); at the
-//! function's boundary every one of those is a `null` ↔ empty-list pair, which
-//! the turn loop treats identically — it extends a step's directories only for
-//! `Ok(Some(dirs))`, so neither adds anything. `tests/bash_target_dirs_corpus.rs`
-//! pins every case, including the divergent ones, against a corpus generated
-//! from the TypeScript implementation.
-//!
-//! # Failure shape
-//!
-//! [`bash_target_dirs`] answers `None` when the command does not parse, parses
-//! with an error, or exceeds the parse budget — v2's own fallback
-//! (`!parsed.ok || parsed.hasError`), which the turn loop mirrors by keeping the
-//! declared `cwd` and nothing more. It never returns an error into the turn.
-//!
-//! # Path normalisation
-//!
-//! The host normalises with `pathe`, whose rules differ from `std::path` in ways
-//! that are observable here (a Windows drive letter is upper-cased, backslashes
-//! become forward slashes on every platform, a trailing slash survives, `..`
-//! above the root of a relative path is kept). The private `pathe` module below
-//! is a direct port of those functions so the two sides produce the same
-//! strings, not merely equivalent paths.
-
 use std::collections::HashSet;
 use std::time::Instant;
 
 use tree_sitter::{Node, Parser, Tree};
 
-/// v2 `BASH_PARSE_OPTIONS` (`agentsMdReminderService.ts`): 500 ms / 10 000 nodes.
 pub const PARSE_TIMEOUT_MS: u128 = 500;
-/// See [`PARSE_TIMEOUT_MS`].
+
 pub const PARSE_MAX_NODES: usize = 10_000;
 
-/// The directories a Bash command's listing operands resolve to, in first-seen
-/// order.
-///
-/// `cwd` is the call's effective working directory; `home` answers a bare `cd`.
-/// `None` when the command does not parse or parses with an error — the host's
-/// own fallback shape, which the turn loop mirrors by keeping only the declared
-/// `cwd`.
 pub fn bash_target_dirs(command: &str, cwd: &str, home: &str) -> Option<Vec<String>> {
     let mut parser = Parser::new();
     parser
@@ -89,8 +46,6 @@ fn count_nodes(tree: &Tree) -> usize {
     }
 }
 
-/// The extraction half, exposed for the corpus test: the caller supplies a tree
-/// it has already validated.
 pub fn extract_target_dirs(root: Node<'_>, source: &str, cwd: &str, home: &str) -> Vec<String> {
     let mut commands = Vec::new();
     collect_commands(root, &mut commands, false);
@@ -172,7 +127,6 @@ fn push_operand(
     }
 }
 
-/// One `command` node, with whether an enclosing `pipeline` put it there.
 struct CollectedCommand<'a> {
     node: Node<'a>,
     in_pipeline: bool,
@@ -198,12 +152,6 @@ fn collect_commands<'a>(node: Node<'a>, out: &mut Vec<CollectedCommand<'a>>, in_
     }
 }
 
-/// The command's word, its literal arguments, and whether anything in the
-/// command could not be read as a literal.
-///
-/// `None` means the command is not a plain executable name at all: a word
-/// containing `/` is a path (`./script.sh`), and a name that does not reduce to
-/// a literal cannot be matched against the listing-command table.
 fn command_name_and_args(command: Node<'_>, source: &str) -> Option<(String, Vec<String>, bool)> {
     let mut name_index: Option<u32> = None;
     let mut index = 0;
@@ -248,7 +196,6 @@ fn command_name_and_args(command: Node<'_>, source: &str) -> Option<(String, Vec
     Some((name, args, dropped))
 }
 
-/// The four node shapes whose text is a literal, and nothing else.
 fn literal_text(node: Node<'_>, source: &str) -> Option<String> {
     let text = node.utf8_text(source.as_bytes()).ok()?;
     match node.kind() {
@@ -281,9 +228,6 @@ fn literal_text(node: Node<'_>, source: &str) -> Option<String> {
                 if child.kind() == "string_content" {
                     value.push_str(child.utf8_text(source.as_bytes()).ok()?);
                 } else if child.is_named() {
-                    // A substitution or expansion inside the quotes: the text
-                    // is not knowable here, and guessing is how a reminder ends
-                    // up naming the wrong directory.
                     return None;
                 }
                 index += 1;
@@ -297,14 +241,11 @@ fn literal_text(node: Node<'_>, source: &str) -> Option<String> {
     }
 }
 
-/// `$`, backtick, glob and brace characters, and `~` — a word carrying any of
-/// them is a substitution or a glob, not a path this module can name.
 fn is_unsafe_operand(text: &str) -> bool {
     text.chars()
         .any(|c| matches!(c, '$' | '`' | '*' | '?' | '[' | ']' | '~'))
 }
 
-/// `raw.replaceAll(/\\(.)/gs, '$1')`: drop the backslash, keep what it escaped.
 fn unescape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
@@ -320,8 +261,6 @@ fn unescape(text: &str) -> String {
     out
 }
 
-/// Drop the command's options, honouring the ones that consume the next
-/// argument. `--opt=value` does not consume; a lone `-` is an operand.
 fn drop_flags(args: &[String], command: &str) -> Vec<String> {
     let argument_taking = if command == "ls" || command == "dir" {
         LS_ARG_TAKING_OPTIONS
@@ -345,9 +284,6 @@ fn drop_flags(args: &[String], command: &str) -> Vec<String> {
     out
 }
 
-/// `find`'s grammar needs its own rule: its paths come *first*, before the
-/// expression, so an option-looking argument ends the path list rather than
-/// being skipped.
 fn take_leading_paths(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for arg in args {
@@ -407,27 +343,21 @@ const TREE_LIKE_ARG_TAKING_OPTIONS: &[&str] = &[
 
 const FIND_GLOBAL_OPTIONS: &[&str] = &["-H", "-L", "-P"];
 
-/// A direct port of the `pathe` functions the host normalises with.
-///
-/// `std::path` would answer a different string for the same input on Windows
-/// (it keeps backslashes, lower-cases nothing, and drops a trailing separator),
-/// and the reminder compares these strings with the ones the host produced.
 mod pathe {
     pub fn is_absolute(path: &str) -> bool {
         let bytes: Vec<char> = path.chars().collect();
         if bytes.is_empty() {
             return false;
         }
-        // `^[/\\](?![/\\])` — one separator, not two.
+
         if matches!(bytes[0], '/' | '\\') {
             if bytes.len() == 1 || !matches!(bytes[1], '/' | '\\') {
                 return true;
             }
-            // `^[/\\]{2}(?!\.)` — a UNC prefix, unless it is `//.`. Two
-            // separators with nothing after them are an absolute root too.
+
             return bytes.len() == 2 || bytes[2] != '.';
         }
-        // `^[A-Za-z]:[/\\]`
+
         bytes.len() > 2
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == ':'
@@ -478,7 +408,6 @@ mod pathe {
             };
             if current == '/' {
                 if last_slash == index as isize - 1 || dots == 1 {
-                    // A repeated separator, or `.` — nothing to add.
                 } else if dots == 2 {
                     let ends_with_dotdot = res.len() >= 2
                         && last_segment_length == 2
@@ -655,8 +584,6 @@ mod tests {
 
     #[test]
     fn a_redirect_leaves_the_command_with_no_operand() {
-        // The redirect is a sibling of `command` under `redirected_statement`,
-        // not an argument, so the listing falls back to the current directory.
         assert_eq!(
             bash_target_dirs("ls > out.txt", "/w", "/h"),
             Some(vec!["/w".to_string()])

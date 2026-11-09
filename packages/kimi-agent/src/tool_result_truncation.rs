@@ -21,6 +21,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::turn_loop::types::ToolResultSpill;
+
 const DEFAULT_TOOL_RESULT_MAX_CHARS: usize = 50_000;
 const DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS: usize = 10_000_000;
 const TOOL_RESULT_PREVIEW_HEAD_CHARS: usize = 4_096;
@@ -49,6 +51,10 @@ pub struct TruncationRequest<'a> {
     pub content: &'a str,
     pub is_error: bool,
     pub note: Option<&'a str>,
+    /// Set when the tool already persisted its own output (v2
+    /// `ExecutableToolResult.spill`): the pointer then targets that file and
+    /// `suffix` is kept after it.
+    pub spill: Option<&'a ToolResultSpill>,
 }
 
 /// Local tool result truncation. Holds the spill directory the caller
@@ -163,46 +169,74 @@ impl ToolResultTruncator {
                 .map(|(idx, _)| req.content[..idx].to_string())
                 .unwrap_or_else(|| req.content.to_string())
         };
-        let total_chars = raw_chars;
+        let total_chars = req
+            .spill
+            .and_then(|spill| spill.total_chars)
+            .unwrap_or(raw_chars);
+        let suffix = req
+            .spill
+            .and_then(|spill| spill.suffix.as_deref())
+            .unwrap_or("");
         let preserved_chars = retained.chars().count();
 
         // Per-line shape: cap every line at 2_000 chars + marker.
         let shaped = shape_per_line(req.content, TOOL_RESULT_MAX_LINE_CHARS);
         let shaped_chars = shaped.chars().count();
 
-        // Spill the retained text to disk; render a pointer if that fails.
-        let spill = self.save_spill(req.tool_name, req.tool_call_id, &retained);
+        // A tool that already wrote its output owns the file; otherwise the
+        // truncator saves the retained text itself (v2
+        // `toolResultTruncationService.ts:73-76`).
+        let saved: Option<(String, usize)> =
+            match req.spill.and_then(|spill| spill.output_path.as_deref()) {
+                Some(path) => Some((path.to_string(), total_chars)),
+                None => self
+                    .save_spill(req.tool_name, req.tool_call_id, &retained)
+                    .map(|path| (path, preserved_chars)),
+            };
         let truncated = true;
 
-        let final_content = match &spill {
-            Some(path) if shaped_chars <= DEFAULT_TOOL_RESULT_MAX_CHARS => {
-                // Inline pointer appended to the shaped text.
-                let pointer =
-                    render_appended_spill_pointer(path, preserved_chars, total_chars, false);
+        let final_content = match &saved {
+            Some((path, preserved)) if shaped_chars <= DEFAULT_TOOL_RESULT_MAX_CHARS => {
+                // Inline pointer appended to the shaped text. Lines already
+                // visible in the body are not repeated (v2
+                // `dropInlineSuffixLines`, `toolResultTruncationService.ts:90`).
+                let inline_suffix = drop_inline_suffix_lines(suffix, &shaped);
+                let pointer = render_appended_spill_pointer(
+                    path,
+                    *preserved,
+                    total_chars,
+                    &inline_suffix,
+                    false,
+                );
                 append_to_output(&shaped, &pointer)
             }
-            Some(path) => {
+            Some((path, preserved)) => {
                 // Persisted pointer replaces the body; head + tail preview.
                 render_persisted_pointer(
                     req.tool_name,
                     req.tool_call_id,
                     &retained,
                     path,
-                    preserved_chars,
+                    *preserved,
                     total_chars,
+                    suffix,
                     false,
                 )
             }
-            None => {
-                render_unpersisted_pointer(req.tool_name, req.tool_call_id, &retained, total_chars)
-            }
+            None => render_unpersisted_pointer(
+                req.tool_name,
+                req.tool_call_id,
+                &retained,
+                total_chars,
+                suffix,
+            ),
         };
 
         FinalizedToolResult {
             content: final_content,
             is_error: req.is_error,
             note: req.note.map(String::from),
-            spill_path: spill,
+            spill_path: saved.map(|(path, _)| path),
             truncated,
         }
     }
@@ -303,6 +337,7 @@ fn render_appended_spill_pointer(
     output_path: &str,
     preserved_chars: usize,
     total_chars: usize,
+    suffix: &str,
     has_media: bool,
 ) -> String {
     let first_line = if total_chars > preserved_chars {
@@ -315,9 +350,14 @@ fn render_appended_spill_pointer(
     } else {
         "[Per-line truncation occurred; the complete output was saved to a file.".to_string()
     };
-    format!(
+    let pointer = format!(
         "{first_line}\noutput_path: {output_path}\nnext_step: Use Read with output_path to page through the saved output, or Grep to search it.]"
-    )
+    );
+    if suffix.is_empty() {
+        pointer
+    } else {
+        format!("{pointer}\n\n{suffix}")
+    }
 }
 
 fn render_persisted_pointer(
@@ -327,6 +367,7 @@ fn render_persisted_pointer(
     output_path: &str,
     preserved_chars: usize,
     total_chars: usize,
+    suffix: &str,
     has_media: bool,
 ) -> String {
     let partial = preserved_chars < total_chars;
@@ -355,11 +396,20 @@ fn render_persisted_pointer(
         format!("tool_name: {tool_name}"),
         format!("tool_call_id: {tool_call_id}"),
         size_line,
-        format!("output_path: {output_path}"),
+    ];
+    if preserved_chars == preview_text.chars().count() {
+        lines.push(format!("output_size_bytes: {}", preview_text.len()));
+    }
+    lines.push(format!("output_path: {output_path}"));
+    lines.push(
         "next_step: Use Read with output_path to page through the saved output, or Grep to search it."
             .to_string(),
-    ];
+    );
     append_preview_lines(&mut lines, preview_text);
+    if !suffix.is_empty() {
+        lines.push(String::new());
+        lines.push(suffix.to_string());
+    }
     lines.join("\n")
 }
 
@@ -368,6 +418,7 @@ fn render_unpersisted_pointer(
     tool_call_id: &str,
     preview_text: &str,
     total_chars: usize,
+    suffix: &str,
 ) -> String {
     let mut lines = vec![
         format!(
@@ -378,7 +429,32 @@ fn render_unpersisted_pointer(
         format!("output_size_chars: {total_chars}"),
     ];
     append_preview_lines(&mut lines, preview_text);
+    if !suffix.is_empty() {
+        lines.push(String::new());
+        lines.push(suffix.to_string());
+    }
     lines.join("\n")
+}
+
+/// Keep only the suffix lines the shaped body does not already show, so the
+/// inline pointer never repeats a visible status line (v2
+/// `dropInlineSuffixLines`, `toolResultTruncationService.ts:327-332`).
+fn drop_inline_suffix_lines(suffix: &str, shaped_text: &str) -> String {
+    if suffix.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<&str> = suffix.split('\n').collect();
+    if !lines
+        .iter()
+        .any(|line| !line.is_empty() && shaped_text.contains(line))
+    {
+        return suffix.to_string();
+    }
+    lines
+        .into_iter()
+        .filter(|line| !line.is_empty() && !shaped_text.contains(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn append_preview_lines(lines: &mut Vec<String>, preview_text: &str) {
@@ -487,6 +563,7 @@ mod tests {
             content: "hello world",
             is_error: false,
             note: None,
+            spill: None,
         });
         assert_eq!(r.content, "hello world");
         assert!(!r.truncated);
@@ -503,6 +580,7 @@ mod tests {
             content: &long,
             is_error: true,
             note: Some("boom"),
+            spill: None,
         });
         // The key assertion: an oversized error output is never waved into the
         // context unchecked — it is truncated and spilled to disk too
@@ -526,6 +604,7 @@ mod tests {
             content: &long,
             is_error: false,
             note: None,
+            spill: None,
         });
         assert!(r.truncated);
         let path = r.spill_path.expect("spill path set");
@@ -559,6 +638,7 @@ mod tests {
             content: &content,
             is_error: false,
             note: None,
+            spill: None,
         });
         assert!(r.truncated);
         let path = r.spill_path.expect("spill path set");
@@ -569,6 +649,7 @@ mod tests {
         assert!(r.content.contains("tool_name: Read"));
         assert!(r.content.contains("tool_call_id: c3b"));
         assert!(r.content.contains("output_size_chars:"));
+        assert!(r.content.contains("output_size_bytes:"));
         assert!(r.content.contains("[preview:"));
     }
 
@@ -587,6 +668,7 @@ mod tests {
             content: &content,
             is_error: false,
             note: None,
+            spill: None,
         });
         assert!(r.truncated);
         // The shaped text should contain the marker on the oversized line.
@@ -607,10 +689,113 @@ mod tests {
             content: &long,
             is_error: false,
             note: None,
+            spill: None,
         });
         assert!(r.spill_path.is_none());
         assert!(r.content.contains("could not be saved to a file"));
         fs::remove_file(&blocker).ok();
+    }
+
+    /// A tool that already persisted its own output owns the pointer: the
+    /// truncator must not save a second copy, and the tool's suffix stays
+    /// after the pointer (v2 `spill.outputPath`, `toolResultTruncationService.ts:73-76`).
+    #[test]
+    fn a_tool_supplied_spill_path_is_used_instead_of_a_second_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_file = dir.path().join("task-output.log");
+        fs::write(&tool_file, "the tool's own file").unwrap();
+        let tool_path = tool_file.to_string_lossy().to_string();
+        let truncator_dir = dir.path().join("truncator-spill");
+        let t = ToolResultTruncator::new(truncator_dir.clone());
+        let long = "a".repeat(60_000);
+        let spill = ToolResultSpill {
+            output_path: Some(tool_path.clone()),
+            total_chars: Some(60_000),
+            suffix: Some("Command failed with exit code: 1.".to_string()),
+        };
+        let r = t.truncate(TruncationRequest {
+            tool_name: "Bash",
+            tool_call_id: "c6",
+            content: &long,
+            is_error: true,
+            note: None,
+            spill: Some(&spill),
+        });
+        assert!(r.truncated);
+        assert_eq!(r.spill_path.as_deref(), Some(tool_path.as_str()));
+        assert!(
+            r.content.contains(&tool_path),
+            "pointer names the tool's file: {}",
+            r.content
+        );
+        assert!(r.content.ends_with("Command failed with exit code: 1."));
+        assert!(
+            !truncator_dir.exists(),
+            "the truncator must not write its own copy when the tool spilled"
+        );
+    }
+
+    /// A saturating producer sets only `totalChars`: the pointer reports the
+    /// true size while the truncator still saves the retained text itself.
+    #[test]
+    fn a_spill_total_chars_reports_the_full_size() {
+        let t = small();
+        let long = "a".repeat(60_000);
+        let spill = ToolResultSpill {
+            output_path: None,
+            total_chars: Some(20_000_000),
+            suffix: None,
+        };
+        let r = t.truncate(TruncationRequest {
+            tool_name: "Bash",
+            tool_call_id: "c7",
+            content: &long,
+            is_error: false,
+            note: None,
+            spill: Some(&spill),
+        });
+        assert!(r.truncated);
+        assert!(r.spill_path.is_some());
+        assert!(
+            r.content.contains("of 20000000"),
+            "pointer carries the producer's total: {}",
+            r.content
+        );
+        assert!(!r.content.contains("output_size_bytes:"));
+    }
+
+    /// The persisted pointer keeps the suffix after the preview, so a trailing
+    /// status line is not lost behind head/tail elision.
+    #[test]
+    fn a_spill_suffix_survives_the_persisted_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_file = dir.path().join("shell-output.log");
+        fs::write(&tool_file, "the tool's own file").unwrap();
+        let t = ToolResultTruncator::new(dir.path().join("unused"));
+        let mut content = String::with_capacity(70_000);
+        for _ in 0..30 {
+            content.push_str(&"b".repeat(2_000));
+            content.push('\n');
+        }
+        let spill = ToolResultSpill {
+            output_path: Some(tool_file.to_string_lossy().to_string()),
+            total_chars: Some(100_000),
+            suffix: Some("task_id: t1".to_string()),
+        };
+        let r = t.truncate(TruncationRequest {
+            tool_name: "Bash",
+            tool_call_id: "c8",
+            content: &content,
+            is_error: false,
+            note: None,
+            spill: Some(&spill),
+        });
+        assert!(r.content.contains("output_size_chars: 100000"));
+        assert!(
+            r.content.ends_with("task_id: t1"),
+            "suffix is the last line: {}",
+            r.content
+        );
     }
 }
 
@@ -639,6 +824,7 @@ fn reading_back_a_spilled_file_is_not_truncated_again() {
             content: &body,
             is_error: false,
             note: None,
+            spill: None,
         },
     );
     assert_eq!(result.content, body);
@@ -658,6 +844,7 @@ fn reading_back_a_spilled_file_is_not_truncated_again() {
             content: &body,
             is_error: false,
             note: None,
+            spill: None,
         },
     );
     assert!(result.truncated);

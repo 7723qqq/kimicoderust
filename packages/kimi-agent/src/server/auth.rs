@@ -182,7 +182,9 @@ impl ServerAuth {
         if !path.starts_with("/api") {
             return true;
         }
-        matches!(path, "/api/v1/healthz" | "/api/v1/health" | "/health")
+        // v2 `defaultIsBypassed` exempts exactly the health probe
+        // (`kap-server/src/middleware/auth.ts:36`).
+        matches!(path, "/api/v1/healthz")
             || path == "/openapi.json"
             || path == "/asyncapi.json"
             // The MCP OAuth browser callback: the authorization server
@@ -349,7 +351,6 @@ mod tests {
     #[test]
     fn health_and_schemas_need_no_credential_but_state_routes_do() {
         assert!(ServerAuth::is_bypassed("GET", "/api/v1/healthz"));
-        assert!(ServerAuth::is_bypassed("GET", "/api/v1/health"));
         assert!(ServerAuth::is_bypassed("GET", "/openapi.json"));
         assert!(ServerAuth::is_bypassed("GET", "/"));
         assert!(ServerAuth::is_bypassed("GET", "/index.html"));

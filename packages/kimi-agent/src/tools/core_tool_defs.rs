@@ -1,11 +1,3 @@
-//! Tool definitions for the core native tools (Read / Grep / Glob / Write /
-//! Edit / Bash / FetchURL / WebSearch), so the REPL's LLM can discover and
-//! call them. Descriptions and input schemas mirror the v2 agent tool
-//! definitions (`packages/agent-core-v2/src/agent/tools/...`): descriptions
-//! are the rendered `.md` templates (placeholders replaced with the v2
-//! constants) and schemas are the v2 `toInputJsonSchema` output of the zod
-//! input schemas.
-
 use std::sync::OnceLock;
 
 use serde_json::json;
@@ -103,8 +95,6 @@ Each result includes its title, its URL, and a snippet, plus its source site and
 When you rely on a result in your answer, cite its source URL so the user can verify it.
 "#;
 
-/// Windows-only suffix appended to the Glob description, mirroring the v2
-/// `GlobTool.description` getter (pathClass === 'win32').
 const GLOB_WINDOWS_PATH_HINT: &str = r#"
 
 Windows note: the `path` argument accepts both Windows paths (e.g. `C:\Users\foo`) and POSIX-style paths (e.g. `/c/Users/foo`). Matched paths are returned in Windows backslash form; convert them to forward slashes before using them in a Bash command."#;
@@ -117,26 +107,18 @@ fn glob_description() -> String {
     }
 }
 
-/// The Bash tool's description with `${SHELL_NAME}` substituted — v2 rendered
-/// the same placeholder from its environment probe, so the tool names the
-/// shell it actually runs.
 fn bash_description() -> String {
     let (shell_name, _) = crate::prompt::environment::detect_shell(None);
     BASH_DESCRIPTION.replace("${SHELL_NAME}", &shell_name)
 }
 
-/// Tool definitions for the core native tools, so the model can discover
-/// and call them (used by the standalone REPL).
-/// All core native tool definitions. Built once and cached: the agent rebuilds
-/// its tool table every step, and these schemas are static, so re-running the
-/// `json!` construction each time is pure waste.
 pub fn core_tool_defs() -> Vec<ToolInfo> {
     static CACHE: OnceLock<Vec<ToolInfo>> = OnceLock::new();
     CACHE.get_or_init(build_core_tool_defs).clone()
 }
 
 fn build_core_tool_defs() -> Vec<ToolInfo> {
-    vec![
+    let mut defs = vec![
         ToolInfo {
             name: "Read".into(),
             description: READ_DESCRIPTION.into(),
@@ -494,7 +476,16 @@ fn build_core_tool_defs() -> Vec<ToolInfo> {
                 "additionalProperties": false
             }),
         },
-    ]
+    ];
+
+    if cfg!(windows) {
+        let at = defs
+            .iter()
+            .position(|def| def.name == "Bash")
+            .map_or(defs.len(), |index| index + 1);
+        defs.insert(at, super::powershell::tool_def());
+    }
+    defs
 }
 
 const NOTIFY_USER_DESCRIPTION: &str = r#"Show the end user a short progress update without ending your turn. Main-agent and subagent updates appear together in the TUI's Updates panel, with source labels added automatically. The panel keeps every update in order until the main agent starts a new turn. It remains visible when work ends, and the user can page through the complete messages.
@@ -514,10 +505,8 @@ const NOTIFY_USER_DESCRIPTION: &str = r#"Show the end user a short progress upda
 - Do not use an update to ask questions, request decisions, or deliver the final answer. Subagents must leave questions for the parent agent in their handoff.
 "#;
 
-/// The tool name the nudge streak scans for (`NOTIFY_USER_TOOL_NAME` upstream).
 pub const NOTIFY_USER_TOOL_NAME: &str = "NotifyUser";
 
-/// Tool definition for the native NotifyUser tool.
 pub fn notify_user_tool_def() -> ToolInfo {
     ToolInfo {
         name: "NotifyUser".into(),
@@ -537,16 +526,27 @@ pub fn notify_user_tool_def() -> ToolInfo {
     }
 }
 
-const LSP_DESCRIPTION: &str = r#"Query a Language Server (LSP) for code intelligence, such as definition locations, references, hover documentation, and document symbols.
+const LSP_DESCRIPTION: &str = r#"# lsp — semantic navigation over a language server
 
-Supported actions:
-- 'definition': Find where a symbol at line and character position is defined.
-- 'references': Find all reference locations for a symbol at line and character position.
-- 'hover': Get documentation and type information for a symbol at line and character position.
-- 'symbols': Get a hierarchical symbol tree (functions, classes, traits) for the target file.
+Runs a Language Server Protocol operation at a position in a file and returns
+the result as text. Use it when you need semantic information that text
+search cannot give you: the definition of a symbol, every reference to it,
+implementations of an interface member, or hover documentation.
+
+Four operations:
+
+- `goToDefinition` — the definition of the symbol at the position.
+- `findReferences` — every reference to the symbol at the position.
+- `goToImplementation` — implementations of an interface or abstract member.
+- `hover` — type information and documentation at the position.
+
+Positions are one-based: line 1 is the first line, character 1 is the first
+UTF-16 code unit of the line. The file must be inside the session workspace.
+
+Requires a language server configured for the file's extension in the `[lsp]`
+config section (e.g. `servers.typescript = { command = "typescript-language-server", args = ["--stdio"], extensionToLanguage = { ts = "typescript" } }`). When no server covers the extension, the tool reports an error explaining how to configure one.
 "#;
 
-/// Tool definition for the native LSP tool.
 pub fn lsp_tool_def() -> ToolInfo {
     ToolInfo {
         name: "lsp".into(),
@@ -555,249 +555,88 @@ pub fn lsp_tool_def() -> ToolInfo {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
             "properties": {
-                "action": {
+                "operation": {
                     "type": "string",
-                    "description": "LSP action to perform: 'definition', 'references', 'hover', or 'symbols'."
+                    "enum": ["goToDefinition", "findReferences", "goToImplementation", "hover"],
+                    "description": "The semantic operation to run: goToDefinition (jump to the symbol definition), findReferences (all references to the symbol), goToImplementation (implementations of an interface/abstract member), hover (type and doc information at the position)."
                 },
-                "path": {
+                "file_path": {
                     "type": "string",
-                    "description": "Path to the target file."
+                    "description": "Absolute path of the file to query."
                 },
                 "line": {
                     "type": "integer",
-                    "description": "0-based line number (for definition, references, hover)."
+                    "minimum": 1,
+                    "description": "One-based line number of the position to query."
                 },
                 "character": {
                     "type": "integer",
-                    "description": "0-based character column (for definition, references, hover)."
-                },
-                "include_declaration": {
-                    "type": "boolean",
-                    "description": "Optional: whether to include declaration in references (defaults to true)."
+                    "minimum": 1,
+                    "description": "One-based character offset (in UTF-16 code units) of the position to query."
                 }
             },
-            "required": ["action", "path"],
+            "required": ["operation", "file_path", "line", "character"],
             "additionalProperties": false
         }),
     }
 }
 
-/// All native tool definitions including LSP, NotifyUser and the six memory
-/// tools.
-///
-/// Invariant: every entry here must satisfy [`crate::tools::is_native_tool_name`].
-/// This list is what `GET /api/v1/tools` reports as active builtins, so an entry
-/// the toolset cannot execute is a promise the engine cannot keep.
+const SESSION_QUERY_DESCRIPTION: &str = r#"Search prior session history: cross-session full-text search over your own workspace's sessions, within-session event search, and fork-lineage tracing.
+
+Operations:
+- `session_search`: full-text search across the workspace's sessions. The `query` is a literal phrase; results rank sessions by the strongest matching event and include a bounded snippet. Optional filters narrow the corpus: `session_ids`, `created_at_from`/`created_at_to` (inclusive ISO 8601), `parent_session_ids`, `include_root_sessions`, `availability` (`live`/`persisted`), and event bounds `event_seq_from`/`event_seq_to`/`event_time_from`/`event_time_to`/`event_types`.
+- `event_search`: full-text search within one session's events (omit `session_id` for the current session). Same query semantics; optional `seq_from`/`seq_to`/`time_from`/`time_to`/`event_types` bounds.
+- `session_trace`: fork lineage of one session (omit `session_id` for the current session) — the ancestor chain and descendant trees.
+
+Queries are interpreted as data, never as query syntax. Results are capped at 20 entries; narrow the query or add filters to find more.
+"#;
+
+pub fn session_query_tool_def() -> ToolInfo {
+    ToolInfo {
+        name: crate::tools::session_query::TOOL_NAME.into(),
+        description: SESSION_QUERY_DESCRIPTION.into(),
+        input_schema: json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["session_search", "event_search", "session_trace"],
+                    "description": "Which session-query operation to run: session_search (cross-session full-text search), event_search (full-text search within one session), session_trace (fork lineage)."
+                },
+                "operationArgs": {
+                    "type": "object",
+                    "description": "Operation-specific arguments. session_search takes query plus optional session/event filters; event_search takes query plus an optional session_id and event bounds; session_trace takes an optional session_id.",
+                    "additionalProperties": true
+                }
+            },
+            "required": ["operation"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 pub fn all_native_tool_defs() -> Vec<ToolInfo> {
     let mut defs = core_tool_defs();
-    defs.push(lsp_tool_def());
+
+    if crate::tools::lsp_tool::lsp_enabled() {
+        defs.push(lsp_tool_def());
+    }
     defs.push(notify_user_tool_def());
-    defs.extend(memory_tool_defs());
+    defs.push(memory_tool_def());
+    defs.push(session_query_tool_def());
     defs
 }
 
-const MEMORY_READ_DESCRIPTION: &str = r#"Read one or more memory files.
+pub const MEMORY_TOOL_NAME: &str = "Memory";
 
-Returns each file's content and its version token — pass that token as `if_version` on the next write to the same file. Read a file before updating it, and read whenever a question concerns the user or their world: the listing says which files exist, not what is in them.
-"#;
+const MEMORY_DESCRIPTION: &str = include_str!("memory-tool.md");
 
-const MEMORY_WRITE_DESCRIPTION: &str = r#"Create a memory file, or replace one in full.
-
-`memory_write` replaces the whole file — any line you leave out is deleted. Use `if_version: "new"` only for a path that is not in the listing; otherwise pass the version `memory_read` returned.
-"#;
-
-const MEMORY_STR_REPLACE_DESCRIPTION: &str = r#"Change one part of a memory file.
-
-`old_str` must match the file's text exactly once; zero or several matches are rejected and return the current content. Use it for a small edit — use `memory_write` when the change touches many lines.
-"#;
-
-const MEMORY_APPEND_DESCRIPTION: &str = r#"Add a line to the end of a memory file.
-
-Use it for a fact the file does not cover yet; use `memory_str_replace` to change a line that is already there.
-"#;
-
-const MEMORY_LIST_DESCRIPTION: &str = r#"Refresh the memory listing.
-
-Returns every file with its size, last update, version, and a one-line preview. Use it when the injected listing may be stale, or with `path_prefix` to inspect a scope the listing does not cover (another project, or a session).
-"#;
-
-const MEMORY_DELETE_DESCRIPTION: &str = r#"Remove a whole memory file.
-
-Only call it when the user explicitly asks to forget something — never proactively, not to clean up, deduplicate, or drop a file that looks stale. Read the file first to get its `if_version`.
-"#;
-
-/// Tool definitions for the six memory tools, in the order the memory section
-/// lists them.
-pub fn memory_tool_defs() -> Vec<ToolInfo> {
-    vec![
-        memory_read_tool_def(),
-        memory_write_tool_def(),
-        memory_str_replace_tool_def(),
-        memory_append_tool_def(),
-        memory_list_tool_def(),
-        memory_delete_tool_def(),
-    ]
-}
-
-/// Tool definition for `memory_read`.
-pub fn memory_read_tool_def() -> ToolInfo {
+pub fn memory_tool_def() -> ToolInfo {
     ToolInfo {
-        name: "memory_read".into(),
-        description: MEMORY_READ_DESCRIPTION.into(),
-        input_schema: json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "path": {
-                    "description": "Memory path, or an array of up to 20 of them.",
-                    "anyOf": [
-                        { "type": "string" },
-                        {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "maxItems": 20
-                        }
-                    ]
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        }),
-    }
-}
-
-/// Tool definition for `memory_write`.
-pub fn memory_write_tool_def() -> ToolInfo {
-    ToolInfo {
-        name: "memory_write".into(),
-        description: MEMORY_WRITE_DESCRIPTION.into(),
-        input_schema: json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Memory path, e.g. `global/profile.md` or `projects/<id>/areas/<name>.md`."
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The file's full new content, frontmatter included."
-                },
-                "if_version": {
-                    "type": "string",
-                    "description": "The version `memory_read` returned, or \"new\" for a path that is not in the listing."
-                }
-            },
-            "required": ["path", "content", "if_version"],
-            "additionalProperties": false
-        }),
-    }
-}
-
-/// Tool definition for `memory_str_replace`.
-pub fn memory_str_replace_tool_def() -> ToolInfo {
-    ToolInfo {
-        name: "memory_str_replace".into(),
-        description: MEMORY_STR_REPLACE_DESCRIPTION.into(),
-        input_schema: json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Memory path to edit."
-                },
-                "old_str": {
-                    "type": "string",
-                    "description": "Text to replace; must match the file exactly once."
-                },
-                "new_str": {
-                    "type": "string",
-                    "description": "Replacement text."
-                },
-                "if_version": {
-                    "type": "string",
-                    "description": "The version `memory_read` returned."
-                }
-            },
-            "required": ["path", "old_str", "new_str", "if_version"],
-            "additionalProperties": false
-        }),
-    }
-}
-
-/// Tool definition for `memory_append`.
-pub fn memory_append_tool_def() -> ToolInfo {
-    ToolInfo {
-        name: "memory_append".into(),
-        description: MEMORY_APPEND_DESCRIPTION.into(),
-        input_schema: json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Memory path to append to."
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The line to add at the end of the file."
-                },
-                "if_version": {
-                    "type": "string",
-                    "description": "The version `memory_read` returned, or \"new\" to create the file."
-                }
-            },
-            "required": ["path", "content", "if_version"],
-            "additionalProperties": false
-        }),
-    }
-}
-
-/// Tool definition for `memory_list`.
-pub fn memory_list_tool_def() -> ToolInfo {
-    ToolInfo {
-        name: "memory_list".into(),
-        description: MEMORY_LIST_DESCRIPTION.into(),
-        input_schema: json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "path_prefix": {
-                    "type": "string",
-                    "description": "Optional path prefix, e.g. `global/people/` or `sessions/<id>/`. Defaults to the global scope plus the current project."
-                },
-                "cursor": {
-                    "type": "string",
-                    "description": "Optional cursor from a previous `memory_list` result, to read the next page."
-                }
-            },
-            "additionalProperties": false
-        }),
-    }
-}
-
-/// Tool definition for `memory_delete`.
-pub fn memory_delete_tool_def() -> ToolInfo {
-    ToolInfo {
-        name: "memory_delete".into(),
-        description: MEMORY_DELETE_DESCRIPTION.into(),
-        input_schema: json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Memory path to remove."
-                },
-                "if_version": {
-                    "type": "string",
-                    "description": "The version `memory_read` returned."
-                }
-            },
-            "required": ["path", "if_version"],
-            "additionalProperties": false
-        }),
+        name: MEMORY_TOOL_NAME.into(),
+        description: MEMORY_DESCRIPTION.into(),
+        input_schema: crate::tools::memory_action::memory_input_schema(),
     }
 }
 
@@ -816,19 +655,21 @@ mod tests {
     fn test_core_tool_defs_expose_all_eight_tools() {
         let defs = core_tool_defs();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "FetchURL",
-                "WebSearch"
-            ]
-        );
+        let mut expected = vec![
+            "Read",
+            "Grep",
+            "Glob",
+            "Write",
+            "Edit",
+            "Bash",
+            "FetchURL",
+            "WebSearch",
+        ];
+
+        if cfg!(windows) {
+            expected.insert(6, "PowerShell");
+        }
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -843,9 +684,6 @@ mod tests {
                 .clone()
         };
 
-        // Read: the page budget is characters, not lines or bytes (v2
-        // `read.md`: "Results are bounded by `max_chars`"), and a negative
-        // `line_offset` has no schema ceiling.
         let read = get("Read");
         assert!(read.contains("Results are bounded by `max_chars`"));
         assert!(!read.contains("truncated mid-line"));
@@ -853,8 +691,6 @@ mod tests {
         assert!(read.contains("(max 100MB)"));
         assert!(!read.contains("absolute value cannot exceed"));
 
-        // Bash: ${SHELL_NAME} / ${DEFAULT_TIMEOUT_S} / ${MAX_TIMEOUT_S} /
-        // ${DEFAULT_BACKGROUND_TIMEOUT_S} / ${MAX_BACKGROUND_TIMEOUT_S}.
         let bash = get("Bash");
         let (shell_name, _) = crate::prompt::environment::detect_shell(None);
         assert!(bash.contains(&format!("Execute a `{shell_name}` command")));
@@ -864,7 +700,6 @@ mod tests {
         assert!(bash.contains("Issue independent read-only commands"));
         assert!(!bash.contains("Foreground commands default to 60s"));
 
-        // Glob: v2's template, including the continuation-offset instruction.
         assert!(get("Glob").contains("Follow returned continuation offsets"));
         assert!(!get("Glob").contains("first 100 matching paths"));
 
@@ -921,20 +756,16 @@ mod tests {
                 .clone()
         };
 
-        // Read.path — verbatim v2 zod .describe() text.
         assert_eq!(
             get("Read")["properties"]["path"]["description"],
             "Path to a file. Text files are read as text; image and video files are sent to the model as multimodal content (requires a model with the matching vision capability). Relative paths resolve against the working directory; a path outside the working directory must be absolute. Directories are not supported; use `ls` via Bash for a known directory, or Glob for pattern search."
         );
 
-        // Grep.pattern — verbatim v2 zod .describe() text.
         assert_eq!(
             get("Grep")["properties"]["pattern"]["description"],
             "Regular expression to search for."
         );
 
-        // Bash.timeout — the v2 .describe() text with rendered constants, plus
-        // the two caps v2's superRefine enforces (`bash.ts:54-65`).
         assert_eq!(
             get("Bash")["properties"]["timeout"]["description"],
             "Optional timeout in seconds for the command to execute. Foreground default 60s, max 300s. Background default 600s, max 86400s. Ignored for background commands when disable_timeout=true."
@@ -948,9 +779,6 @@ mod tests {
         assert_eq!(branches[0]["exclusiveMinimum"], 0);
         assert_eq!(branches[1]["exclusiveMinimum"], 0);
 
-        // Read.line_offset — v2's `z.union([positive, negative])` maps to anyOf
-        // with no lower bound on the negative branch; the fork used to pin a
-        // -1000 floor here that v2 never had.
         let read_schema = get("Read");
         let any_of = read_schema["properties"]["line_offset"]["anyOf"]
             .as_array()
@@ -964,7 +792,6 @@ mod tests {
             "v2's negative branch has no floor"
         );
 
-        // Read.region — nested object with its own required list.
         let region = &read_schema["properties"]["region"];
         assert_eq!(region["type"], "object");
         assert_eq!(region["required"], json!(["x", "y", "width", "height"]));
@@ -975,73 +802,53 @@ mod tests {
     fn test_lsp_tool_def_schema() {
         let lsp = lsp_tool_def();
         assert_eq!(lsp.name, "lsp");
-        assert_eq!(lsp.input_schema["required"], json!(["action", "path"]));
+        assert_eq!(
+            lsp.input_schema["required"],
+            json!(["operation", "file_path", "line", "character"])
+        );
         assert_eq!(lsp.input_schema["additionalProperties"], false);
+        assert_eq!(
+            lsp.input_schema["properties"]["operation"]["enum"],
+            json!([
+                "goToDefinition",
+                "findReferences",
+                "goToImplementation",
+                "hover"
+            ])
+        );
 
         let all = all_native_tool_defs();
-        assert_eq!(all.len(), 16);
-        assert!(all.iter().any(|d| d.name == "lsp"));
+        assert_eq!(
+            all.len(),
+            if cfg!(windows) { 13 } else { 12 }
+                - usize::from(!crate::tools::lsp_tool::lsp_enabled())
+        );
+        assert_eq!(
+            all.iter().filter(|d| d.name == "PowerShell").count(),
+            usize::from(cfg!(windows)),
+            "the PowerShell def follows v2's win32 gate"
+        );
+        assert_eq!(
+            all.iter().filter(|d| d.name == "lsp").count(),
+            usize::from(crate::tools::lsp_tool::lsp_enabled()),
+            "the lsp def follows v2's default-off experimental flag"
+        );
         assert!(all.iter().any(|d| d.name == "NotifyUser"));
+        assert!(all.iter().any(|d| d.name == MEMORY_TOOL_NAME));
     }
 
     #[test]
-    fn memory_tool_defs_match_the_memory_section() {
-        let defs = memory_tool_defs();
-        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    fn the_unified_memory_tool_reuses_the_shared_schema() {
+        let def = memory_tool_def();
+        assert_eq!(def.name, "Memory");
         assert_eq!(
-            names,
-            vec![
-                "memory_read",
-                "memory_write",
-                "memory_str_replace",
-                "memory_append",
-                "memory_list",
-                "memory_delete"
-            ]
+            def.input_schema,
+            crate::tools::memory_action::memory_input_schema()
         );
-        for def in &defs {
-            assert_eq!(def.input_schema["type"], "object");
-            assert_eq!(def.input_schema["additionalProperties"], false);
-            assert!(!def.description.is_empty());
-        }
-        assert_eq!(
-            memory_read_tool_def().input_schema["required"],
-            json!(["path"])
-        );
-        assert_eq!(
-            memory_write_tool_def().input_schema["required"],
-            json!(["path", "content", "if_version"])
-        );
-        assert_eq!(
-            memory_str_replace_tool_def().input_schema["required"],
-            json!(["path", "old_str", "new_str", "if_version"])
-        );
-        assert_eq!(
-            memory_append_tool_def().input_schema["required"],
-            json!(["path", "content", "if_version"])
-        );
-        assert_eq!(
-            memory_delete_tool_def().input_schema["required"],
-            json!(["path", "if_version"])
-        );
-        // `memory_list` takes no required argument: it defaults to the global
-        // scope plus the current project.
-        assert!(
-            memory_list_tool_def()
-                .input_schema
-                .get("required")
-                .is_none()
-        );
-        assert_eq!(
-            memory_read_tool_def().input_schema["properties"]["path"]["anyOf"][1]["maxItems"],
-            20
-        );
+        assert!(def.description.contains("Memory({ action: \"read\""));
+        assert!(def.description.contains("### `delete`"));
     }
 
-    /// `GET /api/v1/tools` reports this list as active builtins. An entry the
-    /// toolset refuses (`handles()` → false) is forwarded to a host that has no
-    /// tool runtime, so it can only ever fail — which is exactly what happened
-    /// to `Lsp` while it was missing from `NATIVE_TOOL_NAMES`.
     #[test]
     fn advertised_native_tools_are_executable() {
         for def in all_native_tool_defs() {

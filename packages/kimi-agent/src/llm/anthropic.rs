@@ -1,27 +1,9 @@
-//! Anthropic Messages request projection and response parsing.
-//!
-//! Pure functions only — no HTTP. Anthropic differs from OpenAI in three ways
-//! this layer handles: the system prompt is a top-level `system` field (not a
-//! message), assistant tool calls are `tool_use` content blocks whose `input`
-//! is a JSON **object** (not a string), and tool results are `tool_result`
-//! blocks carried on a `user` message.
-
 use serde_json::{Value, json};
 
 use crate::llm::wire::{StreamDelta, WireMessage};
 use crate::rpc::types::TokenUsage;
-use crate::turn_loop::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
+use kimi_core::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
 
-/// Content block types that accept a `cache_control` breakpoint, matching
-/// v2's `CACHEABLE_TYPES` (`packages/kosong/src/providers/anthropic.ts:341-350`,
-/// where upstream declares the set inline). `thinking` / `redacted_thinking`
-/// are deliberately absent — a reasoning block is not a cacheable unit.
-///
-/// An earlier version of this comment cited a shared
-/// `anthropic-cache-breakpoints.ts` "imported by both v2 provider layers". No
-/// such file exists upstream (`21406fb4c8`); it only ever lived in this fork's
-/// retired v2 copy, so the claim could not be substantiated against upstream.
-/// The vocabulary itself is unaffected — only its provenance was misdescribed.
 const CACHEABLE_TYPES: [&str; 8] = [
     "text",
     "image",
@@ -33,7 +15,6 @@ const CACHEABLE_TYPES: [&str; 8] = [
     "web_search_tool_result",
 ];
 
-/// Whether a projected content block takes a `cache_control` breakpoint.
 fn is_cacheable_block(block: &Value) -> bool {
     block
         .get("type")
@@ -41,8 +22,6 @@ fn is_cacheable_block(block: &Value) -> bool {
         .is_some_and(|ty| CACHEABLE_TYPES.contains(&ty))
 }
 
-/// Build an Anthropic Messages request body. `max_tokens` is required by the
-/// API and must be supplied by the caller.
 pub fn build_request(
     model: &str,
     max_tokens: u32,
@@ -52,7 +31,6 @@ pub fn build_request(
     build_request_full(model, max_tokens, messages, tools, false, None, None)
 }
 
-/// Build an Anthropic Messages request body, optionally streaming.
 pub fn build_request_with_options(
     model: &str,
     max_tokens: u32,
@@ -63,10 +41,6 @@ pub fn build_request_with_options(
     build_request_full(model, max_tokens, messages, tools, stream, None, None)
 }
 
-/// Build an Anthropic Messages request body with optional thinking budget.
-/// `thinking_keep` is the Moonshot preserved-thinking passthrough: a
-/// `clear_thinking_20251015` context-management edit (the host filters
-/// off-values and gates on Thinking, so any value here goes on the wire).
 pub fn build_request_full(
     model: &str,
     max_tokens: u32,
@@ -89,12 +63,12 @@ pub fn build_request_full(
         None,
         None,
         false,
+        false,
+        &crate::llm::request_options::RequestOptions::default(),
     )
+    .unwrap_or_else(|error| panic!("invalid anthropic request: {error}"))
 }
 
-/// v2 `budgetTokensForEffort`: the Anthropic thinking budget a declared level
-/// maps to. A numeric level is its own budget; a level outside the table (or
-/// `on`) leaves the budget to the provider and yields `None`.
 fn budget_for_effort(effort: &str) -> Option<u32> {
     match effort {
         "low" => Some(1024),
@@ -104,12 +78,6 @@ fn budget_for_effort(effort: &str) -> Option<u32> {
     }
 }
 
-/// [`build_request_full`] plus the runtime inputs the transport knows: the
-/// resolved effort and provider family (Kimi's anthropic trait encodes thinking
-/// as `{type:'enabled'}` + `output_config.effort` rather than an Anthropic
-/// `budget_tokens`), the session's prompt-cache key (`metadata.user_id`, v2
-/// `format.ts:243`), the per-request completion cap (v2
-/// `resolveMaxCompletionCap`), and whether the model's thinking is adaptive.
 #[allow(clippy::too_many_arguments)]
 pub fn build_request_for_provider(
     model: &str,
@@ -124,7 +92,9 @@ pub fn build_request_for_provider(
     cache_key: Option<&str>,
     completion_cap: Option<u32>,
     adaptive_thinking: bool,
-) -> Value {
+    use_beta_api: bool,
+    options: &crate::llm::request_options::RequestOptions,
+) -> Result<Value, String> {
     let mut system = String::new();
     let mut msgs: Vec<Value> = Vec::new();
 
@@ -138,9 +108,6 @@ pub fn build_request_for_provider(
             }
             "assistant" => {
                 let mut blocks: Vec<Value> = Vec::new();
-                // Thinking blocks first: Anthropic requires attested thinking
-                // (with its signature) ahead of text/tool_use in the message,
-                // and rejects follow-ups whose thinking does not round-trip.
                 for b in &m.blocks {
                     if matches!(b, ContentBlock::Think { .. }) {
                         blocks.push(project_block(b));
@@ -154,19 +121,22 @@ pub fn build_request_for_provider(
                         "type": "tool_use",
                         "id": tc.id,
                         "name": tc.name,
-                        // Anthropic expects the arguments as a JSON object.
                         "input": tc.arguments,
                     }));
                 }
                 msgs.push(json!({ "role": "assistant", "content": blocks }));
             }
             "tool" => {
-                // A tool result is a `tool_result` block on a user message.
                 let tool_use_id = m.tool_call_id.clone().unwrap_or_default();
+                let content = if m.blocks.is_empty() {
+                    json!(m.content)
+                } else {
+                    json!(tool_result_content(&m.blocks))
+                };
                 let block = json!({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
-                    "content": m.content,
+                    "content": content,
                 });
                 if let Some(last_msg) = msgs.last_mut()
                     && last_msg.get("role").and_then(|r| r.as_str()) == Some("user")
@@ -179,8 +149,6 @@ pub fn build_request_for_provider(
                 }
             }
             _ => {
-                // user (and any unknown role) -> user content blocks.
-                // Multimodal blocks win over the plain text content.
                 let content: Vec<Value> = if m.blocks.is_empty() {
                     vec![json!({ "type": "text", "text": m.content })]
                 } else {
@@ -199,12 +167,6 @@ pub fn build_request_for_provider(
         }
     }
 
-    // Tail breakpoint: the last block of the absolute last message
-    // (messages.at(-1)). v2 injects this one from `injectCacheControlOnLastBlock`
-    // (`packages/kosong/src/providers/anthropic.ts:352-362`, called at `:1040`).
-    // Together with the system and tools breakpoints below that is 3 of the 4
-    // Anthropic cache_control slots. Only a cacheable block type takes one.
-    // Supports both user text/media and assistant tool_use blocks.
     if let Some(last_msg) = msgs.last_mut()
         && let Some(content_arr) = last_msg.get_mut("content").and_then(|c| c.as_array_mut())
         && let Some(last_block) = content_arr.last_mut()
@@ -213,23 +175,6 @@ pub fn build_request_for_provider(
         last_block["cache_control"] = json!({ "type": "ephemeral" });
     }
 
-    // Stable history breakpoint: the last block of a message that is not one of
-    // the last 2 messages. This creates a prefix cache covering the stable
-    // conversation history, so appended messages still hit the prefix and only
-    // the new tail is processed fresh. With system + tools that fills all 4
-    // Anthropic cache_control slots. A cacheable type the tail does not already
-    // own is required.
-    //
-    // Provenance: **fork-added, not a port.** Upstream's
-    // `injectCacheControlOnLastBlock` (`anthropic.ts:352-362`) touches only the
-    // last message — there is no `messages.length >= 4` branch anywhere in it —
-    // so upstream emits 3 breakpoints and this emits 4. An earlier version of
-    // this comment claimed the stable half came from the same v2 function
-    // "rather than being a fork addition"; that was wrong, and the claim rested
-    // on a `anthropic-cache-breakpoints.ts` file that exists only in this fork's
-    // retired v2 copy. ROADMAP §1 板块 2 records the correction; whether the
-    // extra slot should be kept or dropped is still a user decision, since it
-    // changes real cache-hit behaviour and cost.
     if msgs.len() >= 4 {
         let stable_idx = msgs.len() - 3;
         if let Some(stable_msg) = msgs.get_mut(stable_idx)
@@ -243,9 +188,6 @@ pub fn build_request_for_provider(
     }
 
     let is_kimi = provider_type.is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
-    // v2 `budgetTokensForEffort`: a declared thinking level is the budget's
-    // source when the transport carries no explicit one — the standalone
-    // config path resolves `thinking.effort` into `reasoning_effort` only.
     let effort_thinking_off =
         reasoning_effort.is_some_and(|effort| matches!(effort, "" | "off" | "none"));
     let effort_budget = reasoning_effort
@@ -255,22 +197,28 @@ pub fn build_request_for_provider(
         .filter(|budget| *budget > 0)
         .or(effort_budget);
     let effective_max_tokens = if is_kimi {
-        // The Claude ceiling table says nothing about a Kimi model: v2's
-        // `resolveDefaultMaxTokens` falls through to the requested cap for an
-        // unknown id, so the dynamic cap is the whole answer.
         completion_cap.unwrap_or(max_tokens)
     } else {
         let capped = completion_cap
             .map(|cap| max_tokens.min(cap))
             .unwrap_or(max_tokens);
-        if let Some(budget) = thinking_budget
-            && budget > 0
-            && capped <= budget
-        {
-            budget.saturating_add(4096)
-        } else {
-            capped
+        claude_max_tokens_ceiling(model).map_or(capped, |ceiling| capped.min(ceiling))
+    };
+    let thinking_budget = if !is_kimi && !adaptive_thinking {
+        match thinking_budget {
+            Some(budget) if budget > 0 && budget >= effective_max_tokens => {
+                if effective_max_tokens <= 1024 {
+                    return Err(format!(
+                        "Thinking budget {budget} exceeds the max_tokens cap {effective_max_tokens}; \
+                         max_tokens must be greater than 1024 while thinking is enabled."
+                    ));
+                }
+                Some(effective_max_tokens - 1)
+            }
+            budget => budget,
         }
+    } else {
+        thinking_budget
     };
 
     let mut req = json!({
@@ -282,13 +230,9 @@ pub fn build_request_for_provider(
         req["stream"] = json!(true);
     }
     if let Some(cache_key) = cache_key.filter(|key| !key.is_empty()) {
-        // v2 `format.ts:243`: the session id rides `metadata.user_id`.
         req["metadata"] = json!({ "user_id": cache_key });
     }
     if is_kimi {
-        // v2 `kimiAnthropicTrait.thinking`: the effort is a level on
-        // `output_config`, not a token budget; off is a protocol-level
-        // disable.
         if let Some(effort) = reasoning_effort.filter(|value| !value.is_empty()) {
             if effort == "off" || effort == "none" {
                 req["thinking"] = json!({ "type": "disabled" });
@@ -300,9 +244,6 @@ pub fn build_request_for_provider(
             }
         }
     } else if adaptive_thinking {
-        // v2 `encodeThinking` adaptive mode: the provider decides how much to
-        // think, the resolved level rides `output_config.effort`, and no
-        // `budget_tokens` is sent. `off` stays an explicit protocol disable.
         match reasoning_effort.filter(|value| !value.is_empty()) {
             Some(effort) if effort == "off" || effort == "none" => {
                 req["thinking"] = json!({ "type": "disabled" });
@@ -323,22 +264,49 @@ pub fn build_request_for_provider(
             "budget_tokens": budget,
         });
     } else if !effort_thinking_off && reasoning_effort.is_some() {
-        // A level the budget table does not know (or `on`) enables thinking
-        // without a concrete budget, matching v2's `budgetTokensForEffort`
-        // fallthrough.
         req["thinking"] = json!({ "type": "enabled" });
+    }
+    if let Some(format) = options.response_format.as_ref() {
+        let output_config = format.to_anthropic_output_config()?;
+        let mut merged = req
+            .get("output_config")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if let (Some(target), Some(source)) = (merged.as_object_mut(), output_config.as_object()) {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        req["output_config"] = merged;
+    }
+    if let Value::Object(map) = &mut req {
+        if let Some(temperature) = options.temperature {
+            map.entry("temperature".to_string())
+                .or_insert(json!(temperature));
+        }
+        if let Some(top_p) = options.top_p {
+            map.entry("top_p".to_string()).or_insert(json!(top_p));
+        }
+        for (key, value) in &options.extra_params.anthropic {
+            map.insert(key.clone(), value.clone());
+        }
     }
     if let Some(keep) = thinking_keep
         && !keep.is_empty()
     {
-        // Preserved thinking rides a `clear_thinking_20251015`
-        // context-management edit (beta `context-management-2025-06-27`;
-        // the transport switches to the beta Messages API with it).
-        // `keep` forwards the configured string (usually "all"), mirroring
-        // the host Anthropic provider.
         req["context_management"] = json!({
             "edits": [{ "type": "clear_thinking_20251015", "keep": keep }],
         });
+    }
+
+    let betas = anthropic_betas(
+        provider_type,
+        adaptive_thinking,
+        reasoning_effort.is_some() || thinking_budget.is_some(),
+        thinking_keep,
+    );
+    if use_beta_api && !betas.is_empty() {
+        req["betas"] = json!(betas);
     }
 
     if !system.is_empty() {
@@ -365,14 +333,151 @@ pub fn build_request_for_provider(
         req["tools"] = json!(tool_defs);
     }
 
-    req
+    Ok(req)
 }
 
-/// Project a single content block to the Anthropic content-block form.
-///
-/// Anthropic's Messages API has no native audio/video blocks; audio/video
-/// URLs are degraded to placeholder text (mirroring the host's
-/// `MEDIA_STRIPPED_PLACEHOLDERS` semantics) so the request stays valid.
+pub const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
+pub const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
+
+pub fn anthropic_betas(
+    provider_type: Option<&str>,
+    adaptive_thinking: bool,
+    thinking_configured: bool,
+    thinking_keep: Option<&str>,
+) -> Vec<&'static str> {
+    let is_kimi = provider_type.is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
+    let mut betas = Vec::new();
+    if thinking_configured && is_kimi {
+        betas.push(CONTEXT_MANAGEMENT_BETA);
+    } else if !(thinking_configured && adaptive_thinking) {
+        betas.push(INTERLEAVED_THINKING_BETA);
+    }
+    if thinking_keep.is_some_and(|keep| !keep.is_empty())
+        && !betas.contains(&CONTEXT_MANAGEMENT_BETA)
+    {
+        betas.push(CONTEXT_MANAGEMENT_BETA);
+    }
+    betas
+}
+
+const CLAUDE_CEILINGS: &[(&str, u32)] = &[
+    ("fable-5", 128_000),
+    ("mythos-5", 128_000),
+    ("opus-4-8", 128_000),
+    ("opus-4-7", 128_000),
+    ("opus-4-6", 128_000),
+    ("opus-4-5", 64_000),
+    ("opus-4-1", 32_000),
+    ("opus-4-0", 32_000),
+    ("opus-4", 32_000),
+    ("sonnet-5", 128_000),
+    ("sonnet-4-6", 128_000),
+    ("sonnet-4-5", 64_000),
+    ("sonnet-4-0", 64_000),
+    ("sonnet-4", 64_000),
+    ("haiku-4-5", 64_000),
+    ("haiku-4", 64_000),
+    ("opus-3-5", 8192),
+    ("sonnet-3-5", 8192),
+    ("sonnet-3-7", 8192),
+    ("haiku-3-5", 8192),
+    ("opus-3", 4096),
+    ("sonnet-3", 4096),
+    ("haiku-3", 4096),
+];
+
+fn claude_max_tokens_ceiling(model: &str) -> Option<u32> {
+    let normalized = model.to_ascii_lowercase();
+    if !normalized.contains("claude") {
+        return None;
+    }
+    let (family, major, minor) = parse_anthropic_model_version(&normalized)?;
+    lookup_claude_ceiling(&family, major, minor)
+}
+
+fn lookup_claude_ceiling(family: &str, major: u32, minor: Option<u32>) -> Option<u32> {
+    if let Some(minor) = minor {
+        for candidate in (0..=minor).rev() {
+            let key = format!("{family}-{major}-{candidate}");
+            if let Some((_, ceiling)) = CLAUDE_CEILINGS.iter().find(|(name, _)| *name == key) {
+                return Some(*ceiling);
+            }
+        }
+    }
+    let key = format!("{family}-{major}");
+    CLAUDE_CEILINGS
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, ceiling)| *ceiling)
+}
+
+const ANTHROPIC_FAMILY_TOKENS: [&str; 5] = ["opus", "sonnet", "haiku", "fable", "mythos"];
+
+fn read_version_number(text: &str) -> Option<(u32, &str)> {
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 || digits > 2 {
+        return None;
+    }
+    let (number, rest) = text.split_at(digits);
+    Some((number.parse().ok()?, rest))
+}
+
+fn parse_family_first(model: &str) -> Option<(String, u32, Option<u32>)> {
+    let mut best: Option<(usize, &'static str)> = None;
+    for family in ANTHROPIC_FAMILY_TOKENS {
+        let mut from = 0;
+        while let Some(offset) = model[from..].find(family) {
+            let index = from + offset;
+            let after = &model[index + family.len()..];
+            if after.starts_with(['-', '.', '_']) {
+                if best.is_none_or(|(best_index, _)| index < best_index) {
+                    best = Some((index, family));
+                }
+                break;
+            }
+            from = index + family.len();
+        }
+    }
+    let (index, family) = best?;
+    let rest = &model[index + family.len() + 1..];
+    let (major, rest) = read_version_number(rest)?;
+    let minor = rest
+        .strip_prefix(['-', '.', '_'])
+        .and_then(read_version_number)
+        .map(|(minor, _)| minor);
+    Some((family.to_string(), major, minor))
+}
+
+fn parse_anthropic_model_version(model: &str) -> Option<(String, u32, Option<u32>)> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    static VERSION_FIRST: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(\d{1,2})[-._](\d{1,2})[-._](opus|sonnet|haiku)")
+            .expect("valid anthropic version regex")
+    });
+    static BARE_FAMILY: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(\d{1,2})[-._](opus|sonnet|haiku)").expect("valid anthropic bare regex")
+    });
+
+    if let Some(parsed) = parse_family_first(model) {
+        return Some(parsed);
+    }
+    if let Some(captures) = VERSION_FIRST.captures(model) {
+        return Some((
+            captures.get(3)?.as_str().to_string(),
+            captures.get(1)?.as_str().parse().ok()?,
+            captures.get(2)?.as_str().parse().ok(),
+        ));
+    }
+    let captures = BARE_FAMILY.captures(model)?;
+    Some((
+        captures.get(2)?.as_str().to_string(),
+        captures.get(1)?.as_str().parse().ok()?,
+        None,
+    ))
+}
+
 fn project_block(b: &ContentBlock) -> Value {
     match b {
         ContentBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
@@ -390,10 +495,21 @@ fn project_block(b: &ContentBlock) -> Value {
             "type": "text",
             "text": "[audio omitted: not supported by this provider; re-read the file to hear it]",
         }),
-        ContentBlock::VideoUrl { .. } => json!({
-            "type": "text",
-            "text": "[video omitted: not supported by this provider; re-read the file to view it]",
-        }),
+        ContentBlock::VideoUrl { url, .. } => {
+            if !url.starts_with("data:") {
+                json!({ "type": "video", "source": { "type": "url", "url": url } })
+            } else if let Some((media_type, data)) = url[5..].split_once(";base64,") {
+                json!({
+                    "type": "video",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                })
+            } else {
+                json!({
+                    "type": "text",
+                    "text": "[video omitted: not supported by this provider; re-read the file to view it]",
+                })
+            }
+        }
         ContentBlock::Think {
             think, encrypted, ..
         } => {
@@ -403,9 +519,6 @@ fn project_block(b: &ContentBlock) -> Value {
             }
             obj
         }
-        // A reference that reached the wire was never resolved: the resolver
-        // runs before every request. Degrade visibly rather than hand the
-        // provider a `kimi-file://` URL it cannot fetch.
         ContentBlock::MediaRef { kind, .. } => json!({
             "type": "text",
             "text": crate::llm::media_resolver::unavailable_text(*kind),
@@ -413,7 +526,15 @@ fn project_block(b: &ContentBlock) -> Value {
     }
 }
 
-/// Parse an Anthropic Messages (non-streaming) response.
+fn tool_result_content(blocks: &[ContentBlock]) -> Vec<Value> {
+    blocks
+        .iter()
+        .filter(|block| !matches!(block, ContentBlock::Think { .. }))
+        .filter(|block| !matches!(block, ContentBlock::Text { text, .. } if text.is_empty()))
+        .map(project_block)
+        .collect()
+}
+
 pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
     let content = v
         .get("content")
@@ -439,16 +560,6 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                     details_summary: None,
                 });
             }
-            // A block Anthropic could not return in the clear (safety filter or
-            // encryption): the attestation is in `data` and there is no
-            // readable text. v2 carries it as the *same* think part with an
-            // empty `think` and `encrypted` set to `data`
-            // (`kosong/provider/bases/anthropic/anthropic.ts:634-640`), which
-            // `project_block` already replays verbatim as
-            // `thinking` + `signature` (`anthropic.ts:419-428`). Falling
-            // through to `_` dropped an attested block the next request has to
-            // echo back — Anthropic rejects a follow-up whose thinking does not
-            // round-trip.
             Some("redacted_thinking") => {
                 let data = block
                     .get("data")
@@ -516,12 +627,6 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
         .and_then(|u| u.get("cache_creation_input_tokens"))
         .and_then(|x| x.as_u64())
         .unwrap_or(0) as u32;
-    // Anthropic's `input_tokens` already excludes the cache split fields
-    // (`cache_read_input_tokens` / `cache_creation_input_tokens` are additive
-    // parts of the prompt, not of `input_tokens`), so it is the uncached
-    // remainder the host's `inputOther` expects — v2
-    // `parseRawUsage` maps it straight through. Subtracting the cache fields
-    // here double-counted them and under-reported the prompt.
     let input_tokens = raw_input;
 
     Ok(LLMChatResponse {
@@ -543,59 +648,10 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
     })
 }
 
-/// Resolve the default `max_tokens` ceiling for Anthropic models.
-///
-/// Mirrors the ceiling table in v2's Anthropic profile
-/// (`CEILING_BY_FAMILY_VERSION` + `FALLBACK_MAX_TOKENS`) so the native
-/// transport does not silently truncate a newer Claude model down to the
-/// Claude-3 budget. Branches are ordered most-specific first: a `4-6` release
-/// must be caught before the bare `4` family check.
-///
-/// The unknown-model fallback is v2's `FALLBACK_MAX_TOKENS`, which `21406fb4c8`
-/// (#4091) lowered from 128000 to 64000. A model id this ladder does not
-/// recognize is one v2 cannot parse either, so it takes the same rung; the
-/// earlier 128k value here was a stale copy of the pre-#4091 constant.
 pub fn default_max_tokens_for_model(model: &str) -> u32 {
-    let lower = model.to_ascii_lowercase();
-    // Claude 5 / 4.6+ generation documents a 128k output ceiling.
-    if lower.contains("sonnet-5")
-        || lower.contains("fable-5")
-        || lower.contains("mythos-5")
-        || lower.contains("opus-4-8")
-        || lower.contains("opus-4-7")
-        || lower.contains("opus-4-6")
-        || lower.contains("sonnet-4-6")
-    {
-        return 128_000;
-    }
-    // Claude 4.5 / 4.0 Sonnet and Haiku 4 ship at 64k.
-    if lower.contains("opus-4-5")
-        || lower.contains("sonnet-4-5")
-        || lower.contains("sonnet-4")
-        || lower.contains("haiku-4")
-    {
-        return 64_000;
-    }
-    // Claude Opus 4.0 / 4.1 stay at 32k.
-    if lower.contains("opus-4-1") || lower.contains("opus-4") {
-        return 32_000;
-    }
-    // Claude 3.5 / 3.7 documented at 8192 (standard endpoint).
-    if lower.contains("claude-3-7") || lower.contains("claude-3-5") {
-        return 8192;
-    }
-    // Original Claude 3 generation.
-    if lower.contains("claude-3") {
-        return 4096;
-    }
-    // Unknown model: v2 cannot parse it either, so it lands on
-    // FALLBACK_MAX_TOKENS, 64000 as of #4091.
-    64_000
+    claude_max_tokens_ceiling(model).unwrap_or(64_000)
 }
 
-// ── Streaming (SSE) accumulation ───────────────────────────────────────
-
-/// A content block being accumulated across stream events, keyed by index.
 #[derive(Debug, Clone)]
 enum PartialBlock {
     Text,
@@ -610,23 +666,14 @@ enum PartialBlock {
     },
 }
 
-/// Upper bound on content blocks a single streamed response may open.
-/// Generous for real responses (a tool call or two plus text); small enough
-/// that a hostile `index` cannot exhaust memory.
 const MAX_STREAM_BLOCKS: usize = 256;
 
-/// Accumulates Anthropic Messages stream events into a final
-/// [`LLMChatResponse`]. Feed each SSE `data:` JSON payload (each carries a
-/// `type` discriminator) to [`StreamAccumulator::feed`]; text or thinking deltas are
-/// returned so the caller can forward them to the host.
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     content: String,
     blocks: Vec<Option<PartialBlock>>,
     finish_reason: Option<String>,
     usage: TokenUsage,
-    /// Tool-call argument fragments the last [`Self::feed`] carried, drained by
-    /// the caller through [`Self::take_tool_call_deltas`].
     pending_tool_calls: Vec<StreamDelta>,
 }
 
@@ -635,18 +682,10 @@ impl StreamAccumulator {
         Self::default()
     }
 
-    /// Drain the tool-call argument fragments the last [`Self::feed`] carried,
-    /// in arrival order.
     pub fn take_tool_call_deltas(&mut self) -> Vec<StreamDelta> {
         std::mem::take(&mut self.pending_tool_calls)
     }
 
-    /// Resolve the block slot for a streamed index, or `None` when the index
-    /// is implausible.
-    ///
-    /// The index comes from the provider, and growing the vec to satisfy an
-    /// arbitrary one lets a single chunk allocate until the process dies —
-    /// which in the napi build takes the host down with it.
     fn slot(&mut self, index: usize) -> Option<&mut Option<PartialBlock>> {
         if index >= MAX_STREAM_BLOCKS {
             return None;
@@ -657,8 +696,6 @@ impl StreamAccumulator {
         self.blocks.get_mut(index)
     }
 
-    /// Feed one stream event. Returns the text or thinking delta contained in the
-    /// event, if any.
     pub fn feed(&mut self, v: &Value) -> Option<StreamDelta> {
         let event_type = v.get("type").and_then(|t| t.as_str())?;
         match event_type {
@@ -676,7 +713,6 @@ impl StreamAccumulator {
                         .get("cache_creation_input_tokens")
                         .and_then(|x| x.as_u64())
                         .unwrap_or(0) as u32;
-                    // `input_tokens` excludes the cache fields on this wire.
                     self.usage.input_tokens = raw_input;
                 }
                 None
@@ -696,13 +732,6 @@ impl StreamAccumulator {
                             signature,
                         }
                     }
-                    // The streaming twin of the non-streaming branch: v2 opens
-                    // a redacted block as a think part carrying `data` as its
-                    // attestation (`anthropic.ts:686-692`). It used to fall into
-                    // the text arm, so the block was gone by `finish()`. No
-                    // delta is returned — `StreamDelta::Think` carries
-                    // displayable text only, and a redacted block has none; the
-                    // block reaches the caller through `finish()`.
                     Some("redacted_thinking") => PartialBlock::Thinking {
                         thinking: String::new(),
                         signature: block
@@ -803,12 +832,10 @@ impl StreamAccumulator {
                 }
                 None
             }
-            // ping / content_block_stop / message_stop carry nothing we need.
             _ => None,
         }
     }
 
-    /// Finalize the accumulated stream into a response.
     pub fn finish(mut self) -> LLMChatResponse {
         self.usage.total_tokens = self
             .usage
@@ -840,11 +867,6 @@ impl StreamAccumulator {
                     name,
                     input_json,
                 } if !name.is_empty() => {
-                    // A truncated stream leaves `input_json` incomplete. The
-                    // call is kept and the reason travels with it (v2
-                    // `parseToolCallArguments`): the model reads an error result
-                    // for the call it issued, and no tool runs on a fabricated
-                    // `{}`.
                     let (arguments, args_parse_error) =
                         crate::llm::tool_args::parse_tool_arguments(Some(input_json.as_str()));
                     tool_calls.push(ToolCall {
@@ -902,17 +924,14 @@ mod tests {
 
         assert_eq!(req["model"], "claude-x");
         assert_eq!(req["max_tokens"], 4096);
-        // System messages are concatenated into the top-level array with cache_control.
         assert_eq!(req["system"][0]["text"], "sys-a\n\nsys-b");
         assert_eq!(req["system"][0]["cache_control"]["type"], "ephemeral");
 
         let msgs = req["messages"].as_array().unwrap();
-        // user, assistant, tool-result-as-user
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[0]["content"][0]["type"], "text");
 
-        // Assistant: text block + tool_use block with an OBJECT input.
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["content"][0]["type"], "text");
         let tool_use = &msgs[1]["content"][1];
@@ -921,7 +940,6 @@ mod tests {
         assert_eq!(tool_use["name"], "Read");
         assert_eq!(tool_use["input"], json!({ "path": "a.txt" }));
 
-        // Tool result becomes a user message with a tool_result block and cache_control.
         assert_eq!(msgs[2]["role"], "user");
         let tr = &msgs[2]["content"][0];
         assert_eq!(tr["type"], "tool_result");
@@ -929,7 +947,6 @@ mod tests {
         assert_eq!(tr["content"], "file body");
         assert_eq!(tr["cache_control"]["type"], "ephemeral");
 
-        // Tools use Anthropic's `input_schema` key and last tool has cache_control.
         assert_eq!(req["tools"][0]["name"], "Read");
         assert_eq!(req["tools"][0]["input_schema"], json!({ "type": "object" }));
         assert_eq!(req["tools"][0]["cache_control"]["type"], "ephemeral");
@@ -966,20 +983,16 @@ mod tests {
 
         let req = build_request("claude-x", 4096, &messages, &[]);
         let msgs = req["messages"].as_array().unwrap();
-        // 3 turns total: user (merged), assistant, user (merged 2 tool results + 1 text)
         assert_eq!(msgs.len(), 3);
 
-        // Turn 0: user with 2 text blocks
         assert_eq!(msgs[0]["role"], "user");
         let u0 = msgs[0]["content"].as_array().unwrap();
         assert_eq!(u0.len(), 2);
         assert_eq!(u0[0]["text"], "part 1");
         assert_eq!(u0[1]["text"], "part 2");
 
-        // Turn 1: assistant
         assert_eq!(msgs[1]["role"], "assistant");
 
-        // Turn 2: user with 2 tool_results + 1 text, last block has cache_control
         assert_eq!(msgs[2]["role"], "user");
         let u2 = msgs[2]["content"].as_array().unwrap();
         assert_eq!(u2.len(), 3);
@@ -990,6 +1003,100 @@ mod tests {
         assert_eq!(u2[2]["type"], "text");
         assert_eq!(u2[2]["text"], "continue please");
         assert_eq!(u2[2]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn a_tool_result_with_an_image_block_carries_it_in_the_content_blocks() {
+        let messages = vec![
+            WireMessage::text("user", "look at this"),
+            WireMessage::assistant_tool_calls(
+                "reading",
+                vec![ToolCall {
+                    id: "tu_1".into(),
+                    name: "readMedia".into(),
+                    arguments: json!({ "path": "a.png" }),
+                    extras: None,
+                    args_parse_error: None,
+                }],
+            ),
+            WireMessage {
+                role: "tool".into(),
+                content: "<image path=\"a.png\">".into(),
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "<image path=\"a.png\">".into(),
+                        meta: None,
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".into(),
+                        data: "QUJD".into(),
+                        name: None,
+                    },
+                ],
+                tool_calls: Vec::new(),
+                tool_call_id: Some("tu_1".into()),
+            },
+        ];
+
+        let req = build_request("claude-x", 4096, &messages, &[]);
+        let msgs = req["messages"].as_array().unwrap();
+        let tr = &msgs.last().unwrap()["content"][0];
+        assert_eq!(tr["type"], "tool_result");
+        let content = tr["content"]
+            .as_array()
+            .expect("tool_result content must be content blocks");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "QUJD");
+    }
+
+    #[test]
+    fn a_tool_result_with_a_video_block_carries_a_video_block() {
+        let messages = vec![
+            WireMessage::text("user", "watch this"),
+            WireMessage {
+                role: "tool".into(),
+                content: "".into(),
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "<video path=\"a.mp4\">".into(),
+                        meta: None,
+                    },
+                    ContentBlock::VideoUrl {
+                        url: "data:video/mp4;base64,AAAA".into(),
+                        id: None,
+                        name: None,
+                    },
+                    ContentBlock::VideoUrl {
+                        url: "https://example.test/b.webm".into(),
+                        id: None,
+                        name: None,
+                    },
+                ],
+                tool_calls: Vec::new(),
+                tool_call_id: Some("tu_1".into()),
+            },
+        ];
+
+        let req = build_request("claude-x", 4096, &messages, &[]);
+        let msgs = req["messages"].as_array().unwrap();
+        let tool_result = msgs.last().unwrap()["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| block["type"] == "tool_result")
+            .expect("the tool result must be projected");
+        let content = tool_result["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "video");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "video/mp4");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
+        assert_eq!(content[2]["type"], "video");
+        assert_eq!(content[2]["source"]["type"], "url");
+        assert_eq!(content[2]["source"]["url"], "https://example.test/b.webm");
     }
 
     #[test]
@@ -1015,7 +1122,6 @@ mod tests {
         assert_eq!(parsed.tool_calls.len(), 1);
         assert_eq!(parsed.tool_calls[0].id, "tu_9");
         assert_eq!(parsed.tool_calls[0].name, "Grep");
-        // Anthropic input is already an object.
         assert_eq!(parsed.tool_calls[0].arguments, json!({ "q": "foo" }));
         assert_eq!(parsed.usage.input_tokens, 20);
         assert_eq!(parsed.usage.output_tokens, 8);
@@ -1037,9 +1143,6 @@ mod tests {
         let parsed = parse_response(&v).unwrap();
         assert_eq!(parsed.usage.input_cache_read, 40);
         assert_eq!(parsed.usage.input_cache_creation, 5);
-        // Anthropic's `input_tokens` already excludes the cache fields, so it
-        // is the uncached remainder the host charges as `inputOther`; the
-        // total adds the cache split back (v2 `grandTotal`).
         assert_eq!(parsed.usage.input_tokens, 50);
         assert_eq!(parsed.usage.total_tokens, 101);
     }
@@ -1084,7 +1187,7 @@ mod tests {
 
     #[test]
     fn build_request_projects_image_blocks() {
-        use crate::turn_loop::types::ContentBlock;
+        use kimi_core::types::ContentBlock;
         let msg = WireMessage::with_blocks(
             "user",
             vec![
@@ -1110,9 +1213,8 @@ mod tests {
     }
 
     #[test]
-    fn build_request_degrades_audio_and_video_blocks() {
-        use crate::turn_loop::types::ContentBlock;
-        // Anthropic has no native audio/video blocks: they degrade to text.
+    fn build_request_degrades_audio_and_sends_video_blocks() {
+        use kimi_core::types::ContentBlock;
         let msg = WireMessage::with_blocks(
             "user",
             vec![
@@ -1138,13 +1240,8 @@ mod tests {
                 .unwrap()
                 .contains("audio omitted")
         );
-        assert_eq!(content[1]["type"], "text");
-        assert!(
-            content[1]["text"]
-                .as_str()
-                .unwrap()
-                .contains("video omitted")
-        );
+        assert_eq!(content[1]["type"], "video");
+        assert_eq!(content[1]["source"]["url"], "https://example.com/v.mp4");
     }
 
     #[test]
@@ -1289,10 +1386,6 @@ mod tests {
 
     #[test]
     fn parse_response_keeps_redacted_thinking_as_an_encrypted_think_block() {
-        // v2 `anthropic.ts:634-640`: a `redacted_thinking` block is the same
-        // think part with empty text and `encrypted` set to `data`. Before
-        // this it matched no arm and was dropped, so a multi-turn thinking
-        // response silently lost an attested block.
         let v = json!({
             "content": [
                 { "type": "redacted_thinking", "data": "encrypted_blob" },
@@ -1331,9 +1424,6 @@ mod tests {
 
     #[test]
     fn redacted_thinking_round_trips_back_into_the_next_request() {
-        // Keeping the block only pays off if the next request replays it: v2
-        // `anthropic.ts:419-428` projects any think part carrying `encrypted`
-        // as `thinking` + `signature`, which is what `project_block` does.
         let parsed = parse_response(&json!({
             "content": [{ "type": "redacted_thinking", "data": "encrypted_blob" }],
             "usage": { "input_tokens": 4, "output_tokens": 2 }
@@ -1355,8 +1445,6 @@ mod tests {
 
     #[test]
     fn stream_accumulator_keeps_a_redacted_thinking_block() {
-        // v2 `anthropic.ts:686-692` opens a redacted streamed block the same
-        // way; it used to fall into the text arm and vanish at `finish()`.
         let mut acc = StreamAccumulator::new();
         let delta = acc.feed(&json!({
             "type": "content_block_start",
@@ -1378,8 +1466,6 @@ mod tests {
 
     #[test]
     fn stream_accumulator_ignores_implausible_block_index() {
-        // The index comes from the provider; honouring an arbitrary one grew
-        // the accumulator without bound until the process died.
         let mut acc = StreamAccumulator::new();
         acc.feed(&json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text" } }));
         acc.feed(&json!({ "type": "content_block_start", "index": 50_000_000, "content_block": { "type": "tool_use", "id": "boom", "name": "Boom" } }));
@@ -1395,8 +1481,6 @@ mod tests {
 
     #[test]
     fn finish_after_truncated_stream_keeps_partial_content() {
-        // A provider that dies before message_stop (no message_delta, no
-        // usage) must still surface the streamed text and finish safely.
         let mut acc = StreamAccumulator::default();
         acc.feed(&json!({
             "type": "content_block_delta",
@@ -1416,10 +1500,6 @@ mod tests {
 
     #[test]
     fn truncated_tool_use_input_keeps_the_call_and_its_reason() {
-        // A stream cut inside the input JSON must NOT execute a tool call with
-        // an empty argument object (e.g. Bash without a command), and must not
-        // drop it either: the loop answers the kept call with an error result
-        // (v2 `parseToolCallArguments`).
         let mut acc = StreamAccumulator::default();
         acc.feed(&json!({
             "type": "content_block_start",
@@ -1484,9 +1564,8 @@ mod tests {
             None,
         );
         assert_eq!(req_thinking["thinking"]["type"], "enabled");
-        assert_eq!(req_thinking["thinking"]["budget_tokens"], 4096);
-        // max_tokens should be bumped if <= budget
-        assert!(req_thinking["max_tokens"].as_u64().unwrap() > 4096);
+        assert_eq!(req_thinking["thinking"]["budget_tokens"], 4095);
+        assert_eq!(req_thinking["max_tokens"], 4096);
 
         let req_no_thinking = build_request_full(
             "claude-3-7-sonnet-20250219",
@@ -1524,9 +1603,6 @@ mod tests {
         assert!(req_no_keep.get("context_management").is_none());
     }
 
-    /// v2 `encodeThinking` adaptive mode: the level rides
-    /// `output_config.effort`, the thinking block is `adaptive`, and no token
-    /// budget is sent.
     #[test]
     fn test_build_request_adaptive_thinking() {
         let msgs = vec![WireMessage::text("user", "hello")];
@@ -1544,7 +1620,10 @@ mod tests {
                 None,
                 Some(50_000),
                 true,
+                false,
+                &crate::llm::request_options::RequestOptions::default(),
             )
+            .expect("adaptive request")
         };
         let high = build(Some("high"));
         assert_eq!(
@@ -1553,26 +1632,21 @@ mod tests {
         );
         assert_eq!(high["output_config"]["effort"], "high");
         assert!(high["thinking"].get("budget_tokens").is_none());
-        // `on` enables adaptive thinking without a level.
         let on = build(Some("on"));
         assert_eq!(on["thinking"]["type"], "adaptive");
         assert!(on.get("output_config").is_none());
-        // Off stays an explicit protocol-level disable.
         let off = build(Some("off"));
         assert_eq!(off["thinking"], json!({ "type": "disabled" }));
         assert!(off.get("output_config").is_none());
     }
 
-    /// v2 `budgetTokensForEffort`: a declared level is the budget source when
-    /// the transport carries no explicit budget (the standalone config path
-    /// resolves `thinking.effort` into `reasoning_effort` only).
     #[test]
     fn test_build_request_derives_the_budget_from_the_effort() {
         let msgs = vec![WireMessage::text("user", "hello")];
         let build = |effort: Option<&str>| {
             build_request_for_provider(
                 "claude-sonnet-4-5",
-                4096,
+                64_000,
                 &msgs,
                 &[],
                 true,
@@ -1583,7 +1657,10 @@ mod tests {
                 None,
                 None,
                 false,
+                false,
+                &crate::llm::request_options::RequestOptions::default(),
             )
+            .expect("budget request")
         };
         for (effort, budget) in [
             ("low", 1024),
@@ -1616,30 +1693,28 @@ mod tests {
                 Some("sess-9"),
                 Some(50_000),
                 false,
+                false,
+                &crate::llm::request_options::RequestOptions::default(),
             )
+            .expect("kimi request")
         };
 
-        // A level is `output_config.effort`, never an Anthropic token budget.
         let high = build(Some("high"));
         assert_eq!(high["thinking"], json!({ "type": "enabled" }));
         assert_eq!(high["output_config"]["effort"], "high");
         assert!(high["thinking"].get("budget_tokens").is_none());
-        // Kimi's endpoint has no Claude ceiling: the dynamic cap is the answer.
         assert_eq!(high["max_tokens"], 50_000);
         assert_eq!(high["metadata"]["user_id"], "sess-9");
         assert_eq!(high["context_management"]["edits"][0]["keep"], "all");
 
-        // `on` enables thinking without a level.
         let on = build(Some("on"));
         assert_eq!(on["thinking"], json!({ "type": "enabled" }));
         assert!(on.get("output_config").is_none());
 
-        // Off is a protocol-level disable.
         let off = build(Some("off"));
         assert_eq!(off["thinking"], json!({ "type": "disabled" }));
         assert!(off.get("output_config").is_none());
 
-        // A standard anthropic provider keeps the budget encoding.
         let standard = build_request_for_provider(
             "claude-sonnet-4-5",
             64_000,
@@ -1653,49 +1728,31 @@ mod tests {
             None,
             Some(50_000),
             false,
-        );
+            false,
+            &crate::llm::request_options::RequestOptions::default(),
+        )
+        .expect("standard request");
         assert_eq!(standard["thinking"]["budget_tokens"], 32_000);
         assert!(standard.get("output_config").is_none());
-        // The completion cap can only lower the ceiling.
         assert_eq!(standard["max_tokens"], 50_000);
     }
 
     #[test]
     fn default_max_tokens_matches_the_v2_ceiling_table() {
-        // Newer generations must not be truncated down to the Claude-3 budget.
         assert_eq!(default_max_tokens_for_model("claude-sonnet-4-5"), 64_000);
         assert_eq!(default_max_tokens_for_model("claude-opus-4-1"), 32_000);
         assert_eq!(default_max_tokens_for_model("claude-sonnet-4-6"), 128_000);
         assert_eq!(default_max_tokens_for_model("claude-opus-4-7"), 128_000);
         assert_eq!(default_max_tokens_for_model("claude-haiku-4-5"), 64_000);
-        // Documented Claude 3.x ceilings.
         assert_eq!(
             default_max_tokens_for_model("claude-3-7-sonnet-20250219"),
             8192
         );
         assert_eq!(default_max_tokens_for_model("claude-3-5-haiku"), 8192);
         assert_eq!(default_max_tokens_for_model("claude-3-opus"), 4096);
-        // Unknown model: v2 cannot parse it either, so both sides land on
-        // FALLBACK_MAX_TOKENS — 64000 since #4091, down from 128000.
         assert_eq!(default_max_tokens_for_model("some-unknown-model"), 64_000);
     }
 
-    /// The ladder above matches on substrings while v2 parses
-    /// `family-major[-minor]` and walks `CEILING_BY_FAMILY_VERSION`
-    /// (`profile.ts:110-147`). Pinned here against every real Claude id so a
-    /// future edit to the ladder cannot silently change a ceiling — the two
-    /// agree on all of them.
-    ///
-    /// The divergence, pinned below rather than merely described: v2 rejects
-    /// an id with no `claude` marker up front and returns its fallback
-    /// (`parseAnthropicModelVersion(model, /* requireClaudeMarker */ true)`,
-    /// `profile.ts:78`) — 64000 since `21406fb4c8` (#4091) lowered
-    /// `FALLBACK_MAX_TOKENS` from 128000 — while this ladder's `contains` tests
-    /// fire on the family fragment wherever it sits. A relay id like
-    /// `relay-opus-4-1` therefore takes the 32k rung here while v2 hands it 64k,
-    /// and `my-sonnet-4-6-clone` takes 128k here against v2's 64k: **#4091 made
-    /// this divergence two-directional**, where before the fork was only ever
-    /// below v2. `my-opus-4-5-clone` is the one relay that now coincides.
     #[test]
     fn default_max_tokens_agrees_with_v2_on_every_real_claude_id() {
         let cases = [
@@ -1726,19 +1783,11 @@ mod tests {
             );
         }
 
-        // Relay ids, pinned: this ladder answers the rung its `contains` finds,
-        // where v2 answers its 64000 fallback for every marker-less id. After
-        // #4091 the two can coincide (64k / 128k against the 128k rungs), can
-        // diverge downward (32k), or diverge upward (the 128k rungs vs v2's 64k).
-        for (model, expected) in [
-            ("my-opus-4-5-clone", 64_000),
-            ("my-sonnet-4-6-clone", 128_000),
-            ("relay-opus-4-1", 32_000),
-        ] {
+        for model in ["my-opus-4-5-clone", "my-sonnet-4-6-clone", "relay-opus-4-1"] {
             assert_eq!(
                 default_max_tokens_for_model(model),
-                expected,
-                "{model} hits the contains() rung; v2 answers 64000 for a marker-less id"
+                64_000,
+                "{model} has no `claude` marker, so v2 answers its 64000 fallback"
             );
         }
     }
@@ -1759,24 +1808,18 @@ mod tests {
         }];
         let req = build_request_full("claude-3-7-sonnet", 4096, &msgs, &tools, true, None, None);
 
-        // Slot 1: system prompt (if present)
-        // Slot 2: last tool definition
         let req_tools = req["tools"].as_array().unwrap();
         assert_eq!(req_tools[0]["cache_control"]["type"], "ephemeral");
 
-        // Slot 3 & 4: stable history (msgs.len() - 3 = index 2) and tail (index 4)
         let req_msgs = req["messages"].as_array().unwrap();
         assert_eq!(req_msgs.len(), 5);
 
-        // stable history: index 2 ("turn 2") has cache_control
         let stable_content = req_msgs[2]["content"].as_array().unwrap();
         assert_eq!(stable_content[0]["cache_control"]["type"], "ephemeral");
 
-        // tail: index 4 ("turn 3") has cache_control
         let tail_content = req_msgs[4]["content"].as_array().unwrap();
         assert_eq!(tail_content[0]["cache_control"]["type"], "ephemeral");
 
-        // intermediate message: index 1 ("answer 1") does NOT have cache_control
         let mid_content = req_msgs[1]["content"].as_array().unwrap();
         assert!(mid_content[0].get("cache_control").is_none());
     }
@@ -1803,19 +1846,12 @@ mod tests {
         let req_msgs = req["messages"].as_array().unwrap();
         assert_eq!(req_msgs.len(), 2);
 
-        // The key assertion: when the tail is an Assistant, the break point must
-        // land on that Assistant's tool_use block, aligned with TS
         let asst_content = req_msgs[1]["content"].as_array().unwrap();
         assert_eq!(asst_content.len(), 2);
         assert_eq!(asst_content[1]["type"], "tool_use");
         assert_eq!(asst_content[1]["cache_control"]["type"], "ephemeral");
     }
 
-    /// v2 gates both of its breakpoints on `CACHEABLE_TYPES`
-    /// (`packages/kosong/src/providers/anthropic.ts:341-350`): the reasoning
-    /// types are not in it, so a `thinking` / `redacted_thinking` block never
-    /// takes a `cache_control`. Pinned item by item against v2's set — this is
-    /// the list the injection mirrors, not a local preference.
     #[test]
     fn cacheable_block_types_match_the_v2_vocabulary() {
         for cacheable in CACHEABLE_TYPES {
@@ -1830,14 +1866,9 @@ mod tests {
                 "{not_cacheable} is not in v2's CACHEABLE_TYPES"
             );
         }
-        // v2 reads `lastBlock.type`; a block without one is not cacheable.
         assert!(!is_cacheable_block(&json!({ "text": "typeless" })));
     }
 
-    /// A tail whose last block is a `thinking` block takes no breakpoint. The
-    /// shape needs a thinking-only assistant message (text or a tool_use is
-    /// always pushed *after* the reasoning blocks, and would then be the
-    /// cacheable tail) — what a signature-preserving prefill looks like.
     #[test]
     fn tail_breakpoint_skips_a_thinking_block() {
         let msgs = vec![
@@ -1863,8 +1894,6 @@ mod tests {
         );
     }
 
-    /// The tail still takes the breakpoint on every cacheable shape: plain
-    /// text, a tool_use call, and a media block.
     #[test]
     fn tail_breakpoint_lands_on_the_cacheable_tail_shapes() {
         for (label, msgs) in [
@@ -1912,9 +1941,6 @@ mod tests {
         }
     }
 
-    /// The stable slot is gated the same way: a `thinking` tail there leaves
-    /// that message breakpoint-free, while the tail message still takes its
-    /// own. Four messages, so `len - 3` is the assistant at index 1.
     #[test]
     fn stable_breakpoint_skips_a_thinking_block() {
         let think_only = |why: &str| {
@@ -1950,10 +1976,6 @@ mod tests {
         assert_eq!(tail[0]["cache_control"]["type"], "ephemeral");
     }
 
-    /// The stable slot takes a breakpoint for any cacheable type, media
-    /// included — a user turn carrying an image, not only text. The breakpoint
-    /// still lands on the *last* block, so the text ahead of the image stays
-    /// free.
     #[test]
     fn stable_breakpoint_lands_on_a_cacheable_image_block() {
         let msgs = vec![
@@ -1992,9 +2014,6 @@ mod tests {
     #[test]
     fn test_assistant_thinking_blocks_round_trip_first_with_signature() {
         use crate::rpc::types::ContentBlock;
-        // Regression: the thinking block (with its signature) must return intact
-        // at the head of the next request, otherwise a thinking-enabled
-        // multi-step tool call is rejected by the provider with a 400.
         let msgs = vec![WireMessage {
             role: "assistant".into(),
             content: "Let me check.".into(),
@@ -2022,5 +2041,208 @@ mod tests {
         assert_eq!(asst_content[0]["signature"], "sig-abc");
         assert_eq!(asst_content[1]["type"], "text");
         assert_eq!(asst_content[2]["type"], "tool_use");
+    }
+
+    fn request_with_options(
+        model: &str,
+        max_tokens: u32,
+        budget: Option<u32>,
+        keep: Option<&str>,
+        provider: Option<&str>,
+        use_beta_api: bool,
+        options: &crate::llm::request_options::RequestOptions,
+    ) -> Result<Value, String> {
+        build_request_for_provider(
+            model,
+            max_tokens,
+            &[WireMessage::text("user", "hello")],
+            &[],
+            true,
+            budget,
+            keep,
+            None,
+            provider,
+            None,
+            None,
+            false,
+            use_beta_api,
+            options,
+        )
+    }
+
+    #[test]
+    fn thinking_budget_is_lowered_never_the_cap_raised() {
+        let req = request_with_options(
+            "claude-sonnet-4-5",
+            8000,
+            Some(20_000),
+            None,
+            Some("anthropic"),
+            false,
+            &crate::llm::request_options::RequestOptions::default(),
+        )
+        .expect("valid request");
+        assert_eq!(req["max_tokens"], 8000, "the cap is untouched");
+        assert_eq!(req["thinking"]["budget_tokens"], 7999);
+
+        let error = request_with_options(
+            "claude-sonnet-4-5",
+            1024,
+            Some(4096),
+            None,
+            Some("anthropic"),
+            false,
+            &crate::llm::request_options::RequestOptions::default(),
+        )
+        .expect_err("a 1024 cap cannot host thinking");
+        assert!(error.contains("1024"), "{error}");
+
+        let req = request_with_options(
+            "claude-sonnet-4-5",
+            64_000,
+            Some(4096),
+            None,
+            Some("anthropic"),
+            false,
+            &crate::llm::request_options::RequestOptions::default(),
+        )
+        .expect("valid request");
+        assert_eq!(req["thinking"]["budget_tokens"], 4096);
+    }
+
+    #[test]
+    fn beta_features_follow_the_thinking_profile() {
+        assert_eq!(
+            anthropic_betas(Some("anthropic"), false, true, None),
+            vec![INTERLEAVED_THINKING_BETA]
+        );
+        assert!(anthropic_betas(Some("anthropic"), true, true, None).is_empty());
+        assert_eq!(
+            anthropic_betas(Some("anthropic"), false, true, Some("all")),
+            vec![INTERLEAVED_THINKING_BETA, CONTEXT_MANAGEMENT_BETA]
+        );
+        assert_eq!(
+            anthropic_betas(Some("kimi"), false, true, None),
+            vec![CONTEXT_MANAGEMENT_BETA],
+            "the Kimi trait replaces the interleaved beta"
+        );
+        assert_eq!(
+            anthropic_betas(Some("anthropic"), false, false, None),
+            vec![INTERLEAVED_THINKING_BETA]
+        );
+    }
+
+    #[test]
+    fn the_beta_list_is_a_body_field_only_on_the_beta_api() {
+        let options = crate::llm::request_options::RequestOptions::default();
+        let beta_body = request_with_options(
+            "claude-sonnet-4-5",
+            64_000,
+            Some(4096),
+            Some("all"),
+            Some("anthropic"),
+            true,
+            &options,
+        )
+        .expect("valid request");
+        assert_eq!(
+            beta_body["betas"],
+            json!([INTERLEAVED_THINKING_BETA, CONTEXT_MANAGEMENT_BETA])
+        );
+
+        let standard = request_with_options(
+            "claude-sonnet-4-5",
+            64_000,
+            Some(4096),
+            None,
+            Some("anthropic"),
+            false,
+            &options,
+        )
+        .expect("valid request");
+        assert!(
+            standard.get("betas").is_none(),
+            "the standard API carries betas as a header, not in the body"
+        );
+    }
+
+    #[test]
+    fn response_format_and_sampling_reach_the_body() {
+        use crate::llm::request_options::{RequestOptions, ResponseFormat};
+
+        let options = RequestOptions {
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "answer".into(),
+                schema: json!({ "type": "object" }),
+                strict: None,
+                description: Some("the answer".into()),
+            }),
+            temperature: Some(0.3),
+            top_p: Some(0.8),
+            ..RequestOptions::default()
+        };
+        let req = request_with_options(
+            "claude-sonnet-4-5",
+            64_000,
+            None,
+            None,
+            Some("anthropic"),
+            false,
+            &options,
+        )
+        .expect("valid request");
+        assert_eq!(
+            req["output_config"],
+            json!({ "format": { "type": "json_schema", "schema": { "type": "object" } } })
+        );
+        assert_eq!(req["temperature"], 0.3);
+        assert_eq!(req["top_p"], 0.8);
+
+        let mut options = RequestOptions {
+            temperature: Some(0.3),
+            ..RequestOptions::default()
+        };
+        options
+            .extra_params
+            .anthropic
+            .insert("temperature".into(), json!(0.9));
+        options
+            .extra_params
+            .anthropic
+            .insert("top_k".into(), json!(5));
+        let req = request_with_options(
+            "claude-sonnet-4-5",
+            64_000,
+            None,
+            None,
+            Some("anthropic"),
+            false,
+            &options,
+        )
+        .expect("valid request");
+        assert_eq!(req["temperature"], 0.9, "extraParams wins");
+        assert_eq!(req["top_k"], 5);
+    }
+
+    #[test]
+    fn json_object_response_format_is_rejected_for_anthropic() {
+        use crate::llm::request_options::{RequestOptions, ResponseFormat};
+
+        let options = RequestOptions {
+            response_format: Some(ResponseFormat::JsonObject),
+            ..RequestOptions::default()
+        };
+        assert!(
+            request_with_options(
+                "claude-sonnet-4-5",
+                64_000,
+                None,
+                None,
+                Some("anthropic"),
+                false,
+                &options,
+            )
+            .is_err()
+        );
     }
 }

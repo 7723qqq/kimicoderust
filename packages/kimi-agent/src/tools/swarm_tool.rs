@@ -1,13 +1,3 @@
-//! Native execution of the `AgentSwarm` orchestration tool.
-//!
-//! Direct native port of `agent-core-v2`'s `AgentSwarmTool` (swarm feature).
-//!
-//! This module is deliberately thin: it parses and validates the tool's
-//! arguments, builds the task list, and renders the result XML. Everything
-//! that *owns* the run — member spawn/resume/retry, cancellation, lifecycle
-//! events — lives in the swarm layer ([`crate::swarm::service`]), mirroring
-//! v2 where `AgentSwarmTool` delegates to `ISessionSwarmService`.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,18 +16,12 @@ use crate::swarm::service::SwarmLauncher;
 use crate::tools::arg_error;
 use crate::turn_loop::types::{ExecutableToolResult, LoopTurnStopReason, ToolInfo};
 
-/// The v2 default profile name (`DEFAULT_PROFILE_NAME`).
 const DEFAULT_SUBAGENT_TYPE: &str = "coder";
 
-/// The swarm timeout default (v2 `DEFAULT_SWARM_TIMEOUT_MS`: 2h). Swarms
-/// resolve only this knob — never the subagent timeout (whose default lives
-/// on `agent_tool::DEFAULT_SUBAGENT_TIMEOUT_MS`).
 const DEFAULT_SWARM_TIMEOUT_MS: u64 = 2 * 60 * 60 * 1000;
 
-/// Placeholder for subagent prompts (`PROMPT_TEMPLATE_PLACEHOLDER`).
 const PROMPT_TEMPLATE_PLACEHOLDER: &str = "{{item}}";
 
-/// Maximum number of subagents in a single swarm call (`MAX_AGENT_SWARM_SUBAGENTS`).
 const MAX_AGENT_SWARM_SUBAGENTS: usize = 128;
 
 const AGENT_SWARM_DESCRIPTION: &str = include_str!("../swarm/agent-swarm.md");
@@ -64,6 +48,8 @@ pub struct SwarmTaskSpec {
 
 fn err_result(msg: impl Into<String>) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: msg.into(),
@@ -77,14 +63,6 @@ fn swarm_mode_off_result() -> ExecutableToolResult {
     err_result(SWARM_MODE_OFF_RESULT)
 }
 
-/// The launch-shape rejections, as engine-owned text (v2 raises the same five
-/// `VALIDATION_FAILED` errors, verbatim in English, at
-/// `agentSwarmTool.ts:225-275`).
-///
-/// Localized because they are the tool's result and land in the transcript
-/// where a user reads them. The *tool description* and the model-facing
-/// exclusivity refusal stay English: both are model input rather than a
-/// failure surface.
 fn invalid_args(reason: &str) -> String {
     LocalizedText::with_params(
         "engine.tools.agentSwarm.invalidArgs",
@@ -134,6 +112,8 @@ fn duplicate_prompts(previous: usize, current: usize) -> String {
 
 fn ok_result(msg: impl Into<String>) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: msg.into(),
@@ -183,10 +163,6 @@ fn render_swarm_results(results: &[AgentRunResult<SwarmTaskSpec>]) -> String {
         .filter(|r| r.status == AgentRunStatus::Aborted)
         .count();
 
-    // A member that stopped for a budget, a breaker or a pause has *partial*
-    // output, so the batch as a whole is unfinished even though every task
-    // carries `Completed`. v2 offers the resume hint on exactly this
-    // condition (`stopReason !== undefined`).
     let should_render_resume_hint = (results
         .iter()
         .any(|r| r.status != AgentRunStatus::Completed)
@@ -230,16 +206,12 @@ fn render_swarm_results(results: &[AgentRunResult<SwarmTaskSpec>]) -> String {
             AgentRunStatus::Failed => "failed",
             AgentRunStatus::Aborted => "aborted",
         };
-        // The stop reason is what separates "the model answered" from "the
-        // model was cut off mid-answer". Without it the model reads a partial
-        // result as a finished one and moves on.
+
         let stop_reason_attr = match res.stop_reason.as_ref() {
             Some(reason) => format!(" stop_reason=\"{}\"", stop_reason_wire_name(reason)),
             None => String::new(),
         };
-        // Escape the body's XML tags: a subagent's result (or an error string)
-        // is untrusted text, and a literal `</subagent>` in it would otherwise
-        // close the element early and corrupt the whole result block.
+
         let body =
             crate::tools::skill::escape_xml_tags(if res.status == AgentRunStatus::Completed {
                 res.result.as_deref().unwrap_or("")
@@ -256,9 +228,6 @@ fn render_swarm_results(results: &[AgentRunResult<SwarmTaskSpec>]) -> String {
     lines.join("\n")
 }
 
-/// The stable wire spelling of a stop reason, matching the `LoopTurnStopReason`
-/// variant names the engine already uses on the wire (v2 renders the same
-/// camelCase tokens).
 fn stop_reason_wire_name(reason: &LoopTurnStopReason) -> &'static str {
     match reason {
         LoopTurnStopReason::EndTurn => "end_turn",
@@ -273,13 +242,6 @@ fn stop_reason_wire_name(reason: &LoopTurnStopReason) -> &'static str {
     }
 }
 
-/// Execute the `AgentSwarm` tool natively.
-///
-/// Returns `None` if the call should fall back to the host runtime
-/// (e.g. unknown subagent profiles, or a turn without an injected runtime).
-/// `_timeout_ms` is the dispatch's `Agent` timeout, kept for call-site
-/// symmetry but ignored: swarms resolve only the host swarm timeout
-/// (v2 `resolveSwarmTimeoutMs`), never the subagent timeout.
 pub async fn execute_agent_swarm(
     manager: &Arc<SubagentManager>,
     args: &Value,
@@ -291,17 +253,11 @@ pub async fn execute_agent_swarm(
     let caller_agent_id = crate::tools::CALLER_AGENT_ID
         .try_with(|id| id.clone())
         .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
-    // v2 `resolveExecution`: reject before argument validation or runtime
-    // fallback, so a model cannot enter the mode implicitly or start members.
+
     if !crate::swarm::mode::swarm_mode_registry().is_active(&caller_agent_id) {
         return Some(swarm_mode_off_result());
     }
 
-    // The engine absorbs the `model` parameter with or without a pool: with
-    // one it binds the requested alias; without one only omitting the
-    // parameter is legal — any value, `primary` included (v2 #4418), is the
-    // no-pool error. The binding resolves after the fork gate, the way v2's
-    // `planSpawn` inherits before it ever consults the pool.
     let requested = args.get("model").and_then(|value| value.as_str());
     let runtime = manager.runtime().await?;
 
@@ -315,10 +271,6 @@ pub async fn execute_agent_swarm(
         _ => return Some(err_result(description_required())),
     };
 
-    // v2's zod schema trims and rejects an empty key or prompt
-    // (`z.record(z.string().trim().min(1), z.string().trim().min(1))`); the port
-    // dropped them silently, so a swarm ran with fewer members than the caller
-    // asked for and the report never said which one was lost.
     let mut resume_entries: Vec<(String, String)> = Vec::new();
     for (key, value) in input.resume_agent_ids.unwrap_or_default() {
         let key = key.trim().to_string();
@@ -340,8 +292,6 @@ pub async fn execute_agent_swarm(
         resume_entries.push((key, value));
     }
 
-    // v2 `items: z.array(z.string().trim().min(1)).max(128)`: an empty entry is
-    // an invalid call, not an entry to skip.
     let mut items: Vec<String> = Vec::new();
     for (index, raw) in input.items.unwrap_or_default().into_iter().enumerate() {
         let item = raw.trim().to_string();
@@ -368,15 +318,9 @@ pub async fn execute_agent_swarm(
         && subagent_type != "self"
         && manager.get_definition(subagent_type).await.is_none()
     {
-        // Unknown profile: fall back to host so plugin-defined profiles work.
         return None;
     }
-    // v2 `planSpawn`: the member type must be inside the caller's allowlist
-    // (a profile's `subagents` declaration, else the default profile's set
-    // plus the main agent's discovered extras); forks and `self` skip it —
-    // both inherit a type the caller was already admitted as. The gate runs
-    // after the unknown-profile check so types the engine never registered
-    // keep their host fallback.
+
     if item_count > 0
         && !is_fork
         && subagent_type != "self"
@@ -418,15 +362,11 @@ pub async fn execute_agent_swarm(
     let mut tasks: Vec<AgentRunTask<SwarmTaskSpec>> = Vec::new();
     let parent_tool_call_id = tool_call_id.unwrap_or("swarm").to_string();
 
-    // Host-resolved swarm timeout (v2 `resolveSwarmTimeoutMs`): a dedicated
-    // knob — unlike `Agent` turns, swarms never inherit the subagent
-    // timeout. `0` = "no timeout armed" (v2 `taskService`), so it maps to
-    // the never-expiring sentinel rather than the 2h default.
-    let timeout = Some(Duration::from_millis(match manager.swarm_timeout_ms() {
-        Some(0) => u64::MAX,
-        Some(ms) => ms,
-        None => DEFAULT_SWARM_TIMEOUT_MS,
-    }));
+    let timeout = match manager.swarm_timeout_ms() {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(Duration::from_millis(DEFAULT_SWARM_TIMEOUT_MS)),
+    };
 
     let batch_signal = AbortSignal::new();
     if let Some(parent) = parent_cancel {
@@ -440,11 +380,7 @@ pub async fn execute_agent_swarm(
 
     for (agent_id, prompt) in resume_entries {
         let idx = tasks.len() + 1;
-        // v2 `getSwarmItem`: recover the `{{item}}` this member was spawned
-        // for, so a resumed row is labelled with the work it continues.
-        // Best-effort, exactly as v2: an id that is not one of this caller's
-        // subagents simply has no item here — the ownership refusal happens in
-        // the swarm service when the batch resumes it.
+
         let item = manager
             .parent_of(&agent_id)
             .await
@@ -474,21 +410,12 @@ pub async fn execute_agent_swarm(
     }
 
     if is_fork {
-        // v2 refuses `fork` outright when the flag is off
-        // (`FORK_EXPERIMENTAL_UNAVAILABLE`); the flag defaults ON here (see
-        // `subagent::fork::subagent_fork_enabled`), so this is the opt-out
-        // path rather than the default.
         if !crate::subagent::fork::subagent_fork_enabled() {
             return Some(err_result(
                 crate::subagent::fork::FORK_EXPERIMENTAL_UNAVAILABLE,
             ));
         }
-        // v2 `AgentSwarmTool.runSwarm` runs the same `forkIncompatibility` gate
-        // the `Agent` tool runs: a fork inherits the caller's profile and model
-        // so the prompt prefix cache is reused, so asking for a different
-        // `subagent_type`/`model` is a contradiction, not a preference. Resumed
-        // subagents are never forked, so a non-empty resume is refused outright
-        // (v2 `FORK_WITH_RESUME_UNAVAILABLE`).
+
         if resume_count > 0 {
             return Some(err_result(
                 crate::subagent::fork::FORK_WITH_RESUME_UNAVAILABLE,
@@ -508,9 +435,7 @@ pub async fn execute_agent_swarm(
             return Some(err_result(err));
         }
     }
-    // v2 #4152: fork members inherit the caller's model and thinking
-    // verbatim — a pool binding would move them onto the pool default and
-    // break the request prefix they share with the caller.
+
     let item_llm = if is_fork {
         Some(
             manager
@@ -587,16 +512,10 @@ pub async fn execute_agent_swarm(
         }
     }
 
-    // v2 `execution`: check again after argument resolution, immediately
-    // before any member can be spawned, in case the user left the mode while
-    // the call was waiting to execute.
     if !crate::swarm::mode::swarm_mode_registry().is_active(&caller_agent_id) {
         return Some(swarm_mode_off_result());
     }
 
-    // The swarm layer owns the run: the tool hands it a launcher and the
-    // task list, and gets per-member results back (v2: `AgentSwarmTool`
-    // delegates to `ISessionSwarmService.run`).
     let launcher = Arc::new(SwarmLauncher {
         manager: manager.clone(),
         parent_cancel: parent_cancel.cloned(),
@@ -604,9 +523,7 @@ pub async fn execute_agent_swarm(
         llm: item_llm,
         callbacks: runtime.callbacks.clone(),
         caller_agent_id: caller_agent_id.clone(),
-        // One sink for the whole batch, so the terminalizer it holds is
-        // per-run: a member that is rate-limited and retried reports one
-        // terminal event, not one per attempt.
+
         sink: Arc::new(crate::swarm::service::CallbackSink::new(
             runtime.callbacks.clone(),
         )),
@@ -623,16 +540,11 @@ pub async fn execute_agent_swarm(
     Some(ok_result(render_swarm_results(&results)))
 }
 
-/// Tool definition for `AgentSwarm`.
 pub fn agent_swarm_tool_def(
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> ToolInfo {
-    // v2 `tools/agent-swarm/agent-swarm.md`, verbatim: the description the
-    // model reads.
     let mut description = AGENT_SWARM_DESCRIPTION.to_string();
-    // v2 `buildSubagentModelDescriptions`: the listing and the `model`
-    // parameter appear only when the pool offers a real choice (v2
-    // `exposesSubagentModelChoice`); a single entry pins every spawn.
+
     if let Some(pool) = pool
         && pool.exposes_choice()
     {
@@ -687,9 +599,7 @@ pub fn agent_swarm_tool_def(
             }),
         );
     }
-    // v2 `stripSubagentForkParameter`: the parameter is hidden from the model
-    // while the flag is off, so it is never offered. On by default here, so
-    // this only bites an explicit opt-out.
+
     if !crate::subagent::fork::subagent_fork_enabled()
         && let Some(properties) = input_schema
             .get_mut("properties")
@@ -707,8 +617,7 @@ pub fn agent_swarm_tool_def(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The tests drive the launcher and the batch types directly, so they need
-    // the scheduler surface the tool body no longer imports.
+
     use crate::rpc::types::BoxFuture;
     use crate::swarm::agent_run_batch::{
         AgentRunAttemptOptions, AgentRunBatchLauncher, AgentSpawnAttemptOptions,
@@ -733,9 +642,6 @@ mod tests {
         ));
     }
 
-    /// v2 #4418 `exposesSubagentModelChoice`: only a pool with a real choice
-    /// advertises the listing and the `model` parameter — a single entry
-    /// pins every spawn and hides both.
     #[test]
     fn test_swarm_def_advertises_the_pool_only_when_a_choice_is_offered() {
         fn entry(alias: &str) -> crate::rpc::types::SecondaryModelEntry {
@@ -885,9 +791,6 @@ mod tests {
         assert!(xml.contains("</agent_swarm_result>"));
     }
 
-    /// A worker stopped by a budget or a breaker carries partial output. The
-    /// XML has to say so, and the batch has to offer a resume — otherwise the
-    /// model reads a truncated answer as finished work and stops there.
     #[test]
     fn render_marks_a_budget_stopped_member_as_unfinished() {
         let results = vec![AgentRunResult {
@@ -1091,8 +994,6 @@ mod tests {
         (mgr, events)
     }
 
-    /// Two profiles, so a test can ask for one that differs from the caller's
-    /// default (`coder`) and reach the fork compatibility gate.
     async fn manager_with_runtime_with_profiles() -> Arc<SubagentManager> {
         let mgr = manager_with_runtime().await;
         mgr.register_discovered_definition(crate::subagent::types::SubagentDefinition {
@@ -1111,21 +1012,11 @@ mod tests {
         mgr
     }
 
-    /// A swarm worker's tool call must reach the host attributed to the
-    /// worker, not to the main agent.
-    ///
-    /// The host drops any event whose `agentId` is not `main` into the worker's
-    /// own card (`routeChildAgentEvent`); an event that arrives as `main` is
-    /// announced in the main transcript instead, where its card ends the main
-    /// agent's reasoning mid-sentence. `AgentSwarm` was the reported trigger,
-    /// so drive the real launcher rather than the manager directly.
     #[tokio::test]
     async fn a_swarm_workers_tool_event_names_the_worker() {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         struct ToolCallingWorkerLlm {
-            /// The first step calls the tool; every later step stops, so the
-            /// turn ends instead of looping into compaction.
             calls: Arc<AtomicU32>,
         }
         impl LLM for ToolCallingWorkerLlm {
@@ -1323,10 +1214,6 @@ mod tests {
             );
         }
 
-        // The member reaches a terminal state (v2 `mirrorAgentRun`'s
-        // `emitTerminal`). Without it the TUI's swarm progress row keeps the
-        // worker "running" — it has no other way to leave that state — and the
-        // user sees nothing until the whole batch returns one XML blob.
         let terminals: Vec<_> = recorded
             .iter()
             .filter(|e| {
@@ -1387,9 +1274,7 @@ mod tests {
             "{}",
             res.content
         );
-        // Upstream #4497 (2.4.0 sync `d18a7bcd31`): the refusal now tells the
-        // model how to hand the request back to the user instead of leaving a
-        // dead end.
+
         assert!(res.content.contains("run /swarm <task>"), "{}", res.content);
         assert!(
             res.content.contains("do not mention swarm mode"),
@@ -1506,8 +1391,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_agent_swarm_allows_single_resume() {
         let mgr = manager_with_runtime().await;
-        // A member is always spawned by an agent, which is what makes it
-        // resumable by that agent and nobody else.
+
         let agent_id = crate::tools::CALLER_AGENT_ID
             .scope(
                 crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -1520,7 +1404,6 @@ mod tests {
             .await
             .unwrap();
 
-        // With resume_agent_ids, a single item or no items is allowed
         let mut resumes = serde_json::Map::new();
         resumes.insert(
             agent_id.clone(),
@@ -1540,9 +1423,6 @@ mod tests {
         assert!(res.content.contains(&format!(r#"agent_id="{agent_id}""#)));
     }
 
-    /// v2 `requireOwnedSubagent`: a swarm may only resume its own members. A
-    /// subagent belonging to another parent is refused before its conversation
-    /// is touched, and the refusal comes back as the member's result.
     #[tokio::test]
     async fn a_swarm_cannot_resume_another_parents_subagent() {
         let mgr = manager_with_runtime().await;
@@ -1565,9 +1445,7 @@ mod tests {
         let res = execute_with_swarm(&mgr, &args, None, None, Some("call-x"), None)
             .await
             .unwrap();
-        // v2 shape: the gate throws inside the launcher's resume, which the
-        // batch catches into a *failed member*, so the tool call itself still
-        // succeeds and the refusal arrives as that member's result.
+
         assert!(!res.is_error, "{}", res.content);
         assert!(
             res.content.contains("does not belong to this parent agent"),
@@ -1581,8 +1459,6 @@ mod tests {
         );
     }
 
-    /// v2 `AGENT_NOT_A_SUBAGENT`: the main agent is not a subagent, so naming it
-    /// in `resume_agent_ids` is refused as the other error, not as "not yours".
     #[tokio::test]
     async fn a_swarm_cannot_resume_the_main_agent() {
         let mgr = manager_with_runtime().await;
@@ -1601,10 +1477,6 @@ mod tests {
         );
     }
 
-    /// v2 `requireIdleSubagent`, through the whole tool: a member that is
-    /// still running its own turn must come back as a failed member, not be
-    /// driven into a second concurrent turn. This is the wiring assertion —
-    /// the unit tests on `require_idle_subagent` only prove its logic.
     #[tokio::test]
     async fn a_swarm_cannot_resume_a_member_that_is_already_running() {
         let mgr = manager_with_runtime().await;
@@ -1615,7 +1487,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // Left in Running: no foreground turn ever completes it.
+
         mgr.update_state(
             &agent_id,
             crate::subagent::types::SubagentState::Running,
@@ -1648,8 +1520,6 @@ mod tests {
         );
     }
 
-    /// v2 `getSwarmItem`: a resumed member is labelled with the `{{item}}` it
-    /// was spawned for, so the row says which work it continues.
     #[tokio::test]
     async fn a_resumed_member_keeps_its_swarm_item() {
         let mgr = manager_with_runtime().await;
@@ -1682,10 +1552,6 @@ mod tests {
         );
     }
 
-    /// v2 `AgentSwarmTool.runSwarm`: `fork` shares the caller's profile and
-    /// model so the prompt prefix cache is reused, so naming a different
-    /// `subagent_type` is a contradiction the tool refuses. The single-agent
-    /// `Agent` tool already runs this gate; the swarm has to run it too.
     #[tokio::test]
     async fn fork_rejects_a_different_subagent_type() {
         let mgr = manager_with_runtime_with_profiles().await;
@@ -1708,10 +1574,6 @@ mod tests {
         );
     }
 
-    /// The same gate for the model: a fork runs on the caller's model, so
-    /// asking for a different one (other than `primary`) is refused. The model
-    /// has to be a real pool alias, because the engine resolves `model` before
-    /// the fork gate runs.
     #[tokio::test]
     async fn fork_rejects_a_different_model() {
         let mgr = manager_with_runtime().await;
@@ -1725,8 +1587,6 @@ mod tests {
                     llm: Default::default(),
                 }],
             },
-            // The pool binds an alias only when a live LLM is registered for
-            // it, so the model has to resolve before the fork gate is reached.
             std::collections::HashMap::from([(
                 "fast".to_string(),
                 Arc::new(TestSummaryLlm) as Arc<dyn crate::turn_loop::types::LLM>,
@@ -1751,8 +1611,6 @@ mod tests {
         );
     }
 
-    /// v2 #4152: fork members inherit the caller's model — a pool-bound
-    /// caller's swarm binds the same entry, not the session model.
     #[tokio::test]
     async fn fork_members_inherit_the_callers_model() {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -1820,8 +1678,6 @@ mod tests {
         );
     }
 
-    /// v2 `FORK_WITH_RESUME_UNAVAILABLE`: resumed subagents are never forked, so
-    /// combining the two is refused as a whole call.
     #[tokio::test]
     async fn fork_rejects_a_non_empty_resume() {
         let mgr = manager_with_runtime().await;
@@ -1854,8 +1710,6 @@ mod tests {
         );
     }
 
-    /// A plain fork with no type/model override is still allowed, so the gate
-    /// is not simply refusing every `fork`.
     #[tokio::test]
     async fn a_plain_fork_is_allowed() {
         let mgr = manager_with_runtime().await;
@@ -1872,11 +1726,6 @@ mod tests {
         assert!(res.content.contains("<summary>completed: 2</summary>"));
     }
 
-    /// v2's zod schema refuses an empty item and an empty resume key or prompt
-    /// (`z.array(z.string().trim().min(1))` / `z.record(min(1), min(1))`). The
-    /// port filtered them out instead, so a swarm silently ran with fewer
-    /// members than the caller asked for and the result never said which one
-    /// was dropped.
     #[tokio::test]
     async fn test_validation_rejects_blank_items_and_resume_entries() {
         let mgr = manager_with_runtime().await;
@@ -1912,8 +1761,6 @@ mod tests {
         );
     }
 
-    /// The advertised schema carries v2's own bounds, so the model is told the
-    /// limit the executor enforces instead of discovering it as a refusal.
     #[test]
     fn test_swarm_schema_declares_the_v2_bounds() {
         let def = agent_swarm_tool_def(None);

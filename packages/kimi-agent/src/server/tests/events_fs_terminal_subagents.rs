@@ -9,7 +9,7 @@ async fn test_http_envelope_negotiation() {
     let res_bare = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
-            path: "/api/v1/health".into(),
+            path: "/api/v1/healthz".into(),
             query: None,
             headers: HashMap::new(),
             body: Vec::new(),
@@ -17,7 +17,7 @@ async fn test_http_envelope_negotiation() {
         .await;
     assert_eq!(res_bare.status, 200);
     let val_bare: Value = serde_json::from_slice(&res_bare.body).unwrap();
-    assert_eq!(val_bare["status"], "ok");
+    assert_eq!(val_bare["ok"], true);
     assert!(val_bare.get("code").is_none());
 
     // 2. Request with X-Envelope header -> Envelope JSON
@@ -28,7 +28,7 @@ async fn test_http_envelope_negotiation() {
     let res_env = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
-            path: "/api/v1/health".into(),
+            path: "/api/v1/healthz".into(),
             query: None,
             headers,
             body: Vec::new(),
@@ -39,13 +39,13 @@ async fn test_http_envelope_negotiation() {
     assert_eq!(val_env["code"], 0);
     assert_eq!(val_env["msg"], "success");
     assert_eq!(val_env["request_id"], "req_client_789");
-    assert_eq!(val_env["data"]["status"], "ok");
+    assert_eq!(val_env["data"]["ok"], true);
 
     // 3. Request with query param ?envelope=1 -> Envelope JSON
     let res_query_env = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
-            path: "/api/v1/health".into(),
+            path: "/api/v1/healthz".into(),
             query: Some("envelope=1".into()),
             headers: HashMap::new(),
             body: Vec::new(),

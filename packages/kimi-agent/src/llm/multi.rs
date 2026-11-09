@@ -8,7 +8,7 @@ use crate::callbacks::HostCallbacks;
 use crate::llm::http::NativeHttpLlm;
 use crate::llm::proxy::HostLlmProxy;
 use crate::rpc::types::NativeLlmConfig;
-use crate::turn_loop::types::*;
+use kimi_core::types::*;
 use futures_util::future::select_all;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -81,21 +81,50 @@ impl LlmProvider {
     /// stream. A proxy racer must be told to abort at the host, because
     /// dropping the local future leaves the host's call running; that is what
     /// [`Self::to_llm_with_request_id`] is for.
-    fn build_transport(&self, request_id: Option<String>) -> Arc<dyn LLM> {
-        match &self.native {
-            Some(config) => Arc::new(
-                NativeHttpLlm::new(config.clone(), self.system_prompt.clone())
-                    .with_cache_key(self.cache_key.clone()),
+    ///
+    /// `ledger` is installed on a *native* transport only: it streams the
+    /// fragments itself, so it has to normalize its own ids
+    /// ([`ToolCallIdNormalizer`](kimi_core::tool_call_id::ToolCallIdNormalizer)).
+    /// A proxy racer is deliberately left without it — the host streamed the
+    /// fragments, so [`MultiLLM::chat`] normalizes the winner's finalized
+    /// calls itself, and installing the ledger here too would normalize the
+    /// same response twice.
+    fn build_transport(
+        &self,
+        request_id: Option<String>,
+        ledger: Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>>,
+    ) -> Arc<dyn LLM> {
+        let (llm, native): (Arc<dyn LLM>, bool) = match &self.native {
+            // Antigravity is a subprocess bridge, not an HTTP wire format: it
+            // has no cache key and no request cancellation at the wire.
+            Some(config) if config.protocol == "antigravity" => (
+                Arc::new(crate::llm::antigravity::AntigravityLlm::new(
+                    config.clone(),
+                    self.system_prompt.clone(),
+                )),
+                true,
+            ),
+            Some(config) => (
+                Arc::new(
+                    NativeHttpLlm::new(config.clone(), self.system_prompt.clone())
+                        .with_cache_key(self.cache_key.clone()),
+                ),
+                true,
             ),
             None => {
                 let proxy = HostLlmProxy::new(self.system_prompt.clone(), self.model.clone())
                     .with_callbacks(self.callbacks.clone());
-                match request_id {
-                    Some(id) => Arc::new(proxy.with_request_id(id)),
-                    None => Arc::new(proxy),
-                }
+                let proxy = match request_id {
+                    Some(id) => proxy.with_request_id(id),
+                    None => proxy,
+                };
+                (Arc::new(proxy), false)
             }
+        };
+        if native && let Some(ledger) = ledger {
+            llm.set_tool_call_ids(ledger);
         }
+        llm
     }
 }
 
@@ -120,10 +149,13 @@ pub struct ProviderResult {
 pub struct MultiLLM {
     providers: Vec<LlmProvider>,
     label: String,
-    /// The turn's tool-call-id ledger. Each racer is a host proxy, so the
-    /// engine normalizes the calls the winning racer returned.
+    /// The turn's tool-call-id ledger, installed through
+    /// [`LLM::set_tool_call_ids`]. It is forwarded to every *native* racer at
+    /// build time (each one opens its own response on it) and kept here for the
+    /// proxy racers, whose streamed fragments never enter the engine — the
+    /// winner's finalized calls are normalized in [`LLM::chat`] instead.
     tool_call_ids:
-        std::sync::Mutex<Option<Arc<crate::turn_loop::tool_call_id::ToolCallIdNormalizer>>>,
+        std::sync::Mutex<Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>>>,
 }
 
 impl MultiLLM {
@@ -158,11 +190,34 @@ impl MultiLLM {
         &self,
         params: LLMChatParams,
     ) -> Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        self.first_past_the_post_with_winner(params)
+            .await
+            .map(|(response, _native_winner)| response)
+    }
+
+    /// [`Self::first_past_the_post`] plus whether the *winner* was a native
+    /// transport. That flag decides who normalizes the tool-call ids: a native
+    /// winner already did it inside its own request, a proxy winner did not.
+    #[tracing::instrument(name = "MultiLLM::first_past_the_post", skip_all, fields(providers = self.providers.len()))]
+    async fn first_past_the_post_with_winner(
+        &self,
+        params: LLMChatParams,
+    ) -> Result<(LLMChatResponse, bool), Box<dyn std::error::Error + Send + Sync>> {
         if self.providers.is_empty() {
             return Err("No LLM providers configured".into());
         }
+        let ledger = self
+            .tool_call_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if self.providers.len() == 1 {
-            return self.providers[0].build_transport(None).chat(params).await;
+            let native = self.providers[0].native.is_some();
+            let response = self.providers[0]
+                .build_transport(None, ledger)
+                .chat(params)
+                .await?;
+            return Ok((response, native));
         }
 
         // Spawn each provider as a tokio task. A *proxy* racer carries its own
@@ -182,7 +237,8 @@ impl MultiLLM {
             // Only a proxy racer needs the host-side abort hook, and only it
             // carries a request id; a native racer's `request_id` would be dead
             // weight on the wire.
-            let request_id = if provider.native.is_some() {
+            let is_native = provider.native.is_some();
+            let request_id = if is_native {
                 None
             } else {
                 let id = format!(
@@ -193,7 +249,7 @@ impl MultiLLM {
                 cancellers.insert(id.clone(), provider.callbacks.clone());
                 Some(id)
             };
-            let llm = provider.build_transport(request_id.clone());
+            let llm = provider.build_transport(request_id.clone(), ledger.clone());
             let name = provider.name.clone();
             let racer_id = request_id.unwrap_or_else(|| name.clone());
 
@@ -203,6 +259,7 @@ impl MultiLLM {
                 let elapsed = start.elapsed().as_millis() as u64;
                 (
                     racer_id,
+                    is_native,
                     ProviderResult {
                         provider_name: name,
                         result: result.map_err(|e| e.to_string()),
@@ -225,7 +282,10 @@ impl MultiLLM {
         let mut handles = Vec::with_capacity(self.providers.len());
         for provider in &self.providers {
             let params = params.clone();
-            let llm = provider.build_transport(None);
+            // Diagnostic path: every racer runs at once and its response is
+            // returned unused, so no ledger is installed — claiming ids here
+            // would mark the turn's ledger with calls that never enter history.
+            let llm = provider.build_transport(None, None);
             let name = provider.name.clone();
 
             handles.push(tokio::spawn(async move {
@@ -268,21 +328,21 @@ fn is_empty_completion(response: &LLMChatResponse) -> bool {
 /// it run to completion and bill for work nobody will read.
 #[tracing::instrument(name = "race_first_success", skip_all, fields(handles = handles.len()))]
 async fn race_first_success(
-    mut handles: Vec<tokio::task::JoinHandle<(String, ProviderResult)>>,
+    mut handles: Vec<tokio::task::JoinHandle<(String, bool, ProviderResult)>>,
     cancellers: &HashMap<String, Arc<dyn HostCallbacks>>,
-) -> Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(LLMChatResponse, bool), Box<dyn std::error::Error + Send + Sync>> {
     let mut errors: Vec<String> = Vec::new();
     // An empty completion used to be declared the winner immediately, which
     // aborted and cancelled every healthy provider — one transient relay hiccup
     // therefore failed the whole turn even though another provider was about to
     // answer. Hold it as a fallback and keep racing: it is returned only when
     // nothing better arrives.
-    let mut empty_fallback: Option<LLMChatResponse> = None;
+    let mut empty_fallback: Option<(LLMChatResponse, bool)> = None;
     while !handles.is_empty() {
         let (joined, _index, rest) = select_all(handles).await;
         handles = rest;
         match joined {
-            Ok((winner_id, pr)) => match pr.result {
+            Ok((winner_id, is_native, pr)) => match pr.result {
                 Ok(response) => {
                     if is_empty_completion(&response) {
                         eprintln!(
@@ -290,7 +350,7 @@ async fn race_first_success(
                             pr.provider_name, pr.elapsed_ms
                         );
                         if empty_fallback.is_none() {
-                            empty_fallback = Some(response);
+                            empty_fallback = Some((response, is_native));
                         }
                         continue;
                     }
@@ -303,15 +363,15 @@ async fn race_first_success(
                             callbacks.cancel_llm_chat(id);
                         }
                     }
-                    return Ok(response);
+                    return Ok((response, is_native));
                 }
                 Err(e) => errors.push(format!("{}: {e}", pr.provider_name)),
             },
             Err(e) => errors.push(format!("join error: {e}")),
         }
     }
-    if let Some(response) = empty_fallback {
-        return Ok(response);
+    if let Some(fallback) = empty_fallback {
+        return Ok(fallback);
     }
     Err(errors.join("; ").into())
 }
@@ -359,11 +419,11 @@ impl LLM for MultiLLM {
     fn is_retryable_error(&self, error: &str) -> bool {
         self.providers
             .first()
-            .map(|p| p.build_transport(None).is_retryable_error(error))
+            .map(|p| p.build_transport(None, None).is_retryable_error(error))
             .unwrap_or(false)
     }
 
-    fn set_tool_call_ids(&self, ledger: Arc<crate::turn_loop::tool_call_id::ToolCallIdNormalizer>) {
+    fn set_tool_call_ids(&self, ledger: Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>) {
         *self.tool_call_ids.lock().unwrap_or_else(|e| e.into_inner()) = Some(ledger);
     }
 
@@ -375,16 +435,15 @@ impl LLM for MultiLLM {
         Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>,
     > {
         Box::pin(async move {
-            // A *native* racer normalizes its own tool-call ids inside
-            // `NativeHttpLlm`; a *proxy* racer returns host-streamed fragments
-            // that never entered the engine, so the winner's calls are
-            // normalized here.
-            let winner_is_native = self.providers.is_empty()
-                || self
-                    .providers
-                    .iter()
-                    .all(|provider| provider.native.is_some());
-            let mut response = self.first_past_the_post(params).await?;
+            // Who normalizes: a *native* racer streams its own tool-call
+            // fragments, so it was handed the ledger at build time and already
+            // normalized its response. A *proxy* racer returns host-streamed
+            // fragments that never entered the engine, so the winner's calls are
+            // normalized here. The decision is made on the winner, not on the
+            // provider list — a mixed race can be won by either kind, and
+            // remapping a native winner again would suffix its ids twice.
+            let (mut response, winner_is_native) =
+                self.first_past_the_post_with_winner(params).await?;
             if winner_is_native {
                 return Ok(response);
             }
@@ -394,7 +453,7 @@ impl LLM for MultiLLM {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Some(ledger) = ledger {
-                crate::turn_loop::tool_call_id::remap_response_tool_calls(
+                kimi_core::tool_call_id::remap_response_tool_calls(
                     &mut response,
                     &ledger.begin_response(),
                 );
@@ -531,6 +590,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             (
                 "slow-id".to_string(),
+                false,
                 ProviderResult {
                     provider_name: "slow".into(),
                     result: Ok(mk_response("slow")),
@@ -542,6 +602,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             (
                 "fast-id".to_string(),
+                false,
                 ProviderResult {
                     provider_name: "fast".into(),
                     result: Ok(mk_response("fast")),
@@ -549,7 +610,7 @@ mod tests {
                 },
             )
         });
-        let winner = race_first_success(vec![slow, fast], &HashMap::new())
+        let (winner, _native) = race_first_success(vec![slow, fast], &HashMap::new())
             .await
             .unwrap();
         assert_eq!(winner.finish_reason.as_deref(), Some("fast"));
@@ -563,6 +624,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             (
                 "failer-id".to_string(),
+                false,
                 ProviderResult {
                     provider_name: "failer".into(),
                     result: Err("boom".into()),
@@ -574,6 +636,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             (
                 "ok-id".to_string(),
+                false,
                 ProviderResult {
                     provider_name: "ok".into(),
                     result: Ok(mk_response("ok")),
@@ -581,7 +644,7 @@ mod tests {
                 },
             )
         });
-        let winner = race_first_success(vec![fast_fail, slow_ok], &HashMap::new())
+        let (winner, _native) = race_first_success(vec![fast_fail, slow_ok], &HashMap::new())
             .await
             .unwrap();
         assert_eq!(winner.finish_reason.as_deref(), Some("ok"));
@@ -805,11 +868,237 @@ mod tests {
         );
     }
 
+    /// Serve one OpenAI-compatible SSE response carrying a single tool call
+    /// whose raw id is `call_1`, then close the connection.
+    async fn spawn_openai_tool_call_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = vec![0u8; 64 * 1024];
+            let _ = socket.read(&mut request).await;
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"Read\",\"arguments\":\"{}\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
+        });
+        format!("http://{addr}/v1")
+    }
+
+    fn native_provider(name: &str, base_url: &str) -> LlmProvider {
+        struct NoHost;
+        impl HostCallbacks for NoHost {
+            fn llm_chat(
+                &self,
+                _request: crate::rpc::types::LlmChatRequest,
+            ) -> crate::rpc::types::BoxFuture<
+                'static,
+                Result<crate::rpc::types::LlmChatResponse, String>,
+            > {
+                Box::pin(async { Err("this host has no LLM proxy".to_string()) })
+            }
+
+            fn execute_tool(
+                &self,
+                _request: crate::rpc::types::ToolExecuteRequest,
+            ) -> crate::rpc::types::BoxFuture<
+                'static,
+                Result<crate::rpc::types::ToolExecuteResponse, String>,
+            > {
+                Box::pin(async { Err("not used by this test".into()) })
+            }
+
+            fn check_permission(
+                &self,
+                _request: crate::rpc::types::PermissionCheckRequest,
+            ) -> crate::rpc::types::BoxFuture<
+                'static,
+                Result<crate::rpc::types::PermissionDecision, String>,
+            > {
+                Box::pin(async { Ok(crate::rpc::types::PermissionDecision::allow()) })
+            }
+        }
+        LlmProvider::native(
+            name,
+            "",
+            NativeLlmConfig {
+                protocol: "openai".into(),
+                alias: None,
+                base_url: base_url.into(),
+                api_key: "test-key".into(),
+                model: "native-model".into(),
+                ..Default::default()
+            },
+            Arc::new(NoHost),
+        )
+    }
+
+    /// A proxy that never answers within the test's lifetime.
+    struct BlockedHost;
+
+    impl HostCallbacks for BlockedHost {
+        fn llm_chat(
+            &self,
+            _request: crate::rpc::types::LlmChatRequest,
+        ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::LlmChatResponse, String>>
+        {
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Err("blocked".to_string())
+            })
+        }
+
+        fn execute_tool(
+            &self,
+            _request: crate::rpc::types::ToolExecuteRequest,
+        ) -> crate::rpc::types::BoxFuture<
+            'static,
+            Result<crate::rpc::types::ToolExecuteResponse, String>,
+        > {
+            Box::pin(async { Err("not used by this test".into()) })
+        }
+
+        fn check_permission(
+            &self,
+            _request: crate::rpc::types::PermissionCheckRequest,
+        ) -> crate::rpc::types::BoxFuture<
+            'static,
+            Result<crate::rpc::types::PermissionDecision, String>,
+        > {
+            Box::pin(async { Ok(crate::rpc::types::PermissionDecision::allow()) })
+        }
+    }
+
+    /// A proxy that answers immediately with one tool call whose raw id is
+    /// `call_1`.
+    struct ToolCallHost;
+
+    impl HostCallbacks for ToolCallHost {
+        fn llm_chat(
+            &self,
+            _request: crate::rpc::types::LlmChatRequest,
+        ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::LlmChatResponse, String>>
+        {
+            Box::pin(async {
+                Ok(crate::rpc::types::LlmChatResponse {
+                    content: String::new(),
+                    tool_calls: vec![crate::rpc::types::LlmToolCall {
+                        id: "call_1".into(),
+                        name: "Read".into(),
+                        arguments: serde_json::json!({}),
+                        extras: None,
+                    }],
+                    thinking: vec![],
+                    finish_reason: Some("tool_calls".into()),
+                    usage: crate::rpc::types::TokenUsage::default(),
+                })
+            })
+        }
+
+        fn execute_tool(
+            &self,
+            _request: crate::rpc::types::ToolExecuteRequest,
+        ) -> crate::rpc::types::BoxFuture<
+            'static,
+            Result<crate::rpc::types::ToolExecuteResponse, String>,
+        > {
+            Box::pin(async { Err("not used by this test".into()) })
+        }
+
+        fn check_permission(
+            &self,
+            _request: crate::rpc::types::PermissionCheckRequest,
+        ) -> crate::rpc::types::BoxFuture<
+            'static,
+            Result<crate::rpc::types::PermissionDecision, String>,
+        > {
+            Box::pin(async { Ok(crate::rpc::types::PermissionDecision::allow()) })
+        }
+    }
+
+    /// A ledger where `call_1` is already taken (as if a retry replayed an id
+    /// from history), so the next response carrying it must be rewritten.
+    fn ledger_with_call_1_taken() -> Arc<kimi_core::tool_call_id::ToolCallIdNormalizer> {
+        let ledger = Arc::new(kimi_core::tool_call_id::ToolCallIdNormalizer::new());
+        let previous = ledger.begin_response();
+        assert_eq!(
+            previous.remap_finalized_ids(&["call_1".to_string()]),
+            vec!["call_1"]
+        );
+        ledger
+    }
+
+    /// The native-only path used to skip normalization entirely: `MultiLLM`
+    /// stored the ledger but built its transport without it. A response that
+    /// replays an id already in the turn must come back rewritten.
+    #[tokio::test]
+    async fn test_a_native_only_path_normalizes_tool_call_ids() {
+        let base_url = spawn_openai_tool_call_server().await;
+        let multi = MultiLLM::new(vec![native_provider("native", &base_url)]);
+        multi.set_tool_call_ids(ledger_with_call_1_taken());
+
+        let response = multi.chat(empty_params()).await.unwrap();
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(
+            response.tool_calls[0].id, "call_1__2",
+            "the native transport must receive the ledger and rewrite the replayed id"
+        );
+    }
+
+    /// Mixed race, native winner: the native racer normalizes inside its own
+    /// request, and the racing layer must not normalize the winner again.
+    #[tokio::test]
+    async fn test_a_mixed_race_normalizes_once_when_the_native_racer_wins() {
+        let base_url = spawn_openai_tool_call_server().await;
+        let multi = MultiLLM::new(vec![
+            native_provider("native", &base_url),
+            LlmProvider::host("blocked-proxy", "proxy-model", "", Arc::new(BlockedHost)),
+        ]);
+        multi.set_tool_call_ids(ledger_with_call_1_taken());
+
+        let response = multi.chat(empty_params()).await.unwrap();
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(
+            response.tool_calls[0].id, "call_1__2",
+            "a native winner must be normalized exactly once, not suffix-nested"
+        );
+    }
+
+    /// Mixed race, proxy winner: the proxy returns host-streamed calls, so the
+    /// racing layer normalizes the response itself.
+    #[tokio::test]
+    async fn test_a_mixed_race_normalizes_the_proxy_winner() {
+        let multi = MultiLLM::new(vec![
+            // Refused immediately: the proxy is the only possible winner.
+            native_provider("native", "http://127.0.0.1:1/v1"),
+            LlmProvider::host("proxy", "proxy-model", "", Arc::new(ToolCallHost)),
+        ]);
+        multi.set_tool_call_ids(ledger_with_call_1_taken());
+
+        let response = multi.chat(empty_params()).await.unwrap();
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(
+            response.tool_calls[0].id, "call_1__2",
+            "a proxy winner must be normalized by the racing layer"
+        );
+    }
+
     #[tokio::test]
     async fn test_race_all_fail_reports_every_error() {
         let f1 = tokio::spawn(async {
             (
                 "f1-id".to_string(),
+                false,
                 ProviderResult {
                     provider_name: "f1".into(),
                     result: Err("e1".into()),
@@ -820,6 +1109,7 @@ mod tests {
         let f2 = tokio::spawn(async {
             (
                 "f2-id".to_string(),
+                false,
                 ProviderResult {
                     provider_name: "f2".into(),
                     result: Err("e2".into()),

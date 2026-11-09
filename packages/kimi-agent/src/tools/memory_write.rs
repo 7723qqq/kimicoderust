@@ -1,18 +1,8 @@
-//! The `write` action's validation and non-git result shape, from v2
-//! `app/memory/tools/memoryTool.ts:236-293`.
-//!
-//! Only the branch that applies when git memory is off: check `path` /
-//! `content` / filename, resolve the scope, build the relative path, then
-//! render `Memory written to … / title / type`. The `writeNeedsReference`,
-//! `writtenNotCommitted` and `writtenCommitted` branches belong to the
-//! git-memory subsystem and are not ported yet.
-
 use crate::i18n::{LocalizedText, i18n_params};
 use crate::tools::memory_paths::{
     MemoryScope, build_rel_path, detect_type, extract_title, sanitize_file_name,
 };
 
-/// Why a `write` call cannot proceed, in v2's check order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteRefusal {
     MissingPath,
@@ -38,8 +28,6 @@ impl WriteRefusal {
     }
 }
 
-/// The parsed, safe parts of a `write` call. `scope` defaults to `project`,
-/// matching `memoryTool.ts:244`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteRequest {
     pub scope: MemoryScope,
@@ -51,9 +39,6 @@ pub struct WriteRequest {
     pub content: String,
 }
 
-/// v2's three checks plus `sanitizeFileName` / `buildRelPath`. `scope_id` is
-/// supplied by the caller (project identity or session id); this function
-/// does no I/O.
 pub fn prepare_write(
     path: Option<&str>,
     content: Option<&str>,
@@ -82,8 +67,6 @@ pub fn prepare_write(
     })
 }
 
-/// v2 `toolsV2.memory.written` (`:288-293`), the result when git memory is
-/// off. Three lines: path, title, type.
 pub fn written_message(request: &WriteRequest) -> String {
     LocalizedText::with_params(
         "engine.tools.memory.written",
@@ -92,6 +75,51 @@ pub fn written_message(request: &WriteRequest) -> String {
             "title" => request.title,
             "type" => request.memory_type
         ],
+    )
+    .render()
+}
+
+pub fn written_committed_message(request: &WriteRequest, sha: &str) -> String {
+    LocalizedText::with_params(
+        "engine.tools.memory.writtenCommitted",
+        i18n_params![
+            "path" => request.rel_path,
+            "title" => request.title,
+            "type" => request.memory_type,
+            "sha" => sha
+        ],
+    )
+    .render()
+}
+
+pub fn written_committed_unknown_sha_message(request: &WriteRequest) -> String {
+    LocalizedText::with_params(
+        "engine.tools.memory.writtenCommittedUnknownSha",
+        i18n_params![
+            "path" => request.rel_path,
+            "title" => request.title,
+            "type" => request.memory_type
+        ],
+    )
+    .render()
+}
+
+pub fn written_not_committed_message(request: &WriteRequest) -> String {
+    LocalizedText::with_params(
+        "engine.tools.memory.writtenNotCommitted",
+        i18n_params![
+            "path" => request.rel_path,
+            "title" => request.title,
+            "type" => request.memory_type
+        ],
+    )
+    .render()
+}
+
+pub fn write_needs_reference_message(request: &WriteRequest) -> String {
+    LocalizedText::with_params(
+        "engine.tools.memory.writeNeedsReference",
+        i18n_params!["path" => request.rel_path],
     )
     .render()
 }

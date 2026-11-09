@@ -1,24 +1,8 @@
-//! v2 `app/memory/projectIdentity.ts` + `_base/utils/workdir-slug.ts`:
-//! project identity for the memory layout.
-//!
-//! v2 does not digest the cwd directly. It resolves an identity in three
-//! tiers so that the same repository keeps its memory across a path change:
-//!
-//! 1. a normalized `origin` remote URL inside the discovered git dir;
-//! 2. failing that, the git repository root;
-//! 3. failing that, the cwd itself.
-//!
-//! Each tier's key is hashed to the first 12 hex chars of SHA-256, the same
-//! length this engine's memory layout uses. This module is the pure port;
-//! `memory_paths::project_id_from_cwd` remains the cwd-digest form until the
-//! call sites are switched over one by one.
-
 use std::path::PathBuf;
 
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
-/// The three kinds of identity v2 reports (`ProjectIdentityKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectIdentityKind {
     GitRemote,
@@ -50,9 +34,6 @@ fn digest(value: &str) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()[..12].to_string()
 }
 
-/// v2 `workspaceRootKey`: normalize separators and trailing slashes, and
-/// lowercase Windows-shaped paths (drive letters and UNC) because Windows
-/// filesystems are case-insensitive.
 pub fn workspace_root_key(root: &str) -> String {
     let slashed = root.replace('\\', "/");
     let shaped = Regex::new(r"^(?:[A-Za-z]:[\\/]|\\\\|//)")
@@ -66,9 +47,6 @@ pub fn workspace_root_key(root: &str) -> String {
     }
 }
 
-/// v2 `normalizeRemoteUrl` (`projectIdentity.ts:88-103`): strip credentials
-/// and transport, fold SCP syntax, drop `.git`, and lowercase only the host
-/// portion. Local paths and UNC paths are refused.
 pub fn normalize_remote_url(raw: &str) -> Option<String> {
     let mut value = raw.trim();
     if value.is_empty() {
@@ -119,8 +97,6 @@ pub fn normalize_remote_url(raw: &str) -> Option<String> {
     Some(owned)
 }
 
-/// Read `remote "origin"`'s url out of a git config file. v2 scans section
-/// headers and takes the first `url =` line inside that section.
 fn origin_url(config: &str) -> Option<String> {
     let mut in_origin = false;
     for line in config.lines() {
@@ -147,9 +123,6 @@ struct GitLocation {
     common_dir: PathBuf,
 }
 
-/// v2 `findGitLocation`: walk up from cwd, accept a `.git` directory or a
-/// `.git` file whose `gitdir:` pointer resolves, and follow `commondir` for
-/// worktrees.
 fn find_git_location(start: &str) -> Option<GitLocation> {
     let mut dir = PathBuf::from(start);
     if !dir.is_absolute() {
@@ -192,7 +165,6 @@ fn find_git_location(start: &str) -> Option<GitLocation> {
     }
 }
 
-/// v2 `resolveProjectIdentity` (`projectIdentity.ts:105-118`).
 pub fn resolve_project_identity(cwd: &str) -> ProjectIdentity {
     if let Some(location) = find_git_location(cwd) {
         let config = std::fs::read_to_string(location.common_dir.join("config")).ok();
@@ -221,7 +193,6 @@ pub fn resolve_project_identity(cwd: &str) -> ProjectIdentity {
     }
 }
 
-/// v2 `legacyProjectIdFromCwd`: the pre-identity digest of the workspace key.
 pub fn legacy_project_id_from_cwd(cwd: &str) -> String {
     digest(&workspace_root_key(cwd))
 }

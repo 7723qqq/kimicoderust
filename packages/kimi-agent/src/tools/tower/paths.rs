@@ -16,21 +16,16 @@ pub const MISSIONS_INDEX: &str = ".tower/comms/MISSIONS.md";
 pub const TOWER_NAME: &str = "tower";
 pub const BROADCAST_NAME: &str = "all";
 
-/// `KIMI_CODE_EXPERIMENTAL_TOWER`: the env switch that enables tower mode
-/// (v2 `TOWER_FLAG_ID`).
 pub const TOWER_ENV_SWITCH: &str = "KIMI_CODE_EXPERIMENTAL_TOWER";
-/// The `[experimental]` config key that enables tower mode.
+
 pub const TOWER_CONFIG_KEY: &str = "tower";
 
-/// The env switch alone, `None` when unset (v2 flag precedence: env over
-/// config).
 pub fn tower_env_switch() -> Option<bool> {
     std::env::var(TOWER_ENV_SWITCH)
         .ok()
         .map(|value| !value.is_empty() && value != "false" && value != "0")
 }
 
-/// The `[experimental].tower` entry alone, `None` when unset.
 pub fn tower_config_flag(config: &crate::config::KimiConfig) -> Option<bool> {
     match config.experimental.get(TOWER_CONFIG_KEY) {
         Some(crate::config::ExperimentalValue::Bool(value)) => Some(*value),
@@ -41,10 +36,6 @@ pub fn tower_config_flag(config: &crate::config::KimiConfig) -> Option<bool> {
     }
 }
 
-/// Whether tower mode is enabled: the env switch wins over the config entry,
-/// and either side being set to a truthy value enables it. An unset flag on
-/// both sides leaves tower off — the tool table must not advertise a mode the
-/// user never turned on (v2's flag default is false).
 pub fn tower_enabled(env: Option<bool>, config: Option<bool>) -> bool {
     env.or(config).unwrap_or(false)
 }
@@ -93,13 +84,6 @@ pub fn slugify(text: &str, max_length: usize) -> String {
     }
 }
 
-/// Makes `base` unique within `taken`, appending `-2`, `-3`, … and recording the
-/// winner.
-///
-/// [`slugify`] keeps ASCII alphanumerics only, so every non-Latin title falls
-/// back to `item` and every repeated title collides. Since a mission's branch is
-/// `feat/<slug>`, a duplicate slug meant a duplicate branch and a second
-/// `git worktree add` that fails with "already checked out".
 pub fn unique_slug(base: &str, taken: &mut std::collections::HashSet<String>) -> String {
     if taken.insert(base.to_string()) {
         return base.to_string();
@@ -169,20 +153,17 @@ mod tests {
 
     #[test]
     fn tower_enabled_prefers_env_then_config() {
-        // Env wins over config (v2 flag precedence).
         assert!(tower_enabled(Some(true), Some(false)));
         assert!(!tower_enabled(Some(false), Some(true)));
-        // Single side set.
+
         assert!(tower_enabled(None, Some(true)));
         assert!(!tower_enabled(None, Some(false)));
-        // Nothing set: off. The advertised table must not offer a mode the
-        // user never turned on.
+
         assert!(!tower_enabled(None, None));
     }
 
     #[test]
     fn env_switch_parses_truthy_and_falsy() {
-        // Unset -> None, so the caller can tell "not configured" from false.
         assert_eq!(tower_env_switch(), None);
         unsafe {
             std::env::set_var(TOWER_ENV_SWITCH, "1");

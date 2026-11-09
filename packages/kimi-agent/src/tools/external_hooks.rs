@@ -1,27 +1,3 @@
-//! User-configured external hooks — native mirror of v2
-//! `agentExternalHooksService` (G-6 #6).
-//!
-//! The user configures `[[hooks]]` entries (event / matcher / command /
-//! timeout); the engine executes them directly: `PreToolUse` gates every
-//! native tool call (mirroring v2's `runHook` contract byte for byte: the
-//! command runs through the platform shell with the snake_case payload JSON
-//! on stdin, exit code 2 or a stdout JSON `permissionDecision: "deny"`
-//! blocks the call, and any hook execution failure fails closed),
-//! `PostToolUse` / `PostToolUseFailure`, `PreCompact` / `PostCompact`,
-//! `PermissionRequest` / `PermissionResult`, `TurnStarted` / `StopFailure` /
-//! `Interrupt` / `UserPromptQueued`, `TaskStarted` / `Notification`,
-//! `SubagentStart` / `SubagentStop` and `SessionHeartbeat` fire observe-only
-//! notifications, `UserPromptSubmit` can block or prepend context to the
-//! prompt, and `Stop` hooks can veto a clean text stop once per turn (v2 `runStop`,
-//! agentExternalHooksService.ts:412). Together with `SessionStart` /
-//! `SessionEnd` and the gating `PreToolUse`, that covers all 20 of v2's
-//! `HOOK_EVENT_TYPES`.
-//!
-//! Hooks run in the session's working directory, not the engine process's
-//! cwd (v2 #4242): the guard carries the session cwd, a hook's own `cwd`
-//! still wins over it (v2 `hook.cwd ?? triggerCwd`), and every payload's
-//! `cwd` field reports it.
-
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,20 +9,47 @@ use tokio::process::Command;
 use crate::permission::HookDef;
 use crate::rpc::types::{ContentBlock, ToolExecuteRequest};
 
-/// v2 `matchHooks.ts` default timeout.
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
-/// v2 `HookDefSchema` timeout cap.
+
 const MAX_HOOK_TIMEOUT_SECS: u64 = 600;
 
-/// v2 fail-closed messages (`runHook.ts`).
-const FAILED_TO_SPAWN: &str = "Permission hook failed to spawn: ";
 const TIMED_OUT: &str = "Permission hook timed out";
-const ERRORED: &str = "Permission hook errored while running";
 
-/// A hook whose matcher failed to compile: the hook never matches.
-/// Recorded (and warn-logged) at construction so a typo'd guardrail is
-/// discoverable instead of silently off. Callers that own a user-visible
-/// surface should report [`HookGuard::invalid_matchers`].
+const MAX_HOOK_OUTPUT_CHARS: usize = 64 * 1024;
+const OUTPUT_TRUNCATED_MARKER: &str = "\n[hook output truncated]";
+
+const MAX_HOOK_OUTPUT_BYTES: usize = MAX_HOOK_OUTPUT_CHARS * 4;
+
+#[derive(Clone, Default)]
+pub struct HooksSource {
+    hooks: Arc<std::sync::RwLock<Option<Vec<HookDef>>>>,
+}
+
+impl HooksSource {
+    pub fn new(hooks: Vec<HookDef>) -> Self {
+        Self {
+            hooks: Arc::new(std::sync::RwLock::new(Some(hooks))),
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<Vec<HookDef>> {
+        self.hooks
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn replace(&self, hooks: Vec<HookDef>) -> Option<Vec<HookDef>> {
+        std::mem::replace(
+            &mut *self
+                .hooks
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Some(hooks),
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InvalidMatcher {
     pub event: String,
@@ -54,36 +57,23 @@ pub struct InvalidMatcher {
     pub error: String,
 }
 
-/// The PreToolUse gate: holds the user-configured hooks from the policy
-/// snapshot and runs the matching ones before a native tool call.
 pub struct HookGuard {
     hooks: Vec<HookDef>,
-    /// The hook matchers, compiled once at construction: an empty pattern
-    /// matches everything, an invalid one never matches (v2 `matchHooks.ts`).
-    /// Compiling per tool call would re-parse every hook's regex every time.
+
     matchers: Vec<Matcher>,
     invalid: Vec<InvalidMatcher>,
-    /// Server-side usage telemetry (v2 #3897 `external_hook_resolved`).
-    /// Set once after construction — the pipeline assembles callbacks below
-    /// the guard — and never overwritten. Fire-and-forget: emission must
-    /// never affect the hook verdict.
+
     telemetry: std::sync::OnceLock<TelemetrySink>,
-    /// Host-facing `hook.result` sink (v2's hook-result event): the hook's
-    /// stdout and whether it blocked. Set once after construction; emission is
-    /// fire-and-forget and must never affect the verdict.
+
     hook_result: std::sync::OnceLock<HookResultSink>,
-    /// The session's working directory (v2 #4242 `sessionContext.cwd`):
-    /// the spawn cwd for hooks that do not declare their own `cwd`, and the
-    /// payload's `cwd` field. `None` keeps the pre-#4242 fork behavior
-    /// (the engine process's cwd).
+
     session_cwd: Option<String>,
+
+    failure_warned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub type TelemetrySink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 
-/// `(hook_event, content, blocked)` — one entry per hook run, so the host can
-/// render what the hook said and whether it vetoed.
-/// One finished tool call, as the post-tool hooks see it.
 pub struct PostToolUse<'a> {
     pub agent_id: &'a str,
     pub turn_id: &'a str,
@@ -94,9 +84,6 @@ pub struct PostToolUse<'a> {
     pub is_error: bool,
 }
 
-/// The run a `hook.result` belongs to (v2 `HookResultPayload.agentId` /
-/// `turnId`). A session's guard is shared by the main agent and its subagents,
-/// so the identity travels with the trigger rather than living on the guard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookResultMeta {
     pub agent_id: String,
@@ -114,9 +101,68 @@ impl HookResultMeta {
 
 pub type HookResultSink = Arc<dyn Fn(&HookResultMeta, &str, &str, bool) + Send + Sync>;
 
-/// The prompt-launch verdict (v2 `runPromptSubmitHook`). `block` is the
-/// assistant-visible rendered hook result; `append` parts belong at content
-/// position 0 of the same user prompt, ahead of its original parts.
+#[derive(Clone)]
+struct HookReporter {
+    sink: Option<HookResultSink>,
+    session_cwd: Option<String>,
+    warned: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HookReporter {
+    fn warn(&self, meta: &HookResultMeta, event: &str, message: &str) {
+        if meta.agent_id != crate::callbacks::MAIN_AGENT_ID {
+            return;
+        }
+        if self.warned.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(hook_event = event, %message, "external hook failed to execute");
+        if let Some(sink) = &self.sink {
+            let content = format!(
+                "A {event} hook failed to execute: {message}. Hooks always run on this local machine; check that the hook command works locally. Later hook failures in this session are logged without another warning."
+            );
+            sink(meta, event, &content, false);
+        }
+    }
+}
+
+struct CappedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl CappedOutput {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        let remaining = MAX_HOOK_OUTPUT_BYTES.saturating_sub(self.bytes.len());
+        if chunk.len() > remaining {
+            self.bytes.extend_from_slice(&chunk[..remaining]);
+            self.truncated = true;
+        } else {
+            self.bytes.extend_from_slice(chunk);
+        }
+    }
+
+    fn finish(self) -> (String, bool) {
+        let text = String::from_utf8_lossy(&self.bytes);
+        if !self.truncated && text.chars().count() <= MAX_HOOK_OUTPUT_CHARS {
+            return (text.into_owned(), false);
+        }
+        let mut capped: String = text.chars().take(MAX_HOOK_OUTPUT_CHARS).collect();
+        capped.push_str(OUTPUT_TRUNCATED_MARKER);
+        (capped, true)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct UserPromptSubmitOutcome {
     pub block: Option<String>,
@@ -151,10 +197,10 @@ impl HookGuard {
                     match regex::Regex::new(&hook.matcher) {
                         Ok(re) => Matcher::Regex(re),
                         Err(error) => {
-                            // Silently disabling is the wrong failure mode for a
-                            // guard: a typo in a PreToolUse matcher switched the
-                            // hook off with no signal anywhere, so the user kept
-                            // believing a guardrail was in force.
+
+
+
+
                             tracing::warn!(
                                 event = %hook.event,
                                 matcher = %hook.matcher,
@@ -179,22 +225,23 @@ impl HookGuard {
             telemetry: std::sync::OnceLock::new(),
             hook_result: std::sync::OnceLock::new(),
             session_cwd: None,
+            failure_warned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    /// v2 #4242: agent-level hooks run in the session's working directory,
-    /// not the directory the engine process was started from. A server
-    /// hosting several workspaces (or a CLI that changed directory after
-    /// start) otherwise ran every hook in the wrong place.
+    fn reporter(&self) -> HookReporter {
+        HookReporter {
+            sink: self.hook_result.get().cloned(),
+            session_cwd: self.session_cwd.clone(),
+            warned: Arc::clone(&self.failure_warned),
+        }
+    }
+
     pub fn with_session_cwd(mut self, cwd: Option<String>) -> Self {
         self.session_cwd = cwd.filter(|dir| !dir.is_empty());
         self
     }
 
-    /// The payload `cwd` (v2 `toHookInputData` always carries one): the
-    /// session cwd when wired, else the process cwd as before #4242.
-    /// The spawn-side equivalent lives at the `spawn_hooks` call sites
-    /// (`hook.cwd ?? session_cwd`, v2 `runMatchedHooks`).
     fn payload_cwd(&self) -> String {
         self.session_cwd.clone().unwrap_or_else(|| {
             std::env::current_dir()
@@ -203,28 +250,18 @@ impl HookGuard {
         })
     }
 
-    /// Install the usage-telemetry sink (v2 #3897
-    /// `external_hook_resolved`). The pipeline calls this once after the
-    /// callbacks exist; later calls are ignored, so a double install can
-    /// never duplicate an event.
     pub fn with_telemetry(self: &Arc<Self>, sink: TelemetrySink) {
         let _ = self.telemetry.set(sink);
     }
 
-    /// Install the host-facing `hook.result` sink. Same single-install rule as
-    /// [`Self::with_telemetry`]; without it the hook output is dropped.
     pub fn with_hook_result(self: &Arc<Self>, sink: HookResultSink) {
         let _ = self.hook_result.set(sink);
     }
 
-    /// Hooks whose matcher failed to compile (and therefore never match).
-    /// Empty in the healthy case.
     pub fn invalid_matchers(&self) -> &[InvalidMatcher] {
         &self.invalid
     }
 
-    /// Hooks matching an event + tool-name target, deduped by command
-    /// within a single trigger (v2 `matchHooks` dedups on cwd + command).
     fn matched_hooks(&self, event: &str, target: &str) -> Vec<HookDef> {
         let mut matched: Vec<HookDef> = Vec::new();
         let mut seen_commands = std::collections::HashSet::new();
@@ -235,7 +272,7 @@ impl HookGuard {
             if !matcher.matches(target) {
                 continue;
             }
-            // v2 dedupes by command within a single trigger.
+
             if !seen_commands.insert((hook.cwd.clone(), hook.command.clone())) {
                 continue;
             }
@@ -244,9 +281,6 @@ impl HookGuard {
         matched
     }
 
-    /// The PreToolUse denial for a native tool call, or `None` to let it
-    /// through. Every matching hook runs in parallel (v2 `Promise.all`);
-    /// the first block reason in hook order wins.
     pub async fn denial(&self, request: &ToolExecuteRequest) -> Option<String> {
         let matched = self.matched_hooks("PreToolUse", &request.tool_name);
         if matched.is_empty() {
@@ -259,33 +293,32 @@ impl HookGuard {
                 .map(|hook| run_pre_tool_use_hook(hook, &payload, self.session_cwd.as_deref())),
         )
         .await;
-        // Host-facing `hook.result`: one event per hook run, carrying its
-        // stdout and whether it vetoed.
+        let meta = HookResultMeta::new(
+            request.agent_id.clone(),
+            Some(request.turn_id.clone()).filter(|turn| !turn.is_empty()),
+        );
+
         if let Some(sink) = self.hook_result.get() {
-            let meta = HookResultMeta::new(
-                request.agent_id.clone(),
-                Some(request.turn_id.clone()).filter(|turn| !turn.is_empty()),
-            );
-            for (reason, stdout) in &results {
-                sink(&meta, "PreToolUse", stdout, reason.is_some());
+            for outcome in &results {
+                sink(
+                    &meta,
+                    "PreToolUse",
+                    &outcome.stdout,
+                    outcome.reason.is_some(),
+                );
             }
         }
-        // v2 #3897 `external_hook_resolved`: one usage event per trigger, with
-        // the resolve action and the per-hook failure counts. The verdict below
-        // is unchanged — the event only observes it.
+        let reporter = self.reporter();
+        for outcome in &results {
+            if let Some(message) = &outcome.failure {
+                reporter.warn(&meta, "PreToolUse", message);
+            }
+        }
+
         let matched_count = results.len();
-        let failed_count = results
-            .iter()
-            .filter(|(reason, _)| {
-                matches!(
-                    reason.as_deref(),
-                    Some(text)
-                        if text.starts_with(TIMED_OUT) || text.starts_with(ERRORED)
-                )
-            })
-            .count();
+        let failed_count = results.iter().filter(|r| r.failure.is_some()).count();
         if let Some(sink) = self.telemetry.get() {
-            let action = if results.iter().any(|(reason, _)| reason.is_some()) {
+            let action = if results.iter().any(|outcome| outcome.reason.is_some()) {
                 "block"
             } else {
                 "allow"
@@ -300,11 +333,9 @@ impl HookGuard {
                 }),
             );
         }
-        results.into_iter().find_map(|(reason, _)| reason)
+        results.into_iter().find_map(|outcome| outcome.reason)
     }
 
-    /// Notify user-configured `PostToolUse` and `PostToolUseFailure` hooks
-    /// (v2 `agentExternalHooksService` notifyPostToolUse).
     pub async fn notify_post_tool_use(&self, trigger: PostToolUse<'_>) {
         let PostToolUse {
             agent_id,
@@ -324,8 +355,7 @@ impl HookGuard {
         if matched.is_empty() {
             return;
         }
-        // v2 slices the first 2000 chars (`output.slice(0, 2000)`): count
-        // chars, not bytes, so CJK text keeps the same window.
+
         let output_slice: String = content.chars().take(2000).collect();
         let payload = serde_json::json!({
             "tool_name": tool_name,
@@ -335,13 +365,12 @@ impl HookGuard {
             "tool_output": if !is_error { Some(output_slice) } else { None },
             "error": if is_error { Some(content) } else { None },
         });
-        // Fire-and-forget: spawn matching hooks concurrently
+
         spawn_hooks(
             "PostToolUse",
             matched,
             payload,
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(
                 agent_id,
                 Some(turn_id.to_string()).filter(|turn| !turn.is_empty()),
@@ -349,11 +378,6 @@ impl HookGuard {
         );
     }
 
-    /// Run user-configured `UserPromptSubmit` hooks at the turn head (v2
-    /// `agentExternalHooksService.runPromptSubmitHook`). Matching hooks run
-    /// concurrently but their outcomes retain declaration order. The first
-    /// block wins and suppresses every append; otherwise each non-empty
-    /// allow message becomes a meta-marked part of the original user prompt.
     pub async fn run_user_prompt_submit(
         &self,
         agent_id: &str,
@@ -376,6 +400,14 @@ impl HookGuard {
                 .map(|hook| run_prompt_submit_hook(hook, &payload, self.session_cwd.as_deref())),
         )
         .await;
+
+        let reporter = self.reporter();
+        let meta = HookResultMeta::new(agent_id, Some(turn_id.to_string()));
+        for result in &results {
+            if let Some(message) = &result.failure {
+                reporter.warn(&meta, "UserPromptSubmit", message);
+            }
+        }
 
         if let Some(block) = results
             .iter()
@@ -415,39 +447,27 @@ impl HookGuard {
         }
     }
 
-    /// Notify user-configured `PreCompact` hooks (v2
-    /// `agentExternalHooksService.runPreCompact`). Fire-and-forget
-    /// before each compaction; the hook receives the would-be-compacted
-    /// message count so it can log / observe the turn-trim event. The
-    /// engine only trims mid-turn (`auto`; manual compaction is host-side),
-    /// so hooks match against `"auto"`, as in v2.
-    /// Known partial parity: v2 also reports token counts; the engine
-    /// reports the message count.
-    pub async fn notify_pre_compact(&self, turn_id: &str, message_count: usize) {
+    pub async fn notify_pre_compact(&self, turn_id: &str, message_count: usize, token_count: u32) {
         let matched = self.matched_hooks("PreCompact", "auto");
         if matched.is_empty() {
             return;
         }
+
         let payload = serde_json::json!({
             "turn_id": turn_id,
             "message_count": message_count,
+            "trigger": "auto",
+            "token_count": token_count,
         });
         spawn_hooks(
             "PreCompact",
             matched,
             payload,
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `SessionStart` / `SessionEnd` hooks (v2
-    /// `sessionExternalHooksService.triggerSessionStart/End`). Observational:
-    /// v2 fires these through `runner.trigger` and discards the verdicts —
-    /// a hook can log but cannot block the lifecycle transition.
-    /// `matcher` is the create source (`startup` | `resume`; `fork` never
-    /// triggers upstream) or the close reason (`exit` | `archive`).
     pub async fn notify_session_lifecycle(&self, event: &str, matcher: &str, payload: Value) {
         let matched = self.matched_hooks(event, matcher);
         if matched.is_empty() {
@@ -457,25 +477,15 @@ impl HookGuard {
             event,
             matched,
             payload,
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Whether any configured hook listens for `event` — the agent-side
-    /// equivalent of v2 `runner.hasHooksFor`, used to gate the
-    /// heartbeat timer instead of ticking for no listener.
     pub fn has_hooks_for(&self, event: &str) -> bool {
         self.hooks.iter().any(|hook| hook.event == event)
     }
 
-    /// Notify user-configured `PermissionRequest` hooks (v2
-    /// `agentExternalHooksService`, from `PermissionApprovalRequested`).
-    /// Fire-and-forget: the verdict is already assembling. `reason` is the
-    /// local policy's explanation, when one exists; the upstream payload's
-    /// `id` / `sessionId` / `agentId` / `action` / `display` are host-owned
-    /// metadata the engine does not track.
     pub async fn notify_permission_request(
         &self,
         tool_name: &str,
@@ -501,16 +511,11 @@ impl HookGuard {
             "PermissionRequest",
             matched,
             payload,
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `PermissionResult` hooks (v2
-    /// `PermissionApprovalResolved`). `decision` is `"approved"` or
-    /// `"rejected"`; `feedback` is the host's rejection explanation, when one
-    /// was given. Fire-and-forget, like [`Self::notify_permission_request`].
     pub async fn notify_permission_result(
         &self,
         tool_name: &str,
@@ -538,15 +543,11 @@ impl HookGuard {
             "PermissionResult",
             matched,
             payload,
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `TurnStarted` hooks (v2 event of the same
-    /// name). Fire-and-forget; hooks match against the prompt's origin kind
-    /// (`user` / `system_trigger` / …), as in v2.
     pub async fn notify_turn_started(&self, turn_id: u64, origin: &Value, prompt: &str) {
         let origin_kind = origin
             .get("kind")
@@ -568,15 +569,11 @@ impl HookGuard {
             "TurnStarted",
             matched,
             payload,
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `Interrupt` hooks (v2: fired when a turn ends
-    /// with `reason: "cancelled"`). Matching carries no value in v2, so the
-    /// matcher here is empty.
     pub async fn notify_interrupt(&self, turn_id: u64) {
         let matched = self.matched_hooks("Interrupt", "");
         if matched.is_empty() {
@@ -586,16 +583,11 @@ impl HookGuard {
             "Interrupt",
             matched,
             serde_json::json!({ "turn_id": turn_id, "reason": "cancelled" }),
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `StopFailure` hooks (v2: fired when a turn
-    /// ends with `reason: "failed"`). Hooks match against the error type
-    /// (the protocol error code, e.g. `provider.api_error`), as upstream
-    /// matches against the error's class name.
     pub async fn notify_stop_failure(&self, error_type: &str, error_message: &str) {
         let matched = self.matched_hooks("StopFailure", error_type);
         if matched.is_empty() {
@@ -608,15 +600,11 @@ impl HookGuard {
                 "error_type": error_type,
                 "error_message": error_message,
             }),
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `UserPromptQueued` hooks (v2: a tracked user
-    /// prompt submitted while a turn is active, parked, or the machine
-    /// paused). Hooks match against the prompt text, as in v2.
     pub async fn notify_user_prompt_queued(
         &self,
         prompt_id: u64,
@@ -635,16 +623,11 @@ impl HookGuard {
                 "prompt": prompt,
                 "queue_length": queue_length,
             }),
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `PostCompact` hooks (v2
-    /// `fullCompaction.hooks.onWillCompact` → result). Fire-and-forget;
-    /// hooks match against the compaction trigger, as in v2. `turn_id` is
-    /// carried since, unlike v2's, the fork's payload lacks agent context.
     pub async fn notify_post_compact(
         &self,
         turn_id: &str,
@@ -663,14 +646,11 @@ impl HookGuard {
                 "trigger": trigger,
                 "estimated_token_count": estimated_token_count,
             }),
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `TaskStarted` hooks (v2 `TaskStarted` event).
-    /// Hooks match against the task kind (`subagent` / `bash` / `tool`).
     pub async fn notify_task_started(
         &self,
         task_id: &str,
@@ -693,16 +673,11 @@ impl HookGuard {
                 "status": status,
                 "started_at": started_at,
             }),
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `Notification` hooks (v2 `TaskNotified`
-    /// delivered to the conversation). Hooks match against the terminal
-    /// status (`completed` / `failed` / `killed`); v2's distinct
-    /// notification-type vocabulary is carried here by the status string.
     pub async fn notify_task_notification(
         &self,
         task_id: &str,
@@ -726,14 +701,11 @@ impl HookGuard {
                 "started_at": started_at,
                 "ended_at": ended_at,
             }),
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `SubagentStart` hooks (v2 session-level
-    /// `subagent` hook). Hooks match against the subagent's profile name.
     pub async fn notify_subagent_start(&self, agent_name: &str, prompt: &str) {
         let matched = self.matched_hooks("SubagentStart", agent_name);
         if matched.is_empty() {
@@ -747,17 +719,11 @@ impl HookGuard {
                 "prompt": prompt,
                 "session_title": "",
             }),
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Notify user-configured `SubagentStop` hooks (v2
-    /// `subagents.onDidStopAgentTask`). Hooks match against the subagent's
-    /// profile name. `response` is the final assistant text for a completed
-    /// run, the error text for a failed one, and the empty string for a
-    /// cancelled one.
     pub async fn notify_subagent_stop(&self, agent_name: &str, response: &str) {
         let matched = self.matched_hooks("SubagentStop", agent_name);
         if matched.is_empty() {
@@ -771,23 +737,11 @@ impl HookGuard {
                 "response": response,
                 "session_title": "",
             }),
-            self.hook_result.get().cloned(),
-            self.session_cwd.as_deref(),
+            self.reporter(),
             HookResultMeta::new(crate::callbacks::MAIN_AGENT_ID, None),
         );
     }
 
-    /// Run matching `Stop` hooks when a turn is about to end (v2
-    /// `agentExternalHooksService`'s step-finish registration,
-    /// agentExternalHooksService.ts:239-258, calling its private `runStop` at
-    /// :412).
-    /// A hook vetoes the stop by exiting 2 (reason: trimmed stderr) or by
-    /// printing a stdout JSON `hookSpecificOutput.permissionDecision: "deny"`
-    /// (reason: its `permissionDecisionReason`); the veto text is returned
-    /// as the user message to re-prompt with. `None` means no matching hook
-    /// asked to continue — the stop proceeds. Built-in turn drivers consume
-    /// the veto transparently via `run_turn_continued` (at most one
-    /// continuation per turn, mirroring v2's `stopHookContinuationUsed`).
     pub async fn notify_stop(
         &self,
         agent_id: &str,
@@ -812,33 +766,31 @@ impl HookGuard {
                 .map(|hook| run_stop_hook(hook, &payload, self.session_cwd.as_deref())),
         )
         .await;
+        let meta = HookResultMeta::new(agent_id, Some(turn_id.to_string()));
         if let Some(sink) = self.hook_result.get() {
-            let meta = HookResultMeta::new(agent_id, Some(turn_id.to_string()));
-            for (reason, stdout) in &results {
-                sink(&meta, "Stop", stdout, reason.is_some());
+            for outcome in &results {
+                sink(&meta, "Stop", &outcome.stdout, outcome.reason.is_some());
             }
         }
-        // Block reasons never come back empty (`fallback_reason` fills the
-        // v2 default), so the first veto wins.
-        results.into_iter().filter_map(|(reason, _)| reason).next()
+        let reporter = self.reporter();
+        for outcome in &results {
+            if let Some(message) = &outcome.failure {
+                reporter.warn(&meta, "Stop", message);
+            }
+        }
+
+        results.into_iter().find_map(|outcome| outcome.reason)
     }
 }
 
-/// Fire-and-forget hook executions sharing one payload: observe-only
-/// notifies whose outcome the turn never reads. The payload gains the
-/// `hook_event_name` field (v2 `toHookInputData` always carries it, and
-/// hook scripts commonly switch on it) and, when the caller did not set
-/// one, the `cwd` field (v2 `toHookInputData` always carries the trigger
-/// cwd — #4242 made it the session's working directory).
 fn spawn_hooks(
     event: &str,
     matched: Vec<HookDef>,
     payload: Value,
-    sink: Option<HookResultSink>,
-    session_cwd: Option<&str>,
+    reporter: HookReporter,
     meta: HookResultMeta,
 ) {
-    let payload_cwd = session_cwd.map(str::to_string).unwrap_or_else(|| {
+    let payload_cwd = reporter.session_cwd.clone().unwrap_or_else(|| {
         std::env::current_dir()
             .map(|d| d.to_string_lossy().to_string())
             .unwrap_or_default()
@@ -850,41 +802,34 @@ fn spawn_hooks(
             obj.entry("cwd".to_string())
                 .or_insert_with(|| Value::String(payload_cwd.clone()));
         }
-        let sink = sink.clone();
+        let reporter = reporter.clone();
         let event = event.to_string();
-        let session_cwd = session_cwd.map(str::to_string);
         let meta = meta.clone();
         tokio::spawn(async move {
-            let (reason, stdout) = run_pre_tool_use_hook(&hook, &p, session_cwd.as_deref()).await;
-            // Host-facing `hook.result`: the observe-only notifies still report
-            // what the hook printed (v2 emits it for every run).
-            if let Some(sink) = sink {
-                sink(&meta, &event, &stdout, reason.is_some());
+            let outcome =
+                run_hook_with_denial(&hook, &p, &event, reporter.session_cwd.as_deref(), false)
+                    .await;
+
+            if let Some(sink) = &reporter.sink {
+                sink(&meta, &event, &outcome.stdout, outcome.reason.is_some());
+            }
+            if let Some(message) = &outcome.failure {
+                reporter.warn(&meta, &event, message);
             }
         });
     }
 }
 
-/// Run a Stop hook and resolve the continuation message, or `None` to let
-/// the stop proceed. v2 `runHook.ts` + `runStop`
-/// (`agentExternalHooksService.ts:412`): exit code 2 blocks with the
-/// trimmed stderr, exit 0 with a stdout JSON `permissionDecision: "deny"`
-/// blocks with its reason, spawn/timeout failures fail closed; anything
-/// else (including plain-text stdout) allows. Empty reasons fall back to
-/// the v2 `Blocked by {event} hook` default.
-/// `(block reason, stdout)` — the reason gates the call, the stdout feeds the
-/// host's `hook.result` event.
-type HookOutcome = (Option<String>, String);
-
-async fn run_stop_hook(hook: &HookDef, payload: &Value, session_cwd: Option<&str>) -> HookOutcome {
-    run_hook_with_denial(hook, payload, "Stop", session_cwd).await
+struct HookOutcome {
+    reason: Option<String>,
+    stdout: String,
+    failure: Option<String>,
 }
 
-/// The snake_case stdin payload (v2 `runPreToolUse` → `toHookInputData`):
-/// the fields the engine can truthfully provide. `session_title` is host
-/// metadata the engine does not track (empty), `client_type` uses the
-/// node-platform spelling v2 sends, and `cwd` is the session's working
-/// directory (v2 #4242 — the process cwd only when no session is wired).
+async fn run_stop_hook(hook: &HookDef, payload: &Value, session_cwd: Option<&str>) -> HookOutcome {
+    run_hook_with_denial(hook, payload, "Stop", session_cwd, true).await
+}
+
 fn hook_payload(request: &ToolExecuteRequest, cwd: &str) -> Value {
     let tool_input = request
         .arguments
@@ -903,8 +848,6 @@ fn hook_payload(request: &ToolExecuteRequest, cwd: &str) -> Value {
     })
 }
 
-/// The platform string node reports (`process.platform`): win32 / darwin /
-/// linux / ... — v2 sends `bootstrap.clientIdentity.platform`.
 fn platform_string() -> &'static str {
     match std::env::consts::OS {
         "windows" => "win32",
@@ -913,52 +856,70 @@ fn platform_string() -> &'static str {
     }
 }
 
-/// Run one hook (v2 `runHook.ts`): platform shell, inherited env, the
-/// payload JSON on stdin, timeout with kill. The spawn cwd is the hook's
-/// own `cwd` when declared, else the session cwd (v2 #4242
-/// `hook.cwd ?? triggerCwd`), else the engine process's cwd. Returns the
-/// block reason, or `None` for an allow verdict. Named for its callers:
-/// every path through here reports a `PreToolUse`-shaped verdict, including
-/// the observe-only notifies (which discard it) — pass an explicit event
-/// only via [`run_hook_with_denial`].
 async fn run_pre_tool_use_hook(
     hook: &HookDef,
     payload: &Value,
     session_cwd: Option<&str>,
 ) -> HookOutcome {
-    run_hook_with_denial(hook, payload, "PreToolUse", session_cwd).await
+    run_hook_with_denial(hook, payload, "PreToolUse", session_cwd, true).await
 }
 
-/// [`run_pre_tool_use_hook`] with the v2 `matchHooks.ts` fallback for the triggering
-/// event: an empty block reason becomes `Blocked by {event} hook`.
 async fn run_hook_with_denial(
     hook: &HookDef,
     payload: &Value,
     event: &str,
     session_cwd: Option<&str>,
+    fail_closed: bool,
 ) -> HookOutcome {
     let result = run_hook_process(hook, payload, session_cwd).await;
     match &result.failure {
-        Some(HookProcessFailure::Spawn(error)) => {
-            (Some(format!("{FAILED_TO_SPAWN}{error}")), String::new())
-        }
-        Some(HookProcessFailure::Errored) => (Some(ERRORED.into()), String::new()),
-        Some(HookProcessFailure::TimedOut) => (Some(TIMED_OUT.into()), String::new()),
+        Some(HookProcessFailure::TimedOut) if fail_closed => HookOutcome {
+            reason: Some(TIMED_OUT.into()),
+            stdout: String::new(),
+            failure: None,
+        },
+        Some(failure) => HookOutcome {
+            reason: None,
+            stdout: result.stdout,
+            failure: Some(failure.message(hook.timeout.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS))),
+        },
         None => {
             let reason = result
                 .status
                 .as_ref()
                 .and_then(|status| evaluate_hook(event, status, &result.stdout, &result.stderr));
-            (reason, result.stdout)
+            HookOutcome {
+                reason,
+                stdout: result.stdout,
+                failure: exit_code_failure(result.status.as_ref()),
+            }
         }
     }
+}
+
+fn exit_code_failure(status: Option<&ExitStatus>) -> Option<String> {
+    let code = status?.code()?;
+    if code == 0 || code == 2 {
+        return None;
+    }
+    Some(format!("exited with exit code {code}"))
 }
 
 #[derive(Debug)]
 enum HookProcessFailure {
     Spawn(String),
-    Errored,
+    Errored(String),
     TimedOut,
+}
+
+impl HookProcessFailure {
+    fn message(&self, timeout_secs: u64) -> String {
+        match self {
+            Self::Spawn(error) => error.clone(),
+            Self::Errored(error) => error.clone(),
+            Self::TimedOut => format!("timed out after {timeout_secs}s"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -969,9 +930,6 @@ struct HookProcessResult {
     failure: Option<HookProcessFailure>,
 }
 
-/// Execute one hook without imposing a policy on the result. PreToolUse and
-/// Stop keep their existing fail-closed wrapper above; UserPromptSubmit reads
-/// the same process facts with upstream's fail-open prompt semantics.
 async fn run_hook_process(
     hook: &HookDef,
     payload: &Value,
@@ -1008,30 +966,34 @@ async fn run_hook_process(
                 status: None,
                 stdout: String::new(),
                 stderr: String::new(),
-                failure: Some(HookProcessFailure::Errored),
+                failure: Some(HookProcessFailure::Errored(
+                    "hook stdin was not available".into(),
+                )),
             };
         }
     };
-    // v2 attaches an empty 'error' handler to the hook's stdin and ends the
-    // stream: a hook that exits without reading its input (EPIPE) must still
-    // have its exit code and stderr honored, so the write is best-effort.
+
     let _ = stdin.write_all(payload_json.as_bytes()).await;
     drop(stdin);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    // Drain both pipes while the child runs: waiting first and reading after
-    // can deadlock once a pipe buffer fills. Shared buffers also preserve the
-    // partial output v2 exposes when timeout/wait settles before EOF.
-    let out_buf = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let err_buf = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    let out_buf = Arc::new(tokio::sync::Mutex::new(CappedOutput::new()));
+    let err_buf = Arc::new(tokio::sync::Mutex::new(CappedOutput::new()));
     let out_drain = {
         let buf = Arc::clone(&out_buf);
         tokio::spawn(async move {
             if let Some(mut out) = stdout {
                 use tokio::io::AsyncReadExt;
                 let mut buf = buf.lock().await;
-                let _ = out.read_to_end(&mut buf).await;
+                let mut chunk = [0u8; 8192];
+                while let Ok(read) = out.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    buf.push(&chunk[..read]);
+                }
             }
         })
     };
@@ -1041,38 +1003,48 @@ async fn run_hook_process(
             if let Some(mut err) = stderr {
                 use tokio::io::AsyncReadExt;
                 let mut buf = buf.lock().await;
-                let _ = err.read_to_end(&mut buf).await;
+                let mut chunk = [0u8; 8192];
+                while let Ok(read) = err.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    buf.push(&chunk[..read]);
+                }
             }
         })
     };
     let (status, failure) = tokio::select! {
         status = child.wait() => match status {
             Ok(status) => (Some(status), None),
-            Err(_) => {
+            Err(error) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                (None, Some(HookProcessFailure::Errored))
+                (None, Some(HookProcessFailure::Errored(error.to_string())))
             }
         },
         _ = tokio::time::sleep(timeout) => {
-            // v2 sends SIGTERM then SIGKILL; Rust std exposes no SIGTERM
-            // for children, so the kill is direct.
+
+
             let _ = child.kill().await;
             let _ = child.wait().await;
             (None, Some(HookProcessFailure::TimedOut))
         }
     };
     if failure.is_some() {
-        // Do not wait for a grandchild that inherited the pipes and outlived
-        // the killed shell. Whatever the drains already captured remains in
-        // the shared buffers, matching v2's early-settled result.
         out_drain.abort();
         err_drain.abort();
     }
     let _ = out_drain.await;
     let _ = err_drain.await;
-    let stdout = String::from_utf8_lossy(&out_buf.lock().await).to_string();
-    let stderr = String::from_utf8_lossy(&err_buf.lock().await).to_string();
+    let (stdout, stdout_truncated) = take_output(&out_buf).await;
+    let (stderr, stderr_truncated) = take_output(&err_buf).await;
+    if stdout_truncated || stderr_truncated {
+        tracing::warn!(
+            stdout = stdout_truncated,
+            stderr = stderr_truncated,
+            "external hook output exceeded 64K characters and was truncated"
+        );
+    }
     HookProcessResult {
         status,
         stdout,
@@ -1081,10 +1053,11 @@ async fn run_hook_process(
     }
 }
 
-/// Spawn the hook command through the platform shell (v2 `spawn(command,
-/// { shell: true })`: cmd.exe on Windows, sh elsewhere). `cwd` overrides
-/// the working directory; `env` entries merge over the inherited
-/// environment (v2 spreads `process.env` first).
+async fn take_output(buf: &Arc<tokio::sync::Mutex<CappedOutput>>) -> (String, bool) {
+    let mut guard = buf.lock().await;
+    std::mem::replace(&mut *guard, CappedOutput::new()).finish()
+}
+
 fn spawn_hook_command(
     command: &str,
     cwd: Option<&str>,
@@ -1107,18 +1080,10 @@ fn spawn_hook_command(
     }
     #[cfg(windows)]
     {
-        // v2 `windowsHide: true` — hook shells must not flash a console window.
-        // (tokio's `Command` carries an inherent `creation_flags` on Windows;
-        // the std `CommandExt` trait is not involved.)
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.creation_flags(0x08000000);
     }
     #[cfg(unix)]
     {
-        // v2 `detached` (non-Windows): hooks run in their own process group
-        // so terminal signals don't reach them directly. Timeout/cancel
-        // still kills the direct child, as in v2.
-        // (tokio's `Command` has an inherent `process_group`; the std
-        // `CommandExt` trait import is redundant and trips unused-imports.)
         cmd.process_group(0);
     }
     cmd.stdin(std::process::Stdio::piped())
@@ -1127,15 +1092,7 @@ fn spawn_hook_command(
     cmd.spawn()
 }
 
-/// The veto decision (v2 `runHook.ts`): exit 2 blocks with stderr, exit 0
-/// with a stdout JSON `hookSpecificOutput.permissionDecision: "deny"`
-/// blocks with its `permissionDecisionReason`; everything else allows. A
-/// top-level `permissionDecision` does NOT block — v2 reads only the nested
-/// form. Empty reasons fall back to the v2 default for the triggering event.
 fn evaluate_hook(event: &str, status: &ExitStatus, stdout: &str, stderr: &str) -> Option<String> {
-    // A signal kill yields no exit code. Node reports the same case as a
-    // null exit code, which v2's `resultFromExitCode` allows — mirror that
-    // (spawn/timeout/wait failures still fail closed above).
     let code = status.code()?;
     if code == 2 {
         return Some(fallback_reason(event, stderr.trim()));
@@ -1148,7 +1105,6 @@ fn evaluate_hook(event: &str, status: &ExitStatus, stdout: &str, stderr: &str) -
     None
 }
 
-/// The stdout JSON veto (v2 `structuredOutput`, exit 0 only).
 fn json_deny_reason(stdout: &str) -> Option<String> {
     let value: Value = serde_json::from_str(stdout.trim()).ok()?;
     let specific = value.get("hookSpecificOutput")?;
@@ -1189,10 +1145,12 @@ struct PromptHookResult {
     exited: bool,
     timed_out: bool,
     structured_output: bool,
+
+    failure: Option<String>,
 }
 
 impl PromptHookResult {
-    fn from_process(process: HookProcessResult) -> Self {
+    fn from_process(hook: &HookDef, process: HookProcessResult) -> Self {
         let exit_code = process.status.as_ref().and_then(ExitStatus::code);
         let mut result = Self {
             action: PromptHookAction::Allow,
@@ -1203,9 +1161,16 @@ impl PromptHookResult {
             exited: process.status.is_some(),
             timed_out: matches!(&process.failure, Some(HookProcessFailure::TimedOut)),
             structured_output: false,
+            failure: process
+                .failure
+                .as_ref()
+                .map(|failure| failure.message(hook.timeout.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS))),
         };
         if process.failure.is_some() {
             return result;
+        }
+        if result.failure.is_none() {
+            result.failure = exit_code_failure(process.status.as_ref());
         }
         if exit_code == Some(2) {
             let message = process.stderr.trim().to_string();
@@ -1244,8 +1209,7 @@ impl PromptHookResult {
         if let Some(message) = non_empty_trimmed(self.message.as_deref()) {
             return Some(message);
         }
-        // Structured JSON without a message (for example {"continue":true})
-        // is a verdict, not context text. Invalid JSON is plain-text stdout.
+
         if self.structured_output {
             return None;
         }
@@ -1298,7 +1262,7 @@ async fn run_prompt_submit_hook(
     payload: &Value,
     session_cwd: Option<&str>,
 ) -> PromptHookResult {
-    PromptHookResult::from_process(run_hook_process(hook, payload, session_cwd).await)
+    PromptHookResult::from_process(hook, run_hook_process(hook, payload, session_cwd).await)
 }
 
 fn render_hook_result(event: &str, message: &str) -> String {
@@ -1318,17 +1282,12 @@ fn user_prompt_submit_hook_part(message: &str) -> ContentBlock {
     }
 }
 
-/// Shared test support for any test that asserts on the payload a hook
-/// received on stdin: a shell-safe temp dir, capture-file hooks, and a wait
-/// for the fire-and-forget write to land.
 #[cfg(test)]
 pub(crate) mod capture {
     use serde_json::Value;
 
     use crate::permission::HookDef;
 
-    /// A temp dir safe for shell redirection — a path with spaces breaks the
-    /// capture command, so `None` means skip the test.
     pub fn dir() -> Option<tempfile::TempDir> {
         let dir = tempfile::tempdir().ok()?;
         if dir.path().to_string_lossy().contains(' ') {
@@ -1337,11 +1296,6 @@ pub(crate) mod capture {
         Some(dir)
     }
 
-    /// A hook whose command copies its stdin payload to `target` (`more`
-    /// reads the pipe to EOF on cmd, `cat` elsewhere). The tool is pinned
-    /// through `%SystemRoot%`: cmd.exe's PATH lookup silently fails when
-    /// the inherited PATH grows past ~8k chars (long agent shells accrete
-    /// that), so a bare `more` may not resolve on a real machine.
     pub fn hook(event: &str, matcher: &str, target: &std::path::Path) -> HookDef {
         let command = if cfg!(windows) {
             format!(
@@ -1361,22 +1315,9 @@ pub(crate) mod capture {
         }
     }
 
-    /// How long a capture test waits for the hook subprocess to finish. The
-    /// product grants a hook up to `DEFAULT_HOOK_TIMEOUT_SECS` (30s), so a
-    /// shorter test budget would assert "faster than the product's own
-    /// allowance" and fail whenever the scheduler starves `cmd.exe` spawn —
-    /// each capture costs two processes (`cmd` plus `more.com`).
     const CAPTURE_WAIT: std::time::Duration =
         std::time::Duration::from_secs(super::DEFAULT_HOOK_TIMEOUT_SECS);
 
-    /// Wait for the hook's capture file to hold a complete payload (or the
-    /// deadline to pass), then return it.
-    ///
-    /// A non-empty file is not necessarily complete: the capture command may
-    /// write in more than one chunk (`more.com` echoes the line, then the
-    /// newline), and the fire-and-forget hook publishes while the test polls.
-    /// Parsing every snapshot and retrying removes that partial-read window;
-    /// only the deadline panics, with the raw content for diagnosis.
     pub async fn wait(target: &std::path::Path) -> Value {
         let deadline = std::time::Instant::now() + CAPTURE_WAIT;
         loop {
@@ -1439,20 +1380,12 @@ mod tests {
 
     fn sleeper() -> &'static str {
         if cfg!(windows) {
-            // `%SystemRoot%`-pinned like `capture::hook`: cmd's PATH lookup
-            // fails under a very long inherited PATH, so a bare `ping` may
-            // not resolve.
             "%SystemRoot%\\System32\\ping.exe -n 3 127.0.0.1 >nul"
         } else {
             "sleep 3"
         }
     }
 
-    /// A command that writes a JSON deny to stdout and exits 0. The JSON
-    /// rides in a pre-written file (`type` / `cat`) so the command needs no
-    /// quoting — cmd's `/C` re-parsing mangles embedded quotes. Shaped like
-    /// v2's `hookSpecificOutput` veto (a top-level `permissionDecision`
-    /// does NOT block — see the test below).
     fn json_deny_command(dir: &std::path::Path) -> String {
         let json_file = dir.join("deny.json");
         std::fs::write(
@@ -1467,8 +1400,6 @@ mod tests {
         }
     }
 
-    /// A top-level `permissionDecision` (outside `hookSpecificOutput`) —
-    /// v2 ignores it, so the hook allows.
     fn json_top_level_deny_command(dir: &std::path::Path) -> String {
         let json_file = dir.join("top-deny.json");
         std::fs::write(
@@ -1483,8 +1414,6 @@ mod tests {
         }
     }
 
-    /// Temp paths may contain spaces, which breaks unquoted shell redirects
-    /// and `cmd /C` argument handling. Skip rather than flake.
     fn skip_if_path_has_spaces(path: &std::path::Path) -> bool {
         path.to_string_lossy().contains(' ')
     }
@@ -1500,17 +1429,30 @@ mod tests {
         assert_eq!(empty.denial(&request("Read")).await, None);
     }
 
-    /// v2 #3897 `external_hook_resolved`: one event per trigger carrying the
-    /// resolve action and the per-hook failure counts. The verdict itself is
-    /// unchanged by whether a sink is installed.
+    #[tokio::test]
+    async fn hooks_source_replace_does_not_change_a_guard_already_built() {
+        let source = HooksSource::new(vec![hook("PreToolUse", "", exit_two_silent())]);
+        let guard = HookGuard::new(source.snapshot().unwrap_or_default());
+        let old = source.replace(Vec::new());
+        assert_eq!(
+            old.map(|hooks| hooks.len()),
+            Some(1),
+            "replace must return the set it replaced"
+        );
+        assert!(source.snapshot().unwrap_or_default().is_empty());
+        assert!(
+            guard.denial(&request("Read")).await.is_some(),
+            "the already-built guard must keep blocking after the reload"
+        );
+    }
+
     #[tokio::test]
     async fn denial_emits_the_usage_event_with_counts() {
         let events = Arc::new(std::sync::Mutex::new(
             Vec::<(String, serde_json::Value)>::new(),
         ));
         let log = events.clone();
-        // Two distinct commands (v2 dedupes same-command hooks within one
-        // trigger, so identical commands would fold to a single match).
+
         let guard = Arc::new(HookGuard::new(vec![
             hook("PreToolUse", "", exit_two_with_stderr()),
             hook("PreToolUse", "", exit_two_silent()),
@@ -1529,14 +1471,10 @@ mod tests {
         assert_eq!(payload["hook_event"], "PreToolUse");
         assert_eq!(payload["action"], "block");
         assert_eq!(payload["matched_count"], 2);
-        // Both hooks exit 2 — v2 counts a non-2 exit code as failure, exit 2 as
-        // a deliberate block, so failed_count is 0 here.
+
         assert_eq!(payload["failed_count"], 0);
     }
 
-    /// The host-facing `hook.result`: one event per hook run carrying its
-    /// stdout and whether it vetoed. Before this sink existed the hook ran and
-    /// its output was discarded.
     #[tokio::test]
     async fn denial_emits_a_hook_result_per_hook() {
         let results = Arc::new(std::sync::Mutex::new(Vec::<(
@@ -1577,9 +1515,7 @@ mod tests {
             log.iter().any(|(_, _, _, _, blocked)| *blocked),
             "the blocking hook reports blocked"
         );
-        // v2 `HookResultPayload`: the run's agent and turn ride the event, so a
-        // transcript can attribute a subagent's hook output to the subagent
-        // instead of folding it into the main agent's.
+
         assert!(
             log.iter().all(|(agent, turn, _, _, _)| {
                 agent == &request("Write").agent_id && turn.as_deref() == Some("turn-1")
@@ -1588,8 +1524,6 @@ mod tests {
         );
     }
 
-    /// No sink installed (every entry point before wiring): the verdict is
-    /// identical and nothing panics.
     #[tokio::test]
     async fn denial_without_a_sink_is_verdict_identical() {
         let guard = HookGuard::new(vec![hook("PreToolUse", "", exit_two_with_stderr())]);
@@ -1617,8 +1551,7 @@ mod tests {
     async fn invalid_matcher_never_matches_but_is_reported() {
         let guard = HookGuard::new(vec![hook("PreToolUse", "[", exit_two_with_stderr())]);
         assert_eq!(guard.denial(&request("Write")).await, None);
-        // The hook is off, but the typo must be discoverable: recorded for
-        // user-visible surfaces (and warn-logged at construction).
+
         let invalid = guard.invalid_matchers();
         assert_eq!(invalid.len(), 1);
         assert_eq!(invalid[0].event, "PreToolUse");
@@ -1660,7 +1593,6 @@ mod tests {
 
     #[tokio::test]
     async fn top_level_permission_decision_does_not_block() {
-        // v2 reads only the nested `hookSpecificOutput.permissionDecision`.
         let dir = tempfile::tempdir().unwrap();
         if skip_if_path_has_spaces(dir.path()) {
             return;
@@ -1695,8 +1627,62 @@ mod tests {
         );
     }
 
-    /// A command that exits 2 with the child's working directory on
-    /// stderr — proves `cwd` reaches the child (v2 `cwd` option).
+    #[tokio::test]
+    async fn hook_failures_fail_open_and_warn_once_per_session() {
+        let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = warnings.clone();
+        let second_failure = if cfg!(windows) { "exit /b 3" } else { "exit 3" };
+        let guard = Arc::new(HookGuard::new(vec![
+            hook("PreToolUse", "", exit_one()),
+            hook("PreToolUse", "", second_failure),
+        ]));
+        guard.with_hook_result(Arc::new(move |_, _, content, blocked| {
+            if !blocked && content.contains("hook failed to execute") {
+                log.lock().unwrap().push(content.to_string());
+            }
+        }));
+
+        assert_eq!(
+            guard.denial(&request("Write")).await,
+            None,
+            "hook failures must fail open"
+        );
+        assert_eq!(guard.denial(&request("Write")).await, None);
+        let warnings = warnings.lock().unwrap();
+        assert_eq!(warnings.len(), 1, "one warning per session: {warnings:?}");
+        assert!(
+            warnings[0].contains("exited with exit code"),
+            "the warning names the failure: {}",
+            warnings[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_output_is_capped_at_64k_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        if skip_if_path_has_spaces(dir.path()) {
+            return;
+        }
+        let file = dir.path().join("loud.txt");
+        std::fs::write(&file, "a".repeat(MAX_HOOK_OUTPUT_CHARS + 4_000)).unwrap();
+        let command = if cfg!(windows) {
+            format!("type {}", file.to_string_lossy())
+        } else {
+            format!("cat {}", file.to_string_lossy())
+        };
+        let outcome = run_hook_process(
+            &hook("PreToolUse", "", &command),
+            &serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert!(outcome.stdout.ends_with(OUTPUT_TRUNCATED_MARKER));
+        assert_eq!(
+            outcome.stdout.chars().count(),
+            MAX_HOOK_OUTPUT_CHARS + OUTPUT_TRUNCATED_MARKER.chars().count()
+        );
+    }
+
     fn cwd_report_command() -> &'static str {
         if cfg!(windows) {
             "echo %CD% 1>&2 & exit /b 2"
@@ -1705,8 +1691,6 @@ mod tests {
         }
     }
 
-    /// A command that exits 2 with a custom env value on stderr — proves
-    /// `env` reaches the child (v2 `env` option, merged over inheritance).
     fn env_report_command() -> &'static str {
         if cfg!(windows) {
             "echo %KIMI_HOOK_TEST_VALUE% 1>&2 & exit /b 2"
@@ -1730,9 +1714,7 @@ mod tests {
             env: None,
         }]);
         let denial = guard.denial(&request("Write")).await;
-        // The denial reason is the child's reported cwd. Compare only the
-        // dir name: canonicalization (symlinked /tmp, short names) can
-        // respell the full path.
+
         let name = dir.path().file_name().unwrap().to_string_lossy();
         assert!(
             denial
@@ -1742,8 +1724,6 @@ mod tests {
         );
     }
 
-    /// v2 #4242: a hook without its own `cwd` runs in the session's working
-    /// directory, not the engine process's cwd.
     #[tokio::test]
     async fn hooks_run_in_the_session_cwd_when_they_declare_none() {
         let dir = tempfile::tempdir().unwrap();
@@ -1769,8 +1749,6 @@ mod tests {
         );
     }
 
-    /// v2 `runMatchedHooks`: `hook.cwd ?? triggerCwd` — a hook's own `cwd`
-    /// still wins over the session cwd.
     #[tokio::test]
     async fn a_hooks_own_cwd_wins_over_the_session_cwd() {
         let own = tempfile::tempdir().unwrap();
@@ -1799,16 +1777,13 @@ mod tests {
         );
     }
 
-    /// v2 #4242 covers the observe-only notifies too (the event-bus triggers
-    /// got the same `cwd`): a fire-and-forget hook runs in the session cwd.
     #[tokio::test]
     async fn fire_and_forget_hooks_also_run_in_the_session_cwd() {
         let dir = tempfile::tempdir().unwrap();
         if skip_if_path_has_spaces(dir.path()) {
             return;
         }
-        // A relative redirect lands in the child's cwd: the file appears in
-        // the session directory only if the hook ran there.
+
         let guard = HookGuard::new(vec![hook("PostToolUse", "Write", "echo 1 >> hook-ran.txt")])
             .with_session_cwd(Some(dir.path().to_string_lossy().to_string()));
         guard
@@ -1823,9 +1798,7 @@ mod tests {
             })
             .await;
         let marker = dir.path().join("hook-ran.txt");
-        // The product grants a hook up to `DEFAULT_HOOK_TIMEOUT_SECS`; wait
-        // that long instead of a shorter test budget that a starved `cmd.exe`
-        // spawn can miss.
+
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_secs(super::DEFAULT_HOOK_TIMEOUT_SECS);
         let ran = loop {
@@ -1843,13 +1816,11 @@ mod tests {
         assert!(ran, "the hook never wrote into the session directory");
     }
 
-    /// The payload `cwd` follows the session cwd (v2 #4242); without one the
-    /// process cwd fills in, matching the pre-#4242 fork behavior.
     #[test]
     fn the_payload_cwd_is_the_session_cwd_or_the_process_cwd() {
         let guard = HookGuard::new(vec![]).with_session_cwd(Some("/session/dir".to_string()));
         assert_eq!(guard.payload_cwd(), "/session/dir");
-        // An empty session cwd is treated as absent.
+
         let guard = HookGuard::new(vec![]).with_session_cwd(Some(String::new()));
         assert!(!guard.payload_cwd().is_empty());
         let guard = HookGuard::new(vec![]);
@@ -1886,10 +1857,7 @@ mod tests {
         if skip_if_path_has_spaces(dir_a.path()) || skip_if_path_has_spaces(dir_b.path()) {
             return;
         }
-        // Same command, different cwd: v2 dedups on cwd + command, so both run.
-        // Each hook writes a marker relative to its own cwd so the two runs
-        // never contend on one file (Windows `cmd >>` seeks instead of
-        // appending atomically).
+
         let command = "echo 1 >> marker.txt".to_string();
         let guard = HookGuard::new(vec![
             HookDef {
@@ -1986,9 +1954,7 @@ mod tests {
                 is_error: false,
             })
             .await;
-        // The hook runs fire-and-forget; poll for the marker instead of
-        // sleeping a fixed window so the test stays stable under load. The
-        // bound is the product's own hook allowance.
+
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_secs(super::DEFAULT_HOOK_TIMEOUT_SECS);
         let content = loop {
@@ -2001,10 +1967,6 @@ mod tests {
         assert!(content.contains("done"));
     }
 
-    /// A command that copies its stdin payload to a file (`more` reads the
-    /// pipe to EOF on cmd; `cat` elsewhere), so the test can assert on the
-    /// exact JSON the hook received. `%SystemRoot%`-pinned like
-    /// `capture::hook`: cmd's PATH lookup fails under a very long PATH.
     fn capture_stdin_command(target: &std::path::Path) -> String {
         if cfg!(windows) {
             format!(
@@ -2016,12 +1978,6 @@ mod tests {
         }
     }
 
-    /// Wait for a fire-and-forget hook to finish writing a *complete* capture.
-    /// A non-empty snapshot can be a partial write (`more.com` echoes the line
-    /// and then the newline, both as separate writes), so only a snapshot that
-    /// parses as JSON ends the wait. The bound matches the product's own hook
-    /// allowance (`DEFAULT_HOOK_TIMEOUT_SECS`): this path spawns `cmd` plus
-    /// `more.com`, which can be starved far past a short test-only budget.
     async fn wait_for_capture(path: &std::path::Path) -> String {
         let timeout = std::time::Duration::from_secs(super::DEFAULT_HOOK_TIMEOUT_SECS);
         let deadline = std::time::Instant::now() + timeout;
@@ -2049,7 +2005,6 @@ mod tests {
             &capture_stdin_command(&captured),
         )]);
 
-        // A `resume` session does not match a `startup` hook: no file.
         guard
             .notify_session_lifecycle(
                 "SessionStart",
@@ -2063,8 +2018,6 @@ mod tests {
             "the resume source must not match a startup hook"
         );
 
-        // The `startup` source matches, and the stdin payload carries the
-        // v2 `hook_event_name` + `source` fields.
         guard
             .notify_session_lifecycle(
                 "SessionStart",
@@ -2085,8 +2038,7 @@ mod tests {
             return;
         }
         let captured = dir.path().join("session-end.json");
-        // SessionEnd is observational: even an exit-2 hook must not block
-        // the caller (the notify resolves and the reason is dropped).
+
         let veto = hook("SessionEnd", "archive", exit_two_with_stderr());
         let guard = HookGuard::new(vec![
             veto,
@@ -2119,7 +2071,6 @@ mod tests {
             &capture_stdin_command(&captured),
         )]);
 
-        // A `user` origin does not match a `system_trigger` hook: no file.
         guard
             .notify_turn_started(7, &json!({ "kind": "user" }), "hello")
             .await;
@@ -2155,7 +2106,6 @@ mod tests {
             &capture_stdin_command(&captured),
         )]);
 
-        // A different error type does not match.
         guard.notify_stop_failure("permission.denied", "nope").await;
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(!captured.exists());
@@ -2285,7 +2235,6 @@ mod tests {
             hook("PostCompact", "auto", &capture_stdin_command(&post)),
         ]);
 
-        // A `bash` task does not match a `subagent` matcher: no file.
         guard
             .notify_task_started("t0", "bash", "other", "running", 99)
             .await;
@@ -2324,16 +2273,14 @@ mod tests {
             hook("Interrupt", "", exit_two_silent()),
             hook("StopFailure", "permission.denied", exit_two_silent()),
         ]);
-        // Both fire observationally — an exit-2 hook changes nothing here.
+
         guard.notify_interrupt(3).await;
         guard.notify_stop_failure("permission.denied", "nope").await;
-        // `has_hooks_for` reports listener presence for the heartbeat gate.
+
         assert!(guard.has_hooks_for("Interrupt"));
         assert!(!guard.has_hooks_for("SessionHeartbeat"));
     }
 
-    /// A command that writes plain text to stdout and exits 0 — v2 allows
-    /// it (only exit 2 or a stdout JSON deny blocks).
     fn echo_reason_command(reason: &str) -> String {
         if cfg!(windows) {
             format!("echo {reason}")
@@ -2342,8 +2289,6 @@ mod tests {
         }
     }
 
-    /// A command that exits 2 with a known reason on stderr — the Stop-hook
-    /// continuation contract (v2 `agentExternalHooksService.ts:239-263`).
     fn exit_two_with_reason(reason: &str) -> String {
         if cfg!(windows) {
             format!("echo {reason} 1>&2 & exit /b 2")
@@ -2375,8 +2320,6 @@ mod tests {
 
     #[tokio::test]
     async fn stop_hook_plain_stdout_does_not_continue() {
-        // `echo` exits 0 with unstructured stdout — v2 allows (only exit 2
-        // or a stdout JSON deny blocks), so the stop proceeds.
         let guard = HookGuard::new(vec![hook("Stop", "", &echo_reason_command("keep going"))]);
         let reason = guard.notify_stop("main", "t1", "", "", "stop").await;
         assert!(reason.is_none());
@@ -2395,20 +2338,18 @@ mod tests {
 
     #[tokio::test]
     async fn stop_hook_filters_by_event_and_matcher() {
-        // PreToolUse hook should never run for Stop dispatch.
         let guard = HookGuard::new(vec![
             hook("PreToolUse", "", &exit_two_with_reason("pretool")),
             hook("Stop", "Bash", &exit_two_with_reason("bash-only")),
         ]);
-        // At a clean text stop the matcher runs against "": the Bash-scoped
-        // hook does not hit.
+
         assert!(
             guard
                 .notify_stop("main", "t1", "", "", "stop")
                 .await
                 .is_none()
         );
-        // A matcher hit vetoes with its reason.
+
         assert_eq!(
             guard
                 .notify_stop("main", "t1", "Bash", "c2", "stop")

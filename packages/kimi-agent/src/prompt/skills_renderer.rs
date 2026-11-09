@@ -12,14 +12,23 @@ Identify the skills relevant to your current task and read the skill file for it
 Skills are grouped by scope (`Project`, `User`, `Extra`, `Built-in`) so you can tell where each came from. When the user refers to \"the skill in this project\" or \"the user-scope skill\", use the scope heading to disambiguate. When multiple scopes define a skill with the same name, the more specific scope takes precedence: **Project overrides User overrides Extra overrides Built-in**.\n\n\
 DISREGARD any earlier skill listings. Current available skills:";
 
+/// v2 `LISTING_DESC_MAX` (`catalog/registry.ts:13`): the model listing caps a
+/// description at 250 characters, marking the cut with `...`.
+const LISTING_DESC_MAX: usize = 250;
+
 /// Render a list of skill descriptors into the formatted Markdown `# Skills` section.
 pub fn render_skills_markdown(skills: &[SkillDescriptor]) -> String {
-    // Sub-skills are user-invocable only: v2's catalog filters them out
-    // (`listInvocableSkills` drops `isSubSkill`) and advertises the parent
-    // instead, so the model never sees `<parent>.<child>`.
+    // v2's `listInvocableSkills` (`registry.ts:96-101`) keeps exactly what the
+    // `Skill` tool will load — `disableModelInvocation` off and an inline type
+    // (`None` | `prompt` | `inline`) — and `getModelSkillListing` then drops
+    // sub-skills. Anything else would advertise a skill the tool refuses.
     let active_skills: Vec<&SkillDescriptor> = skills
         .iter()
-        .filter(|s| !s.disable_model_invocation && s.is_sub_skill != Some(true))
+        .filter(|s| {
+            !s.disable_model_invocation
+                && s.is_sub_skill != Some(true)
+                && crate::skills::is_inline_skill_type(s.skill_type.as_deref())
+        })
         .collect();
 
     if active_skills.is_empty() {
@@ -51,9 +60,13 @@ pub fn render_skills_markdown(skills: &[SkillDescriptor]) -> String {
             let desc = if s.description.is_empty() {
                 "No description provided.".to_string()
             } else {
-                s.description.clone()
+                truncate_listing_description(&s.description)
             };
-            buf.push_str(&format!("- {}: {}\n  Path: {}\n", s.name, desc, s.path));
+            buf.push_str(&format!("- {}: {}\n", s.name, desc));
+            if let Some(when_to_use) = s.when_to_use.as_deref().filter(|text| !text.is_empty()) {
+                buf.push_str(&format!("  When to use: {when_to_use}\n"));
+            }
+            buf.push_str(&format!("  Path: {}\n", s.path));
         }
     };
 
@@ -63,6 +76,25 @@ pub fn render_skills_markdown(skills: &[SkillDescriptor]) -> String {
     format_group("Extra", &other_skills, &mut out);
 
     out
+}
+
+/// v2 `truncate` (`catalog/registry.ts:239-249`): keep at most
+/// [`LISTING_DESC_MAX`] grapheme clusters and mark the cut with `...`.
+fn truncate_listing_description(value: &str) -> String {
+    if value.chars().count() <= LISTING_DESC_MAX {
+        return value.to_string();
+    }
+    let mut truncated = String::new();
+    let mut length = 0;
+    for character in value.chars() {
+        if length + 1 > LISTING_DESC_MAX - 3 {
+            break;
+        }
+        truncated.push(character);
+        length += 1;
+    }
+    truncated.push_str("...");
+    truncated
 }
 
 /// Helper that scans skills for the given workspace and renders the Markdown block.
@@ -123,6 +155,7 @@ mod tests {
                 dir: plugin_root,
                 plugin_id: "plugin-a".into(),
                 instructions: None,
+                session_start: None,
             }],
             true,
         );
@@ -149,6 +182,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: None,
                 skill_type: None,
+                when_to_use: None,
             },
             SkillDescriptor {
                 name: "hidden-2".into(),
@@ -159,6 +193,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: None,
                 skill_type: None,
+                when_to_use: None,
             },
         ];
         assert_eq!(render_skills_markdown(&hidden_skills), "");
@@ -177,6 +212,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: None,
                 skill_type: None,
+                when_to_use: None,
             },
             // Disabled skill in project scope must be omitted
             SkillDescriptor {
@@ -188,6 +224,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: None,
                 skill_type: None,
+                when_to_use: None,
             },
             // User scope
             SkillDescriptor {
@@ -199,6 +236,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: None,
                 skill_type: None,
+                when_to_use: None,
             },
             // Built-in scope with empty description fallback
             SkillDescriptor {
@@ -210,6 +248,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: None,
                 skill_type: None,
+                when_to_use: None,
             },
             // Extra scope (any unrecognized source string)
             SkillDescriptor {
@@ -221,6 +260,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: None,
                 skill_type: None,
+                when_to_use: None,
             },
         ];
 
@@ -266,6 +306,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: None,
                 skill_type: None,
+                when_to_use: None,
             },
             SkillDescriptor {
                 name: "bundle.child".into(),
@@ -278,6 +319,7 @@ mod tests {
                 scopes: None,
                 is_sub_skill: Some(true),
                 skill_type: None,
+                when_to_use: None,
             },
         ];
 
@@ -299,6 +341,7 @@ mod tests {
             scopes: None,
             is_sub_skill: None,
             skill_type: None,
+            when_to_use: None,
         }];
 
         let md = render_skills_markdown(&skills);
@@ -318,5 +361,65 @@ mod tests {
             !md.contains("### Extra"),
             "empty Extra group must not be rendered"
         );
+    }
+
+    /// v2's listing keeps only what `Skill` can load (`isInlineSkillType`):
+    /// `flow` and `reference` are skipped, so the prompt never advertises a
+    /// skill the tool refuses.
+    #[test]
+    fn test_render_skills_lists_only_model_loadable_types() {
+        let make = |name: &str, skill_type: Option<&str>| SkillDescriptor {
+            name: name.into(),
+            description: "d".into(),
+            source: "project".into(),
+            path: format!("/skills/{name}/SKILL.md"),
+            disable_model_invocation: false,
+            scopes: None,
+            is_sub_skill: None,
+            skill_type: skill_type.map(str::to_string),
+            when_to_use: None,
+        };
+        let skills = vec![
+            make("inline-ok", None),
+            make("prompt-ok", Some("prompt")),
+            make("flow-only", Some("flow")),
+            make("reference-only", Some("reference")),
+        ];
+
+        let md = render_skills_markdown(&skills);
+        assert!(md.contains("- inline-ok:"), "{md}");
+        assert!(md.contains("- prompt-ok:"), "{md}");
+        assert!(!md.contains("flow-only"), "{md}");
+        assert!(!md.contains("reference-only"), "{md}");
+    }
+
+    /// v2 `formatModelSkill` (`registry.ts:228-235`): the description is capped
+    /// at 250 characters with `...`, and `whenToUse` renders as its own line.
+    #[test]
+    fn test_render_skills_shows_when_to_use_and_caps_the_description() {
+        let long = "x".repeat(400);
+        let skills = vec![SkillDescriptor {
+            name: "capped".into(),
+            description: long,
+            source: "project".into(),
+            path: "/skills/capped/SKILL.md".into(),
+            disable_model_invocation: false,
+            scopes: None,
+            is_sub_skill: None,
+            skill_type: None,
+            when_to_use: Some("When the user asks for a chart.".into()),
+        }];
+
+        let md = render_skills_markdown(&skills);
+        assert!(
+            md.contains("  When to use: When the user asks for a chart.\n"),
+            "{md}"
+        );
+        let description = md
+            .lines()
+            .find_map(|line| line.strip_prefix("- capped: "))
+            .expect("listing line");
+        assert_eq!(description.chars().count(), 250, "{description}");
+        assert!(description.ends_with("..."), "{description}");
     }
 }

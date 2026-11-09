@@ -45,43 +45,45 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
                     })
                 } else {
                     // Third call succeeds after compaction. v2 shape:
-                    // system + head user input (u1, kept verbatim) +
-                    // elision note + prefixed summary + continuation +
-                    // the uncompacted tail (u2/a2/u3) + date reminder.
-                    assert_eq!(params.messages.len(), 8);
+                    // system + the kept real user input (u1, u2, u3, all
+                    // verbatim) + the in-flight turn (the date reminder
+                    // injected after u3) + prefixed summary + continuation.
+                    // The completed-turn assistant messages (a1, a2) are
+                    // covered by the summary instead of riding the tail.
+                    assert_eq!(params.messages.len(), 7);
                     assert_eq!(params.messages[0].role, "system");
                     assert_eq!(params.messages[1].content, "u1");
-                    // The compacted range here covers only u1/a1 — its
-                    // head keeps u1 verbatim; u2/u3 live in the
-                    // uncompacted tail.
-                    assert_eq!(params.messages[2].role, "user");
+                    assert_eq!(params.messages[2].content, "u2");
+                    assert_eq!(params.messages[3].content, "u3");
                     assert!(
-                        params.messages[2]
+                        params.messages[4].content.starts_with(
+                            "<system-reminder>
+"
+                        ),
+                        "the reminder injected after the last user input is the in-flight turn"
+                    );
+                    assert!(
+                        params.messages[5]
                             .content
                             .contains(crate::compaction::COMPACTION_SUMMARY_PREFIX),
                         "the summary must ride the compaction prefix"
                     );
-                    let summary_message = &params.messages[2];
+                    let summary_message = &params.messages[5];
                     assert!(
                         summary_message
                             .content
-                            .ends_with("Earlier user and assistant discussed the task."),
+                            .contains("Earlier user and assistant discussed the task."),
                         "the generated summary must replace the omitted history"
                     );
-                    assert_eq!(
-                        params.messages[3].content,
-                        crate::compaction::COMPACTION_CONTINUATION_TEXT,
-                        "continuation note carried by the compacted shape, ahead of the tail"
-                    );
-                    assert_eq!(params.messages[4].content, "u2");
-                    assert_eq!(params.messages[5].content, "a2");
-                    assert_eq!(params.messages[6].content, "u3");
                     assert!(
-                        params.messages[7].content.starts_with(
-                            "<system-reminder>
-"
-                        ),
-                        "date reminder appended after emergency compaction"
+                        summary_message.content.starts_with("<system-reminder>")
+                            && summary_message.content.ends_with("</system-reminder>"),
+                        "v2 wraps the summary in a system-reminder"
+                    );
+                    assert_eq!(
+                        params.messages[6].content,
+                        crate::compaction::COMPACTION_CONTINUATION_TEXT,
+                        "continuation note closes the compacted shape"
                     );
                     Ok(LLMChatResponse {
                         content: "Recovered successfully".into(),
@@ -819,7 +821,7 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
                 &format!("img-{index}.png"),
                 "image/png",
                 None,
-                format!("PNGDATA-{index}").as_bytes(),
+                &[b"\x89PNG\r\n\x1a\n" as &[u8], format!("PNGDATA-{index}").as_bytes()].concat(),
             )
             .unwrap();
         file_ids.push(meta.id);
@@ -942,10 +944,12 @@ async fn an_interruption_cancels_an_in_flight_media_upload() {
             protocol: "openai".into(),
             base_url: format!("http://{addr}"),
             provider_key: "kimi".into(),
+            provider_type: "kimi".into(),
             image_in: true,
             video_in: true,
             audio_in: true,
             uploads_media: true,
+            inline_video: false,
         },
     };
     let messages = vec![LLMMessage {
@@ -1089,7 +1093,7 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
                 &format!("img-{index}.png"),
                 "image/png",
                 None,
-                format!("PNGDATA-{index}").as_bytes(),
+                &[b"\x89PNG\r\n\x1a\n" as &[u8], format!("PNGDATA-{index}").as_bytes()].concat(),
             )
             .unwrap();
         file_ids.push(meta.id);
@@ -1266,7 +1270,7 @@ async fn an_image_format_rejection_strips_the_media_and_retries() {
                 &format!("img-{index}.png"),
                 "image/png",
                 None,
-                format!("PNGDATA-{index}").as_bytes(),
+                &[b"\x89PNG\r\n\x1a\n" as &[u8], format!("PNGDATA-{index}").as_bytes()].concat(),
             )
             .unwrap();
         file_ids.push(meta.id);
@@ -1419,32 +1423,31 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
     let turn = run_turn(input, &callbacks).await.unwrap();
 
     let sent = captured.lock().unwrap().clone();
-    let omitted = |message: &LLMMessage| {
+    let omitted_block = |block: &ContentBlock| {
         matches!(
-            message.blocks.first(),
-            Some(ContentBlock::Text { text, .. })
+            block,
+            ContentBlock::Text { text, .. }
                 if text == "[image omitted: dropped to fit the request media budget]"
         )
     };
-    // The turn head is the rebuilt system message, and the loop injects a
-    // date reminder of its own — the media are the messages that carry a
-    // media block or the placeholder one left behind.
-    let media: Vec<&LLMMessage> = sent
+    let omitted = |message: &LLMMessage| message.blocks.iter().any(omitted_block);
+    // Consecutive real user messages merge on the wire (v2
+    // `canMergeUserMessage`), so media are counted per block, not per message.
+    let media: Vec<&ContentBlock> = sent
         .iter()
-        .filter(|m| {
-            omitted(m)
-                || m.blocks
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Image { .. }))
-        })
+        .flat_map(|m| m.blocks.iter())
+        .filter(|b| omitted_block(b) || matches!(b, ContentBlock::Image { .. }))
         .collect();
     assert_eq!(media.len(), 3, "{sent:?}");
-    assert!(omitted(media[0]), "the oldest media leaves the request");
-    assert!(omitted(media[1]));
     assert!(
-        !omitted(media[2]),
+        omitted_block(media[0]),
+        "the oldest media leaves the request"
+    );
+    assert!(omitted_block(media[1]));
+    assert!(
+        matches!(media[2], ContentBlock::Image { .. }),
         "the newest media stays: {:?}",
-        media[2].blocks
+        media[2]
     );
     assert!(
         turn.messages

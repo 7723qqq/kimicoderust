@@ -399,9 +399,9 @@ mod tests {
 
     #[test]
     fn accepts_a_plain_origin_form_get() {
-        let request = parse(b"GET /api/v1/health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let request = parse(b"GET /api/v1/healthz HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
         assert_eq!(request.method, "GET");
-        assert_eq!(request.path, "/api/v1/health");
+        assert_eq!(request.path, "/api/v1/healthz");
         assert_eq!(request.headers.get("host").map(String::as_str), Some("x"));
     }
 
@@ -478,7 +478,7 @@ mod tests {
 
         let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
         stream
-            .write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(b"GET /api/v1/healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await
             .unwrap();
 
@@ -488,7 +488,7 @@ mod tests {
 
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
         assert!(text.contains("Connection: close"), "{text}");
-        assert!(text.contains("kimi-agent-rust"), "{text}");
+        assert!(text.contains("\"ok\":true"), "{text}");
 
         handle.shutdown();
     }
@@ -628,7 +628,7 @@ mod tests {
 
         let health = exchange(
             handle.local_addr,
-            "GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /api/v1/healthz HTTP/1.1\r\nHost: localhost\r\n\r\n",
         )
         .await;
         assert!(health.starts_with("HTTP/1.1 200 OK\r\n"), "{health}");

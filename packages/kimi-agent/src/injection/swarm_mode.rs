@@ -64,7 +64,15 @@ pub fn register_swarm_mode_injection(
     let mut disclosed = baseline;
     registry.register(
         "swarm_mode",
-        Box::new(move |_ctx: &InjectionContext| {
+        Box::new(move |ctx: &InjectionContext| {
+            // The disclosure lives in the conversation history (v2
+            // `renderedState`), so a compaction splice can drop it and the
+            // rearm must announce the mode again. Re-deriving on the rearm is
+            // the history-derived rule; the constructor baseline covers the
+            // turn head.
+            if ctx.rearmed {
+                disclosed = scan_swarm_mode_baseline(ctx.history);
+            }
             // Tool-triggered entries are legacy history only: they neither
             // activate the mode nor announce it.
             let trigger = swarm_mode_registry().trigger(&agent_id);

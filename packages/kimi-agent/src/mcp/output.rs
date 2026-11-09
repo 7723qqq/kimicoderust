@@ -13,6 +13,7 @@
 
 use std::fmt::Write as _;
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::types::{McpContent, McpToolCallResult};
@@ -45,8 +46,9 @@ pub struct SavedAttachment {
 pub struct McpOutput {
     /// Model-facing text: the server's own text plus the attachment notices.
     pub content: String,
-    /// Media the model should receive, as references the resolver can inline.
-    pub delivery: Vec<ContentBlock>,
+    /// The result body in the order the server returned it, media included
+    /// (v2 `mcpResultToExecutableOutput` output parts).
+    pub parts: Vec<ContentBlock>,
     /// `true` when an original was withheld from the model but preserved (or
     /// could not be preserved) — the caller marks the result truncated.
     pub truncated: bool,
@@ -392,13 +394,14 @@ impl ConvertedBlock {
 /// nothing is preserved, which is what a host with no session store gets.
 pub fn mcp_result_to_output(
     result: &McpToolCallResult,
+    qualified_tool_name: &str,
     files: Option<&FileStore>,
     provider_type: Option<&str>,
     cancelled: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> McpOutput {
     let aborted = || cancelled.is_some_and(|is_cancelled| is_cancelled());
     let mut texts: Vec<String> = Vec::new();
-    let mut delivery: Vec<ContentBlock> = Vec::new();
+    let mut parts: Vec<ContentBlock> = Vec::new();
     let mut notices: Vec<String> = Vec::new();
     // payload -> the id it was preserved under, so a repeat of the same
     // original reuses the stored copy instead of sending the bytes again.
@@ -473,15 +476,40 @@ pub fn mcp_result_to_output(
         }
 
         if let Some(text) = converted.text {
+            parts.push(ContentBlock::Text {
+                text: text.clone(),
+                meta: None,
+            });
             texts.push(text);
         }
         if let Some(block) = media_ref.or(converted.media) {
-            delivery.push(block);
+            parts.push(block);
         }
+    }
+
+    wrap_media_only(&mut parts, qualified_tool_name);
+
+    // v2 appends the extras before the attachment notices (`output.ts:220-228`
+    // versus `:262-263`): the notice list is the tail of the result.
+    if let Some(extras) = structured_extras(
+        &texts,
+        result.structured_content.as_ref(),
+        result.meta.as_ref(),
+    ) {
+        let extras_text = format!("\n<mcp-result-extras>\n{extras}\n</mcp-result-extras>");
+        parts.push(ContentBlock::Text {
+            text: extras_text.clone(),
+            meta: None,
+        });
+        texts.push(extras_text);
     }
 
     let (notice_text, notice_spilled) = bound_notices(&notices, files, &aborted);
     if !notice_text.is_empty() {
+        parts.push(ContentBlock::Text {
+            text: notice_text.clone(),
+            meta: None,
+        });
         texts.push(notice_text);
     }
     if notice_spilled {
@@ -490,9 +518,94 @@ pub fn mcp_result_to_output(
 
     McpOutput {
         content: texts.join("\n"),
-        delivery,
+        parts,
         truncated: omitted,
     }
+}
+
+fn is_media_part(part: &ContentBlock) -> bool {
+    matches!(
+        part,
+        ContentBlock::Image { .. }
+            | ContentBlock::ImageUrl { .. }
+            | ContentBlock::AudioUrl { .. }
+            | ContentBlock::VideoUrl { .. }
+            | ContentBlock::MediaRef { .. }
+    )
+}
+
+/// v2 `wrapMediaOnly` (`output.ts:412-423`): a result carrying media but no
+/// non-empty text is wrapped in an `<mcp_tool_result name="…">` envelope so
+/// the model can tell whose media it is looking at.
+fn wrap_media_only(parts: &mut Vec<ContentBlock>, qualified_tool_name: &str) {
+    let has_media = parts.iter().any(is_media_part);
+    let has_non_empty_text = parts
+        .iter()
+        .any(|part| matches!(part, ContentBlock::Text { text, .. } if !text.is_empty()));
+    if !has_media || has_non_empty_text {
+        return;
+    }
+    parts.insert(
+        0,
+        ContentBlock::Text {
+            text: format!("<mcp_tool_result name=\"{qualified_tool_name}\">"),
+            meta: None,
+        },
+    );
+    parts.push(ContentBlock::Text {
+        text: "</mcp_tool_result>".to_string(),
+        meta: None,
+    });
+}
+
+/// v2 `hasStructuredCopy` + `structuredExtras` (`output.ts:200-228`):
+/// `structuredContent` only when no single converted text part already renders
+/// the same JSON, `_meta` only after dropping reserved MCP namespaces, compact
+/// JSON with `<` escaped.
+pub(crate) fn structured_extras(
+    texts: &[String],
+    structured: Option<&Value>,
+    meta: Option<&Value>,
+) -> Option<String> {
+    let mut extras = serde_json::Map::new();
+    if let Some(structured) = structured {
+        let duplicated = texts.iter().any(|text| {
+            serde_json::from_str::<Value>(text.trim()).is_ok_and(|parsed| parsed == *structured)
+        });
+        if !duplicated {
+            extras.insert("structuredContent".to_string(), structured.clone());
+        }
+    }
+    if let Some(Value::Object(meta)) = meta {
+        let kept: serde_json::Map<String, Value> = meta
+            .iter()
+            .filter(|(key, _)| !is_reserved_meta_key(key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !kept.is_empty() {
+            extras.insert("_meta".to_string(), Value::Object(kept));
+        }
+    }
+    if extras.is_empty() {
+        return None;
+    }
+    Some(Value::Object(extras).to_string().replace('<', "\\u003c"))
+}
+
+/// v2 `isReservedMetaKey` (`output.ts:403-410`): the labels before the first
+/// `/` name the protocol namespace (`mcp.*`, `modelcontextprotocol.*`); a bare
+/// `mcp` segment is reserved only when it is not the last label.
+fn is_reserved_meta_key(key: &str) -> bool {
+    let Some(slash) = key.find('/') else {
+        return false;
+    };
+    if slash == 0 {
+        return false;
+    }
+    let labels: Vec<&str> = key[..slash].split('.').collect();
+    labels.iter().enumerate().any(|(index, label)| {
+        (*label == "modelcontextprotocol" || *label == "mcp") && index < labels.len() - 1
+    })
 }
 
 /// Bound the attachment list (v2 `attachmentDetails`, output.ts:158-186):
@@ -594,10 +707,127 @@ mod tests {
             ..Default::default()
         }]);
 
-        let output = mcp_result_to_output(&result, Some(&files), None, None);
+        let output = mcp_result_to_output(&result, "mcp__srv__t", Some(&files), None, None);
         assert_eq!(output.content, "hello");
-        assert!(output.delivery.is_empty());
+        assert_eq!(output.parts.len(), 1);
         assert!(!output.truncated);
+    }
+
+    /// v2 `mcpResultToExecutableOutput` extras: a structured copy the server
+    /// already rendered as one text part is not repeated; reserved `_meta`
+    /// namespaces are stripped; the block is compact JSON with `<` escaped.
+    #[test]
+    fn structured_extras_follow_the_v2_dedupe_and_meta_rules() {
+        let structured = json!({ "rows": [{ "id": 1 }] });
+        assert_eq!(
+            structured_extras(
+                &[r#"{"rows":[{"id":1}]}"#.to_string()],
+                Some(&structured),
+                None
+            ),
+            None,
+            "one text part already carries the same JSON"
+        );
+        assert!(
+            structured_extras(
+                &["{\"rows\":".to_string(), "[{\"id\":1}]}".to_string()],
+                Some(&structured),
+                None
+            )
+            .is_some(),
+            "v2 compares each text part, not the joined text"
+        );
+        assert_eq!(
+            structured_extras(&["a human summary".to_string()], Some(&structured), None).as_deref(),
+            Some(r#"{"structuredContent":{"rows":[{"id":1}]}}"#)
+        );
+
+        let meta = json!({
+            "mcp.tool/annotations": { "readOnly": true },
+            "modelcontextprotocol.io/version": "1",
+            "source": "db",
+            "mcp/plain": "kept: a bare namespace label is not reserved",
+            "mcp": "last-label is not reserved"
+        });
+        let extras =
+            structured_extras(&["text".to_string()], None, Some(&meta)).expect("meta survives");
+        let parsed: Value = serde_json::from_str(&extras).expect("valid JSON");
+        assert_eq!(
+            parsed,
+            json!({
+                "_meta": {
+                    "source": "db",
+                    "mcp": "last-label is not reserved",
+                    "mcp/plain": "kept: a bare namespace label is not reserved"
+                }
+            })
+        );
+        assert_eq!(
+            structured_extras(
+                &["text".to_string()],
+                None,
+                Some(&json!({ "mcp.tool/x": 1, "modelcontextprotocol.io/session": 2 }))
+            ),
+            None
+        );
+        assert_eq!(
+            structured_extras(
+                &["text".to_string()],
+                Some(&json!({ "html": "<script>" })),
+                None
+            )
+            .as_deref(),
+            Some(r#"{"structuredContent":{"html":"\u003cscript>"}}"#)
+        );
+    }
+
+    #[test]
+    fn reserved_meta_keys_match_the_protocol_namespaces() {
+        for reserved in [
+            "mcp.tool/x",
+            "mcp.internal/x",
+            "modelcontextprotocol.io/version",
+            "modelcontextprotocol.session/x",
+        ] {
+            assert!(is_reserved_meta_key(reserved), "{reserved}");
+        }
+        for kept in [
+            "mcp",
+            "mcp/plain",
+            "modelcontextprotocol/x",
+            "source",
+            "/leading",
+            "mcpx.tool/x",
+            "x.mcp/y",
+        ] {
+            assert!(!is_reserved_meta_key(kept), "{kept}");
+        }
+    }
+
+    /// v2 pushes the extras onto the body at `output.ts:220-228` and only then
+    /// appends the attachment notices at `:262-263`.
+    #[test]
+    fn the_result_body_orders_extras_before_the_attachment_notices() {
+        let (_dir, files) = store();
+        let mut result = result_with(vec![png_block(7)]);
+        result.structured_content = Some(json!({ "ok": true }));
+
+        let output = mcp_result_to_output(&result, "mcp__srv__t", Some(&files), None, None);
+        let extras = output
+            .parts
+            .iter()
+            .position(|part| {
+                matches!(part, ContentBlock::Text { text, .. } if text.contains("<mcp-result-extras>"))
+            })
+            .expect("the extras part is present");
+        let notice = output
+            .parts
+            .iter()
+            .position(|part| {
+                matches!(part, ContentBlock::Text { text, .. } if text.contains("Original attachment saved at:"))
+            })
+            .expect("the notice part is present");
+        assert!(extras < notice, "{:?}", output.parts);
     }
 
     /// An inline image is preserved before it is delivered, and the model is
@@ -605,8 +835,13 @@ mod tests {
     #[test]
     fn inline_image_is_preserved_and_delivered_as_a_reference() {
         let (_dir, files) = store();
-        let output =
-            mcp_result_to_output(&result_with(vec![png_block(7)]), Some(&files), None, None);
+        let output = mcp_result_to_output(
+            &result_with(vec![png_block(7)]),
+            "mcp__srv__t",
+            Some(&files),
+            None,
+            None,
+        );
 
         assert!(
             output.content.contains("Original attachment saved at:"),
@@ -621,13 +856,30 @@ mod tests {
             output.content
         );
         let mut file_ids = Vec::new();
-        for block in &output.delivery {
+        for block in &output.parts {
             if let ContentBlock::MediaRef { file_id, kind } = block {
                 assert_eq!(*kind, MediaKind::Image);
                 file_ids.push(file_id.clone());
             }
         }
         assert_eq!(file_ids.len(), 1, "the image must ride as one MediaRef");
+        assert!(
+            matches!(
+                output.parts.first(),
+                Some(ContentBlock::Text { text, .. })
+                    if text == "<mcp_tool_result name=\"mcp__srv__t\">"
+            ),
+            "a media-only result is wrapped: {:?}",
+            output.parts
+        );
+        assert!(
+            matches!(
+                output.parts.get(2),
+                Some(ContentBlock::Text { text, .. }) if text == "</mcp_tool_result>"
+            ),
+            "the envelope closes before the notices: {:?}",
+            output.parts
+        );
 
         let (_, path) = files
             .get(&file_ids[0])
@@ -643,6 +895,7 @@ mod tests {
         let (_dir, files) = store();
         let output = mcp_result_to_output(
             &result_with(vec![png_block(7), png_block(7)]),
+            "mcp__srv__t",
             Some(&files),
             None,
             None,
@@ -661,14 +914,14 @@ mod tests {
         // Both occurrences ride as the same reference: the model sees the
         // media twice, the request carries the bytes once.
         let ids: Vec<&String> = output
-            .delivery
+            .parts
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::MediaRef { file_id, .. } => Some(file_id),
                 _ => None,
             })
             .collect();
-        assert_eq!(ids.len(), 2, "{:?}", output.delivery);
+        assert_eq!(ids.len(), 2, "{:?}", output.parts);
         assert_eq!(ids[0], ids[1]);
     }
 
@@ -688,7 +941,7 @@ mod tests {
             resource: None,
         }]);
 
-        let output = mcp_result_to_output(&result, Some(&files), None, None);
+        let output = mcp_result_to_output(&result, "mcp__srv__t", Some(&files), None, None);
         assert!(
             output.content.contains("image_url dropped"),
             "{}",
@@ -718,7 +971,7 @@ mod tests {
             ..Default::default()
         }]);
 
-        let output = mcp_result_to_output(&result, Some(&files), None, None);
+        let output = mcp_result_to_output(&result, "mcp__srv__t", Some(&files), None, None);
         assert!(
             output.content.contains("unsupported mimeType"),
             "{}",
@@ -734,7 +987,13 @@ mod tests {
     fn a_long_notice_list_is_replaced_by_a_pointer() {
         let (_dir, files) = store();
         let blocks: Vec<McpContent> = (0..40u8).map(png_block).collect();
-        let output = mcp_result_to_output(&result_with(blocks), Some(&files), None, None);
+        let output = mcp_result_to_output(
+            &result_with(blocks),
+            "mcp__srv__t",
+            Some(&files),
+            None,
+            None,
+        );
 
         assert!(
             output
@@ -753,12 +1012,18 @@ mod tests {
     /// preserved.
     #[test]
     fn without_a_store_media_stays_inline() {
-        let output = mcp_result_to_output(&result_with(vec![png_block(7)]), None, None, None);
+        let output = mcp_result_to_output(
+            &result_with(vec![png_block(7)]),
+            "mcp__srv__t",
+            None,
+            None,
+            None,
+        );
 
         assert!(!output.content.contains("Original attachment saved at:"));
         assert!(!output.truncated);
         assert!(matches!(
-            output.delivery.first(),
+            output.parts.get(1),
             Some(ContentBlock::ImageUrl { .. })
         ));
     }
@@ -770,11 +1035,12 @@ mod tests {
         let cancelled = || true;
         let output = mcp_result_to_output(
             &result_with(vec![png_block(7)]),
+            "mcp__srv__t",
             Some(&files),
             None,
             Some(&cancelled),
         );
-        assert!(output.delivery.is_empty());
+        assert!(output.parts.is_empty());
         assert!(files.list().unwrap().is_empty());
     }
 }

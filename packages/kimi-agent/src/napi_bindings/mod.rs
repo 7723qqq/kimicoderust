@@ -23,6 +23,7 @@
 //! callbacks.
 
 mod callbacks;
+mod errors;
 mod mcp;
 mod misc;
 mod params;

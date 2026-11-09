@@ -421,8 +421,13 @@ async fn test_context_compaction_before_llm_call() {
     assert!(
         summary_message
             .content
-            .ends_with("Earlier user and assistant discussed the task."),
+            .contains("Earlier user and assistant discussed the task."),
         "the generated summary must ride the compaction prefix"
+    );
+    assert!(
+        summary_message.content.starts_with("<system-reminder>")
+            && summary_message.content.ends_with("</system-reminder>"),
+        "v2 wraps the summary in a system-reminder"
     );
     assert!(
         captured.iter().any(|m| {
@@ -442,8 +447,10 @@ async fn test_context_compaction_before_llm_call() {
         "exactly one continuation note, carried by the compacted shape itself"
     );
     assert!(
-        captured.iter().any(|m| m.content == big),
-        "most recent message preserved"
+        captured.iter().any(|m| {
+            !m.content.is_empty() && m.content.len() < big.len() && big.ends_with(&m.content)
+        }),
+        "the newest user input survives as the v2 tail-budget suffix"
     );
     assert!(
         captured

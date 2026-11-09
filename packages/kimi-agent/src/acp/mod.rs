@@ -46,6 +46,10 @@ pub struct AcpServer {
     /// rendered as a string, valued by session id. A `$/cancel_request` names
     /// the request to abort, so this is how the notification finds the turn.
     in_flight_prompts: Mutex<HashMap<String, String>>,
+    /// Per-session cancellation, fired by `$/cancel_request` and by EOF. The
+    /// permission/question bridge selects on it, so cancelling a turn also
+    /// stops a client prompt nobody is going to answer.
+    prompt_cancels: Arc<std::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
     /// Client capabilities declared on `initialize` (drives which reverse
     /// RPCs — client fs / terminal — the agent may issue). Shared with the
     /// session host so an ACP-advertised fs can own Read/Write execution.
@@ -74,6 +78,7 @@ impl AcpServer {
             channel: AcpChannel::new(),
             modes: Mutex::new(HashMap::new()),
             in_flight_prompts: Mutex::new(HashMap::new()),
+            prompt_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             client_capabilities: Arc::new(std::sync::Mutex::new(AcpClientCapabilities::default())),
             disable_auth: false,
             last_titles: Mutex::new(HashMap::new()),
@@ -98,6 +103,7 @@ impl AcpServer {
             channel: AcpChannel::new(),
             modes: Mutex::new(HashMap::new()),
             in_flight_prompts: Mutex::new(HashMap::new()),
+            prompt_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             client_capabilities: Arc::new(std::sync::Mutex::new(AcpClientCapabilities::default())),
             disable_auth: false,
             last_titles: Mutex::new(HashMap::new()),
@@ -115,19 +121,27 @@ impl AcpServer {
         // `packages/acp-server/src/acp-fs/acpFsService.ts`).
         let channel = AcpChannel::new();
         let capabilities = Arc::new(std::sync::Mutex::new(AcpClientCapabilities::default()));
+        let prompt_cancels = Arc::new(std::sync::Mutex::new(HashMap::<
+            String,
+            tokio_util::sync::CancellationToken,
+        >::new()));
         let factory_channel = channel.clone();
         let factory_capabilities = capabilities.clone();
+        let factory_cancels = prompt_cancels.clone();
         // The reverse Bash path runs in the client's terminal, which needs the
         // session's cwd (v2 `AcpSessionRuntime` is constructed with it).
         let factory_store = store.clone();
         engine.set_host_factory(Arc::new(move |session_id: &str| {
-            Arc::new(permission::AcpPermissionHost::new(
-                Arc::new(crate::server::engine::ServerHost::standalone()),
-                factory_channel.clone(),
-                session_id.to_string(),
-                factory_capabilities.clone(),
-                session_cwd_of(&factory_store, session_id),
-            ))
+            Arc::new(
+                permission::AcpPermissionHost::new(
+                    Arc::new(crate::server::engine::ServerHost::standalone()),
+                    factory_channel.clone(),
+                    session_id.to_string(),
+                    factory_capabilities.clone(),
+                    session_cwd_of(&factory_store, session_id),
+                )
+                .with_prompt_cancels(factory_cancels.clone()),
+            )
         }));
         Self {
             store,
@@ -135,6 +149,7 @@ impl AcpServer {
             channel,
             modes: Mutex::new(HashMap::new()),
             in_flight_prompts: Mutex::new(HashMap::new()),
+            prompt_cancels,
             client_capabilities: capabilities,
             disable_auth: false,
             last_titles: Mutex::new(HashMap::new()),
@@ -781,28 +796,48 @@ impl AcpServer {
         // not deliver the `session/cancel` / `$/cancel_request` that is
         // supposed to stop it. Responses are correlated by JSON-RPC id, so
         // out-of-order completion is fine.
-        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let mut tasks: Vec<(String, tokio::task::JoinHandle<()>)> = Vec::new();
         while let Some(line) = reader.next_line().await? {
             let trimmed = line.trim().to_string();
             if trimmed.is_empty() {
                 continue;
             }
+            let label = line_label(&trimmed);
             let server = self.clone();
             let tx = tx.clone();
-            tasks.push(tokio::spawn(async move {
-                if let Some(resp) = server.handle_line(&trimmed).await {
-                    let _ = tx.send(AcpOutbound::Response(resp));
-                }
-            }));
-            tasks.retain(|task| !task.is_finished());
+            tasks.push((
+                label,
+                tokio::spawn(async move {
+                    if let Some(resp) = server.handle_line(&trimmed).await {
+                        let _ = tx.send(AcpOutbound::Response(resp));
+                    }
+                }),
+            ));
+            tasks.retain(|(_, task)| !task.is_finished());
         }
+        // EOF: the client can no longer answer an approval or a question, so
+        // cancel the in-flight turns first, then fail every pending
+        // server→client request so no waiter is parked.
+        self.cancel_all_prompts();
+        self.channel.close().await;
         // Drop the sink's clone too, otherwise the writer task never ends.
-        self.channel.clear_sink();
         drop(tx);
-        for task in tasks {
-            let _ = task.await;
+
+        // Drain: a cancelled turn still has to unwind tool work. The reference
+        // waits for every request to settle with no upper bound
+        // (`agent/loop/loopService.ts:970-993`), so this wait has none either.
+        for (label, mut task) in tasks {
+            match (&mut task).await {
+                Ok(()) => {}
+                Err(error) => {
+                    tracing::warn!(%label, %error, "ACP request task ended abnormally");
+                }
+            }
         }
-        let _ = writer.await;
+        match writer.await {
+            Ok(()) => {}
+            Err(error) => tracing::warn!(%error, "ACP writer task ended abnormally"),
+        }
         Ok(())
     }
 
@@ -826,14 +861,32 @@ impl AcpServer {
             return false;
         }
         in_flight.insert(request_key.to_string(), session_id.to_string());
+        drop(in_flight);
+        // A fresh token per turn: `$/cancel_request` and EOF fire it, and the
+        // permission/question bridge selects on it so a cancelled turn does
+        // not leave a client prompt waiting for its human bound.
+        self.prompt_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                session_id.to_string(),
+                tokio_util::sync::CancellationToken::new(),
+            );
         true
     }
 
     fn end_prompt(&self, request_key: &str) {
-        self.in_flight_prompts
+        let session_id = self
+            .in_flight_prompts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(request_key);
+        if let Some(session_id) = session_id {
+            self.prompt_cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&session_id);
+        }
     }
 
     /// Cancel the turn behind a `$/cancel_request` notification: the
@@ -849,9 +902,56 @@ impl AcpServer {
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
             .cloned();
-        match (session_id, self.engine.as_ref()) {
-            (Some(session_id), Some(engine)) => engine.cancel_turn(&session_id),
-            _ => false,
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        self.cancel_prompt(&session_id);
+        match self.engine.as_ref() {
+            Some(engine) => engine.cancel_turn(&session_id),
+            None => false,
+        }
+    }
+
+    /// Fire the session's permission/question wait so it stops now instead of
+    /// waiting for an answer that can no longer arrive.
+    fn cancel_prompt(&self, session_id: &str) {
+        if let Some(token) = self
+            .prompt_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned()
+        {
+            token.cancel();
+        }
+    }
+
+    /// Cancel every in-flight turn. Called when stdin reaches EOF: the client
+    /// can no longer answer a prompt, so waiting for the turn to finish on its
+    /// own could block until the human bound.
+    fn cancel_all_prompts(&self) {
+        let prompts = {
+            let in_flight = self
+                .in_flight_prompts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            in_flight
+                .iter()
+                .map(|(key, session)| (key.clone(), session.clone()))
+                .collect::<Vec<_>>()
+        };
+        for (request_key, session_id) in prompts {
+            self.cancel_prompt(&session_id);
+            let cancelled = self
+                .engine
+                .as_ref()
+                .is_some_and(|engine| engine.cancel_turn(&session_id));
+            tracing::warn!(
+                %session_id,
+                %request_key,
+                cancelled,
+                "ACP stdin closed; cancelling an in-flight turn"
+            );
         }
     }
 
@@ -894,9 +994,7 @@ impl AcpServer {
                 json!(acp_mode_permission(mode_id)),
             );
         }
-        let _ = self
-            .store
-            .put_session_state("metadata", session_id, session_id, &metadata);
+        let _ = self.store.put_session_metadata(session_id, &metadata);
         apply_plan_toggle(&self.store, session_id, acp_mode_plan(mode_id));
         self.modes
             .lock()
@@ -1156,6 +1254,19 @@ impl AcpServer {
 
                 match created {
                     Ok(_) => {
+                        // Freeze the environment at creation (v2 `createSession`
+                        // acquires it before the first turn): a later config edit
+                        // must not move this session, and a resume reads the
+                        // binding back instead of re-deriving it.
+                        if let Some(engine) = self.engine.as_ref()
+                            && let Err(error) = engine.freeze_session_environment(&session_id).await
+                        {
+                            return Some(JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("Environment error: {error}"),
+                            ));
+                        }
                         let mut metadata = json!({});
                         if let Some(root) = cwd.as_deref() {
                             metadata["cwd"] = json!(root);
@@ -1664,8 +1775,30 @@ impl AcpServer {
                                 format!("Unknown sessionId: {sid}"),
                             )
                         } else {
+                            // The session's on-disk engine state (undo
+                            // snapshots, wake state, logs) does not cascade with
+                            // the rows; remove it first and refuse to report a
+                            // clean delete while it survives.
+                            if let Err(error) =
+                                crate::server::idle_sessions::remove_session_state_dir(
+                                    &self.store,
+                                    sid,
+                                )
+                            {
+                                return Some(JsonRpcResponse::error(
+                                    req.id,
+                                    -32000,
+                                    format!("Could not clean up session {sid}: {error}"),
+                                ));
+                            }
                             match self.store.delete_session(sid) {
-                                Ok(_) => JsonRpcResponse::success(req.id, json!({})),
+                                Ok(_) => {
+                                    if let Some(engine) = self.engine.as_ref() {
+                                        engine.forget_change_notifier(sid);
+                                        engine.forget_mcp_status(sid);
+                                    }
+                                    JsonRpcResponse::success(req.id, json!({}))
+                                }
                                 Err(e) => JsonRpcResponse::error(
                                     req.id,
                                     -32000,
@@ -1889,6 +2022,23 @@ fn request_key(id: &serde_json::Value) -> String {
     }
 }
 
+/// A human-readable name for a request line (`method#id`), used only when a
+/// shutdown drain has to report which request did not stop.
+fn line_label(line: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return "unparseable-request".to_string();
+    };
+    let method = value
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("response");
+    let id = value
+        .get("id")
+        .map(request_key)
+        .unwrap_or_else(|| "-".to_string());
+    format!("{method}#{id}")
+}
+
 /// The engine merges additional roots only at session create, so
 /// load / resume / fork cannot honor `additionalDirectories` — say so instead
 /// of dropping the field in silence (v2 `warnIgnoredAdditionalDirs`,
@@ -1930,8 +2080,8 @@ fn acp_mode_plan(mode: &str) -> bool {
 }
 
 /// Apply the plan half of v2 `setMode` through the session state store (v2
-/// agent scope — the same `plan` domain `tools/plan_mode.rs` reads and writes),
-/// so a mode switch and a native `EnterPlanMode` cannot shadow each other.
+/// agent scope — the same `plan` domain the guard in `tools/plan_mode.rs`
+/// reads), so a mode switch and a plan exit cannot shadow each other.
 /// Best effort: a domain that cannot be reached must not fail the mode
 /// switch, because the permission half still has to land.
 fn apply_plan_toggle(store: &SqliteSessionStore, session_id: &str, plan: bool) {
@@ -1945,18 +2095,12 @@ fn apply_plan_toggle(store: &SqliteSessionStore, session_id: &str, plan: bool) {
     let Ok(state) = state else {
         return;
     };
-    // `apply_write` is the domain's own semantics: entering plan mode mints
-    // the plan id/path and the empty plan file, exactly like `EnterPlanMode`.
+    // `apply_write_and_persist` is the domain's own semantics: entering plan
+    // mode mints the plan id/path and the empty plan file, exactly like the
+    // user's own plan-mode entry, and persists it under the same domain lock.
     let value = serde_json::json!({ "active": plan });
-    match state.apply_write("plan", &value) {
-        Ok(outcome) => {
-            if let Err(error) = state.write_domain("plan", &outcome.stored) {
-                tracing::warn!(session_id, plan, %error, "acp set_mode could not persist plan state");
-            }
-        }
-        Err(error) => {
-            tracing::warn!(session_id, plan, %error, "acp set_mode could not toggle plan state");
-        }
+    if let Err(error) = state.apply_write_and_persist("plan", &value) {
+        tracing::warn!(session_id, plan, %error, "acp set_mode could not persist plan state");
     }
 }
 

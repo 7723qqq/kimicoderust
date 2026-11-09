@@ -47,8 +47,19 @@ fn dedupe_key(path_str: &str) -> String {
 }
 
 /// Read an instruction file if it is non-empty.
-fn read_agent_file(path: &Path) -> Option<AgentFile> {
+///
+/// v2 `readAgentFile` (`profile/context.ts:300-320`): a path that exists but
+/// is not a regular file, or that cannot be read, is skipped *and* reported —
+/// silently dropping a broken instruction file hides a configuration problem
+/// from the user.
+fn read_agent_file(path: &Path, warnings: &mut Vec<String>) -> Option<AgentFile> {
     if !path.is_file() {
+        if path.symlink_metadata().is_ok() {
+            warnings.push(format!(
+                "Instruction file at {} exists but is not a readable regular file; skipping.",
+                normalize_path_display(path)
+            ));
+        }
         return None;
     }
     match std::fs::read_to_string(path) {
@@ -63,7 +74,13 @@ fn read_agent_file(path: &Path) -> Option<AgentFile> {
                 })
             }
         }
-        Err(_) => None,
+        Err(_) => {
+            warnings.push(format!(
+                "Instruction file at {} could not be read; skipping.",
+                normalize_path_display(path)
+            ));
+            None
+        }
     }
 }
 
@@ -92,13 +109,80 @@ pub(crate) fn instruction_dirs(work_dir: &Path) -> Vec<PathBuf> {
     chain
 }
 
+/// Every directory from `root` down to `leaf`, inclusive. `leaf` must be
+/// inside `root`; the caller checks that, so a workspace-root chain never
+/// escapes into an unrelated path.
+pub(crate) fn dirs_root_to_leaf(root: &Path, leaf: &Path) -> Vec<PathBuf> {
+    let mut chain = vec![root.to_path_buf()];
+    let Ok(relative) = leaf.strip_prefix(root) else {
+        return vec![leaf.to_path_buf()];
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        chain.push(current.clone());
+    }
+    chain
+}
+
+/// The AGENTS.md paths embedded in a rendered system prompt (v2
+/// `extractAgentsMdPathsFromSystemPrompt`, `profile/context.ts:113-130`).
+///
+/// The loader prefixes every section with `<!-- From: <path> -->`; the
+/// reminder seeds those paths as already disclosed so it never suggests a file
+/// the model was handed in its instructions (`seedInjected`,
+/// `agentsMdReminderService.ts:98-106, 117-124`).
+pub fn extract_agents_md_paths_from_prompt(system_prompt: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for line in system_prompt.lines() {
+        let Some(inner) = line
+            .trim()
+            .strip_prefix("<!-- From: ")
+            .and_then(|rest| rest.strip_suffix(" -->"))
+        else {
+            continue;
+        };
+        let path = inner.trim();
+        if path.is_empty() {
+            continue;
+        }
+        let is_agents_md = Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| AGENTS_MD_PLAIN_NAMES.contains(&name));
+        if !is_agents_md {
+            continue;
+        }
+        let normalized = path.replace('\\', "/");
+        if !paths.iter().any(|seen| seen == &normalized) {
+            paths.push(normalized);
+        }
+    }
+    paths
+}
+
 /// Load and aggregate all relevant AGENTS.md files for a workspace.
 pub fn load_agents_md(workspace_root: &Path, custom_brand_home: Option<&Path>) -> LoadedAgentsMd {
+    load_agents_md_with_home(
+        workspace_root,
+        custom_brand_home,
+        user_home_dir().as_deref(),
+    )
+}
+
+/// [`load_agents_md`] with an explicit home directory, so tests can pin the
+/// `~/.agents` fallback instead of reading the machine's real home.
+fn load_agents_md_with_home(
+    workspace_root: &Path,
+    custom_brand_home: Option<&Path>,
+    home: Option<&Path>,
+) -> LoadedAgentsMd {
     let mut discovered: Vec<AgentFile> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     let mut collect = |path: PathBuf| -> bool {
-        if let Some(file) = read_agent_file(&path) {
+        if let Some(file) = read_agent_file(&path, &mut warnings) {
             let key = dedupe_key(&file.path);
             if seen.insert(key) {
                 discovered.push(file);
@@ -108,12 +192,16 @@ pub fn load_agents_md(workspace_root: &Path, custom_brand_home: Option<&Path>) -
         false
     };
 
-    // 1. User brand home: ~/.kimi-code/AGENTS.md
+    // 1. User brand home: <brandHome ?? ~/.kimi-code>/AGENTS.md
     if let Some(bh) = custom_brand_home {
         collect(bh.join("AGENTS.md"));
-    } else if let Some(home) = user_home_dir() {
+    } else if let Some(home) = home {
         collect(home.join(".kimi-code").join("AGENTS.md"));
-        // Generic fallbacks: ~/.agents/AGENTS.md
+    }
+
+    // Generic fallbacks: ~/.agents/AGENTS.md. v2 applies these even when a
+    // brand home overrides the personal directory (`profile/context.ts:190-196`).
+    if let Some(home) = home {
         for name in AGENTS_MD_PLAIN_NAMES {
             if collect(home.join(".agents").join(name)) {
                 break;
@@ -145,15 +233,19 @@ pub fn load_agents_md(workspace_root: &Path, custom_brand_home: Option<&Path>) -
     let content = rendered_sections.join("\n\n");
     let total_bytes = content.len();
 
-    let warning = if total_bytes > AGENTS_MD_RECOMMENDED_MAX_BYTES {
+    if total_bytes > AGENTS_MD_RECOMMENDED_MAX_BYTES {
         let kb = (total_bytes as f64) / 1024.0;
         let max_kb = (AGENTS_MD_RECOMMENDED_MAX_BYTES as f64) / 1024.0;
-        Some(format!(
-            "AGENTS.md total {:.1} KB exceeds recommended {:.0} KB. Large instruction files increase cost and latency; consider trimming.",
+        warnings.push(format!(
+            "AGENTS.md total {:.1} KB exceeds the recommended {:.0} KB. Large instruction files increase cost and may impact performance; consider trimming.",
             kb, max_kb
-        ))
-    } else {
+        ));
+    }
+
+    let warning = if warnings.is_empty() {
         None
+    } else {
+        Some(warnings.join("\n"))
     };
 
     LoadedAgentsMd {
@@ -168,10 +260,29 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// v2 `extractAgentsMdPathsFromSystemPrompt`: only AGENTS.md sections
+    /// count, duplicates collapse, and other provenance headers are ignored.
+    #[test]
+    fn test_extract_agents_md_paths_from_prompt() {
+        let prompt = "intro\n\
+             <!-- From: /repo/AGENTS.md -->\n# Root\n\n\
+             <!-- From: /repo/sub/agents.md -->\n# Sub\n\n\
+             <!-- From: /repo/src/main.rs -->\nfn main() {}\n\n\
+             <!-- From: /repo/AGENTS.md -->\n# Root again\n";
+        assert_eq!(
+            extract_agents_md_paths_from_prompt(prompt),
+            vec![
+                "/repo/AGENTS.md".to_string(),
+                "/repo/sub/agents.md".to_string()
+            ]
+        );
+        assert!(extract_agents_md_paths_from_prompt("no headers here").is_empty());
+    }
+
     #[test]
     fn test_load_agents_md_empty_workspace() {
         let temp = tempdir().unwrap();
-        let loaded = load_agents_md(temp.path(), Some(temp.path()));
+        let loaded = load_agents_md_with_home(temp.path(), Some(temp.path()), Some(temp.path()));
         assert_eq!(
             loaded,
             LoadedAgentsMd {
@@ -190,7 +301,8 @@ mod tests {
         std::fs::write(kimi_code_dir.join("AGENTS.md"), "   \n\t\r\n  ").unwrap();
         std::fs::write(temp_ws.path().join("AGENTS.md"), "").unwrap();
 
-        let loaded = load_agents_md(temp_ws.path(), Some(temp_ws.path()));
+        let loaded =
+            load_agents_md_with_home(temp_ws.path(), Some(temp_ws.path()), Some(temp_ws.path()));
         assert_eq!(loaded.content, "");
         assert!(loaded.paths.is_empty());
         assert_eq!(loaded.warning, None);
@@ -206,7 +318,11 @@ mod tests {
         std::fs::write(&home_file, "# Global Rules\nBe nice.").unwrap();
         std::fs::write(&ws_file, "# Local Rules\nUse Rust.").unwrap();
 
-        let loaded = load_agents_md(temp_ws.path(), Some(temp_home.path()));
+        let loaded = load_agents_md_with_home(
+            temp_ws.path(),
+            Some(temp_home.path()),
+            Some(temp_home.path()),
+        );
         let expected_home_path = normalize_path_display(&home_file);
         let expected_ws_path = normalize_path_display(&ws_file);
 
@@ -235,7 +351,7 @@ mod tests {
         std::fs::write(nested.join("AGENTS.md"), "# Nested rules").unwrap();
         let brand = tempdir().unwrap();
 
-        let loaded = load_agents_md(&nested, Some(brand.path()));
+        let loaded = load_agents_md_with_home(&nested, Some(brand.path()), Some(brand.path()));
         assert_eq!(
             loaded.paths,
             vec![
@@ -263,7 +379,11 @@ mod tests {
         std::fs::write(&root_agents, "General workspace config").unwrap();
 
         let empty_home = tempdir().unwrap();
-        let loaded = load_agents_md(temp_ws.path(), Some(empty_home.path()));
+        let loaded = load_agents_md_with_home(
+            temp_ws.path(),
+            Some(empty_home.path()),
+            Some(empty_home.path()),
+        );
 
         let expected_sub_path = normalize_path_display(&sub_agents);
         let expected_root_path = normalize_path_display(&root_agents);
@@ -287,7 +407,11 @@ mod tests {
         std::fs::write(&lower_agents, "Fallback lowercase config").unwrap();
 
         let empty_home = tempdir().unwrap();
-        let loaded = load_agents_md(temp_ws.path(), Some(empty_home.path()));
+        let loaded = load_agents_md_with_home(
+            temp_ws.path(),
+            Some(empty_home.path()),
+            Some(empty_home.path()),
+        );
 
         // On case-insensitive filesystems (Windows), checking the first candidate "AGENTS.md"
         // in AGENTS_MD_PLAIN_NAMES succeeds because the filesystem resolves it to the existing file.
@@ -331,7 +455,8 @@ mod tests {
         std::fs::write(&agents_file, "Duplicate test").unwrap();
 
         // Pass same directory as brand_home and workspace_root
-        let loaded = load_agents_md(temp_ws.path(), Some(temp_ws.path()));
+        let loaded =
+            load_agents_md_with_home(temp_ws.path(), Some(temp_ws.path()), Some(temp_ws.path()));
         let expected_path = normalize_path_display(&agents_file);
 
         assert_eq!(loaded.paths, vec![expected_path.clone()]);
@@ -356,14 +481,18 @@ mod tests {
         let big_content = "a".repeat(35 * 1024);
         std::fs::write(temp_ws.path().join("AGENTS.md"), &big_content).unwrap();
 
-        let loaded = load_agents_md(temp_ws.path(), Some(empty_home.path()));
+        let loaded = load_agents_md_with_home(
+            temp_ws.path(),
+            Some(empty_home.path()),
+            Some(empty_home.path()),
+        );
         let total_bytes = loaded.content.len();
         assert!(total_bytes > AGENTS_MD_RECOMMENDED_MAX_BYTES);
 
         let kb = (total_bytes as f64) / 1024.0;
         let max_kb = (AGENTS_MD_RECOMMENDED_MAX_BYTES as f64) / 1024.0;
         let expected_warning = format!(
-            "AGENTS.md total {:.1} KB exceeds recommended {:.0} KB. Large instruction files increase cost and latency; consider trimming.",
+            "AGENTS.md total {:.1} KB exceeds the recommended {:.0} KB. Large instruction files increase cost and may impact performance; consider trimming.",
             kb, max_kb
         );
 

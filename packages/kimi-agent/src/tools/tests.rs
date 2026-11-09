@@ -2,15 +2,6 @@ use super::search::*;
 use super::*;
 use serde_json::json;
 
-/// The generic argument-validation keys bind exactly `{{tool}}` and
-/// `{{field}}`, and nothing else.
-///
-/// `check:engine-i18n` already compares the helper's bound names against
-/// each template's placeholders, but only for keys someone still names at a
-/// call site. This pins the rendering itself — that the two substitutions
-/// land and the braces do not survive — so a renamed placeholder shows up as
-/// a failing assertion here rather than as a literal `{{field}}` in a user's
-/// error message.
 #[test]
 fn arg_error_binds_the_tool_and_the_field() {
     let out = arg_error_text("CronCreate", "cron", "engine.tools.argMustBeString");
@@ -31,9 +22,6 @@ fn arg_error_binds_the_tool_and_the_field() {
     assert!(!localized.contains('{') && !localized.contains('}'));
 }
 
-/// An unknown key must render as the key, not as an empty message — the
-/// helper is the one path where a typo in `message_key` reaches the catalog
-/// from far away, so the failure mode is worth pinning.
 #[test]
 fn arg_error_surfaces_an_unknown_key_rather_than_blank_text() {
     assert_eq!(
@@ -46,22 +34,10 @@ fn setup() -> (tempfile::TempDir, NativeToolset) {
     setup_with_shell(None)
 }
 
-/// A bridge for the tests that call a static tool directly. The tests run
-/// on the host's real shell, so this is the same bridge the toolset builds.
 fn bridge() -> ShellPathBridge {
     ShellPathBridge::new(&crate::native::shell::resolve_shell(None).program)
 }
 
-// ── background output bounds (v2 agent/task/taskService.ts) ──────────
-// The sink-shaped reader in `stream_sink` now owns these contracts; its own
-// tests pin them against `StreamTail`. The old local-Vec reader was removed
-// with the 250 ms drain-grace wiring, so repeating them here would test a
-// function that no longer exists.
-
-/// v2's reason is a catalog string, not a literal: `outputLimitReason()`
-/// (`taskService.ts:153-160`) is the engine's own text, and the fork
-/// localises it. Resolving it also proves the `{{mib}}` placeholder is
-/// filled — an unfilled placeholder ships to the user verbatim.
 #[test]
 fn the_output_limit_reason_names_the_cap_and_its_relief() {
     let reason = output_limit_reason();
@@ -93,19 +69,17 @@ fn canonical_tool_name_restores_the_tables_spelling() {
             input_schema: json!({}),
         },
     ];
-    // The lowercase name a free-tier wire advertises resolves back to the
-    // engine's spelling, whatever case the model echoed.
+
     assert_eq!(canonical_tool_name("bash", &table), "Bash");
     assert_eq!(canonical_tool_name("READ", &table), "Read");
-    // An exact hit is a no-op, and a name the table does not carry keeps the
-    // model's own words (a hallucinated or not-yet-loaded tool).
+
     assert_eq!(canonical_tool_name("Bash", &table), "Bash");
     assert_eq!(
         canonical_tool_name("mcp__github__search", &table),
         "mcp__github__search"
     );
     assert_eq!(canonical_tool_name("Nope", &table), "Nope");
-    // A turn whose table never arrived has nothing to match against.
+
     assert_eq!(canonical_tool_name("bash", &[]), "bash");
 }
 
@@ -122,8 +96,6 @@ fn setup_with_shell(shell: Option<&str>) -> (tempfile::TempDir, NativeToolset) {
     (dir, toolset)
 }
 
-/// Minimal host that answers only `list_tools` — enough to drive
-/// `select_tools` through the toolset.
 struct ToolTableHost(Vec<crate::turn_loop::types::ToolInfo>);
 
 impl crate::callbacks::HostCallbacks for ToolTableHost {
@@ -168,16 +140,10 @@ fn tool_info(name: &str) -> crate::turn_loop::types::ToolInfo {
     }
 }
 
-/// `select_tools` remembers what it loaded: the loaded set lives on the
-/// toolset, so a second call reports `already available` instead of
-/// re-claiming the load (a fresh set per call made that branch dead), and
-/// the announcement reaches the model through `delivery`.
 #[tokio::test]
-async fn select_tools_remembers_loaded_names_and_announces_them() {
+async fn select_tools_remembers_loaded_names() {
     let (_dir, ts) = setup();
-    // Loading targets the deferred set (v2 `loadableToolNames`), so the test
-    // wires a deferred MCP server and switches disclosure on — with the
-    // switch off, a registered name is statically callable instead.
+
     let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
     manager
         .configure(
@@ -196,7 +162,10 @@ async fn select_tools_remembers_loaded_names_and_announces_them() {
     let ts = ts
         .with_callbacks(std::sync::Arc::new(ToolTableHost(vec![tool_info("Read")])))
         .with_mcp(manager)
-        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
         .with_tool_select_enabled(true);
 
     let first = ts
@@ -214,22 +183,11 @@ async fn select_tools_remembers_loaded_names_and_announces_them() {
         "{}",
         first.content
     );
-    let delivery = first.delivery.expect("announcement is delivered");
-    let announced = delivery
-        .blocks
-        .iter()
-        .find_map(|b| match b {
-            crate::rpc::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .expect("a text block");
-    assert!(announced.contains("<tools_added>"), "{announced}");
     assert!(
-        announced.contains("mcp__github__github_sample_tool"),
-        "{announced}"
+        first.delivery.is_none(),
+        "the loaded schema travels through the tool table, not a delivered message"
     );
 
-    // Second call for the same name: remembered, not re-loaded.
     let second = ts
         .execute_tool(
             "select_tools",
@@ -246,13 +204,10 @@ async fn select_tools_remembers_loaded_names_and_announces_them() {
     );
     assert!(
         second.delivery.is_none(),
-        "nothing new was loaded, so no announcement"
+        "nothing new was loaded, so nothing is delivered"
     );
 }
 
-/// v2's `select_tools` query branch: a capability search ranks the deferred
-/// catalogue and returns candidates **without** loading them, and a call
-/// carrying neither argument is the schema's refine failure.
 #[tokio::test]
 async fn select_tools_searches_deferred_tools_without_loading_them() {
     let (_dir, ts) = setup();
@@ -274,7 +229,10 @@ async fn select_tools_searches_deferred_tools_without_loading_them() {
     let ts = ts
         .with_callbacks(std::sync::Arc::new(ToolTableHost(vec![tool_info("Read")])))
         .with_mcp(manager)
-        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
         .with_tool_select_enabled(true);
 
     let search = ts
@@ -300,7 +258,6 @@ async fn select_tools_searches_deferred_tools_without_loading_them() {
         search.content
     );
 
-    // A search never loads: the same name still arrives as a load below.
     let load = ts
         .execute_tool(
             "select_tools",
@@ -315,7 +272,6 @@ async fn select_tools_searches_deferred_tools_without_loading_them() {
         load.content
     );
 
-    // Neither argument is the refine failure, not an empty search.
     let neither = ts
         .execute_tool("select_tools", &json!({}))
         .await
@@ -326,8 +282,6 @@ async fn select_tools_searches_deferred_tools_without_loading_them() {
         crate::tools::select_tools::SELECT_TOOLS_PROVIDE_NAMES_OR_QUERY
     );
 
-    // The disclosure gate closed mid-session: the call says why it did
-    // nothing instead of searching a catalogue it would not expose.
     let closed = ts.with_tool_select_enabled(false);
     let refused = closed
         .execute_tool("select_tools", &json!({ "query": "github" }))
@@ -340,9 +294,6 @@ async fn select_tools_searches_deferred_tools_without_loading_them() {
     );
 }
 
-/// A deferred server's tools leave the advertised table and
-/// `select_tools` appears in their place — but only when the model
-/// declares `dynamically_loaded_tools` (v2 `shapeTools`).
 #[tokio::test]
 async fn disclosure_shapes_the_tool_table_and_announces_on_new_turns() {
     let (_dir, mut ts) = setup();
@@ -363,11 +314,12 @@ async fn disclosure_shapes_the_tool_table_and_announces_on_new_turns() {
         .await;
     ts = ts
         .with_mcp(manager.clone())
-        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
         .with_tool_select_enabled(true);
 
-    // A native table plus the deferred MCP tool: only select_tools and
-    // the native side may remain.
     let shaped = ts.shape_tool_table(vec![
         tool_info("Read"),
         tool_info("mcp__github__github_sample_tool"),
@@ -380,18 +332,133 @@ async fn disclosure_shapes_the_tool_table_and_announces_on_new_turns() {
         "the deferred tool must leave the table: {names:?}"
     );
 
-    // The first new turn announces the deferred tool as added.
-    let first = ts.take_disclosure_announcement().expect("announcement");
+    let first = ts.take_disclosure_announcement(&[]).expect("announcement");
     assert!(first.contains("<tools_added>"), "{first}");
     assert!(first.contains("mcp__github__github_sample_tool"), "{first}");
-    // The second turn has nothing new: no announcement.
-    assert!(ts.take_disclosure_announcement().is_none());
+
+    let history = vec![crate::injection::injection_message_named(
+        crate::injection::wrap_system_reminder(&first),
+        crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+    )];
+    assert!(ts.take_disclosure_announcement(&history).is_none());
 }
 
-/// A loaded deferred tool comes back into the offered table with its **real**
-/// schema: the model must see the full definition, not only the
-/// `<tools_added>` text (v2 delivers the schema as a system message carrying
-/// `tools`; this engine's equivalent channel is the per-step tool table).
+#[tokio::test]
+async fn a_resumed_session_restores_its_loaded_deferred_tools() {
+    let (_dir, ts) = setup();
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    manager
+        .configure(
+            "github",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_client(crate::mcp::client::McpClient::mock("github"))
+        .await;
+    let ts = ts
+        .with_mcp(manager)
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
+        .with_tool_select_enabled(true);
+
+    let table = || {
+        ts.shape_tool_table(vec![
+            tool_info("Read"),
+            tool_info("mcp__github__github_sample_tool"),
+        ])
+    };
+    assert!(
+        !table()
+            .iter()
+            .any(|tool| tool.name == "mcp__github__github_sample_tool"),
+        "a fresh process starts with nothing loaded"
+    );
+
+    let history = vec![crate::injection::injection_message_named(
+        crate::injection::wrap_system_reminder(
+            "<tools_added>\nmcp__github__github_sample_tool\n</tools_added>",
+        ),
+        crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+    )];
+    ts.seed_loaded_tools_from_history(&history);
+
+    assert!(ts.is_dynamic_tool_loaded("mcp__github__github_sample_tool"));
+    assert!(
+        table()
+            .iter()
+            .any(|tool| tool.name == "mcp__github__github_sample_tool"),
+        "the resumed session must expose the tool it had loaded"
+    );
+}
+
+#[tokio::test]
+async fn a_large_deferred_catalogue_announces_a_ranked_slice() {
+    let (_dir, ts) = setup();
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    manager
+        .configure(
+            "big",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let tools: Vec<crate::mcp::types::McpTool> = (0..22)
+        .map(|index| crate::mcp::types::McpTool {
+            name: format!("tool_{index:02}"),
+            description: Some(format!("capability number {index}")),
+            input_schema: json!({ "type": "object" }),
+        })
+        .collect();
+    manager
+        .add_client(crate::mcp::client::McpClient::mock_with_tools("big", tools))
+        .await;
+    let ts = ts
+        .with_mcp(manager)
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
+        .with_tool_select_enabled(true);
+
+    let history = vec![crate::turn_loop::types::LLMMessage::user(
+        "find the issue search tool",
+    )];
+    let announcement = ts
+        .take_disclosure_announcement(&history)
+        .expect("a large catalogue is announced");
+    assert!(
+        announcement.contains("<tools_relevant>"),
+        "the slice replaces a full delta: {announcement}"
+    );
+    assert!(
+        announcement.contains("These are the 10 most relevant of 22 loadable tools."),
+        "{announcement}"
+    );
+    assert!(
+        !announcement.contains("<tools_added>"),
+        "a large catalogue is not dumped as an added list: {announcement}"
+    );
+
+    let mut repeated_history = history;
+    repeated_history.push(crate::injection::injection_message_named(
+        crate::injection::wrap_system_reminder(&announcement),
+        crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+    ));
+    assert!(ts.take_disclosure_announcement(&repeated_history).is_none());
+}
+
 #[tokio::test]
 async fn disclosure_readvertises_the_loaded_tool_schema() {
     let (_dir, ts) = setup();
@@ -412,10 +479,12 @@ async fn disclosure_readvertises_the_loaded_tool_schema() {
         .await;
     let ts = ts
         .with_mcp(manager.clone())
-        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
         .with_tool_select_enabled(true);
 
-    // The table the host serves is the real catalogue, schemas included.
     let mcp_tool = manager
         .list_tool_infos()
         .await
@@ -424,7 +493,6 @@ async fn disclosure_readvertises_the_loaded_tool_schema() {
         .expect("the mock server's tool is in the catalogue");
     let table = vec![tool_info("Read"), mcp_tool.clone()];
 
-    // Unloaded: advertised table hides it (only select_tools stands in).
     let before = ts.shape_tool_table(table.clone());
     assert!(
         !before
@@ -442,8 +510,6 @@ async fn disclosure_readvertises_the_loaded_tool_schema() {
         .expect("select_tools is a native tool");
     assert!(!load.is_error, "{}", load.content);
 
-    // Loaded: the definition is advertised with the catalogue's schema, not
-    // merely announced by name in the delivered text.
     let after = ts.shape_tool_table(table);
     let advertised = after
         .iter()
@@ -458,7 +524,6 @@ async fn disclosure_readvertises_the_loaded_tool_schema() {
         "the schema must be the MCP definition, not a placeholder"
     );
 
-    // Nothing new to load the second time: the set does not grow or duplicate.
     let names: Vec<&str> = after.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(
         names
@@ -470,8 +535,6 @@ async fn disclosure_readvertises_the_loaded_tool_schema() {
     );
 }
 
-/// Without the capability or the flag, the table passes through
-/// unchanged and no announcement is produced (v2 `enabled()` gate).
 #[tokio::test]
 async fn disclosure_stays_off_without_capability_or_flag() {
     let (_dir, ts) = setup();
@@ -490,24 +553,30 @@ async fn disclosure_stays_off_without_capability_or_flag() {
     manager
         .add_client(crate::mcp::client::McpClient::mock("github"))
         .await;
-    // Flag on but the capability missing:
+
     let ts = ts.with_mcp(manager.clone()).with_tool_select_enabled(true);
     let shaped = ts.shape_tool_table(vec![tool_info("mcp__github__github_sample_tool")]);
     assert_eq!(shaped.len(), 1);
     assert_eq!(shaped[0].name, "mcp__github__github_sample_tool");
-    assert!(ts.take_disclosure_announcement().is_none());
+    assert!(ts.take_disclosure_announcement(&[]).is_none());
 
-    // Capability on but the flag off:
     let ts = ts
         .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_tool_select_enabled(true);
+    assert!(!ts.supports_dynamic_tool_loading());
+    assert!(ts.take_disclosure_announcement(&[]).is_none());
+
+    let ts = ts
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
         .with_tool_select_enabled(false);
     let shaped = ts.shape_tool_table(vec![tool_info("mcp__github__github_sample_tool")]);
     assert_eq!(shaped[0].name, "mcp__github__github_sample_tool");
-    assert!(ts.take_disclosure_announcement().is_none());
+    assert!(ts.take_disclosure_announcement(&[]).is_none());
 }
 
-/// A call to a deferred-but-unloaded MCP tool is refused with load
-/// guidance instead of executed (v2 `shouldIntercept`).
 #[tokio::test]
 async fn disclosure_refuses_a_call_to_a_deferred_unloaded_tool() {
     let (_dir, ts) = setup();
@@ -528,7 +597,10 @@ async fn disclosure_refuses_a_call_to_a_deferred_unloaded_tool() {
         .await;
     let ts = ts
         .with_mcp(manager)
-        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
         .with_tool_select_enabled(true);
 
     let refused = ts
@@ -543,12 +615,9 @@ async fn disclosure_refuses_a_call_to_a_deferred_unloaded_tool() {
         "{}",
         refused.content
     );
-    // `note` is model-facing prose (v2 `ToolResult.note`) and the engine
-    // appends it verbatim to the result the model reads: a provenance tag here
-    // showed up in the model's context on every deferred and every MCP call.
+
     assert!(refused.note.is_none(), "note = {:?}", refused.note);
 
-    // After loading through select_tools, the call goes through.
     let load = ts
         .execute_tool(
             "select_tools",
@@ -565,22 +634,20 @@ async fn disclosure_refuses_a_call_to_a_deferred_unloaded_tool() {
     assert!(executed.note.is_none(), "note = {:?}", executed.note);
 }
 
-/// v2 #4364: the disclosure wait blocks until the manager's initial load
-/// settles, and is a no-op when disclosure is off or no manager is wired.
 #[tokio::test]
 async fn disclosure_waits_for_the_initial_mcp_discovery() {
     let (_dir, ts) = setup();
     let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
     let ts = ts
         .with_mcp(manager.clone())
-        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
         .with_tool_select_enabled(true);
 
-    // No load ever started (the ready channel still holds its initial
-    // `true`): the wait returns at once.
     ts.wait_for_mcp_discovery_before_disclosure().await;
 
-    // A load in flight settles, then the wait completes.
     let handle = manager.connect_all(vec![(
         "github".into(),
         crate::mcp::manager::McpServerRecipe::Mock,
@@ -594,20 +661,11 @@ async fn disclosure_waits_for_the_initial_mcp_discovery() {
     .await
     .expect("the wait settles once the connects do");
 
-    // Disclosure off: no wait even with a manager mid-load.
     let ts = ts.with_tool_select_enabled(false);
     ts.wait_for_mcp_discovery_before_disclosure().await;
 }
 
-/// Locate a bash for native-Bash tests; `None` skips them (Windows CI
-/// without Git Bash on PATH keeps the host fallback contract anyway).
 fn find_bash() -> Option<String> {
-    // `KIMI_SHELL_PATH` first (the documented pin), then the usual
-    // locations. The probe runs a command and checks the *output*, not just
-    // the exit status: on Windows the WSL launcher
-    // (`…\WindowsApps\bash.exe`) sits ahead of MSYS2 on PATH, exits 0, and
-    // then answers in UTF-16 with a proxy warning instead of the command's
-    // stdout — which silently broke the streaming assertions below.
     let candidates = [
         std::env::var("KIMI_SHELL_PATH").ok(),
         Some("bash".to_string()),
@@ -631,6 +689,12 @@ fn find_bash() -> Option<String> {
     None
 }
 
+fn find_powershell() -> Option<std::path::PathBuf> {
+    super::powershell::resolve_powershell()
+        .ok()
+        .map(|exe| exe.path)
+}
+
 #[test]
 fn new_rejects_missing_root() {
     assert!(NativeToolset::new("/definitely/not/a/real/dir", None).is_none());
@@ -641,7 +705,7 @@ fn read_returns_numbered_lines() {
     let (_dir, ts) = setup();
     let result = ts.execute("Read", &json!({ "path": "a.txt" })).unwrap();
     assert!(!result.is_error);
-    // Host Read line format: `${lineNo}	${content}`.
+
     assert!(
         result.content.contains("1	alpha"),
         "content: {}",
@@ -705,10 +769,14 @@ fn read_crops_an_image_region() {
         note.contains("Showing region (x=10, y=20, width=40, height=30)"),
         "note: {note}"
     );
-    let delivery = result.delivery.expect("delivery");
+    assert!(result.delivery.is_none());
     assert!(matches!(
-        delivery.blocks.as_slice(),
-        [crate::rpc::types::ContentBlock::Image { .. }]
+        result.parts.as_slice(),
+        [
+            crate::rpc::types::ContentBlock::Text { .. },
+            crate::rpc::types::ContentBlock::Image { .. },
+            crate::rpc::types::ContentBlock::Text { .. }
+        ]
     ));
 }
 
@@ -741,8 +809,12 @@ fn read_full_resolution_sends_the_original_bytes() {
             .expect("note")
             .contains("Shown at native resolution; no downscaling applied.")
     );
-    let delivery = result.delivery.expect("delivery");
-    match &delivery.blocks[0] {
+    let media = result
+        .parts
+        .iter()
+        .find(|part| matches!(part, crate::rpc::types::ContentBlock::Image { .. }))
+        .expect("an image block");
+    match media {
         crate::rpc::types::ContentBlock::Image { data, .. } => {
             use base64::prelude::*;
             assert_eq!(*data, BASE64_STANDARD.encode(&bytes));
@@ -802,9 +874,6 @@ async fn write_append_mode_appends() {
 
 #[tokio::test]
 async fn write_unknown_mode_is_reported() {
-    // v2 validates `mode` against `z.enum(['overwrite','append'])` before
-    // the tool runs; the engine is the only validator on the native
-    // harness, so it reports the enum instead of forwarding the call.
     let (_dir, ts) = setup();
     let result = ts
         .execute_mutating(
@@ -823,11 +892,6 @@ async fn write_unknown_mode_is_reported() {
     );
 }
 
-/// The file-history chain end to end: a native `Write` records a
-/// `session_file_history` row, and `revert_turn_file_changes` can then undo
-/// it. Before this was wired `with_file_history` had no caller, so
-/// `/file-history/*` was always empty and `undo {revert_files:true}`
-/// reported success while restoring nothing.
 #[tokio::test]
 async fn write_records_file_history_and_revert_restores_the_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -835,8 +899,6 @@ async fn write_records_file_history_and_revert_restores_the_file() {
     let sid = "sess-file-history";
     store.create_session(sid, Some("fh")).unwrap();
 
-    // Pre-existing file, so the revert path restores the pre-image rather
-    // than exercising only the "added file" branch.
     std::fs::write(dir.path().join("kept.txt"), "original").unwrap();
 
     let ts = NativeToolset::new(dir.path().to_str().unwrap(), None)
@@ -858,9 +920,6 @@ async fn write_records_file_history_and_revert_restores_the_file() {
         .expect("write executes natively");
     assert!(!created.is_error, "{}", created.content);
 
-    // Both writes are attributed to the turn `with_turn_id` installed.
-    // `record_file_history` stores the canonicalized absolute path (that is
-    // what the mutating tools resolve), so match on the file name.
     let (changes, _) = store.get_file_history_changes(sid, Some(1)).unwrap();
     assert_eq!(changes.len(), 2, "one row per write: {changes:?}");
     let named = |suffix: &str| {
@@ -871,11 +930,9 @@ async fn write_records_file_history_and_revert_restores_the_file() {
     assert!(named("kept.txt"), "{changes:?}");
     assert!(named("fresh.txt"), "{changes:?}");
 
-    // A different turn number sees nothing.
     let (other_turn, _) = store.get_file_history_changes(sid, Some(2)).unwrap();
     assert!(other_turn.is_empty(), "{other_turn:?}");
 
-    // The pre-image was captured, so undo can actually restore the file.
     let reverted = store.revert_turn_file_changes(sid, 1, dir.path()).unwrap();
     assert_eq!(reverted.len(), 2, "{reverted:?}");
     assert_eq!(
@@ -888,8 +945,6 @@ async fn write_records_file_history_and_revert_restores_the_file() {
     );
 }
 
-/// Without `with_file_history` nothing is recorded — the chain is opt-in,
-/// not incidentally broken.
 #[tokio::test]
 async fn write_without_recorder_records_nothing() {
     let (_dir, ts) = setup();
@@ -903,23 +958,23 @@ async fn write_without_recorder_records_nothing() {
 #[test]
 fn background_bash_timeout_follows_call_then_config() {
     let (_dir, ts) = setup();
-    // Built-in default when neither the config nor the call sets one.
+
     assert_eq!(
         ts.background_bash_timeout(&json!({})),
         Some(Duration::from_secs(BASH_TASK_DEFAULT_TIMEOUT_S))
     );
-    // `[background].bash_task_timeout_s` wins over the built-in...
+
     let configured = ts.with_bash_task_timeout(Some(1200));
     assert_eq!(
         configured.background_bash_timeout(&json!({})),
         Some(Duration::from_secs(1200))
     );
-    // ...and the call's own `timeout` wins over the config.
+
     assert_eq!(
         configured.background_bash_timeout(&json!({ "timeout": 30 })),
         Some(Duration::from_secs(30))
     );
-    // `0` from either source means "no timeout".
+
     assert_eq!(
         configured.background_bash_timeout(&json!({ "timeout": 0 })),
         None
@@ -931,12 +986,12 @@ fn background_bash_timeout_follows_call_then_config() {
             .background_bash_timeout(&json!({})),
         None
     );
-    // `disable_timeout` is an explicit opt-out.
+
     assert_eq!(
         configured.background_bash_timeout(&json!({ "timeout": 30, "disable_timeout": true })),
         None
     );
-    // The 24h ceiling clamps both sources.
+
     assert_eq!(
         configured.background_bash_timeout(&json!({ "timeout": BASH_TASK_MAX_SECONDS + 1 })),
         Some(Duration::from_secs(BASH_TASK_MAX_SECONDS))
@@ -952,10 +1007,10 @@ fn background_bash_timeout_follows_call_then_config() {
 fn bash_auto_background_defaults_on_and_is_overridable() {
     let (_dir, ts) = setup();
     assert!(ts.bash_auto_background);
-    // Unset keeps the default; an explicit value overrides it.
+
     let unset = ts.with_bash_auto_background(None);
     assert!(unset.bash_auto_background);
-    // The builder consumes `self`, so rebind for the second override.
+
     let off = unset.with_bash_auto_background(Some(false));
     assert!(!off.bash_auto_background);
 }
@@ -977,9 +1032,6 @@ fn sensitive_file_rules_match_v2() {
     assert!(!crate::native::file_type::is_sensitive_file("src/main.rs"));
 }
 
-/// Reads are not path-gated: v2's sandbox (`sandboxWriteGuard`) covers
-/// writes only, so an out-of-workspace read is served in-process — the
-/// host has no file-tool runtime to fall back to.
 #[test]
 fn read_outside_workspace_is_served_natively() {
     let (_dir, ts) = setup();
@@ -997,12 +1049,6 @@ fn read_outside_workspace_is_served_natively() {
     );
 }
 
-/// v2 `grepTool.ts:94-98` / `globTool.ts:94-98` run the path gate with
-/// `operation: 'search'` and an explicit `checkSensitive: false`: a
-/// *relative* spelling that escapes the workspace is refused, while the
-/// same target spelled absolutely is still searched. The search policy
-/// drops the sensitive-file refusal (Grep/Glob filter hits in
-/// `filtered_sensitive` instead), not the workspace one.
 #[test]
 fn grep_search_policy_refuses_a_relative_escape_but_allows_an_absolute_one() {
     let (_dir, ts) = setup();
@@ -1036,10 +1082,6 @@ fn grep_search_policy_refuses_a_relative_escape_but_allows_an_absolute_one() {
     );
 }
 
-/// A tool the `[tools]` filter disables is refused with the guidance text and
-/// **no note**: `note` is model-facing prose (v2 `ToolResult.note`) that the
-/// engine appends verbatim to the result the model reads, so an internal tag
-/// there wrote `tool_policy` into the model's context on every refused call.
 #[tokio::test]
 async fn disabled_tool_refusal_carries_no_provenance_tag() {
     let (_dir, ts) = setup();
@@ -1058,8 +1100,6 @@ async fn disabled_tool_refusal_carries_no_provenance_tag() {
     assert!(refused.note.is_none(), "note = {:?}", refused.note);
 }
 
-/// The same gate and policy as Grep, so a relative escape is refused here
-/// too — Glob is a search operation in v2, not a write one.
 #[test]
 fn glob_search_policy_refuses_a_relative_escape() {
     let (_dir, ts) = setup();
@@ -1077,8 +1117,6 @@ fn glob_search_policy_refuses_a_relative_escape() {
     );
 }
 
-/// The sensitive-file refusal is the *read/write* policy, not the search
-/// one: Grep keeps searching a `.env` and drops the hit from its results.
 #[test]
 fn grep_search_policy_does_not_refuse_a_sensitive_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -1102,10 +1140,6 @@ fn grep_search_policy_does_not_refuse_a_sensitive_path() {
     );
 }
 
-/// End-to-end proof that the realpath half of the path gate is wired into
-/// the tool path, not just unit-tested: an innocent-looking name inside the
-/// workspace that resolves to a sensitive file is refused with the target
-/// spelled out — and the secret never appears in the result.
 #[test]
 fn read_through_a_symlink_onto_a_sensitive_file_is_refused() {
     let (dir, ts) = setup();
@@ -1121,8 +1155,6 @@ fn read_through_a_symlink_onto_a_sensitive_file_is_refused() {
         return;
     }
 
-    // Lexically this is an ordinary text file inside the workspace, so the
-    // first gate admits it — which is the whole reason the second exists.
     let result = ts
         .execute("Read", &json!({ "path": link.to_str().unwrap() }))
         .expect("the call is served, with a refusal result");
@@ -1139,10 +1171,6 @@ fn read_through_a_symlink_onto_a_sensitive_file_is_refused() {
     );
 }
 
-/// The escape check applies only to a link that *claims* to be inside. A
-/// path that is already lexically outside is the caller's stated intent and
-/// stays the permission layer's decision — v2 hands it back unchanged, and
-/// refusing it here would break every absolute read outside the workspace.
 #[test]
 fn a_symlink_outside_the_workspace_is_still_served() {
     let (_dir, ts) = setup();
@@ -1172,7 +1200,7 @@ fn a_symlink_outside_the_workspace_is_still_served() {
 #[test]
 fn read_negative_offset_reads_tail_natively() {
     let (_dir, ts) = setup();
-    // a.txt is 3 lines; -2 serves the last two with correct numbers.
+
     let tail = ts
         .execute("Read", &json!({ "path": "a.txt", "line_offset": -2 }))
         .expect("tail reads must be served natively, not declined");
@@ -1188,7 +1216,6 @@ fn read_negative_offset_reads_tail_natively() {
         tail.content
     );
 
-    // A tail larger than the file serves the whole file from line 1.
     let whole = ts
         .execute("Read", &json!({ "path": "a.txt", "line_offset": -100 }))
         .expect("oversized tail must clamp to the file start");
@@ -1204,7 +1231,7 @@ fn read_negative_offset_respects_n_lines_window() {
     let (dir, ts) = setup();
     let body: String = (1..=10).map(|i| format!("line{i}\n")).collect();
     std::fs::write(dir.path().join("ten.txt"), body).unwrap();
-    // Last 3 lines, capped to 2 by n_lines: lines 8-9.
+
     let result = ts
         .execute(
             "Read",
@@ -1288,7 +1315,7 @@ fn read_transcodes_utf16be_bom() {
 #[test]
 fn read_transcodes_bomless_utf16le() {
     let (_dir, ts) = setup();
-    // Zero-byte parity heuristic: no BOM, zeros at odd indices.
+
     std::fs::write(_dir.path().join("u16.txt"), utf16le_bytes("alpha\n")).unwrap();
     let result = ts.execute("Read", &json!({ "path": "u16.txt" })).unwrap();
     assert!(!result.is_error, "content: {}", result.content);
@@ -1301,10 +1328,6 @@ fn read_transcodes_bomless_utf16le() {
 
 #[test]
 fn read_binary_nul_reports_not_readable() {
-    // v2 `readTool` refuses a file it cannot place (`notReadableFileOutput`)
-    // instead of declining the call: a `None` here made the engine forward
-    // it to a host with no file-tool runtime, and the model saw
-    // `tool "Read" is host-owned and not yet wired on the native harness`.
     let (_dir, ts) = setup();
     std::fs::write(_dir.path().join("bin.dat"), b"plain prefix\x00\x01").unwrap();
     let result = ts.execute("Read", &json!({ "path": "bin.dat" })).unwrap();
@@ -1318,9 +1341,6 @@ fn read_binary_nul_reports_not_readable() {
 
 #[test]
 fn read_invalid_utf8_reports_not_decodable() {
-    // v2 `readTool` rejects invalid UTF-8 instead of returning replacement
-    // characters; a `None` here made the engine forward the call to a host
-    // with no file-tool runtime.
     let (_dir, ts) = setup();
     std::fs::write(_dir.path().join("bad.txt"), b"a\xffb").unwrap();
     let result = ts.execute("Read", &json!({ "path": "bad.txt" })).unwrap();
@@ -1393,9 +1413,6 @@ fn read_mixed_line_endings_make_cr_visible() {
     );
 }
 
-/// v2 has no per-line cap: a 3,000-character line comes back whole when it fits
-/// the `max_chars` budget. A page that does not fit splits the line and hands
-/// back a `column_offset` continuation instead of a `...` marker.
 #[test]
 fn read_returns_a_long_line_whole() {
     let (_dir, ts) = setup();
@@ -1415,10 +1432,6 @@ fn read_returns_a_long_line_whole() {
     assert!(!note.contains("were truncated"), "note: {note}");
 }
 
-/// v2 pages on characters only (`max_chars`, default 100 000, cap 500 000).
-/// The fork used to also stop at 100 KB of bytes, which cut multi-byte text to
-/// about a third of the page v2 would return; this pins the removal: ~110 KB of
-/// ASCII under a 500 000-character budget is one complete page.
 #[test]
 fn read_pages_on_characters_with_no_byte_ceiling() {
     let (_dir, ts) = setup();
@@ -1447,6 +1460,34 @@ fn read_pages_on_characters_with_no_byte_ceiling() {
 }
 
 #[test]
+fn read_reports_range_too_large_for_an_explicit_line_request() {
+    let (_dir, ts) = setup();
+    let mut content = String::new();
+    for _ in 0..4725 {
+        content.push_str(&"x".repeat(100));
+        content.push('\n');
+    }
+    std::fs::write(_dir.path().join("dense.txt"), content).unwrap();
+    let result = ts
+        .execute(
+            "Read",
+            &json!({ "path": "dense.txt", "max_chars": 500_000, "n_lines": 4725 }),
+        )
+        .unwrap();
+    assert!(result.is_error, "content: {}", result.content);
+    assert!(
+        result.content.contains("more than one Read can return"),
+        "content: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Read at most"),
+        "content: {}",
+        result.content
+    );
+}
+
+#[test]
 fn read_output_character_budget_reports_the_v2_summary() {
     let (_dir, ts) = setup();
     let mut content = String::new();
@@ -1463,13 +1504,9 @@ fn read_output_character_budget_reports_the_v2_summary() {
         note.contains("Effective max_chars: 100000."),
         "note: {note}"
     );
-    assert!(note.contains("To resume reading, call Read with line_offset="));
+    assert!(note.contains("Next Read: {"), "note: {note}");
 }
 
-/// v2 has no line-count ceiling: a page ends on `max_chars`, so a 1,500-line
-/// file of short lines comes back in one call. The fork used to stop at 1,000
-/// lines and report "Max 1000 lines reached."; both the ceiling and the
-/// sentence are gone.
 #[test]
 fn read_has_no_line_count_ceiling() {
     let (_dir, ts) = setup();
@@ -1507,14 +1544,6 @@ fn read_empty_file_with_offset_does_not_panic() {
     assert!(note.contains("Total lines in file: 0."), "note: {note}");
 }
 
-/// A 10MB single-line file is served natively: reads stream, so file size
-/// is no longer a constraint (the old READ_MAX_BYTES cap declined every
-/// large text file). Output is still bounded by the line renderer.
-/// A model that emits `line_offset` as a JSON string or float instead of
-/// an integer still has its read served: the schema advertises
-/// `"type": "integer"`, but rejecting these made the tool fail with
-/// `"line_offset" must be an integer` on values that print as a bare
-/// number. The integer intent is unambiguous either way, so parse it.
 #[test]
 fn read_line_offset_accepts_numeric_string_and_float() {
     let (_dir, ts) = setup();
@@ -1575,7 +1604,7 @@ async fn grep_finds_matches_across_files() {
 #[tokio::test]
 async fn grep_default_mode_lists_files_by_recency() {
     let (dir, ts) = setup();
-    // Make a.txt the most recently modified file.
+
     std::fs::write(dir.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
     let result = ts.execute("Grep", &json!({ "pattern": "beta" })).unwrap();
     assert!(!result.is_error);
@@ -1641,8 +1670,7 @@ async fn grep_content_context_lines() {
             }),
         )
         .unwrap();
-    // Context lines use `-` separators; matches use `:`. A single window
-    // covering lines 1-3 has no `--` cluster separator.
+
     assert!(
         result.content.contains("a.txt-1-alpha"),
         "content: {}",
@@ -1663,7 +1691,7 @@ async fn grep_content_context_lines() {
 #[tokio::test]
 async fn grep_context_clusters_separated_by_dash_dash() {
     let (_dir, ts) = setup();
-    // Two matches five lines apart produce two disjoint clusters.
+
     std::fs::write(
         _dir.path().join("spread.txt"),
         "m1
@@ -1743,7 +1771,7 @@ fn grep_invalid_regex_is_an_error_result() {
 #[tokio::test]
 async fn grep_with_type_filter_matches_natively() {
     let (_dir, ts) = setup();
-    // `type: rust` (rg `--type rust` = `*.rs`) keeps only src/lib.rs.
+
     let rust = ts
         .execute(
             "Grep",
@@ -1761,7 +1789,7 @@ async fn grep_with_type_filter_matches_natively() {
         "type=rust must exclude a.txt: {}",
         rust.content
     );
-    // `type: txt` (rg `--type txt` = `*.txt`) keeps only a.txt.
+
     let txt = ts
         .execute(
             "Grep",
@@ -1783,10 +1811,7 @@ async fn grep_with_type_filter_matches_natively() {
 #[test]
 fn grep_with_unknown_type_is_reported() {
     let (_dir, ts) = setup();
-    // The static type table only covers one rg release, while the host runs
-    // whatever rg is on PATH and also honours user `--type-add` definitions
-    // from `.ripgreprc`. The native harness has no host to hand the call to,
-    // so an unknown name is reported the way rg reports it.
+
     let unknown = ts
         .execute("Grep", &json!({ "pattern": "x", "type": "kimiunknown" }))
         .unwrap();
@@ -1798,13 +1823,13 @@ fn grep_with_unknown_type_is_reported() {
         "content: {}",
         unknown.content
     );
-    // A known type is still served natively (the table is a fast path).
+
     assert!(
         ts.execute("Grep", &json!({ "pattern": "x", "type": "rust" }))
             .is_some(),
         "known type must stay native"
     );
-    // A mistyped `type` argument is reported by the engine.
+
     let mistyped = ts
         .execute("Grep", &json!({ "pattern": "x", "type": 7 }))
         .unwrap();
@@ -1814,8 +1839,7 @@ fn grep_with_unknown_type_is_reported() {
 #[tokio::test]
 async fn grep_include_ignored_searches_gitignored_files() {
     let dir = tempfile::tempdir().unwrap();
-    // Mark the temp dir as a git repo so `.gitignore` is honored by
-    // default (rg / the `ignore` crate require a git context).
+
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
     std::fs::write(dir.path().join("ignored.txt"), "needle ignored\n").unwrap();
@@ -1834,7 +1858,6 @@ async fn grep_include_ignored_searches_gitignored_files() {
         default.content
     );
 
-    // rg `--no-ignore` surfaces the gitignored file.
     let with_ignored = ts
         .execute(
             "Grep",
@@ -1873,8 +1896,7 @@ async fn grep_multiline_spans_lines_with_per_line_numbers() {
         )
         .unwrap();
     assert!(!result.is_error, "content: {}", result.content);
-    // rg `-U` reports every physical line the match spans, each with its
-    // own line number and the `:` match separator.
+
     let lines: Vec<&str> = result.content.lines().collect();
     assert_eq!(
         lines,
@@ -1907,7 +1929,7 @@ async fn grep_multiline_count_matches_counts_matches_not_lines() {
             }),
         )
         .unwrap();
-    // One match spanning three lines counts as 1 (rg `--count-matches -U`).
+
     assert!(
         result.content.contains("span.txt:1"),
         "content: {}",
@@ -1936,7 +1958,7 @@ async fn grep_multiline_context_and_cluster_separator() {
     )
     .unwrap();
     let ts = NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap();
-    // -C1 window around the single multiline match in span.txt.
+
     let span = ts
         .execute(
             "Grep",
@@ -1962,7 +1984,7 @@ async fn grep_multiline_context_and_cluster_separator() {
         "content: {}",
         span.content
     );
-    // Two disjoint `A\nB` matches with -C1 produce a `--` cluster break.
+
     let multi = ts
         .execute(
             "Grep",
@@ -2006,8 +2028,7 @@ async fn grep_type_include_ignored_multiline_combine() {
     .unwrap();
     std::fs::write(dir.path().join("combo.txt"), "start MATCH\nend MATCH\n").unwrap();
     let ts = NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap();
-    // include_ignored surfaces the gitignored combo.ts, type=ts drops
-    // combo.txt, and multiline spans the match across lines 2-4.
+
     let result = ts
         .execute(
             "Grep",
@@ -2066,9 +2087,7 @@ async fn grep_skips_vcs_directories() {
 #[test]
 fn glob_judges_vcs_exclusion_below_the_search_root_only() {
     let dir = tempfile::tempdir().unwrap();
-    // The search root sits *under* a VCS-named directory. The exclusion must
-    // judge only the path relative to the search root, or the `.hg` in the
-    // root's own prefix would drop every result.
+
     let proj = dir.path().join(".hg").join("proj");
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::write(proj.join("keep.txt"), "hello\n").unwrap();
@@ -2102,8 +2121,7 @@ async fn grep_count_matches_counts_occurrences() {
         "content: {}",
         result.content
     );
-    // setup() also writes a.txt ("beta" once) and src/lib.rs ("beta"
-    // once), so the whole-workspace count is 5 across 3 files.
+
     assert!(
         result
             .content
@@ -2113,7 +2131,6 @@ async fn grep_count_matches_counts_occurrences() {
     );
 }
 
-/// Build a wider fixture tree so the parallel walker has real fan-out.
 fn build_parallel_tree(root: &std::path::Path, files: usize) {
     for i in 0..files {
         let dir = root.join(format!("d{:02}", i % 12));
@@ -2133,8 +2150,6 @@ async fn grep_parallel_walk_is_deterministic() {
     build_parallel_tree(dir.path(), 120);
     let ts = NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap();
 
-    // The walk fans out unordered, but the aggregate is re-sorted, so two
-    // runs over the same tree must be byte-identical in every mode.
     for mode in ["files_with_matches", "content", "count_matches"] {
         let args = json!({ "pattern": "needle_", "output_mode": mode });
         let first = ts.execute("Grep", &args).unwrap();
@@ -2156,10 +2171,9 @@ async fn grep_parallel_walk_is_deterministic() {
 #[tokio::test]
 async fn grep_content_clusters_and_merging_are_byte_stable() {
     let dir = tempfile::tempdir().unwrap();
-    // One merged cluster: the windows around lines 3 and 5 overlap, so no
-    // `--` separator appears inside this file.
+
     std::fs::write(dir.path().join("merged.txt"), "a\nb\nmatch\nd\nmatch2\nf\n").unwrap();
-    // Two disjoint clusters separated by `--`.
+
     std::fs::write(dir.path().join("split.txt"), "match1\nx\ny\nz\nmatch2\n").unwrap();
     let ts = NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap();
     let result = ts
@@ -2187,7 +2201,7 @@ async fn grep_content_clusters_and_merging_are_byte_stable() {
         "content: {}",
         result.content
     );
-    // Re-running yields the same bytes (path-ordered aggregation).
+
     let again = ts
         .execute(
             "Grep",
@@ -2216,7 +2230,7 @@ async fn grep_head_limit_offset_are_stable_under_parallelism() {
         "content: {}",
         first.content
     );
-    // Exactly head_limit result lines precede the truncation notice.
+
     let body = first.content.split("\n\n").next().unwrap();
     assert_eq!(body.lines().count(), 5, "content: {}", first.content);
 }
@@ -2234,8 +2248,7 @@ fn grep_expired_deadline_sets_the_atomic_timeout() {
         line_numbers: true,
         multiline: false,
     };
-    // A deadline already in the past: the first visited entry must trip
-    // the atomic timeout flag and abort the walk with no results.
+
     let collected = grep_collect(
         dir.path(),
         dir.path(),
@@ -2245,7 +2258,6 @@ fn grep_expired_deadline_sets_the_atomic_timeout() {
         false,
         GrepWalkLimits {
             deadline: std::time::Instant::now(),
-            scan_cap: GREP_WALK_SCAN_CAP,
         },
     );
     assert!(collected.timed_out);
@@ -2275,7 +2287,7 @@ fn glob_no_matches_reports_cleanly() {
 #[test]
 fn read_only_path_stays_on_execute() {
     let (_dir, ts) = setup();
-    // The read-only entry point never handles mutating tools.
+
     assert!(
         ts.execute("Write", &json!({ "path": "a.txt", "content": "x" }))
             .is_none()
@@ -2302,9 +2314,6 @@ async fn write_creates_file_inside_sandbox() {
     assert_eq!(written, "hello\n");
 }
 
-/// v2's sandbox defaults to `off`, so an out-of-workspace write is served
-/// in-process when no SandboxMode policy is wired; confinement belongs to
-/// `SandboxExecutionPolicy::sandbox_write_guard` at the callbacks layer.
 #[tokio::test]
 async fn write_outside_workspace_is_served_without_a_mode() {
     let (_dir, ts) = setup();
@@ -2348,11 +2357,93 @@ async fn edit_ambiguous_match_is_an_error() {
         .await
         .unwrap();
     assert!(result.is_error, "content: {}", result.content);
-    assert!(result.content.contains("matched 2 times"));
-    // The file must be untouched.
+    assert!(
+        result.content.contains("not unique"),
+        "content: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("replace_all=true"),
+        "content: {}",
+        result.content
+    );
+
     assert_eq!(
         std::fs::read_to_string(_dir.path().join("dup.txt")).unwrap(),
         "x\nx\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_success_reports_the_replaced_occurrence_count() {
+    let (_dir, ts) = setup();
+    std::fs::write(_dir.path().join("one.txt"), "alpha\n").unwrap();
+    let result = ts
+        .execute_mutating(
+            "Edit",
+            &json!({ "path": "one.txt", "old_string": "alpha", "new_string": "beta" }),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "content: {}", result.content);
+    assert!(
+        result.content.contains("Replaced 1 occurrence in one.txt"),
+        "content: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn edit_rejects_identical_old_and_new_strings() {
+    let (_dir, ts) = setup();
+    std::fs::write(_dir.path().join("same.txt"), "alpha\n").unwrap();
+    let result = ts
+        .execute_mutating(
+            "Edit",
+            &json!({ "path": "same.txt", "old_string": "alpha", "new_string": "alpha" }),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error, "content: {}", result.content);
+    assert!(
+        result
+            .content
+            .contains("No changes to make: old_string and new_string are exactly the same."),
+        "content: {}",
+        result.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(_dir.path().join("same.txt")).unwrap(),
+        "alpha\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_zero_matches_tells_the_model_to_reload() {
+    let (_dir, ts) = setup();
+    std::fs::write(_dir.path().join("stale.txt"), "alpha\n").unwrap();
+    let result = ts
+        .execute_mutating(
+            "Edit",
+            &json!({ "path": "stale.txt", "old_string": "missing", "new_string": "beta" }),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error, "content: {}", result.content);
+    assert!(
+        result.content.contains("old_string not found in stale.txt"),
+        "content: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("reload the content"),
+        "content: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("not unique"),
+        "zero matches must not be reported as ambiguous: {}",
+        result.content
     );
 }
 
@@ -2396,10 +2487,10 @@ async fn bash_streams_output_chunks_to_the_progress_callback() {
     let (_dir, ts) = setup_with_shell(Some(&shell));
     let chunks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = chunks.clone();
-    let emit = move |kind: &str, text: &str| {
+    let emit = move |update: &crate::tools::ToolUpdate<'_>| {
         seen.lock()
             .unwrap()
-            .push((kind.to_string(), text.to_string()));
+            .push((update.kind.to_string(), update.text.to_string()));
     };
     let result = ts
         .execute_tool_streaming(
@@ -2426,9 +2517,7 @@ async fn bash_streams_output_chunks_to_the_progress_callback() {
 #[test]
 fn progress_throttle_admits_the_first_chunk_of_each_stream() {
     let throttle = ProgressThrottle::new();
-    // A stderr banner landing first must not consume stdout's window: the
-    // shared-gate version dropped the command's real output from the live
-    // stream entirely (regression: bash_streams_output_chunks...).
+
     assert!(throttle.admit("stderr"), "first stderr chunk is admitted");
     assert!(throttle.admit("stdout"), "first stdout chunk is admitted");
     assert!(!throttle.admit("stderr"), "stderr is now inside its window");
@@ -2451,8 +2540,7 @@ fn progress_throttle_reopens_each_stream_after_the_interval() {
 async fn bash_uses_bash_semantics_not_cmd() {
     let Some(shell) = find_bash() else { return };
     let (_dir, ts) = setup_with_shell(Some(&shell));
-    // Arithmetic expansion only exists in bash — this documents that the
-    // native path honors the tool's bash contract instead of cmd.exe.
+
     let result = ts
         .execute_mutating("Bash", &json!({ "command": "echo $((20 + 3))" }))
         .await
@@ -2465,8 +2553,7 @@ async fn bash_uses_bash_semantics_not_cmd() {
 async fn bash_reports_failure_exit_code() {
     let Some(shell) = find_bash() else { return };
     let (_dir, ts) = setup_with_shell(Some(&shell));
-    // The native Bash contract is bash everywhere, so the exit syntax is
-    // POSIX even on Windows.
+
     let result = ts
         .execute_mutating("Bash", &json!({ "command": "exit 3" }))
         .await
@@ -2479,11 +2566,6 @@ async fn bash_reports_failure_exit_code() {
     );
 }
 
-/// v2 `foregroundCompletionResult` wording, which the port had drifted from: a
-/// clean run says `Command executed successfully.` (the fork added "(no
-/// output)"), and a failure with nothing printed opens with
-/// `Process exited with code N` instead of a blank line. Neither string had a
-/// test before.
 #[tokio::test]
 async fn bash_result_messages_match_v2() {
     let Some(shell) = find_bash() else { return };
@@ -2526,6 +2608,95 @@ async fn bash_result_messages_match_v2() {
 }
 
 #[tokio::test]
+async fn powershell_runs_a_script_natively_and_keeps_utf8() {
+    if find_powershell().is_none() {
+        return;
+    }
+    let (_dir, ts) = setup();
+    let result = ts
+        .execute_mutating(
+            "PowerShell",
+            &json!({ "command": "Write-Output 'héllo 世界'" }),
+        )
+        .await
+        .expect("the native arm must handle PowerShell, not hand it to the host");
+    assert!(!result.is_error, "content: {}", result.content);
+    assert!(
+        result.content.contains("héllo 世界"),
+        "UTF-8 must survive the -EncodedCommand round trip: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn powershell_reports_failure_exit_code() {
+    if find_powershell().is_none() {
+        return;
+    }
+    let (_dir, ts) = setup();
+    let result = ts
+        .execute_mutating("PowerShell", &json!({ "command": "exit 7" }))
+        .await
+        .expect("the native arm must handle PowerShell");
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("Command failed with exit code: 7."),
+        "content: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn powershell_refuses_an_empty_command() {
+    let (_dir, ts) = setup();
+    let result = ts
+        .execute_mutating("PowerShell", &json!({ "command": "" }))
+        .await
+        .expect("an empty command is refused natively");
+    assert!(result.is_error);
+    assert_eq!(result.content, "Command cannot be empty.");
+}
+
+#[tokio::test]
+async fn powershell_run_in_background_falls_back_to_host() {
+    let (_dir, ts) = setup();
+    assert!(
+        ts.execute_mutating(
+            "PowerShell",
+            &json!({
+                "command": "Write-Output hi",
+                "run_in_background": true,
+                "description": "emit hi"
+            }),
+        )
+        .await
+        .is_none(),
+        "without a task runner the background call stays host-owned (same as Bash)"
+    );
+}
+
+#[tokio::test]
+async fn powershell_timeout_kills_and_reports_without_falling_back() {
+    if find_powershell().is_none() {
+        return;
+    }
+    let (_dir, ts) = setup();
+    let result = ts
+        .execute_mutating(
+            "PowerShell",
+            &json!({ "command": "Start-Sleep -Seconds 5", "timeout": 1 }),
+        )
+        .await
+        .expect("timeout must be reported, not handed to the host");
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("killed by timeout"),
+        "content: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
 async fn bash_run_in_background_falls_back_to_host() {
     let (_dir, ts) = setup();
     assert!(
@@ -2543,10 +2714,7 @@ async fn bash_run_in_background_falls_back_to_host() {
 async fn bash_timeout_kills_and_reports_without_falling_back() {
     let Some(shell) = find_bash() else { return };
     let (_dir, ts) = setup_with_shell(Some(&shell));
-    // A `sleep` that outlives the 1s timeout — every bash flavor ships it,
-    // while msys2's own `ping` cannot open raw sockets and exits at once.
-    // On timeout the command must be killed and reported — never re-run by
-    // the host.
+
     let command = "sleep 5";
     let result = ts
         .execute_mutating("Bash", &json!({ "command": command, "timeout": 1 }))
@@ -2560,9 +2728,6 @@ async fn bash_timeout_kills_and_reports_without_falling_back() {
     );
 }
 
-/// Same as the write case: with no SandboxMode policy wired, Bash runs
-/// with whatever cwd the caller passes — confinement is the
-/// `sandbox_code_execution_guard`'s job at the callbacks layer.
 #[tokio::test]
 async fn bash_cwd_outside_workspace_runs_without_a_mode() {
     let (_dir, ts) = setup();
@@ -2578,7 +2743,6 @@ async fn bash_cwd_outside_workspace_runs_without_a_mode() {
     assert!(result.content.contains("hi"), "content: {}", result.content);
 }
 
-/// Temporary benchmark: large inputs (20MB file / 300-file grep / 2000-file glob).
 #[test]
 fn bench_large_inputs() {
     use std::time::Instant;
@@ -2651,7 +2815,6 @@ fn bench_large_inputs() {
     );
 }
 
-/// Temporary benchmark: native basic-tool latency floor (10 runs each).
 #[test]
 fn bench_basic_tools_latency() {
     use std::time::Instant;
@@ -2671,7 +2834,6 @@ fn bench_basic_tools_latency() {
     let grep_arg = json!({ "pattern": "needle", "path": dir.path().to_string_lossy() });
     let glob_arg = json!({ "pattern": "*.txt", "path": dir.path().to_string_lossy() });
 
-    // warmup
     let _ = ts.execute("Read", &read_arg).unwrap();
     let _ = ts.execute("Grep", &grep_arg).unwrap();
     let _ = ts.execute("Glob", &glob_arg).unwrap();
@@ -2709,71 +2871,110 @@ fn bench_basic_tools_latency() {
     let _ = (&mut file,);
 }
 
-/// The six memory tools are wired into the dispatch table. A name the
-/// toolset does not handle returns `None` (the call is forwarded to a host
-/// that has no memory runtime), so `Some` here is the wiring assertion.
-/// Every arm is driven with a path outside the memory store, which is
-/// refused before any file is touched — a test never writes to the real
-/// memory root.
-#[tokio::test]
-async fn memory_tools_dispatch_through_the_toolset() {
-    let (_dir, ts) = setup();
-    let refused = [
-        ("memory_read", json!({ "path": "../escape.md" })),
-        (
-            "memory_write",
-            json!({ "path": "../escape.md", "content": "x", "if_version": "new" }),
-        ),
-        (
-            "memory_str_replace",
-            json!({
-                "path": "../escape.md",
-                "old_str": "a",
-                "new_str": "b",
-                "if_version": "new"
-            }),
-        ),
-        (
-            "memory_append",
-            json!({ "path": "../escape.md", "content": "x", "if_version": "new" }),
-        ),
-        (
-            "memory_delete",
-            json!({ "path": "../escape.md", "if_version": "new" }),
-        ),
-    ];
-    for (name, args) in refused {
-        let result = ts
-            .execute_tool(name, &args)
-            .await
-            .unwrap_or_else(|| panic!("{name} is not handled by the toolset"));
-        assert!(result.is_error, "{name}: {}", result.content);
-    }
-    // `memory_list` is read-only, so it may succeed against the real root.
-    assert!(
-        ts.execute_tool("memory_list", &json!({})).await.is_some(),
-        "memory_list is not handled by the toolset"
-    );
-    // The squashed twins reach the same arms.
-    for name in [
-        "MemoryRead",
-        "MemoryWrite",
-        "MemoryStrReplace",
-        "MemoryAppend",
-        "MemoryList",
-        "MemoryDelete",
-    ] {
-        assert!(ts.handles(name), "{name} is not a native tool name");
+struct MemoryToolEnv {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    previous_home: Option<std::ffi::OsString>,
+    previous_flag: Option<std::ffi::OsString>,
+}
+
+impl MemoryToolEnv {
+    async fn arm(home: &std::path::Path) -> Self {
+        let lock = crate::env::ENV_TEST_LOCK.lock().await;
+        let previous_home = std::env::var_os("KIMI_CODE_HOME");
+        let previous_flag =
+            std::env::var_os(crate::tools::memory_action::ASSOCIATIVE_MEMORY_FLAG_ENV);
+        unsafe { std::env::set_var("KIMI_CODE_HOME", home) };
+        unsafe {
+            std::env::set_var(
+                crate::tools::memory_action::ASSOCIATIVE_MEMORY_FLAG_ENV,
+                "0",
+            )
+        };
+        Self {
+            _lock: lock,
+            previous_home,
+            previous_flag,
+        }
     }
 }
 
-/// The name contract between the v2 host and this engine, pinned on both
-/// sides: this test fails when `NATIVE_TOOL_NAMES` and
-/// `tool-name-contract.json` drift apart, and the v2-side test
-/// (`toolNameContract.test.ts`) fails when a v2 tool name loses its
-/// classification. See the contract file's `notes` for the P34
-/// corrections this pinning surfaced (WaitFor, list_directory,
-/// ReadMediaFile).
+impl Drop for MemoryToolEnv {
+    fn drop(&mut self) {
+        match self.previous_home.take() {
+            Some(value) => unsafe { std::env::set_var("KIMI_CODE_HOME", value) },
+            None => unsafe { std::env::remove_var("KIMI_CODE_HOME") },
+        }
+        match self.previous_flag.take() {
+            Some(value) => unsafe {
+                std::env::set_var(
+                    crate::tools::memory_action::ASSOCIATIVE_MEMORY_FLAG_ENV,
+                    value,
+                )
+            },
+            None => unsafe {
+                std::env::remove_var(crate::tools::memory_action::ASSOCIATIVE_MEMORY_FLAG_ENV)
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn memory_tool_runs_read_write_list_and_delete() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = MemoryToolEnv::arm(home.path()).await;
+    let (_dir, ts) = setup();
+    let name = crate::tools::core_tool_defs::MEMORY_TOOL_NAME;
+
+    let write = ts
+        .execute_tool(
+            name,
+            &json!({
+                "action": "write",
+                "scope": "global",
+                "path": "note",
+                "content": "# Note\n\nbody"
+            }),
+        )
+        .await
+        .unwrap_or_else(|| panic!("{name} is not handled by the toolset"));
+    assert!(!write.is_error, "{}", write.content);
+    assert!(home.path().join("memory/global/note.md").is_file());
+
+    let read = ts
+        .execute_tool(name, &json!({ "action": "read", "path": "global/note" }))
+        .await
+        .expect("Memory is handled");
+    assert!(!read.is_error, "{}", read.content);
+    assert!(read.content.contains("body"), "{}", read.content);
+
+    let list = ts
+        .execute_tool(name, &json!({ "action": "list", "scope": "global" }))
+        .await
+        .expect("Memory is handled");
+    assert!(!list.is_error, "{}", list.content);
+    assert!(list.content.contains("global/note.md"), "{}", list.content);
+
+    let delete = ts
+        .execute_tool(name, &json!({ "action": "delete", "path": "global/note" }))
+        .await
+        .expect("Memory is handled");
+    assert!(!delete.is_error, "{}", delete.content);
+    assert!(!home.path().join("memory/global/note.md").exists());
+}
+
+#[tokio::test]
+async fn memory_tool_is_refused_for_subagents() {
+    let (_dir, ts) = setup();
+    let ts = ts.with_caller_agent_id("researcher");
+    let name = crate::tools::core_tool_defs::MEMORY_TOOL_NAME;
+    let result = ts
+        .execute_tool(name, &json!({ "action": "list" }))
+        .await
+        .unwrap_or_else(|| panic!("{name} is not handled by the toolset"));
+    assert!(result.is_error, "{}", result.content);
+    assert!(result.content.contains("main agent"), "{}", result.content);
+}
+
 #[test]
 fn native_tool_names_match_the_contract_file() {
     let contract: serde_json::Value =
@@ -2833,14 +3034,13 @@ fn native_tool_names_match_the_contract_file() {
     );
 }
 
-// ── Ordering contract: sort before the hard cap ─────────────────────
-
 fn scan(display: &str, mtime: u64, total_matches: usize) -> FileScan {
     FileScan {
         display: display.to_string(),
         mtime,
         total_matches,
         rendered: Vec::new(),
+        lossy_utf8: false,
     }
 }
 
@@ -2849,39 +3049,29 @@ fn displays(per_file: &[FileScan]) -> Vec<&str> {
 }
 
 #[test]
-fn grep_file_cap_keeps_the_sorted_prefix_not_the_walk_order() {
-    // The parallel walk yields files in scheduling order. Truncating before
-    // sorting kept a nondeterministic subset, which `head_limit` then paged
-    // over — so the cap is parameterised here and applied after the sort.
+fn grep_sort_orders_files_with_matches_by_mtime_then_path() {
     let mut per_file = vec![
         scan("zeta.txt", 10, 1),
         scan("alpha.txt", 30, 1),
         scan("mid.txt", 20, 1),
         scan("beta.txt", 30, 1),
     ];
-    assert!(grep_sort_and_cap(
-        &mut per_file,
-        GrepMode::FilesWithMatches,
-        2
-    ));
-    // mtime DESC, ties broken by display path ASC: alpha(30) outranks
-    // beta(30) on the path, and both outrank mid(20) / zeta(10).
-    assert_eq!(displays(&per_file), vec!["alpha.txt", "beta.txt"]);
+    grep_sort(&mut per_file, GrepMode::FilesWithMatches);
+
+    assert_eq!(
+        displays(&per_file),
+        vec!["alpha.txt", "beta.txt", "mid.txt", "zeta.txt"]
+    );
 }
 
 #[test]
-fn grep_file_cap_is_inert_below_the_limit() {
-    // Nothing is dropped, and each mode's own ordering still applies.
+fn grep_sort_uses_path_order_for_content_and_count_modes() {
     let mut per_file = vec![scan("b.txt", 9, 1), scan("a.txt", 1, 2)];
-    assert!(!grep_sort_and_cap(
-        &mut per_file,
-        GrepMode::FilesWithMatches,
-        5
-    ));
+    grep_sort(&mut per_file, GrepMode::FilesWithMatches);
     assert_eq!(displays(&per_file), vec!["b.txt", "a.txt"], "mtime DESC");
-    // `content` / `count_matches` ignore mtime entirely: path ASC.
+
     let mut per_file = vec![scan("b.txt", 9, 1), scan("a.txt", 1, 2)];
-    assert!(!grep_sort_and_cap(&mut per_file, GrepMode::CountMatches, 5));
+    grep_sort(&mut per_file, GrepMode::CountMatches);
     assert_eq!(displays(&per_file), vec!["a.txt", "b.txt"], "path ASC");
     assert_eq!(
         per_file[1].total_matches, 1,
@@ -2891,10 +3081,6 @@ fn grep_file_cap_is_inert_below_the_limit() {
 
 #[test]
 fn grep_same_second_files_order_by_path_in_every_run() {
-    // The engine and the host both quantise mtime to whole seconds
-    // (`duration_since(UNIX_EPOCH).as_secs()` vs `Math.trunc(mtimeMs/1000)`),
-    // so the files a `git checkout` leaves with identical mtimes are ordered
-    // by path — never by walk order or by rg's output index.
     let dir = tempfile::tempdir().unwrap();
     let names = ["delta.txt", "alpha.txt", "charlie.txt", "bravo.txt"];
     for name in names {
@@ -2929,74 +3115,21 @@ fn mtime_secs_reports_whole_seconds_since_the_epoch() {
         .unwrap()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .unwrap();
-    // The host quantises with `Math.trunc(mtimeMs / 1000)`; the engine has
-    // to land on the same integer or same-second files order differently.
+
     assert_eq!(mtime_secs(&meta), elapsed.as_secs());
     assert_eq!(mtime_secs(&meta), elapsed.as_millis() as u64 / 1000);
 }
 
-// ── Walk resource bounds ────────────────────────────────────────────
-
 #[test]
 fn grep_walk_worker_count_is_explicitly_bounded() {
-    // `ignore` defaults to one worker per CPU, which multiplies with
-    // `spawn_blocking` × MAX_PARALLEL_TOOLS concurrent native calls.
     let threads = grep_walk_threads();
     assert!(threads >= 1, "`ignore` treats 0 workers as serial");
     assert!(
         threads <= GREP_WALK_THREADS,
         "walk workers {threads} exceed the cap {GREP_WALK_THREADS}"
     );
-    assert_eq!(
-        GREP_WALK_SCAN_CAP,
-        GREP_MAX_FILES * 2,
-        "the soft walk cap must stay a small multiple of the hard cap"
-    );
 }
 
-#[test]
-fn grep_walk_scan_cap_stops_the_parallel_walk() {
-    let dir = tempfile::tempdir().unwrap();
-    build_parallel_tree(dir.path(), 12);
-    let regex = regex::Regex::new("needle_").unwrap();
-    let cfg = GrepScanConfig {
-        regex: &regex,
-        mode: GrepMode::Content,
-        context_before: 0,
-        context_after: 0,
-        line_numbers: true,
-        multiline: false,
-    };
-    let collect = |scan_cap: usize| {
-        grep_collect(
-            dir.path(),
-            dir.path(),
-            &cfg,
-            None,
-            None,
-            false,
-            GrepWalkLimits {
-                deadline: Instant::now() + GREP_TIME_BUDGET,
-                scan_cap,
-            },
-        )
-    };
-    // A cap of 0 trips on the very first visited entry: nothing is scanned
-    // and the result is flagged truncated rather than silently empty.
-    let capped = collect(0);
-    assert!(capped.file_cap_truncated, "scan cap must flag truncation");
-    assert!(capped.per_file.is_empty(), "no file may be scanned");
-    // The production cap leaves the walk untouched.
-    let uncapped = collect(GREP_WALK_SCAN_CAP);
-    assert!(!uncapped.file_cap_truncated);
-    assert!(!uncapped.timed_out);
-    assert_eq!(uncapped.per_file.len(), 4, "every 3rd of 12 files matches");
-}
-
-// ── JoinError split by mutability ───────────────────────────────────
-
-/// A panic inside `spawn_blocking` surfaces to the awaiting task as a real
-/// `JoinError`, which is exactly the failure mode the split has to handle.
 fn panicking_tool(
     _sandbox: &Sandbox,
     _bridge: &ShellPathBridge,
@@ -3008,9 +3141,7 @@ fn panicking_tool(
 #[tokio::test]
 async fn readonly_tool_join_error_falls_back_to_the_host() {
     let (_dir, ts) = setup();
-    // read/grep/glob are idempotent: re-running one on the host is always
-    // safe, and a task lost to the runtime must not reach the model as a
-    // tool failure.
+
     assert!(
         ts.run_readonly_file_tool_on_blocking_pool(&json!({ "path": "a.txt" }), panicking_tool)
             .await
@@ -3022,8 +3153,7 @@ async fn readonly_tool_join_error_falls_back_to_the_host() {
 #[tokio::test]
 async fn mutating_tool_join_error_becomes_an_error_result() {
     let (_dir, ts) = setup();
-    // write/edit already hold a permission grant and may have partially
-    // applied, so the host must not be allowed to re-run them.
+
     let result = ts
         .run_mutating_file_tool_on_blocking_pool(&json!({ "path": "a.txt" }), panicking_tool)
         .await
@@ -3048,17 +3178,10 @@ fn blocking_pool_failure_splits_on_mutability() {
     );
 }
 
-// ── Malformed arguments are reported by the engine ──────────────────
-
 #[test]
 fn grep_rejects_mistyped_arguments_instead_of_ignoring_them() {
     let (_dir, ts) = setup();
-    // The engine short-circuits ahead of the host's zod validation, and the
-    // native harness has no host tool runtime to fall back to — returning
-    // `None` surfaced as `tool "Grep" is host-owned and not yet wired on
-    // the native harness` instead of naming the argument. Coercing the
-    // value instead would report a successful search that ignored what the
-    // model asked for (`{"multiline":"true"}` silently meaning `false`).
+
     let malformed = [
         json!({ "pattern": "beta", "multiline": "true" }),
         json!({ "pattern": "beta", "include_ignored": 1 }),
@@ -3107,12 +3230,6 @@ fn grep_treats_absent_and_null_arguments_as_schema_defaults() {
     }
 }
 
-// ── Read errors drop the whole file ─────────────────────────────────
-
-/// A line source that serves `lines` copies of one matching line and then
-/// either ends cleanly or fails, standing in for the two ways a file read
-/// can stop. Injecting it keeps the read-error contract testable without a
-/// filesystem that fails on demand.
 struct ScriptedReader {
     lines: usize,
     fail_after: bool,
@@ -3146,8 +3263,7 @@ fn grep_read_error_skips_the_whole_file() {
         line_numbers: true,
         multiline: false,
     };
-    // `Ok(0) | Err(_) => break` used to report the prefix read so far as a
-    // complete result; a partially readable file must not masquerade as one.
+
     let reader = std::io::BufReader::new(ScriptedReader {
         lines: 1,
         fail_after: true,
@@ -3155,9 +3271,10 @@ fn grep_read_error_skips_the_whole_file() {
     assert!(
         matches!(
             scan_grep_lines(reader, &cfg, "broken.txt".to_string(), 7),
-            ScanOutcome::Skip
+            ScanOutcome::Unreadable
         ),
-        "an I/O error must drop the file"
+        "an I/O error must drop the file and be reported as unreadable, not \
+         silently treated as a file with no matches"
     );
 }
 
@@ -3172,8 +3289,7 @@ fn grep_clean_eof_keeps_the_scanned_matches() {
         line_numbers: true,
         multiline: false,
     };
-    // The happy path is pinned alongside it: a clean EOF must still yield
-    // everything that was read, so the error branch cannot be "always skip".
+
     let reader = std::io::BufReader::new(ScriptedReader {
         lines: 3,
         fail_after: false,
@@ -3193,15 +3309,11 @@ fn grep_clean_eof_keeps_the_scanned_matches() {
             );
         }
         ScanOutcome::Skip => panic!("a fully served file must not be skipped"),
-        ScanOutcome::Oversized => panic!("a tiny file must not be oversized"),
+        ScanOutcome::Unreadable => panic!("a fully served file must not be unreadable"),
     }
 }
 
-// ── Multiline zero-width / EOF semantics (pinned against rg 15.0.0) ──
-
 fn multiline_regex(pattern: &str) -> regex::Regex {
-    // rg `-U --multiline-dotall`: `.` matches `\n`, and `^`/`$` stay
-    // anchored per line.
     regex::RegexBuilder::new(pattern)
         .multi_line(true)
         .dot_matches_new_line(true)
@@ -3234,23 +3346,21 @@ fn matched_scan(outcome: ScanOutcome, what: &str) -> FileScan {
     match outcome {
         ScanOutcome::Match(scan) => scan,
         ScanOutcome::Skip => panic!("{what}: expected a match, the file was skipped"),
-        ScanOutcome::Oversized => panic!("{what}: expected a match, the file was oversized"),
+        ScanOutcome::Unreadable => panic!("{what}: expected a match, the file was unreadable"),
     }
 }
 
 #[test]
 fn multiline_eof_zero_width_match_is_not_counted_or_marked() {
     let dir = tempfile::tempdir().unwrap();
-    // rg -U --count-matches '$' over "a\nb\n" reports 2 (offsets 1 and 3);
-    // the third zero-width match sits at EOF, where `line_at(content.len())`
-    // is out of range and clamping it would wrongly re-mark the last line.
+
     let scan = matched_scan(
         scan_multiline(dir.path(), "withnl.txt", "a\nb\n", "$", GrepMode::Content),
         "$ over \"a\\nb\\n\"",
     );
     assert_eq!(scan.total_matches, 2, "rg --count-matches reports 2");
     assert_eq!(scan.rendered, vec!["withnl.txt:1:a", "withnl.txt:2:b"]);
-    // `x*` matches at every offset: rg counts `len` (4), not `len + 1` (5).
+
     let scan = matched_scan(
         scan_multiline(
             dir.path(),
@@ -3262,7 +3372,7 @@ fn multiline_eof_zero_width_match_is_not_counted_or_marked() {
         "x* over \"a\\nb\\n\"",
     );
     assert_eq!(scan.total_matches, 4, "rg --count-matches reports 4");
-    // `\z` needs a buffer end that is not a line boundary.
+
     assert!(
         matches!(
             scan_multiline(
@@ -3276,7 +3386,7 @@ fn multiline_eof_zero_width_match_is_not_counted_or_marked() {
         ),
         "rg finds nothing for `\\z` in a newline-terminated file"
     );
-    // An empty file has no line to attribute any match to.
+
     assert!(
         matches!(
             scan_multiline(
@@ -3295,17 +3405,14 @@ fn multiline_eof_zero_width_match_is_not_counted_or_marked() {
 #[test]
 fn multiline_zero_width_match_on_a_newline_spans_into_the_next_line() {
     let dir = tempfile::tempdir().unwrap();
-    // rg -U -n '$' over "a\nb" prints BOTH lines while counting 1: the
-    // zero-width match sits on the '\n' byte and rg spans the line it
-    // terminates plus the one after it.
+
     let scan = matched_scan(
         scan_multiline(dir.path(), "nonl.txt", "a\nb", "$", GrepMode::Content),
         "$ over \"a\\nb\"",
     );
     assert_eq!(scan.total_matches, 1, "rg --count-matches reports 1");
     assert_eq!(scan.rendered, vec!["nonl.txt:1:a", "nonl.txt:2:b"]);
-    // Same rule for a non-`$` zero-width pattern: `\b` over "a\nb" counts 3
-    // (the EOF boundary is dropped) and still prints both lines.
+
     let scan = matched_scan(
         scan_multiline(dir.path(), "nonl2.txt", "a\nb", r"\b", GrepMode::Content),
         "\\b over a\\nb",
@@ -3317,18 +3424,14 @@ fn multiline_zero_width_match_on_a_newline_spans_into_the_next_line() {
 #[test]
 fn multiline_sole_eof_match_in_a_dangling_last_line_survives() {
     let dir = tempfile::tempdir().unwrap();
-    // rg -U --count-matches '\z' over "xy" reports 1 and prints line 1: the
-    // only match is at EOF, and dropping it would remove the file from
-    // `files_with_matches` entirely — a false negative, which is worse than
-    // an off-by-one count.
+
     let scan = matched_scan(
         scan_multiline(dir.path(), "xy.txt", "xy", r"\z", GrepMode::Content),
         "\\z over xy",
     );
     assert_eq!(scan.total_matches, 1, "rg --count-matches reports 1");
     assert_eq!(scan.rendered, vec!["xy.txt:1:xy"]);
-    // Once another match exists, rg drops the EOF one again: `\b|\z` over
-    // "xy" counts 1, not 2.
+
     let scan = matched_scan(
         scan_multiline(
             dir.path(),
@@ -3345,8 +3448,7 @@ fn multiline_sole_eof_match_in_a_dangling_last_line_survives() {
 #[test]
 fn multiline_anchors_stay_per_line_like_ripgrep() {
     let dir = tempfile::tempdir().unwrap();
-    // rg -U keeps `^` anchored per line, so multi_line(true) is required:
-    // over "a\nb\nc" it reports 3, over "ab\ncd\n" 2 (the EOF `^` is dropped).
+
     let scan = matched_scan(
         scan_multiline(
             dir.path(),
@@ -3371,20 +3473,21 @@ fn multiline_anchors_stay_per_line_like_ripgrep() {
     assert_eq!(scan.total_matches, 2, "rg --count-matches reports 2");
 }
 
-/// The tool description promises "sorted by modification time (most
-/// recent first)" on both sides (v2 `glob.md:1`), and v2 gets that by
-/// running rg with `--sortr=modified` (globTool.ts:360). Sorting the
-/// display strings returned alphabetical order instead.
 #[test]
 fn test_glob_orders_results_by_mtime_desc() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    // Written in this order, so alphabetical and mtime order differ.
-    for name in ["a-old.txt", "b-mid.txt", "c-new.txt"] {
-        std::fs::write(root.join(name), "x").unwrap();
-        // 1.1 s apart, so the three mtimes stay distinct even where the
-        // filesystem only keeps whole seconds.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let now = std::time::SystemTime::now();
+    for (name, age_secs) in [("a-old.txt", 20u64), ("b-mid.txt", 10), ("c-new.txt", 0)] {
+        let path = root.join(name);
+        std::fs::write(&path, "x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(now - std::time::Duration::from_secs(age_secs))
+            .unwrap();
     }
 
     let sandbox = Sandbox::new(std::fs::canonicalize(root).unwrap());
@@ -3408,28 +3511,21 @@ fn test_glob_orders_results_by_mtime_desc() {
 fn test_glob_finds_hidden_and_filters_vcs_and_sensitive() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    // Create files in hidden folder
+
     let github_dir = root.join(".github").join("workflows");
     std::fs::create_dir_all(&github_dir).unwrap();
     std::fs::write(github_dir.join("ci.yml"), "name: CI").unwrap();
 
-    // Create file in VCS folder (.git)
     let git_dir = root.join(".git").join("hooks");
     std::fs::create_dir_all(&git_dir).unwrap();
     std::fs::write(git_dir.join("ci.yml"), "hook").unwrap();
 
-    // Create sensitive file
     std::fs::write(root.join(".env"), "SECRET=123").unwrap();
 
-    // Create normal file
     std::fs::write(root.join("hello.txt"), "world").unwrap();
 
-    // Canonicalized the way `NativeToolset::new` canonicalizes the
-    // workspace root: `resolve` compares canonical paths, so a raw
-    // `dir.path()` would not match on Windows.
     let sandbox = Sandbox::new(std::fs::canonicalize(root).unwrap());
 
-    // 1. Glob for ci.yml: should find .github/workflows/ci.yml, NOT .git/hooks/ci.yml
     let res = NativeToolset::glob(&sandbox, &bridge(), &json!({ "pattern": "**/ci.yml" })).unwrap();
     assert!(res.content.contains("ci.yml"));
     assert!(res.content.contains(".github"));
@@ -3438,25 +3534,17 @@ fn test_glob_finds_hidden_and_filters_vcs_and_sensitive() {
         assert!(!line.contains(".git/") && !line.contains(".git\\"));
     }
 
-    // 2. Glob for sensitive file: should filter it out and report filtered
     let res = NativeToolset::glob(&sandbox, &bridge(), &json!({ "pattern": "**/.env" })).unwrap();
     assert!(
         res.content
             .contains("No non-sensitive matches found (1 sensitive file(s) filtered)")
     );
 
-    // 3. Glob matching both normal and sensitive file:
     let res = NativeToolset::glob(&sandbox, &bridge(), &json!({ "pattern": "**/*" })).unwrap();
     assert!(res.content.contains("hello.txt"));
     assert!(res.content.contains("Filtered 1 sensitive file(s)."));
 }
 
-/// The paging report is fork-original prose (v2's glob has no counterpart)
-/// and it *reports* a window rather than instructing, so it goes through the
-/// locale catalog. The two lines that follow it stay hardcoded English: they
-/// tell the model how to drive the tool, which is protocol, not UI. The
-/// assertion on them is a decision pin, not a wording preference — moving
-/// either into the catalog needs a ruling, and this test is where it shows.
 #[test]
 fn test_glob_paging_report_is_localized_but_its_instructions_are_not() {
     let dir = tempfile::tempdir().unwrap();
@@ -3473,8 +3561,6 @@ fn test_glob_paging_report_is_localized_but_its_instructions_are_not() {
     )
     .unwrap();
 
-    // Rendered from `engine.tools.glob.showingMatches`, so a wrong key would
-    // show up as the bare key here rather than as a sentence.
     assert!(
         res.content.contains("Showing matches 1\u{2013}2 of 3."),
         "content: {}",
@@ -3492,7 +3578,7 @@ fn test_glob_paging_report_is_localized_but_its_instructions_are_not() {
         "content: {}",
         res.content
     );
-    // Two rows on the page, not three.
+
     let rows = res
         .content
         .lines()
@@ -3501,11 +3587,6 @@ fn test_glob_paging_report_is_localized_but_its_instructions_are_not() {
     assert_eq!(rows, 2, "content: {}", res.content);
 }
 
-// ── Multi-root sandbox (`/add-dir` → `additionalDirs`) ──────────────
-
-/// A path outside `workspace_root` used to be unservable: the toolset
-/// declined it and the call went to the host `execute_tool` seam, which
-/// has no tool runtime. Authorized extra roots must be served natively.
 #[test]
 fn reads_are_not_path_gated() {
     let workspace = tempfile::tempdir().unwrap();
@@ -3526,9 +3607,6 @@ fn reads_are_not_path_gated() {
     );
 }
 
-/// The whole path a restart takes: a task the previous process left
-/// running is announced to the model through the turn's injection
-/// registry, exactly once (v2 `reconcile` → reminder).
 #[test]
 fn previous_session_reminder_reaches_the_injection_registry_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -3564,7 +3642,6 @@ fn previous_session_reminder_reaches_the_injection_registry_once() {
         texts[0]
     );
 
-    // A later turn in the same process stays silent.
     assert!(
         registry.build_injections(true).is_empty(),
         "the reminder is one-shot"
@@ -3604,23 +3681,107 @@ async fn test_native_bash_background_task_runner() {
         .trim()
         .trim_end_matches(['.', ')']);
 
-    // 60s, not 2s: this wait races a real shell spawn, and on a loaded
-    // machine (parallel builds, ConPTY tests spawning powershells) shorter
-    // budgets intermittently expired before the task finished — a flake, not
-    // a regression. 10s still lost that race when a second full test suite
-    // ran concurrently, so the bound now covers what the product itself
-    // allows a shell task. The happy path still returns in milliseconds.
     let wait_res = runner.wait(task_id, 60_000).await;
     let crate::storage::TaskWaitResult::Completed(entry) = wait_res else {
         panic!("the background task must settle as completed: {wait_res:?}");
     };
-    // The 250 ms stream-drain grace (`process-task.ts:119-132`) must not
-    // discard output that arrived before the process exited.
+
     let output = entry["output"].as_str().unwrap_or_default();
     assert!(
         output.contains("bg hello"),
         "the background task's stdout must survive the drain: {entry:?}"
     );
+}
+
+#[tokio::test]
+async fn test_native_powershell_background_task_runner() {
+    if find_powershell().is_none() {
+        return;
+    }
+    let (_dir, ts) = setup();
+    let runner = std::sync::Arc::new(crate::storage::TaskRunner::new(None));
+    let ts = ts.with_task_runner(runner.clone());
+
+    let res = ts
+        .powershell_with(
+            &json!({
+                "command": "Write-Output 'bg hello'",
+                "run_in_background": true,
+                "description": "emit bg hello"
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!res.is_error, "{}", res.content);
+    assert!(
+        res.content.contains("Background task started"),
+        "{}",
+        res.content
+    );
+    assert!(res.content.contains("description: emit bg hello"));
+
+    let line = res
+        .content
+        .lines()
+        .find(|line| line.contains("task_id:"))
+        .unwrap();
+    let task_id = line
+        .split("task_id: ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .trim_end_matches(['.', ')']);
+
+    let wait_res = runner.wait(task_id, 60_000).await;
+    let crate::storage::TaskWaitResult::Completed(entry) = wait_res else {
+        panic!("the background script must settle as completed: {wait_res:?}");
+    };
+    let output = entry["output"].as_str().unwrap_or_default();
+    assert!(
+        output.contains("bg hello"),
+        "the background task's stdout must survive the drain: {entry:?}"
+    );
+}
+
+#[tokio::test]
+async fn powershell_foreground_timeout_is_rehomed_to_the_background() {
+    if find_powershell().is_none() {
+        return;
+    }
+    let (_dir, ts) = setup();
+    let runner = std::sync::Arc::new(crate::storage::TaskRunner::new(None));
+    let ts = ts.with_task_runner(runner.clone());
+
+    let res = ts
+        .powershell_with(
+            &json!({ "command": "Start-Sleep -Seconds 30", "timeout": 1 }),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!res.is_error, "{}", res.content);
+    assert!(
+        res.content
+            .contains("and was moved to the background (task_id: "),
+        "{}",
+        res.content
+    );
+    let task_id = res
+        .content
+        .split("(task_id: ")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(
+        runner.running_ids().contains(&task_id),
+        "the migrated script must be registered as a running task"
+    );
+
+    let _ = runner.stop(&task_id, Some("test cleanup")).await;
 }
 
 #[tokio::test]
@@ -3645,11 +3806,6 @@ async fn workflow_tool_lists_without_a_subagent_runtime() {
     assert!(run.content.contains("no subagent runtime"));
 }
 
-/// The mode-mutex dispatch wiring end to end: the real
-/// `execute_tool` arms (`EnterPlanMode` / `TowerInit`), the real
-/// `TowerSpawn` / `TowerMerge` gates, and a real git repository.
-/// Unit tests of the helpers live in `mode_mutex.rs`; this module covers
-/// the wiring those helpers are attached to.
 mod mode_mutex_dispatch {
     use std::path::Path;
     use std::process::Command;
@@ -3684,7 +3840,6 @@ mod mode_mutex_dispatch {
         );
     }
 
-    /// A real repository with one commit on `main`.
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         run_git(dir.path(), &["init", "-b", "main"]);
@@ -3694,8 +3849,6 @@ mod mode_mutex_dispatch {
         dir
     }
 
-    /// State-bridge host: plan reads answer `active`, writes are
-    /// recorded.
     struct StateHost {
         plan_active: bool,
         writes: Arc<StdMutex<Vec<Value>>>,
@@ -3727,9 +3880,9 @@ mod mode_mutex_dispatch {
 
         fn state_read(
             &self,
-            _: StateReadRequest,
+            request: StateReadRequest,
         ) -> BoxFuture<'static, Result<StateReadResponse, String>> {
-            let active = self.plan_active;
+            let active = self.plan_active && request.domain == "plan";
             Box::pin(async move {
                 Ok(StateReadResponse {
                     value: json!({ "active": active }),
@@ -3758,8 +3911,6 @@ mod mode_mutex_dispatch {
         )
     }
 
-    /// A live tower with one open mission `M1`, planned through the real
-    /// `TowerPlan` tool so the branch/worktree fields match production.
     async fn repo_with_open_mission(dir: &Path, toolset: &NativeToolset) {
         let init = toolset
             .execute_tool("TowerInit", &json!({}))
@@ -3784,40 +3935,6 @@ mod mode_mutex_dispatch {
         state.missions.iter().find(|m| m.id == id).map(|m| m.status)
     }
 
-    /// The real bug this guards: entering plan mode through the toolset
-    /// dispatch must pause open tower missions, with the pause visible in
-    /// the persisted state (not just mentioned in the tool result).
-    #[tokio::test]
-    async fn enter_plan_mode_through_dispatch_pauses_open_tower_missions() {
-        let dir = init_repo();
-        let (callbacks, writes) = host(false);
-        let toolset = NativeToolset::new(dir.path().to_str().unwrap(), None)
-            .unwrap()
-            .with_callbacks(callbacks);
-        repo_with_open_mission(dir.path(), &toolset).await;
-
-        let result = toolset
-            .execute_tool("EnterPlanMode", &json!({}))
-            .await
-            .expect("EnterPlanMode is native");
-        assert!(!result.is_error, "{}", result.content);
-        assert!(
-            result.content.contains("paused 1 open tower mission") && result.content.contains("M1"),
-            "{}",
-            result.content
-        );
-        // The state bridge saw the plan activation.
-        assert_eq!(writes.lock().unwrap().len(), 1);
-
-        let state = TowerStore::new(dir.path().to_path_buf())
-            .load()
-            .await
-            .unwrap();
-        assert_eq!(status_of(&state, "M1"), Some(TowerMissionStatus::Paused));
-    }
-
-    /// TowerSpawn-worker on a paused mission must be refused by the real
-    /// dispatch path (no worktree is created, no worker is spawned).
     #[tokio::test]
     async fn tower_spawn_worker_refuses_paused_mission() {
         let dir = init_repo();
@@ -3827,7 +3944,6 @@ mod mode_mutex_dispatch {
             .with_callbacks(callbacks);
         repo_with_open_mission(dir.path(), &toolset).await;
 
-        // Pause M1 via the mutex (the same call the plan-enter arm makes).
         let paused = crate::tools::mode_mutex::pause_tower_for_mode_enter(dir.path(), "test").await;
         assert_eq!(paused, vec!["M1".to_string()]);
 
@@ -3844,13 +3960,10 @@ mod mode_mutex_dispatch {
             "{}",
             result.content
         );
-        // The refusal happens before the worktree is created.
+
         assert!(!dir.path().join(".tower/worktrees/wt-1").exists());
     }
 
-    /// v2 #3976: AgentSwarm is refused outright while a tower has open
-    /// missions — the pre-#3976 auto-pause is gone, and the batch must not
-    /// run at all (no subagents, and the mission keeps its status).
     #[tokio::test]
     async fn agent_swarm_is_refused_while_tower_is_active() {
         let dir = init_repo();
@@ -3882,8 +3995,6 @@ mod mode_mutex_dispatch {
             result.content
         );
 
-        // No mission was paused (the pause half is gone in #3976) and no
-        // swarm side effect landed.
         let after = TowerStore::new(dir.path().to_path_buf())
             .load()
             .await
@@ -3891,8 +4002,6 @@ mod mode_mutex_dispatch {
         assert_eq!(status_of(&after, "M1"), Some(TowerMissionStatus::Planned));
     }
 
-    /// With no tower, the swarm dispatch is untouched: the call reaches the
-    /// swarm tool instead of the tower mutex.
     #[tokio::test]
     async fn agent_swarm_is_not_vetoed_when_no_tower_is_initialized() {
         let dir = init_repo();
@@ -3906,8 +4015,7 @@ mod mode_mutex_dispatch {
                 .await
                 .is_none()
         );
-        // `None` means the call fell through to the host (this fixture has no
-        // subagent runtime); either way the tower mutex did not veto it.
+
         if let Some(result) = toolset
             .execute_tool("AgentSwarm", &json!({ "tasks": [] }))
             .await
@@ -3922,9 +4030,6 @@ mod mode_mutex_dispatch {
         }
     }
 
-    /// TowerMerge on a paused mission's branch must be refused even though
-    /// every other gate (review, deps) would also matter — the mutex gate
-    /// runs first and names the mission.
     #[tokio::test]
     async fn tower_merge_refuses_paused_mission_branch() {
         let dir = init_repo();
@@ -3955,8 +4060,6 @@ mod mode_mutex_dispatch {
         );
     }
 
-    /// TowerInit while plan mode is active exits plan through the state
-    /// bridge (main agent path), and the tool result says so.
     #[tokio::test]
     async fn tower_init_through_dispatch_exits_plan_mode() {
         let dir = init_repo();
@@ -3982,45 +4085,6 @@ mod mode_mutex_dispatch {
         assert_eq!(writes[0], json!({ "active": false }));
     }
 
-    /// A subagent's EnterPlanMode (non-main caller) must not touch the
-    /// main agent's tower (v2's modeMutex is Agent-scoped and
-    /// `tower.isActive` is main-only).
-    #[tokio::test]
-    async fn subagent_enter_plan_does_not_pause_tower() {
-        let dir = init_repo();
-        // The tower is created by the main agent's toolset (TowerInit is
-        // main-only); the subagent call runs through a second toolset.
-        let (main_callbacks, _) = host(false);
-        let main = NativeToolset::new(dir.path().to_str().unwrap(), None)
-            .unwrap()
-            .with_callbacks(main_callbacks);
-        repo_with_open_mission(dir.path(), &main).await;
-
-        let (sub_callbacks, _) = host(false);
-        let subagent = NativeToolset::new(dir.path().to_str().unwrap(), None)
-            .unwrap()
-            .with_callbacks(sub_callbacks)
-            .with_caller_agent_id("subagent-42");
-
-        let result = subagent
-            .execute_tool("EnterPlanMode", &json!({}))
-            .await
-            .expect("EnterPlanMode is native");
-        assert!(!result.is_error, "{}", result.content);
-        assert!(
-            !result.content.contains("paused"),
-            "a subagent plan entry must not pause main's tower: {}",
-            result.content
-        );
-        let state = TowerStore::new(dir.path().to_path_buf())
-            .load()
-            .await
-            .unwrap();
-        assert_eq!(status_of(&state, "M1"), Some(TowerMissionStatus::Planned));
-    }
-
-    /// A subagent's TowerInit is refused (main-only) and must not exit
-    /// main's plan mode as a side effect of the mutex arm running anyway.
     #[tokio::test]
     async fn subagent_tower_init_refused_and_plan_untouched() {
         let dir = init_repo();
@@ -4041,11 +4105,10 @@ mod mode_mutex_dispatch {
         );
     }
 
-    /// A failed TowerInit (no git repo) must not exit plan mode: v2 exits
-    /// plan on the entry event, and no tower mode was entered here.
     #[tokio::test]
     async fn failed_tower_init_does_not_exit_plan_mode() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".tower"), b"x").unwrap();
         let (callbacks, writes) = host(true);
         let toolset = NativeToolset::new(dir.path().to_str().unwrap(), None)
             .unwrap()
@@ -4062,9 +4125,6 @@ mod mode_mutex_dispatch {
         );
     }
 
-    /// A worker's TowerSend uses the shared rich-wake runtime for the session
-    /// that ran TowerInit, with no main-self wake and a variant-scoped drop on
-    /// teardown. Same-task burst coalescing is covered by the runtime tests.
     #[tokio::test]
     async fn worker_tower_send_wakes_the_main_session() {
         #[derive(Default)]
@@ -4110,8 +4170,6 @@ mod mode_mutex_dispatch {
             .expect("TowerInit is native");
         assert!(!init.is_error, "{}", init.content);
 
-        // Register a worker directly in the store (a real spawn builds
-        // worktrees and detached runs the wake test does not need).
         let store = TowerStore::new(dir.path().to_path_buf());
         store
             .register_agent(crate::tools::tower::types::TowerRosterEntry {
@@ -4187,7 +4245,6 @@ mod mode_mutex_dispatch {
             payloads.len()
         };
 
-        // Main's own sends wake nothing.
         let main_send = main
             .execute_tool(
                 "TowerSend",
@@ -4210,9 +4267,6 @@ mod mode_mutex_dispatch {
     }
 }
 
-/// Read shows a pure-CRLF file as LF, so Edit must match that same view and
-/// write the result back as CRLF. Matching the raw bytes made every
-/// multi-line edit on a Windows-checked-out file fail with "not found".
 #[tokio::test]
 async fn edit_matches_the_model_view_of_a_crlf_file() {
     let (_dir, ts) = setup();
@@ -4236,7 +4290,6 @@ async fn edit_matches_the_model_view_of_a_crlf_file() {
     );
 }
 
-/// Invalid UTF-8 must be refused, not silently rewritten as U+FFFD.
 #[tokio::test]
 async fn edit_refuses_invalid_utf8_instead_of_rewriting_it() {
     let (_dir, ts) = setup();
@@ -4257,12 +4310,6 @@ async fn edit_refuses_invalid_utf8_instead_of_rewriting_it() {
     assert_eq!(std::fs::read(&path).unwrap(), vec![0xff, 0xfe, b'a']);
 }
 
-/// v2 `describeUnavailableTool` / `describeMissingTool`
-/// (`toolSelectService.ts:298-318`) at the dispatch seam: a deferred tool that
-/// was never loaded is told to load itself, and one whose server went away is
-/// told why retrying cannot help. Both answers come from the engine — without
-/// them the call reaches the host and comes back as a generic unknown-tool
-/// error that tells the model nothing about loading or reconnecting.
 #[tokio::test]
 async fn a_deferred_tool_call_is_refused_with_v2_guidance() {
     let (_dir, ts) = setup();
@@ -4283,10 +4330,12 @@ async fn a_deferred_tool_call_is_refused_with_v2_guidance() {
         .await;
     let ts = ts
         .with_mcp(manager.clone())
-        .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+        .with_model_capabilities(Some(vec![
+            "tool_use".into(),
+            "dynamically_loaded_tools".into(),
+        ]))
         .with_tool_select_enabled(true);
 
-    // Not loaded yet: the table hid it, so the call gets load guidance.
     let unloaded = ts
         .execute_tool("mcp__github__github_sample_tool", &json!({}))
         .await
@@ -4298,8 +4347,6 @@ async fn a_deferred_tool_call_is_refused_with_v2_guidance() {
 Call select_tools with [\"mcp__github__github_sample_tool\"] first, then call the tool."
     );
 
-    // Loaded, then the server goes away: the name leaves the registry, and the
-    // model is told a reconnect is what would bring it back.
     ts.execute_tool(
         "select_tools",
         &json!({ "names": ["mcp__github__github_sample_tool"] }),
@@ -4320,11 +4367,6 @@ do not retry immediately."
     );
 }
 
-/// v2 #4720 / #4719: without progressive disclosure, the request still
-/// reconciles the live registry into the session's initial snapshot — a
-/// same-name tool uses its current definition, while a runtime-only addition
-/// never joins the initial table. Rebuilding from scratch would silently
-/// keep the stale schema and advertise the new tool with no announcement.
 #[tokio::test]
 async fn disabled_disclosure_reconciles_the_initial_tool_table() {
     let (_dir, ts) = setup();
@@ -4353,5 +4395,256 @@ async fn disabled_disclosure_reconciles_the_initial_tool_table() {
     assert!(
         shaped[0].input_schema["properties"].get("old").is_none(),
         "the initial snapshot must not survive a same-name update"
+    );
+}
+
+struct SilentLlm;
+
+impl crate::turn_loop::types::LLM for SilentLlm {
+    fn system_prompt(&self) -> &str {
+        "mock system prompt"
+    }
+    fn model_name(&self) -> &str {
+        "mock-model"
+    }
+    fn is_retryable_error(&self, _error: &str) -> bool {
+        false
+    }
+    fn chat(
+        &self,
+        _params: crate::turn_loop::types::LLMChatParams,
+    ) -> crate::rpc::types::BoxFuture<
+        '_,
+        Result<crate::turn_loop::types::LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>,
+    > {
+        Box::pin(async { Err("unused".into()) })
+    }
+}
+
+struct UnusedHost;
+
+impl crate::callbacks::HostCallbacks for UnusedHost {
+    fn llm_chat(
+        &self,
+        _request: crate::rpc::types::LlmChatRequest,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::LlmChatResponse, String>>
+    {
+        Box::pin(async { Err("unused".into()) })
+    }
+
+    fn execute_tool(
+        &self,
+        _request: crate::rpc::types::ToolExecuteRequest,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::ToolExecuteResponse, String>>
+    {
+        Box::pin(async { Err("unused".into()) })
+    }
+
+    fn check_permission(
+        &self,
+        _request: crate::rpc::types::PermissionCheckRequest,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::PermissionDecision, String>>
+    {
+        Box::pin(async { Ok(crate::rpc::types::PermissionDecision::allow()) })
+    }
+}
+
+async fn manager_bound_to(
+    work: &std::path::Path,
+    env: std::collections::BTreeMap<String, String>,
+) -> std::sync::Arc<crate::subagent::SubagentManager> {
+    let manager = std::sync::Arc::new(crate::subagent::SubagentManager::new());
+    manager
+        .set_runtime(
+            std::sync::Arc::new(SilentLlm),
+            std::sync::Arc::new(UnusedHost),
+            Some("session-tools".into()),
+        )
+        .await;
+    let roots = crate::environment::WorkspaceRoots::new(work, Vec::new()).unwrap();
+    let snapshot = crate::environment::EnvironmentSnapshot::capture(
+        &crate::environment::EnvironmentDeclaration::default(),
+        None,
+        Some(roots.work_dir()),
+        env,
+        &roots,
+        false,
+    )
+    .unwrap();
+    manager
+        .set_session_environment("session-tools", snapshot, roots)
+        .await;
+    manager
+}
+
+async fn bound_manager_and_id(
+    work: &std::path::Path,
+    requested: &str,
+    child_env: std::collections::BTreeMap<String, String>,
+) -> (std::sync::Arc<crate::subagent::SubagentManager>, String) {
+    let manager = manager_bound_to(
+        work,
+        std::collections::BTreeMap::from([("PARENT_ONLY".to_string(), "1".to_string())]),
+    )
+    .await;
+    let id = manager
+        .spawn_in_environment(
+            "explore",
+            "child",
+            crate::environment::AgentEnvironmentRequest {
+                cwd: Some(std::path::PathBuf::from(requested)),
+                env: child_env,
+            },
+        )
+        .await
+        .unwrap();
+    (manager, id)
+}
+
+async fn bound_toolset(
+    work: &std::path::Path,
+    requested: &str,
+    child_env: std::collections::BTreeMap<String, String>,
+) -> NativeToolset {
+    let (manager, id) = bound_manager_and_id(work, requested, child_env).await;
+    NativeToolset::new(work.to_str().unwrap(), None)
+        .unwrap()
+        .with_subagents(manager)
+        .with_caller_agent_id(id)
+}
+
+#[tokio::test]
+async fn a_bound_agent_resolves_relative_paths_from_its_own_cwd() {
+    let work = tempfile::tempdir().unwrap();
+    let nested = work.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(work.path().join("root.txt"), "root\n").unwrap();
+    std::fs::write(nested.join("child.txt"), "child marker\n").unwrap();
+
+    let ts = bound_toolset(
+        work.path(),
+        "nested",
+        std::collections::BTreeMap::from([("PARENT_ONLY".to_string(), "child".to_string())]),
+    )
+    .await;
+
+    assert_eq!(
+        ts.execution_root(),
+        std::fs::canonicalize(&nested).unwrap(),
+        "the default execution directory is the agent's cwd"
+    );
+
+    let env = ts.execution_environment();
+    assert_eq!(env.get("PARENT_ONLY").map(String::as_str), Some("child"));
+
+    let read = ts.execute("Read", &json!({ "path": "child.txt" })).unwrap();
+    assert!(!read.is_error, "content: {}", read.content);
+    assert!(read.content.contains("child marker"));
+
+    let root = ts.execute("Read", &json!({ "path": "root.txt" })).unwrap();
+    assert!(root.is_error, "content: {}", root.content);
+
+    let grep = ts
+        .execute("Grep", &json!({ "pattern": "child marker" }))
+        .unwrap();
+    assert!(!grep.is_error, "content: {}", grep.content);
+    assert!(
+        grep.content.contains("child.txt"),
+        "content: {}",
+        grep.content
+    );
+}
+
+#[tokio::test]
+async fn a_bound_agent_stays_inside_the_session_roots() {
+    let work = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let nested = work.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(work.path().join("sibling")).unwrap();
+
+    let ts = bound_toolset(work.path(), "nested", std::collections::BTreeMap::new()).await;
+
+    let escaped = outside.path().join("escaped.txt");
+    let refusal = ts
+        .execute_mutating(
+            "Write",
+            &json!({
+                "path": format!("../../{}", escaped.file_name().unwrap().to_string_lossy()),
+                "content": "nope",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(refusal.is_error, "content: {}", refusal.content);
+
+    let sibling = work.path().join("sibling").join("ok.txt");
+    let write = ts
+        .execute_mutating(
+            "Write",
+            &json!({ "path": sibling.to_str().unwrap(), "content": "ok" }),
+        )
+        .await
+        .unwrap();
+    assert!(!write.is_error, "content: {}", write.content);
+    assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "ok");
+}
+
+#[tokio::test]
+async fn an_unbound_agent_falls_back_to_the_session_root() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(work.path().join("a.txt"), "alpha\n").unwrap();
+
+    let manager = manager_bound_to(work.path(), std::collections::BTreeMap::new()).await;
+    let ts = NativeToolset::new(work.path().to_str().unwrap(), None)
+        .unwrap()
+        .with_subagents(manager)
+        .with_caller_agent_id("agent-unbound");
+
+    assert_eq!(
+        ts.execution_root(),
+        std::fs::canonicalize(work.path()).unwrap(),
+        "an agent without a binding runs at the session root, as before"
+    );
+    assert!(ts.execution_environment().is_empty());
+    let read = ts.execute("Read", &json!({ "path": "a.txt" })).unwrap();
+    assert!(!read.is_error, "content: {}", read.content);
+    assert!(read.content.contains("alpha"));
+}
+
+#[tokio::test]
+async fn a_bound_agent_runs_bash_in_its_own_directory() {
+    let Some(shell) = find_bash() else { return };
+    let work = tempfile::tempdir().unwrap();
+    let nested = work.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let (manager, id) = bound_manager_and_id(
+        work.path(),
+        "nested",
+        std::collections::BTreeMap::from([("AGENT_MARKER".to_string(), "from-child".to_string())]),
+    )
+    .await;
+    let ts = NativeToolset::new(work.path().to_str().unwrap(), Some(&shell))
+        .unwrap()
+        .with_subagents(manager)
+        .with_caller_agent_id(id);
+
+    let cwd = ts
+        .execute_mutating("Bash", &json!({ "command": "pwd" }))
+        .await
+        .unwrap();
+    assert!(!cwd.is_error, "content: {}", cwd.content);
+    assert!(cwd.content.contains("nested"), "content: {}", cwd.content);
+
+    let marker = ts
+        .execute_mutating("Bash", &json!({ "command": "echo $AGENT_MARKER" }))
+        .await
+        .unwrap();
+    assert!(!marker.is_error, "content: {}", marker.content);
+    assert!(
+        marker.content.contains("from-child"),
+        "content: {}",
+        marker.content
     );
 }

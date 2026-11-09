@@ -7,7 +7,7 @@ async fn test_http_health_endpoint() {
     let server = HttpServer::in_memory().unwrap();
     let req = HttpRequest {
         method: "GET".into(),
-        path: "/api/v1/health".into(),
+        path: "/api/v1/healthz".into(),
         query: None,
         headers: HashMap::new(),
         body: Vec::new(),
@@ -15,8 +15,7 @@ async fn test_http_health_endpoint() {
     let res = server.handle_request(&req).await;
     assert_eq!(res.status, 200);
     let val: Value = serde_json::from_slice(&res.body).unwrap();
-    assert_eq!(val["status"], "ok");
-    assert_eq!(val["engine"], "kimi-agent-rust");
+    assert_eq!(val, json!({ "ok": true }));
 }
 
 /// v2 #3832: a metadata object that names its own variant is a prompt

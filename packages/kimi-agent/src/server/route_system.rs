@@ -8,14 +8,11 @@ impl HttpServer {
         req: &HttpRequest,
     ) -> HttpResponse {
         let resp = match (method, path) {
-            ("GET", "/api/v1/health")
-            | ("GET", "/health")
-            | ("GET", "/healthz")
-            | ("GET", "/api/v1/healthz") => HttpResponse::ok(&json!({
-                "status": "ok",
-                "version": env!("CARGO_PKG_VERSION"),
-                "engine": "kimi-agent-rust",
-            })),
+            // v2 `registerHealthRoute` serves exactly `GET /api/v1/healthz`
+            // and answers `{ ok: true }`
+            // (`kap-server/src/routes/registerApiV1Routes.ts:221-246`; the
+            // auth bypass names the same path, `middleware/auth.ts:36`).
+            ("GET", "/api/v1/healthz") => HttpResponse::ok(&json!({ "ok": true })),
             ("GET", "/api/v1/meta") => {
                 let dangerous_bypass_auth = self.auth.is_disabled();
                 HttpResponse::ok(&json!({
@@ -211,42 +208,18 @@ impl HttpServer {
                 if let Some(telemetry) = body.get("telemetry").and_then(|v| v.as_bool()) {
                     config.telemetry = Some(telemetry);
                 }
+                // A hooks write arrives already validated above; publish it to
+                // the reloadable set so the next turn uses it without a restart.
+                if body.get("hooks").is_some() {
+                    self.hooks_source.replace(config.hooks.clone());
+                }
                 *self.config_override.lock().await = Some(config.clone());
                 HttpResponse::ok(&format_config_response(&config))
             }
-            ("POST", "/api/v1/config:reload") | ("POST", "/api/v1/config/reload") => {
-                *self.config_override.lock().await = None;
-                // Re-read the file the server pinned when it has one — the same
-                // precedence the provider routes use (`provider_write.rs`
-                // `effective_config`, `provider_refresh.rs`) — so a reload picks
-                // up the file this server is actually using rather than a
-                // re-discovery that could land on a different one.
-                let config = match self.config_write_path() {
-                    Some(path) => crate::config::KimiConfig::from_file(&path).unwrap_or_default(),
-                    None => crate::config::KimiConfig::discover()
-                        .map(|(c, _)| c)
-                        .unwrap_or_default(),
-                };
-                // Published even when the list is empty: the entity is an upsert,
-                // so `warnings: []` is what clears the advisory a previously
-                // broken `config.toml` left on the client.
-                self.publish_config_warnings(&config.config_warnings);
-                HttpResponse::ok(&json!({
-                    "status": "reloaded",
-                    "config": format_config_response(&config)
-                }))
-            }
-            ("GET", "/api/v1/runtime") | ("GET", "/api/v1/runtime/info") => {
-                HttpResponse::ok(&json!({
-                    "os": std::env::consts::OS,
-                    "arch": std::env::consts::ARCH,
-                    "family": std::env::consts::FAMILY,
-                    "platform": std::env::consts::OS,
-                    "backend": "rust",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "pid": std::process::id(),
-                }))
-            }
+            // v2 `registerApiV1Routes` has no `/runtime` route: the only
+            // always-on system routes are healthz, meta, config, models,
+            // search and the fs family
+            // (`kap-server/src/routes/registerApiV1Routes.ts:87-217`).
             // Static advertisement, not a probe: the list is a compile-time
             // constant, so it does not reflect per-process availability (e.g. a
             // build without the workflow engine still reports the same set).

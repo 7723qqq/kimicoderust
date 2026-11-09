@@ -192,81 +192,23 @@ fn sorted_list(values: Option<&[String]>) -> String {
         .join(",")
 }
 
-/// One public MCP entry as the host-facing `mcp.server.status` event (v2
-/// `McpServerStatus`, agent-core-v2 `agent/mcp/mcpEvents.ts:13-23`). `error` is
-/// omitted when absent so the payload carries the protocol's optional field
-/// rather than a `null` the zod schema would reject.
-fn mcp_status_event(entry: &crate::mcp::manager::McpServerEntry) -> serde_json::Value {
-    let mut server = serde_json::json!({
-        "name": entry.name,
-        "transport": entry.transport,
-        "status": entry.status,
-        "toolCount": entry.tool_count,
-    });
-    if let Some(error) = &entry.error {
-        server["error"] = serde_json::json!(error);
-    }
-    serde_json::json!({ "type": "mcp.server.status", "server": server })
-}
-
-/// Owns one session's MCP status subscription. Dropping it unsubscribes from
-/// the (process-wide, shared) manager, so a disposed session stops receiving
-/// transitions and, more importantly, stops holding its event TSFN alive
-/// (v2 `attachMcpTools`'s `_register` disposal, mcpService.ts:154-166).
-pub(crate) struct McpStatusBridge {
-    manager: Arc<crate::mcp::McpManager>,
-    subscription: crate::mcp::manager::McpStatusSubscription,
-}
-
-impl Drop for McpStatusBridge {
-    fn drop(&mut self) {
-        self.manager.unsubscribe_status(self.subscription);
-    }
-}
-
 /// Bridge the manager's status transitions to the host's event stream, so a
 /// server that connects (or fails) *after* `createSession` returned still
 /// reaches the UI (v2 `handleMcpServerStatusChange`, mcpService.ts:168-180).
 ///
-/// The manager starts its connects in the background — `createSession` does
-/// not await them — so without this bridge the host only ever saw the one-shot
-/// roster snapshot and a still-connecting server stayed `pending` forever.
-///
-/// The current roster is emitted once *after* the subscription is installed.
-/// v2 does the same thing on attach, in the opposite order and synchronously:
-/// `attachMcpTools` walks `this.list()` through the status handler before it
-/// registers `onStatusChange` (mcpService.ts:190-198). The fork subscribes
-/// first and emits the snapshot from a task, so the replay cannot run inside
-/// the bridge's own construction; a transition landing in that gap emits one
-/// duplicate status, which is idempotent. Without the replay a session
-/// attaching to an already warm manager — `/new` reuses one manager per
-/// resolved configuration — never learns its servers are `connected`, because
-/// the transition happened before this session existed. The snapshot is taken
-/// now rather than captured earlier, so it cannot resurrect a stale state: a
-/// `pending` entry in it is one that is still connecting, and its `connected`
-/// transition follows.
+/// The mapping and the replay live in [`crate::mcp::status`]; this wrapper is
+/// only the napi sink (a JS callback). The bridge owns the subscription, so a
+/// disposed session stops receiving transitions and stops holding the TSFN
+/// alive (v2 `attachMcpTools`'s `_register` disposal, mcpService.ts:154-166).
+pub(crate) use crate::mcp::status::McpStatusBridge;
+
 pub(crate) fn attach_mcp_status(
     manager: &Option<Arc<crate::mcp::McpManager>>,
     callbacks: Arc<dyn crate::callbacks::HostCallbacks>,
 ) -> Option<Arc<McpStatusBridge>> {
-    let manager = manager.as_ref()?.clone();
-    let listener: crate::mcp::manager::McpStatusListener = Box::new({
-        let callbacks = callbacks.clone();
-        move |entry| callbacks.emit_event(mcp_status_event(&entry))
-    });
-    let subscription = manager.on_status_change(listener);
-    // Late-attach replay: the host subscribes at handle creation, so emitting
-    // from a spawned task lands after the bridge exists and survives ordering.
-    let replay = manager.clone();
-    tokio::spawn(async move {
-        for entry in replay.server_entries().await {
-            callbacks.emit_event(mcp_status_event(&entry));
-        }
-    });
-    Some(Arc::new(McpStatusBridge {
-        manager,
-        subscription,
-    }))
+    let manager = manager.as_ref()?;
+    let emit: crate::mcp::status::McpEventSink = Arc::new(move |event| callbacks.emit_event(event));
+    Some(crate::mcp::status::attach(manager, emit))
 }
 
 // ── MCP OAuth (browser auth-code + PKCE flow) ─────────────────────────────

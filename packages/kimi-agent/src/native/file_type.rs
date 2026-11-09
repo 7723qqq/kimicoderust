@@ -103,6 +103,165 @@ pub fn resolve_mime(path: &Path, header: &[u8]) -> String {
     "application/octet-stream".to_string()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSniffKind {
+    Image,
+    Video,
+    Document,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SniffedMedia {
+    pub kind: MediaSniffKind,
+    pub mime_type: &'static str,
+}
+
+const ASF_HEADER: [u8; 16] = [
+    0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c,
+];
+
+const VIDEO_SUFFIX_MIME: [(&str, &str); 13] = [
+    (".mp4", "video/mp4"),
+    (".mpg", "video/mpeg"),
+    (".mpeg", "video/mpeg"),
+    (".mkv", "video/x-matroska"),
+    (".avi", "video/x-msvideo"),
+    (".mov", "video/quicktime"),
+    (".ogv", "video/ogg"),
+    (".wmv", "video/x-ms-wmv"),
+    (".webm", "video/webm"),
+    (".m4v", "video/x-m4v"),
+    (".flv", "video/x-flv"),
+    (".3gp", "video/3gpp"),
+    (".3g2", "video/3gpp2"),
+];
+
+fn sniff_media_suffix(path: &str) -> String {
+    let Some(idx) = path.rfind('.') else {
+        return String::new();
+    };
+    let last_sep = path.rfind(['/', '\\']).map_or(0, |sep| sep + 1);
+    if idx <= last_sep {
+        return String::new();
+    }
+    path[idx..].to_ascii_lowercase()
+}
+
+fn sniff_ftyp_brand(header: &[u8]) -> Option<String> {
+    if header.len() < 12 || &header[4..8] != b"ftyp" {
+        return None;
+    }
+    let raw = std::str::from_utf8(&header[8..12]).ok()?;
+    Some(
+        raw.trim_end_matches(|c: char| c.is_whitespace() || c == '\0')
+            .trim()
+            .to_ascii_lowercase(),
+    )
+}
+
+pub fn sniff_media_from_magic(data: &[u8]) -> Option<SniffedMedia> {
+    let header = if data.len() > MEDIA_SNIFF_BYTES {
+        &data[..MEDIA_SNIFF_BYTES]
+    } else {
+        data
+    };
+    let starts = |needle: &[u8]| header.len() >= needle.len() && &header[..needle.len()] == needle;
+    let image = |mime_type| {
+        Some(SniffedMedia {
+            kind: MediaSniffKind::Image,
+            mime_type,
+        })
+    };
+    let video = |mime_type| {
+        Some(SniffedMedia {
+            kind: MediaSniffKind::Video,
+            mime_type,
+        })
+    };
+    if starts(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return image("image/png");
+    }
+    if starts(&[0xff, 0xd8, 0xff]) {
+        return image("image/jpeg");
+    }
+    if starts(b"GIF87a") || starts(b"GIF89a") {
+        return image("image/gif");
+    }
+    if starts(b"BM") {
+        return image("image/bmp");
+    }
+    if starts(&[0x49, 0x49, 0x2a, 0x00]) || starts(&[0x4d, 0x4d, 0x00, 0x2a]) {
+        return image("image/tiff");
+    }
+    if starts(&[0x00, 0x00, 0x01, 0x00]) {
+        return image("image/x-icon");
+    }
+    if starts(b"RIFF") && header.len() >= 12 {
+        match &header[8..12] {
+            b"WEBP" => return image("image/webp"),
+            b"AVI " => return video("video/x-msvideo"),
+            _ => {}
+        }
+    }
+    if starts(b"%PDF-") {
+        return Some(SniffedMedia {
+            kind: MediaSniffKind::Document,
+            mime_type: "application/pdf",
+        });
+    }
+    if starts(b"FLV") {
+        return video("video/x-flv");
+    }
+    if starts(&ASF_HEADER) {
+        return video("video/x-ms-wmv");
+    }
+    if starts(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        let lowered = String::from_utf8_lossy(header).to_ascii_lowercase();
+        if lowered.contains("webm") {
+            return video("video/webm");
+        }
+        if lowered.contains("matroska") {
+            return video("video/x-matroska");
+        }
+    }
+    if let Some(brand) = sniff_ftyp_brand(header) {
+        match brand.as_str() {
+            "avif" | "avis" => return image("image/avif"),
+            "heic" | "hevc" => return image("image/heic"),
+            "heif" | "heix" | "mif1" | "msf1" => return image("image/heif"),
+            "isom" | "iso2" | "iso5" | "mp41" | "mp42" | "avc1" | "mp4v" => {
+                return video("video/mp4");
+            }
+            "m4v" => return video("video/x-m4v"),
+            "qt" => return video("video/quicktime"),
+            "3gp4" | "3gp5" | "3gp6" | "3gp7" => return video("video/3gpp"),
+            "3g2" => return video("video/3gpp2"),
+            _ => {}
+        }
+    }
+    None
+}
+
+pub fn detect_media_file_type(name: &str, data: &[u8]) -> Option<SniffedMedia> {
+    if let Some(sniffed) = sniff_media_from_magic(data) {
+        return Some(sniffed);
+    }
+    let suffix = sniff_media_suffix(name);
+    if let Some((_, mime_type)) = VIDEO_SUFFIX_MIME.iter().find(|(ext, _)| *ext == suffix) {
+        return Some(SniffedMedia {
+            kind: MediaSniffKind::Video,
+            mime_type,
+        });
+    }
+    if suffix == ".pdf" && data.starts_with(b"%PDF-") {
+        return Some(SniffedMedia {
+            kind: MediaSniffKind::Document,
+            mime_type: "application/pdf",
+        });
+    }
+    None
+}
+
 fn is_image_magic(header: &[u8]) -> bool {
     if header.len() < 4 {
         return false;

@@ -27,6 +27,16 @@ pub struct SummaryPolicy {
     pub retries: u32,
 }
 
+/// One profile the live catalog advertises (v2
+/// `ISessionAgentProfileCatalog.list`): what the `subagents_change` reminder
+/// names when a profile appears, without carrying the whole definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentProfileSummary {
+    pub name: String,
+    pub description: String,
+    pub when_to_use: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentDefinition {
     pub name: String,

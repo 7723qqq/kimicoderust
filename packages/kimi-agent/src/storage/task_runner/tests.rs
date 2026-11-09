@@ -15,7 +15,9 @@ fn stored_tasks(runner: &TaskRunner) -> Value {
         .store
         .as_ref()
         .unwrap()
-        .read_domain("task")
+        .read_domain_state("task")
+        .into_result()
+        .unwrap()
         .unwrap_or(Value::Array(vec![]))
 }
 
@@ -707,7 +709,7 @@ async fn output_is_none_while_running() {
     assert_eq!(tasks[0]["taskId"], "task-1");
     assert_eq!(tasks[0]["status"], "running");
     // Clean up the pending task so the test runtime can shut down.
-    let wire = runner.stop("task-1", None).await.unwrap();
+    let wire = runner.stop("task-1", None).await.unwrap().wire;
     assert_eq!(wire["status"], "killed");
 }
 
@@ -721,7 +723,7 @@ async fn stop_kills_running_task() {
             std::future::pending::<String>(),
         )
         .unwrap();
-    let wire = runner.stop("task-1", None).await.unwrap();
+    let wire = runner.stop("task-1", None).await.unwrap().wire;
     assert_eq!(wire["status"], "killed");
     assert_eq!(wire["stopReason"], "Stopped by TaskStop");
     assert!(wire["endedAt"].as_u64().unwrap() >= wire["startedAt"].as_u64().unwrap());
@@ -799,7 +801,7 @@ async fn stop_session_flags_only_its_own_tasks() {
             .unwrap();
     }
 
-    let mut stopped = runner.stop_session("sess-a", None).await;
+    let mut stopped = runner.stop_session("sess-a", None).await.flagged;
     stopped.sort();
     assert_eq!(stopped, vec!["a-1".to_string(), "a-2".to_string()]);
 
@@ -814,7 +816,7 @@ async fn stop_session_flags_only_its_own_tasks() {
 #[tokio::test]
 async fn stop_session_is_empty_for_a_session_that_owns_nothing() {
     let (_tmp, runner) = runner();
-    assert!(runner.stop_session("nobody", None).await.is_empty());
+    assert!(runner.stop_session("nobody", None).await.flagged.is_empty());
 
     // A task with no session is nobody's to stop by naming a session.
     runner
@@ -831,7 +833,7 @@ async fn stop_session_is_empty_for_a_session_that_owns_nothing() {
             std::future::pending::<TaskOutcome>(),
         )
         .unwrap();
-    assert!(runner.stop_session("nobody", None).await.is_empty());
+    assert!(runner.stop_session("nobody", None).await.flagged.is_empty());
     assert!(runner.entry("unattributed").unwrap()["stopReason"].is_null());
     runner.stop("unattributed", None).await.unwrap();
 }
@@ -1091,7 +1093,8 @@ async fn stop_records_custom_reason() {
     let wire = runner
         .stop("task-1", Some("User initiated stop"))
         .await
-        .unwrap();
+        .unwrap()
+        .wire;
     assert_eq!(wire["status"], "killed");
     assert_eq!(wire["stopReason"], "User initiated stop");
     // A blank reason falls back to the default.
@@ -1102,7 +1105,7 @@ async fn stop_records_custom_reason() {
             std::future::pending::<String>(),
         )
         .unwrap();
-    let wire = runner.stop("task-2", Some("   ")).await.unwrap();
+    let wire = runner.stop("task-2", Some("   ")).await.unwrap().wire;
     assert_eq!(wire["stopReason"], "Stopped by TaskStop");
 }
 
@@ -1113,7 +1116,11 @@ async fn stop_on_terminal_task_returns_current_status() {
         .spawn_task("task-1".into(), "a".into(), async { "x".to_string() })
         .unwrap();
     runner.wait("task-1", 5000).await;
-    let wire = runner.stop("task-1", Some("late reason")).await.unwrap();
+    let wire = runner
+        .stop("task-1", Some("late reason"))
+        .await
+        .unwrap()
+        .wire;
     assert_eq!(wire["status"], "completed");
     // Terminal entries keep their state: no reason is attached.
     assert!(wire.get("stopReason").is_none());
@@ -1504,4 +1511,85 @@ async fn success_failure_and_kill_settle_three_different_statuses() {
     assert_eq!(runner.entry("t-ok").unwrap()["status"], "completed");
     assert_eq!(runner.entry("t-bad").unwrap()["status"], "failed");
     assert_eq!(runner.entry("t-held").unwrap()["status"], "killed");
+}
+
+/// v2 `sessionActivityService`: a running background task contributes to its
+/// session's `busy` fold, and the query flips as soon as the task settles.
+#[tokio::test]
+async fn running_task_keeps_its_session_busy() {
+    let (_tmp, runner) = runner();
+    runner
+        .spawn_task_with_meta(
+            TaskSpawnMeta {
+                session_id: Some("session-a"),
+                kind: "bash",
+                subagent_type: None,
+                agent_id: None,
+                timeout_ms: None,
+            },
+            "task-busy".into(),
+            "sleep".into(),
+            async {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                TaskOutcome::Completed("done".to_string())
+            },
+        )
+        .unwrap();
+
+    assert!(runner.has_running_task_for_session("session-a"));
+    assert!(
+        !runner.has_running_task_for_session("session-b"),
+        "another session's task must not count"
+    );
+
+    // Wait for the task to settle, then the same session reports idle.
+    let _ = runner.wait("task-busy", 2_000).await;
+    assert!(!runner.has_running_task_for_session("session-a"));
+}
+
+/// A panic while a critical section holds the registry must not turn every
+/// later call into a panic: the locks recover the poisoned guard instead of
+/// unwrapping it, which is what `StateStore` already does.
+#[test]
+fn a_poisoned_registry_lock_is_recovered_not_propagated() {
+    let (_tmp, runner) = runner();
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = runner.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        panic!("poison the task registry");
+    }));
+    assert!(poisoned.is_err(), "the guard is poisoned by the panic");
+
+    // Every read path takes the same lock; none of them may panic now.
+    assert!(runner.list().is_empty());
+    assert!(runner.entry("task-1").is_none());
+    assert!(runner.reconcile_previous_session(&HashSet::new()).is_none());
+}
+
+/// A `task.json` that parses but is not a list must not be replaced by a
+/// settle's mirror: the file may hold entries this process does not know
+/// about, so the mirror is skipped instead of rewritten from an empty list.
+#[tokio::test]
+async fn a_malformed_task_domain_is_not_overwritten_by_a_settle() {
+    let tmp = TempDir::new().unwrap();
+    let store = StateStore::for_dir(tmp.path().join("state")).unwrap();
+    let path = tmp.path().join("state").join("task.json");
+    let original = "{ \"entries\": [] }";
+    std::fs::write(&path, original).unwrap();
+
+    let runner = Arc::new(TaskRunner::new(Some(store)));
+    runner
+        .spawn_task("task-1".into(), "work".into(), async { "ok".to_string() })
+        .unwrap();
+    let _ = runner.wait("task-1", 2_000).await;
+
+    assert_eq!(
+        runner.entry("task-1").expect("the entry is in memory")["status"],
+        "completed",
+        "the in-memory entry still settles"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original,
+        "the mirror must not replace a malformed task domain"
+    );
 }

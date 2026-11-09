@@ -1,51 +1,3 @@
-//! Stale-write guard (G-6 #3) — a **port** of v2's `features/staleGuard/`,
-//! not a fork-original feature.
-//!
-//! (2026-10-01 correction) The file header previously claimed upstream deleted
-//! `features/staleGuard/` in a020946916 (#3517) and that the described v2
-//! behaviour "never existed upstream". That conclusion was reached from a
-//! commit that is **not an ancestor of the v2 export point**
-//! (`git merge-base --is-ancestor a020946916 ecad4136d9` → false), so the
-//! deletion postdates the baseline the comparison is made against. At the
-//! baseline (`G:\kimi\_v2-ref`, extracted from `ecad4136d9^`) the feature is a
-//! complete implementation: `features/staleGuard/staleGuardService.ts` is 146
-//! executable lines, `guardWrite` matches `Edit`/`Write` exactly, and its two
-//! veto strings are byte-identical to the ones in this module
-//! (`staleGuardService.ts:46-138`). `staleGuardFeature.ts:19` registers it for
-//! real. The behaviour is aligned; only the attribution was wrong — and the
-//! wrong attribution is what told a later audit to skip comparing the two.
-//! The deletion itself is still real, it just is not evidence about v2.
-//!
-//! v2's other mtime check — a read-side TOCTOU guard on tail reads
-//! (`readTool.ts`) — remains a separate mechanism.
-//!
-//! This module records the mtime of every file a successful Read/Edit/Write
-//! touched and vetoes native Write/Edit calls when the target was never read
-//! or changed on disk since. The host-side guard keeps covering host-executed
-//! tools; this module closes the native path, which bypasses the host veto
-//! chain entirely.
-//!
-//! State is a per-session in-process table (`Arc` shared by the pipeline
-//! builder): it survives across turns. v2 also clears it when the runtime
-//! changes status (`staleGuardService.ts:64-68` dispatches `StaleGuardCleared`,
-//! reduced at `staleGuardOps.ts:39-41`), and there is no such path here — the
-//! audit note that called this "fail-open, to be patched" had the reason
-//! backwards. Both of v2's mtime reads go through `lease.runtime.fs`
-//! (`staleGuardService.ts:128`), so the table goes stale when the *runtime* is
-//! swapped underneath it, not when time passes. This fork has no runtime to swap:
-//! `mtime_of` below stats the same local filesystem the writer resolves its
-//! target on, so a recorded entry can only disagree with the file if the file
-//! really changed — which is exactly what the guard is for.
-//!
-//! The clear this fork does have is the gate's own lifetime: one `StaleGate` per
-//! pipeline (`pipeline/mod.rs`), per REPL process (`repl/mod.rs`) and per native
-//! run (`lib.rs`), so a rebuilt session starts with an empty table and re-arms
-//! the "read it first" denial. That is stricter than v2's in-place clear, and it
-//! fails closed where v2's would. Porting the v2 clear path needs the runtime
-//! capability layer first — see `ROADMAP.md` §6.24 — so until that layering is
-//! decided, adding a trigger here would be a fork-original behaviour with
-//! nothing upstream to point at.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -55,12 +7,8 @@ use serde_json::Value;
 
 use crate::native::shell_path_bridge::ShellPathBridge;
 
-/// mtime as (secs, nanos) since the Unix epoch — exact comparison, no float
-/// hazard. The value never crosses the wire, so it does not need to match
-/// v2's `mtimeMs` float representation.
 type Mtime = (i64, u32);
 
-/// Per-session `canonical path -> mtime at last successful read/write`.
 pub struct StaleGuardState {
     entries: Mutex<HashMap<PathBuf, Mtime>>,
 }
@@ -94,8 +42,6 @@ impl Default for StaleGuardState {
     }
 }
 
-/// Whether the stale-write guard applies to this tool (v2 guards exactly
-/// `Edit`/`Write`; both spellings are matched like the plan guard).
 pub fn stale_guarded_tool(tool_name: &str) -> bool {
     matches!(tool_name.to_ascii_lowercase().as_str(), "write" | "edit")
 }
@@ -120,15 +66,6 @@ fn mtime_of(path: &Path) -> Option<Mtime> {
     Some((dur.as_secs() as i64, dur.subsec_nanos()))
 }
 
-/// Canonicalized absolute path used as the map key. `None` when the target
-/// does not exist yet (new-file Write is exempt) or cannot be canonicalized.
-/// Canonicalization converges symlink spellings onto one key.
-///
-/// Resolution goes through the toolset's own `candidate_path`: the gate's key
-/// and the writer's target must name the same file, and a raw
-/// `Path::is_absolute` check disagrees with it on every shell-dialect path
-/// (`/tmp/x` became `<drive-root>/tmp/x` here while the writer resolved it
-/// through `cygpath`).
 fn key_path(
     path: &str,
     workspace_root: Option<&Path>,
@@ -139,10 +76,6 @@ fn key_path(
     std::fs::canonicalize(candidate).ok()
 }
 
-/// Record the current mtime of a successfully executed Read/Edit/Write
-/// target (v2 `observeExecution`: re-stat after every successful execution,
-/// so consecutive writes never trip the guard). Non-file targets and missing
-/// paths are skipped.
 pub fn observe_execution(
     state: &StaleGuardState,
     tool_name: &str,
@@ -166,10 +99,6 @@ pub fn observe_execution(
     state.record(key, mtime);
 }
 
-/// The stale-write denial for a native Write/Edit (v2 `checkWritable`):
-/// stat failure / non-regular file allows (new-file Write exemption), no
-/// prior read denies, a changed mtime denies. Messages are byte-identical
-/// to v2's hardcoded strings; `displayPath` is the raw `args.path`.
 pub fn stale_denial(
     state: &StaleGuardState,
     tool_name: &str,
@@ -182,8 +111,7 @@ pub fn stale_denial(
     }
     let raw = args.get("path").and_then(|p| p.as_str())?;
     let key = key_path(raw, workspace_root, bridge)?;
-    // stat failure / non-regular file / pre-epoch clock — the new-file
-    // Write exemption (v2 `checkWritable`).
+
     let current = mtime_of(&key)?;
     match state.lookup(&key) {
         None => Some(format!(
@@ -196,10 +124,6 @@ pub fn stale_denial(
     }
 }
 
-/// Whether this Write/Edit targets the current plan file while plan mode is
-/// active. v2 short-circuits its veto chain via planService `allow()` in
-/// that case, so the stale guard must not fire — the host creates the plan
-/// file and the model writes it without a prior read.
 pub fn plan_file_write_exempt(
     plan: &Value,
     args: &Value,
@@ -215,31 +139,21 @@ pub fn plan_file_write_exempt(
     let Some(raw) = args.get("path").and_then(|p| p.as_str()) else {
         return false;
     };
-    // Resolved the way the writer will resolve it: the model may spell the
-    // plan file in the shell's dialect (`/c/Users/...`), which is not
-    // absolute on Windows and would otherwise be relocated onto the
-    // workspace's drive and miss the exemption.
+
     let resolved = match workspace_root {
         Some(root) => super::NativeToolset::candidate_path(root, bridge, raw)
             .to_string_lossy()
             .into_owned(),
         None => raw.to_string(),
     };
-    // Component-wise comparison: the host's plan path and the model's
-    // argument may mix separators (`/` vs `\` on Windows).
+
     Path::new(plan_path) == Path::new(&resolved)
 }
 
-/// The native-execution gate bundle: the per-session table plus the
-/// workspace root used for path resolution. Mounted on
-/// [`crate::callbacks::NativeToolCallbacks`]; observation runs on every
-/// completed read/write execution, the veto runs before every native
-/// Write/Edit.
 pub struct StaleGate {
     pub state: Arc<StaleGuardState>,
     pub workspace_root: Option<PathBuf>,
-    /// Shared with the toolset so the gate's map key and the writer's target
-    /// resolve a shell-dialect path to the same file.
+
     pub bridge: Arc<ShellPathBridge>,
 }
 
@@ -252,10 +166,6 @@ impl StaleGate {
         }
     }
 
-    /// Record the mtime of a completed read/write execution target
-    /// (v2 `observeExecution`: successful executions only). Call this after
-    /// every completed Read/Edit/Write — native or host-forwarded — so a
-    /// later native Write never trips on a read the host served.
     pub fn observe(&self, tool_name: &str, args: &Value, is_error: bool) {
         observe_execution(
             &self.state,
@@ -267,11 +177,6 @@ impl StaleGate {
         );
     }
 
-    /// The full veto for a native Write/Edit: the stale-write denial, with
-    /// the v2 plan-file short-circuit (`planService.allow()` releases the
-    /// whole chain, so an unread plan-file write must go through). The plan
-    /// state is only consulted when a denial would fire; a broken state
-    /// bridge fails open (mirrors the plan guard's `Err(_) => None`).
     pub async fn denial(
         &self,
         inner: &dyn crate::callbacks::HostCallbacks,
@@ -314,8 +219,6 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
 
-    /// The tests resolve real paths on the host, so they use the same
-    /// bridge the toolset builds.
     fn bridge() -> ShellPathBridge {
         ShellPathBridge::new(&crate::native::shell::resolve_shell(None).program)
     }
@@ -533,7 +436,6 @@ mod tests {
         ));
     }
 
-    /// Host stub whose plan domain answers a scripted value, counting reads.
     struct PlanScriptCallbacks {
         plan: std::sync::Mutex<Option<Value>>,
         reads: std::sync::atomic::AtomicU32,
@@ -597,23 +499,19 @@ mod tests {
             reads: std::sync::atomic::AtomicU32::new(0),
         };
 
-        // No record → denial; plan inactive → denial stands.
         let denial = gate.denial(&host, "Write", &args).await.unwrap();
         assert!(denial.contains("has not been read"));
         assert_eq!(host.reads.load(std::sync::atomic::Ordering::Relaxed), 1);
 
-        // Already-read → pass with zero plan reads (fast path).
         gate.observe("Read", &args, false);
         assert_eq!(gate.denial(&host, "Write", &args).await, None);
         assert_eq!(host.reads.load(std::sync::atomic::Ordering::Relaxed), 1);
 
-        // Plan-mode plan-file write: exempt even without a prior read.
         let fresh = StaleGate::new(Some(dir.path().to_path_buf()), Arc::new(bridge()));
         *host.plan.lock().unwrap() =
             Some(json!({ "active": true, "path": path.to_string_lossy() }));
         assert_eq!(fresh.denial(&host, "Write", &args).await, None);
 
-        // Broken state bridge fails open.
         *host.plan.lock().unwrap() = None;
         let fresher = StaleGate::new(Some(dir.path().to_path_buf()), Arc::new(bridge()));
         assert_eq!(fresher.denial(&host, "Write", &args).await, None);

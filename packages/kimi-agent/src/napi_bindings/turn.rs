@@ -35,6 +35,71 @@ pub(crate) static CANCEL_MAP: LazyLock<
 pub(crate) static SUBAGENT_MANAGER: LazyLock<Arc<crate::subagent::SubagentManager>> =
     LazyLock::new(|| Arc::new(crate::subagent::SubagentManager::new()));
 
+/// Build the engine transport config from the host's napi object.
+///
+/// The structured request knobs travel as JSON strings (`serde_json::Value`
+/// is not a napi value, the same convention as `JsToolDef.input_schema`); a
+/// malformed string is warned about and dropped so one bad optional knob
+/// cannot fail the turn. Absent knobs stay inert.
+fn native_llm_config_from_js(cfg: &JsNativeLlmConfig) -> NativeLlmConfig {
+    let llm = NativeLlmConfig {
+        protocol: cfg.protocol.clone(),
+        alias: cfg.alias.clone(),
+        provider_type: cfg.provider_type.clone(),
+        base_url: cfg.base_url.clone(),
+        api_key: cfg.api_key.clone(),
+        api_key_env: cfg.api_key_env.clone(),
+        model: cfg.model.clone(),
+        max_tokens: cfg.max_tokens,
+        custom_headers: cfg.custom_headers.clone().unwrap_or_default(),
+        reasoning_effort: cfg.reasoning_effort.clone(),
+        thinking_budget: cfg.thinking_budget,
+        auth_provider: cfg.auth_provider.clone(),
+        thinking_keep: cfg.thinking_keep.clone(),
+        beta_api: cfg.beta_api.unwrap_or(false),
+        capabilities: cfg.capabilities.clone(),
+        system_prompt: cfg.system_prompt.clone(),
+        max_input_size: cfg.max_input_size,
+        adaptive_thinking: cfg.adaptive_thinking,
+        reasoning_key: cfg.reasoning_key.clone(),
+        off_effort: cfg.off_effort.clone(),
+        response_format: cfg
+            .response_format
+            .as_deref()
+            .and_then(|json| parse_knob(json, "response_format")),
+        sampling: cfg
+            .sampling
+            .as_ref()
+            .map(|value| crate::rpc::types::NativeSampling {
+                temperature: value.temperature,
+                top_p: value.top_p,
+            }),
+        determinism: cfg
+            .determinism
+            .as_ref()
+            .map(|value| crate::rpc::types::NativeDeterminism { seed: value.seed }),
+        extra_params: cfg
+            .extra_params
+            .as_deref()
+            .and_then(|json| parse_knob(json, "extra_params")),
+        // The JS host resolves antigravity itself; the addon never carried a
+        // binary path or bridge limits over the napi boundary.
+        binary_path: None,
+        antigravity: None,
+    };
+    llm
+}
+
+fn parse_knob<T: serde::de::DeserializeOwned>(json: &str, field: &str) -> Option<T> {
+    match serde_json::from_str(json) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(field, %error, "ignoring an unparseable native request knob");
+            None
+        }
+    }
+}
+
 /// Ask a running turn (identified by `turn_id`) to stop. The flag is
 /// observed by the turn loop between LLM/tool steps; if the turn has already
 /// finished this is a no-op.
@@ -687,54 +752,12 @@ pub(crate) async fn build_engine_pipeline(
                         name: p.name.clone(),
                         system_prompt: p.system_prompt.clone(),
                         model: p.model.clone(),
-                        native: p.native.as_ref().map(|cfg| NativeLlmConfig {
-                            protocol: cfg.protocol.clone(),
-                            alias: cfg.alias.clone(),
-                            provider_type: cfg.provider_type.clone(),
-                            base_url: cfg.base_url.clone(),
-                            api_key: cfg.api_key.clone(),
-                            api_key_env: cfg.api_key_env.clone(),
-                            auth_provider: cfg.auth_provider.clone(),
-                            model: cfg.model.clone(),
-                            max_tokens: cfg.max_tokens,
-                            custom_headers: cfg.custom_headers.clone().unwrap_or_default(),
-                            reasoning_effort: cfg.reasoning_effort.clone(),
-                            thinking_budget: cfg.thinking_budget,
-                            thinking_keep: cfg.thinking_keep.clone(),
-                            beta_api: cfg.beta_api.unwrap_or(false),
-                            capabilities: cfg.capabilities.clone(),
-                            system_prompt: cfg.system_prompt.clone(),
-                            max_input_size: cfg.max_input_size,
-                            adaptive_thinking: cfg.adaptive_thinking,
-                            reasoning_key: cfg.reasoning_key.clone(),
-                            off_effort: cfg.off_effort.clone(),
-                        }),
+                        native: p.native.as_ref().map(native_llm_config_from_js),
                     })
                     .collect()
             })
             .unwrap_or_default(),
-        native_llm: params.native_llm.as_ref().map(|cfg| NativeLlmConfig {
-            protocol: cfg.protocol.clone(),
-            alias: cfg.alias.clone(),
-            provider_type: cfg.provider_type.clone(),
-            base_url: cfg.base_url.clone(),
-            api_key: cfg.api_key.clone(),
-            api_key_env: cfg.api_key_env.clone(),
-            model: cfg.model.clone(),
-            max_tokens: cfg.max_tokens,
-            custom_headers: cfg.custom_headers.clone().unwrap_or_default(),
-            reasoning_effort: cfg.reasoning_effort.clone(),
-            thinking_budget: cfg.thinking_budget,
-            auth_provider: cfg.auth_provider.clone(),
-            thinking_keep: cfg.thinking_keep.clone(),
-            beta_api: cfg.beta_api.unwrap_or(false),
-            capabilities: cfg.capabilities.clone(),
-            system_prompt: cfg.system_prompt.clone(),
-            max_input_size: cfg.max_input_size,
-            adaptive_thinking: cfg.adaptive_thinking,
-            reasoning_key: cfg.reasoning_key.clone(),
-            off_effort: cfg.off_effort.clone(),
-        }),
+        native_llm: params.native_llm.as_ref().map(native_llm_config_from_js),
         workspace_root: params.workspace_root.clone(),
         native_tools: params.native_tools.unwrap_or(false),
         extra_roots: params.additional_dirs.clone().unwrap_or_default(),

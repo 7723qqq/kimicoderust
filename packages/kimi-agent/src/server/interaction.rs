@@ -26,6 +26,10 @@ struct ActiveQuestion {
 
 struct ActiveApproval {
     session_id: String,
+    /// The turn whose tool call is blocked on this approval (v2 interaction tag
+    /// `turnId`). Kept so a finished turn can sweep its own leftovers without
+    /// touching a concurrent turn's pending prompts.
+    turn_id: String,
     tool_name: String,
     tool_call_id: String,
     arguments: Value,
@@ -304,20 +308,14 @@ impl InteractionManager {
     }
 
     /// The interaction kind currently blocking the session, in the
-    /// kap-server `SessionPendingInteraction` vocabulary: `question` wins
-    /// over `approval` (a turn waits on at most one at a time), and `None`
-    /// means the session is not blocked on the engine. `work_changed`
-    /// reads this so the Web client's badge follows the real state.
+    /// kap-server `SessionPendingInteraction` vocabulary.
+    ///
+    /// v2 `sessionActivityService.ts:267-271` settles **approval before
+    /// question**. An approval gates tool execution, so while both are parked
+    /// the session is effectively waiting to run, not waiting for an answer;
+    /// reporting `question` would mislabel the state and let the UI hide the
+    /// approval behind a question card.
     pub fn pending_interaction_kind(&self, session_id: &str) -> Option<&'static str> {
-        if self
-            .questions
-            .lock()
-            .unwrap()
-            .values()
-            .any(|q| q.session_id == session_id)
-        {
-            return Some("question");
-        }
         if self
             .approvals
             .lock()
@@ -326,6 +324,15 @@ impl InteractionManager {
             .any(|a| a.session_id == session_id)
         {
             return Some("approval");
+        }
+        if self
+            .questions
+            .lock()
+            .unwrap()
+            .values()
+            .any(|q| q.session_id == session_id)
+        {
+            return Some("question");
         }
         None
     }
@@ -429,6 +436,7 @@ impl InteractionManager {
 
         let active = ActiveApproval {
             session_id: session_id.to_string(),
+            turn_id: req.turn_id.clone(),
             tool_name: req.tool_name.clone(),
             tool_call_id: req.tool_call_id.clone(),
             arguments: req.arguments.clone(),
@@ -580,6 +588,57 @@ impl InteractionManager {
         } else {
             false
         }
+    }
+
+    /// Cancel every interaction a finished turn left pending (v2
+    /// `cancelInteractionsForTurn`, `interactionWiring.ts:35-51`).
+    ///
+    /// A turn only returns after its tool calls do, so an entry still tagged
+    /// with a finished turn is one nobody will await again: left in the maps it
+    /// keeps a reconnecting client listing a phantom approval and leaks the
+    /// blocked receiver. Scoped by `(session, turn)`, so a concurrent turn in
+    /// the same session keeps its own prompts. Returns how many were swept.
+    pub fn cancel_turn(&self, session_id: &str, turn_id: &str, reason: &str) -> usize {
+        let mut cancelled = 0;
+        let mut q_lock = self
+            .questions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let to_remove_q: Vec<String> = q_lock
+            .iter()
+            .filter(|(_, q)| q.session_id == session_id && q.turn_id == turn_id)
+            .map(|(qid, _)| qid.clone())
+            .collect();
+        for qid in to_remove_q {
+            if let Some(q) = q_lock.remove(&qid) {
+                let _ = q.tx.send(AskQuestionResponse {
+                    answers: HashMap::new(),
+                    method: None,
+                    note: None,
+                    cancelled: Some(true),
+                    reason: Some(reason.into()),
+                });
+                cancelled += 1;
+            }
+        }
+        drop(q_lock);
+
+        let mut a_lock = self
+            .approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let to_remove_a: Vec<String> = a_lock
+            .iter()
+            .filter(|(_, a)| a.session_id == session_id && a.turn_id == turn_id)
+            .map(|(aid, _)| aid.clone())
+            .collect();
+        for aid in to_remove_a {
+            if let Some(a) = a_lock.remove(&aid) {
+                let _ = a.tx.send(PermissionDecision::deny("Turn ended"));
+                cancelled += 1;
+            }
+        }
+        cancelled
     }
 
     /// Cancel all pending interactions when a session is aborted, deleted, or turns complete.
@@ -958,6 +1017,55 @@ mod tests {
         assert_eq!(manager.list_approvals("sess-B").len(), 1);
         assert!(manager.list_questions("sess-A").is_empty());
         assert!(manager.list_approvals("sess-A").is_empty());
+    }
+
+    /// A finished turn sweeps only its own leftovers: the same session's other
+    /// turn keeps its pending question and approval (v2
+    /// `cancelInteractionsForTurn` scopes by `turnId`).
+    #[tokio::test]
+    async fn test_cancel_turn_interaction_isolation() {
+        let manager = InteractionManager::new();
+        let question = |id: &str, turn: &str| AskQuestionRequest {
+            question_id: id.into(),
+            turn_id: turn.into(),
+            tool_call_id: format!("c_{id}"),
+            background: false,
+            timeout_ms: None,
+            questions: vec![],
+        };
+        let approval = |turn: &str| PermissionCheckRequest {
+            tool_name: "Bash".into(),
+            session_approval_rule: None,
+            tool_call_id: format!("c_appr_{turn}"),
+            turn_id: turn.into(),
+            arguments: json!({}),
+            reason: None,
+        };
+
+        let mut rx_q_done = manager.register_question("sess-1", question("q_done", "turn-done"));
+        let (_aid_done, mut rx_appr_done) =
+            manager.register_approval("sess-1", approval("turn-done"), "action");
+        let mut rx_q_live = manager.register_question("sess-1", question("q_live", "turn-live"));
+        let (_aid_live, mut rx_appr_live) =
+            manager.register_approval("sess-1", approval("turn-live"), "action");
+
+        assert_eq!(manager.cancel_turn("sess-1", "turn-done", "turn_ended"), 2);
+
+        let resp = rx_q_done.try_recv().unwrap();
+        assert_eq!(resp.cancelled, Some(true));
+        assert_eq!(resp.reason.as_deref(), Some("turn_ended"));
+        let decision = rx_appr_done.try_recv().unwrap();
+        assert!(!decision.is_allow());
+        assert_eq!(decision.reason.as_deref(), Some("Turn ended"));
+
+        // The still-running turn keeps its interaction.
+        assert!(rx_q_live.try_recv().is_err());
+        assert!(rx_appr_live.try_recv().is_err());
+        assert_eq!(manager.list_questions("sess-1").len(), 1);
+        assert_eq!(manager.list_approvals("sess-1").len(), 1);
+
+        // Idempotent: nothing left to sweep.
+        assert_eq!(manager.cancel_turn("sess-1", "turn-done", "turn_ended"), 0);
     }
 
     #[tokio::test]

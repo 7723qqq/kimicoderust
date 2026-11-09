@@ -11,12 +11,14 @@
 //! file id, so the same file is one budget item however often it appears, and
 //! an omission can name the path the model may re-read.
 
+pub use kimi_core::types::{DroppedMedia, Entry, MediaRecovery, MediaRecoveryAction, MediaRecoveryState, SharedMediaRecovery};
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::llm::media_resolver::{build_media_path_tag, unavailable_text};
 use crate::rpc::types::{ContentBlock, MediaKind};
-use crate::turn_loop::types::LLMMessage;
+use kimi_core::types::LLMMessage;
 
 /// v2 `REQUEST_MEDIA_BUDGET_BYTES` (agent/media/mediaResolverService.ts:48):
 /// above this the request is over budget.
@@ -30,24 +32,6 @@ pub const REQUEST_MEDIA_BUDGET_LOW_BYTES: usize = 10 * 1024 * 1024;
 /// `media-budget-exceeded`, mediaResolverService.ts:210).
 pub const MEDIA_BUDGET_EXCEEDED_CODE: &str = "media-budget-exceeded";
 
-/// One media item that costs request bytes, in message order.
-pub struct Entry {
-    pub message_index: usize,
-    pub block_index: usize,
-    /// The budget identity: a daemon file id, or `inline\0<sha256>` for a
-    /// payload with no file behind it.
-    pub key: String,
-    /// The daemon file the entry came from, when it came from one.
-    pub file_id: Option<String>,
-    /// The saved path, for the tag an omission leaves behind.
-    pub path: Option<String>,
-    pub kind: MediaKind,
-    pub bytes: usize,
-}
-
-/// The media keys an earlier request already omitted, shared with the caller
-/// so the record outlives one turn (v2 keeps the same set in agent state).
-pub type DroppedMedia = std::sync::Arc<std::sync::Mutex<HashSet<String>>>;
 
 /// The media keys an earlier request already omitted.
 ///
@@ -167,20 +151,34 @@ impl MediaBudget {
 /// saved path when the file is known, the unavailable placeholder when it is
 /// known but gone, and the plain budget placeholder when there is no file.
 pub(crate) fn replace_with_media_tag(messages: &mut [LLMMessage], entry: &Entry) {
+    let text = match (&entry.file_id, &entry.path) {
+        (Some(_), Some(path)) => build_media_path_tag(entry.kind, path),
+        (Some(_), None) => unavailable_text(entry.kind).to_string(),
+        _ => budget_omitted_media(entry.kind),
+    };
+    set_block_text(messages, entry, text);
+}
+
+fn replace_with_recovery_text(
+    messages: &mut [LLMMessage],
+    entry: &Entry,
+    placeholder: fn(MediaKind) -> String,
+) {
+    let text = match &entry.path {
+        Some(path) => build_media_path_tag(entry.kind, path),
+        None => placeholder(entry.kind),
+    };
+    set_block_text(messages, entry, text);
+}
+
+fn set_block_text(messages: &mut [LLMMessage], entry: &Entry, text: String) {
     let Some(block) = messages
         .get_mut(entry.message_index)
         .and_then(|message| message.blocks.get_mut(entry.block_index))
     else {
         return;
     };
-    *block = ContentBlock::Text {
-        text: match (&entry.file_id, &entry.path) {
-            (Some(_), Some(path)) => build_media_path_tag(entry.kind, path),
-            (Some(_), None) => unavailable_text(entry.kind).to_string(),
-            _ => budget_omitted_media(entry.kind),
-        },
-        meta: None,
-    };
+    *block = ContentBlock::Text { text, meta: None };
 }
 
 /// v2 `budgetOmittedMedia`.
@@ -194,6 +192,38 @@ pub fn budget_omitted_media(kind: MediaKind) -> String {
 /// v2 `MEDIA_DEGRADE_KEEP_RECENT`: a degraded request keeps this many of the
 /// newest media parts and replaces the rest.
 pub const MEDIA_DEGRADE_KEEP_RECENT: usize = 2;
+
+/// v2 `MEDIA_DEGRADED_PLACEHOLDERS` (`contextProjector/mediaProjection.ts:7-14`).
+pub fn degraded_media_placeholder(kind: MediaKind) -> String {
+    match kind {
+        MediaKind::Image => {
+            "[image omitted: dropped to fit the provider request size limit; re-read the file to view it]"
+        }
+        MediaKind::Audio => {
+            "[audio omitted: dropped to fit the provider request size limit; re-read the file to hear it]"
+        }
+        MediaKind::Video => {
+            "[video omitted: dropped to fit the provider request size limit; re-read the file to view it]"
+        }
+    }
+    .to_string()
+}
+
+/// v2 `MEDIA_STRIPPED_PLACEHOLDERS` (`contextProjector/mediaProjection.ts:16-21`).
+pub fn stripped_media_placeholder(kind: MediaKind) -> String {
+    match kind {
+        MediaKind::Image => {
+            "[image omitted for provider compatibility; re-read the file to view it or get conversion guidance]"
+        }
+        MediaKind::Audio => {
+            "[audio omitted for provider compatibility; re-read the file to hear it]"
+        }
+        MediaKind::Video => {
+            "[video omitted for provider compatibility; re-read the file to view it]"
+        }
+    }
+    .to_string()
+}
 
 /// The `WarningEvent.code` a degraded retry reports under (v2's
 /// `media-degraded` projection).
@@ -209,7 +239,7 @@ pub const MEDIA_STRIPPED_CODE: &str = "media-stripped";
 /// body says, and a body that only says "too large" without the status is
 /// not the signal (v2 classifies the coded error, not the prose).
 pub fn is_request_too_large(error: &str) -> bool {
-    crate::llm::http::llm_http_status(error) == Some(413)
+    kimi_core::error::llm_http_status(error) == Some(413)
 }
 
 /// v2 `isImageFormatError` (`llm-adapter/contract/errors.ts:215`): the
@@ -218,7 +248,7 @@ pub fn is_request_too_large(error: &str) -> bool {
 /// names an image. The overflow and too-large classes are excluded: they
 /// have their own recoveries, and v2 checks them first.
 pub fn is_image_format_error(error: &str) -> bool {
-    if crate::llm::http::llm_http_status(error) != Some(400) {
+    if kimi_core::error::llm_http_status(error) != Some(400) {
         return false;
     }
     let lower = error.to_lowercase();
@@ -283,7 +313,7 @@ pub fn degrade_leading_media(
 ) -> usize {
     let to_degrade = count.min(entries.len());
     for entry in entries.iter().take(to_degrade) {
-        replace_with_media_tag(messages, entry);
+        replace_with_recovery_text(messages, entry, degraded_media_placeholder);
     }
     to_degrade
 }
@@ -293,91 +323,13 @@ pub fn degrade_leading_media(
 pub fn strip_all_media(messages: &mut [LLMMessage], entries: &[Entry]) -> usize {
     let mut replaced = 0;
     for entry in entries {
-        replace_with_media_tag(messages, entry);
+        replace_with_recovery_text(messages, entry, stripped_media_placeholder);
         replaced += 1;
     }
     replaced
 }
 
-/// v2 #4413 `llmRequester.mediaRecovery` (agent/loop/requester.ts): one
-/// agent-level media recovery, keyed by model alias and context prefix
-/// revision, applied to every later request until the model changes or the
-/// history is rewritten. Before this, the fork's recovery was a pair of
-/// per-turn flags in `run_turn` — the next turn resent the full media,
-/// was rejected again, and paid the degrade/strip round-trip twice.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MediaRecovery {
-    /// The model the recovery was captured under (v2 `modelAlias`; the fork
-    /// keys by `LLM::model_name`): a model switch invalidates the recovery —
-    /// the new model may accept the media the old one rejected.
-    pub model: String,
-    /// The history revision at capture time (v2 `contextRevision`). Undo /
-    /// `set_history` / `clear_history` advance the revision, invalidating
-    /// the recovery; compaction does not (the media it removed are simply
-    /// absent from the keys below, so applying is a no-op).
-    pub context_revision: u64,
-    pub action: MediaRecoveryAction,
-}
 
-/// What the recovery does to a request (v2's recovery `action`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MediaRecoveryAction {
-    /// `degraded` with the count pinned at capture time (v2 #4456
-    /// `degradeCount`): degrade exactly this many leading media parts.
-    /// Recomputing "all but the newest N" per request would let a media
-    /// added later push an older kept one out and break the prompt-cache
-    /// prefix.
-    Degraded(usize),
-    /// `stripped` with the captured key set: strip exactly these media keys,
-    /// so media added after the capture stay visible until a rejection of
-    /// their own (v2 keeps the captured `MediaStripSnapshot` keys).
-    Stripped(Vec<String>),
-}
-
-/// The cell a session shares with its turns (v2 keeps the recovery in agent
-/// state). `revision` advances on every history rewrite; a recovery captured
-/// under an older revision is ignored (and cleared on the next capture).
-#[derive(Debug, Default)]
-pub struct MediaRecoveryState {
-    pub revision: u64,
-    pub recovery: Option<MediaRecovery>,
-}
-
-/// Shared handle to a session's [`MediaRecoveryState`] (the same Arc pattern
-/// as [`DroppedMedia`]).
-pub type SharedMediaRecovery = std::sync::Arc<std::sync::Mutex<MediaRecoveryState>>;
-
-impl MediaRecoveryState {
-    /// v2's `recoveredMedia(request)` gate: the recovery applies only to the
-    /// model and history revision it was captured under.
-    pub fn applicable(&self, model: &str) -> Option<&MediaRecovery> {
-        match &self.recovery {
-            Some(recovery)
-                if recovery.model == model && recovery.context_revision == self.revision =>
-            {
-                Some(recovery)
-            }
-            _ => None,
-        }
-    }
-
-    /// Record the recovery a successful fallback just paid for (v2
-    /// `markMediaRecovery`), overwriting whatever an older rejection left.
-    pub fn mark(&mut self, model: String, action: MediaRecoveryAction) {
-        self.recovery = Some(MediaRecovery {
-            model,
-            context_revision: self.revision,
-            action,
-        });
-    }
-
-    /// Advance the context revision after a history rewrite (v2 advances
-    /// `contextRevision` when context state is restored): any recovery
-    /// captured before the rewrite stops applying.
-    pub fn advance_revision(&mut self) {
-        self.revision += 1;
-    }
-}
 
 /// Apply an applicable recovery to this turn's working messages, the fork's
 /// in-place spelling of v2's per-request projection rewrite. Returns the
@@ -405,7 +357,7 @@ pub fn apply_media_recovery(
             let mut remaining = 0usize;
             for entry in entries {
                 if keys.iter().any(|key| key == &entry.key) {
-                    replace_with_media_tag(messages, entry);
+                    replace_with_recovery_text(messages, entry, stripped_media_placeholder);
                 } else {
                     remaining += 1;
                 }
@@ -554,6 +506,80 @@ mod tests {
                 MEDIA_DEGRADE_KEEP_RECENT
             ),
             0
+        );
+    }
+
+    #[test]
+    fn the_recovery_placeholders_match_v2() {
+        let mut messages = vec![
+            media_message(inline_image("a")),
+            media_message(ContentBlock::VideoUrl {
+                url: "data:video/mp4;base64,AA".into(),
+                id: None,
+                name: None,
+            }),
+            media_message(ContentBlock::AudioUrl {
+                url: "data:audio/mpeg;base64,AA".into(),
+                id: None,
+                name: None,
+            }),
+        ];
+        let entries = vec![
+            Entry {
+                message_index: 0,
+                block_index: 0,
+                key: "a".into(),
+                file_id: None,
+                path: None,
+                kind: MediaKind::Image,
+                bytes: 10,
+            },
+            Entry {
+                message_index: 1,
+                block_index: 0,
+                key: "v".into(),
+                file_id: None,
+                path: None,
+                kind: MediaKind::Video,
+                bytes: 10,
+            },
+            Entry {
+                message_index: 2,
+                block_index: 0,
+                key: "au".into(),
+                file_id: None,
+                path: None,
+                kind: MediaKind::Audio,
+                bytes: 10,
+            },
+        ];
+
+        degrade_leading_media(&mut messages, &entries, 3);
+        assert_eq!(
+            omitted_text(&messages[0]),
+            Some("[image omitted: dropped to fit the provider request size limit; re-read the file to view it]")
+        );
+        assert_eq!(
+            omitted_text(&messages[1]),
+            Some("[video omitted: dropped to fit the provider request size limit; re-read the file to view it]")
+        );
+        assert_eq!(
+            omitted_text(&messages[2]),
+            Some("[audio omitted: dropped to fit the provider request size limit; re-read the file to hear it]")
+        );
+
+        strip_all_media(&mut messages, &entries);
+        assert_eq!(
+            omitted_text(&messages[0]),
+            Some("[image omitted for provider compatibility; re-read the file to view it or get conversion guidance]")
+        );
+        assert_eq!(
+            omitted_text(&messages[1]),
+            Some("[video omitted for provider compatibility; re-read the file to view it]")
+        );
+        assert_eq!(
+            omitted_text(&messages[2]),
+            Some("[audio omitted for provider compatibility; re-read the file to hear it]")
         );
     }
 

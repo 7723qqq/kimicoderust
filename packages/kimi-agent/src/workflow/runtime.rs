@@ -1,6 +1,7 @@
 //! Workflow JS sandbox and host primitives.
 //!
-//! Ported from the retired `agent-core-v2` `workflowRuntime.ts`. The script
+//! Ported from `agent-core-v2` `workflowRuntime.ts` (reference HEAD
+//! `a0ccd487`). The script
 //! runs in an embedded QuickJS context ([`rquickjs`]) as an async IIFE with a
 //! fixed set of injected host functions — no `require`, `process`, or Node API.
 //!

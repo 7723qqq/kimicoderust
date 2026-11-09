@@ -328,12 +328,16 @@ async fn test_acp_set_mode_plan_activates_plan_mode() {
     assert_eq!(metadata["permission_mode"], "manual");
 
     // Plan half: the `plan` domain the engine reads is now active. The
-    // domain is session-scoped (v2 agent scope), like the native
-    // `EnterPlanMode` write it must not shadow.
+    // domain is session-scoped (v2 agent scope), like the host's own
+    // plan-mode entry it must not shadow.
     let state =
         crate::storage::state_store::StateStore::for_session(workspace.path(), &sid).unwrap();
     assert_eq!(
-        state.read_domain("plan").unwrap()["active"],
+        state
+            .read_domain_state("plan")
+            .into_result()
+            .unwrap()
+            .unwrap()["active"],
         true,
         "plan mode must be active after session/set_mode plan"
     );
@@ -348,7 +352,11 @@ async fn test_acp_set_mode_plan_activates_plan_mode() {
     let resp = server.handle_message(&back.to_string()).await.unwrap();
     assert!(resp.error.is_none(), "unexpected error: {resp:?}");
     assert_eq!(
-        state.read_domain("plan").unwrap()["active"],
+        state
+            .read_domain_state("plan")
+            .into_result()
+            .unwrap()
+            .unwrap()["active"],
         false,
         "leaving plan mode must clear the plan domain"
     );

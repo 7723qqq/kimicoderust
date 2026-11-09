@@ -1,20 +1,15 @@
-//! ListDirectory — compact 2-level directory tree for LLM context.
-//!
-//! Ported for `kimi-agent` (P26 批 2).
-
 use std::fs;
 use std::path::Path;
 
 use serde_json::Value;
 
+use crate::i18n::{LocalizedText, i18n_params};
 use crate::native::shell_path_bridge::ShellPathBridge;
 use crate::turn_loop::types::ExecutableToolResult;
 
 pub const LIST_DIR_ROOT_WIDTH: usize = 30;
 pub const LIST_DIR_CHILD_WIDTH: usize = 10;
 
-/// Rendered when the target directory cannot be read at all. Compared by
-/// value at the call site to mark the call failed (see below).
 pub const UNREADABLE_DIRECTORY: &str = "(unreadable directory)";
 
 #[derive(Debug, Clone)]
@@ -23,10 +18,6 @@ struct Entry {
     is_dir: bool,
 }
 
-/// `extra_roots` are the host-authorized `additionalDirs`. They belong here
-/// because the workspace root alone is not the boundary: rejecting a path inside
-/// a directory the host handed over returned `None`, which fell back to a host
-/// with no file-tool runtime — the call vanished with no explanation.
 pub fn execute_list_directory(
     root_dir: &Path,
     extra_roots: &[std::path::PathBuf],
@@ -42,18 +33,15 @@ pub fn execute_list_directory(
     let target_dir = if raw_path.is_empty() || raw_path == "." {
         root_dir.to_path_buf()
     } else {
-        // Same resolution as the other file tools: a shell-dialect path
-        // (`/g/kimi`, `/tmp/x`) is not absolute on Windows, and `join` would
-        // relocate it onto the workspace's drive.
         let candidate = super::NativeToolset::candidate_path(root_dir, bridge, raw_path);
         match std::fs::canonicalize(&candidate) {
             Ok(p) => {
                 let authorized =
                     p.starts_with(root_dir) || extra_roots.iter().any(|extra| p.starts_with(extra));
                 if !authorized {
-                    // Report the refusal instead of returning `None`: a `None`
-                    // here is forwarded to the host, which cannot serve it.
                     return Some(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: format!(
@@ -69,6 +57,8 @@ pub fn execute_list_directory(
             }
             Err(e) => {
                 return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: format!("Directory does not exist: {raw_path} ({e})"),
@@ -82,6 +72,8 @@ pub fn execute_list_directory(
 
     if !target_dir.is_dir() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: format!("{} is not a directory", target_dir.display()),
@@ -92,10 +84,11 @@ pub fn execute_list_directory(
     }
 
     let output = render_directory_tree(&target_dir, collapse_hidden);
-    // An unreadable directory is a failed call, not empty data: reporting it
-    // with is_error:false made permission failures look like results.
+
     let is_error = output == UNREADABLE_DIRECTORY;
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: output,
@@ -106,11 +99,19 @@ pub fn execute_list_directory(
 }
 
 pub fn render_directory_tree(dir_path: &Path, collapse_hidden: bool) -> String {
-    let (root_entries, total_root, readable) = collect_entries(dir_path, LIST_DIR_ROOT_WIDTH);
+    let (root_entries, total_root, readable, root_errors) =
+        collect_entries(dir_path, LIST_DIR_ROOT_WIDTH);
     if !readable {
         return UNREADABLE_DIRECTORY.to_string();
     }
     if root_entries.is_empty() {
+        if root_errors > 0 {
+            return LocalizedText::with_params(
+                "engine.tools.listDirectory.unreadableEntries",
+                i18n_params!["count" => root_errors],
+            )
+            .render();
+        }
         return "(empty directory)".to_string();
     }
 
@@ -120,7 +121,7 @@ pub fn render_directory_tree(dir_path: &Path, collapse_hidden: bool) -> String {
             lines.push(format!("{}/", entry.name));
             if !should_collapse_directory(entry, collapse_hidden) {
                 let child_path = dir_path.join(&entry.name);
-                let (child_entries, total_children, child_readable) =
+                let (child_entries, total_children, child_readable, child_errors) =
                     collect_entries(&child_path, LIST_DIR_CHILD_WIDTH);
                 if child_readable {
                     for child in &child_entries {
@@ -131,6 +132,18 @@ pub fn render_directory_tree(dir_path: &Path, collapse_hidden: bool) -> String {
                         let remaining = total_children - child_entries.len();
                         lines.push(format!("  ... and {remaining} more"));
                     }
+                    if child_errors > 0 {
+                        lines.push(format!(
+                            "  {}",
+                            LocalizedText::with_params(
+                                "engine.tools.listDirectory.unreadableEntries",
+                                i18n_params!["count" => child_errors],
+                            )
+                            .render()
+                        ));
+                    }
+                } else {
+                    lines.push("  (unreadable)".to_string());
                 }
             }
         } else {
@@ -142,29 +155,51 @@ pub fn render_directory_tree(dir_path: &Path, collapse_hidden: bool) -> String {
         let remaining = total_root - root_entries.len();
         lines.push(format!("... and {remaining} more"));
     }
+    if root_errors > 0 {
+        lines.push(
+            LocalizedText::with_params(
+                "engine.tools.listDirectory.unreadableEntries",
+                i18n_params!["count" => root_errors],
+            )
+            .render(),
+        );
+    }
 
     lines.join("\n")
 }
 
-fn collect_entries(dir_path: &Path, max_width: usize) -> (Vec<Entry>, usize, bool) {
+fn collect_entries(dir_path: &Path, max_width: usize) -> (Vec<Entry>, usize, bool, usize) {
     let mut all: Vec<Entry> = Vec::new();
+    let mut entry_errors = 0usize;
 
     match fs::read_dir(dir_path) {
         Ok(iter) => {
-            for entry in iter.flatten() {
+            for entry in iter {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => {
+                        entry_errors += 1;
+                        continue;
+                    }
+                };
                 let name = entry.file_name().to_string_lossy().to_string();
-                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                let is_dir = match entry.file_type() {
+                    Ok(file_type) => file_type.is_dir(),
+                    Err(_) => {
+                        entry_errors += 1;
+                        continue;
+                    }
+                };
                 all.push(Entry { name, is_dir });
             }
         }
         Err(_) => {
-            return (Vec::new(), 0, false);
+            return (Vec::new(), 0, false, 0);
         }
     }
 
     let total = all.len();
 
-    // Sort: directories first, then alphabetically (case-insensitive).
     all.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
@@ -177,7 +212,7 @@ fn collect_entries(dir_path: &Path, max_width: usize) -> (Vec<Entry>, usize, boo
         all
     };
 
-    (entries, total, true)
+    (entries, total, true, entry_errors)
 }
 
 fn should_collapse_directory(entry: &Entry, collapse_hidden: bool) -> bool {

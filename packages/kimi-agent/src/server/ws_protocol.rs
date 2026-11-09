@@ -66,7 +66,6 @@ struct HelloPayload {
     ws_connection_id: String,
     protocol_version: u32,
     heartbeat_ms: u64,
-    max_event_buffer_size: usize,
     capabilities: Capabilities,
 }
 
@@ -99,7 +98,6 @@ fn control<T: Serialize>(kind: &'static str, payload: T) -> Result<Vec<u8>, serd
 pub fn server_hello(
     connection_id: &str,
     heartbeat: Duration,
-    max_event_buffer_size: usize,
 ) -> Result<Vec<u8>, serde_json::Error> {
     control(
         "server_hello",
@@ -107,7 +105,6 @@ pub fn server_hello(
             ws_connection_id: connection_id.to_string(),
             protocol_version: WS_PROTOCOL_VERSION,
             heartbeat_ms: heartbeat.as_millis() as u64,
-            max_event_buffer_size,
             capabilities: Capabilities {
                 event_batching: false,
                 compression: false,
@@ -751,15 +748,17 @@ mod tests {
     #[test]
     fn server_hello_carries_kap_server_field_names_and_honest_values() {
         let frame: Value =
-            serde_json::from_slice(&server_hello("ws-1", DEFAULT_HEARTBEAT, 256).unwrap()).unwrap();
+            serde_json::from_slice(&server_hello("ws-1", DEFAULT_HEARTBEAT).unwrap()).unwrap();
 
         assert_eq!(frame["type"], "server_hello");
         assert_eq!(frame["payload"]["ws_connection_id"], "ws-1");
         assert_eq!(frame["payload"]["protocol_version"], 2);
         assert_eq!(frame["payload"]["heartbeat_ms"], 10_000);
-        assert_eq!(frame["payload"]["max_event_buffer_size"], 256);
         assert_eq!(frame["payload"]["capabilities"]["event_batching"], false);
         assert_eq!(frame["payload"]["capabilities"]["compression"], false);
+        // v2 `serverHelloPayloadSchema` (`kap-server/src/protocol/ws-control.ts:50-58`)
+        // has no buffer-size field: the broadcaster does not bound its queue.
+        assert!(frame["payload"].get("max_event_buffer_size").is_none());
     }
 
     #[test]

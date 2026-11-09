@@ -86,16 +86,6 @@ pub enum EngineEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block: Option<u32>,
     },
-    /// v2 #4663 / `TurnStepStreamReset`: the step's streamed partials were
-    /// discarded and a fresh block sequence starts. Observable only.
-    #[serde(rename = "turn.step.stream_reset")]
-    StepStreamReset {
-        #[serde(default = "crate::rpc::types::main_agent_id")]
-        agent_id: String,
-        turn_id: String,
-        step: u32,
-        step_id: String,
-    },
     #[serde(rename = "tool.call.delta")]
     ToolCallDelta {
         #[serde(default = "crate::rpc::types::main_agent_id")]
@@ -260,7 +250,6 @@ impl EngineEvent {
             EngineEvent::GoalBudgetLimitReached { .. } => "goal.budget.limit_reached",
             EngineEvent::AssistantDelta { .. } => "assistant.delta",
             EngineEvent::ThinkingDelta { .. } => "thinking.delta",
-            EngineEvent::StepStreamReset { .. } => "turn.step.stream_reset",
             EngineEvent::ToolCallDelta { .. } => "tool.call.delta",
             EngineEvent::ToolCallStarted { .. } => "tool.call.started",
             EngineEvent::ToolProgress { .. } => "tool.progress",
@@ -302,8 +291,7 @@ impl EngineEvent {
             | EngineEvent::TurnEnded { agent_id, .. }
             | EngineEvent::ToolCallCompleted { agent_id, .. }
             | EngineEvent::ToolCallFailed { agent_id, .. }
-            | EngineEvent::StreamSegment { agent_id, .. }
-            | EngineEvent::StepStreamReset { agent_id, .. } => Some(agent_id.as_str()),
+            | EngineEvent::StreamSegment { agent_id, .. } => Some(agent_id.as_str()),
             EngineEvent::Custom(value) => value.get("agent_id").and_then(|v| v.as_str()),
             _ => None,
         }
@@ -454,10 +442,9 @@ mod tests {
         assert_eq!(back.seq(), Some(7));
     }
 
-    /// v2 #4663: assistant/thinking deltas carry the provider's content-block
-    /// index, and a step whose stream is discarded emits a stream_reset event.
+    /// Assistant/thinking deltas carry the provider's content-block index.
     #[test]
-    fn block_indexed_deltas_and_stream_reset_round_trip() {
+    fn block_indexed_deltas_round_trip() {
         let assistant = EngineEvent::AssistantDelta {
             agent_id: "main".into(),
             turn_id: "t".into(),
@@ -483,27 +470,6 @@ mod tests {
         };
         let value = serde_json::to_value(&without_block).unwrap();
         assert!(value.get("block").is_none(), "absent block must not leak");
-
-        let reset = EngineEvent::StepStreamReset {
-            agent_id: "main".into(),
-            turn_id: "t".into(),
-            step: 3,
-            step_id: "step-uuid".into(),
-        };
-        let value = serde_json::to_value(&reset).unwrap();
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "type": "turn.step.stream_reset",
-                "agent_id": "main",
-                "turn_id": "t",
-                "step": 3,
-                "step_id": "step-uuid",
-            })
-        );
-        assert_eq!(reset.event_type(), "turn.step.stream_reset");
-        let back: EngineEvent = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&back).unwrap(), value);
     }
 
     /// The batched-segment variant round-trips with its span and stream tag.

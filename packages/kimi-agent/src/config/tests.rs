@@ -148,6 +148,63 @@ model = "kimi-k3"
     assert_eq!(native.protocol, "openai");
 }
 
+/// antigravity is a subprocess bridge: it resolves without an endpoint or a
+/// credential, and carries the declared binary path and bounded waits. A
+/// provider that is *not* declared antigravity must still require a
+/// credential — there is no implicit "no Google key → use antigravity"
+/// substitution in the engine.
+#[test]
+fn antigravity_resolves_explicitly_without_credentials() {
+    let config = KimiConfig::from_str(
+        r#"
+default_model = "ag"
+
+[providers.google-cli]
+type = "antigravity"
+binaryPath = "/opt/agy"
+
+[providers.google-cli.antigravity]
+spawnTimeoutMs = 1200
+firstFrameTimeoutMs = 3400
+idleTimeoutMs = 5600
+totalTimeoutMs = 7800
+
+[models.ag]
+provider = "google-cli"
+model = "gemini-3.7-flash"
+"#,
+    )
+    .unwrap();
+    let native = config.extract_native_llm(Some("ag")).unwrap();
+    assert_eq!(native.protocol, "antigravity");
+    assert_eq!(native.provider_type, "antigravity");
+    assert!(native.base_url.is_empty());
+    assert!(native.api_key.is_empty());
+    assert_eq!(native.binary_path.as_deref(), Some("/opt/agy"));
+    let limits = native.antigravity.unwrap();
+    assert_eq!(limits.spawn_ms, 1_200);
+    assert_eq!(limits.first_frame_ms, 3_400);
+    assert_eq!(limits.idle_ms, 5_600);
+    assert_eq!(limits.total_ms, 7_800);
+
+    // Same shape without `type = "antigravity"` does not resolve: a missing
+    // credential is a configuration error, not a silent provider switch.
+    let plain = KimiConfig::from_str(
+        r#"
+default_model = "m"
+
+[providers.p]
+type = "google-genai"
+
+[models.m]
+provider = "p"
+model = "gemini-3.7-flash"
+"#,
+    )
+    .unwrap();
+    assert!(plain.extract_native_llm(Some("m")).is_none());
+}
+
 /// A one-provider config whose provider carries a credential but no
 /// endpoint, so the provider type's env/default chain is what resolves.
 fn endpoint_less_config(provider_type: &str) -> KimiConfig {
@@ -1084,6 +1141,187 @@ max_context_size = 1000
             .unwrap()
             .config_warnings
             .is_empty()
+    );
+}
+
+/// v2 validates `[environments]` while the config is read (`configSection.ts`
+/// via `buildValidated`): a bad declaration set is reported at startup instead
+/// of firing on the first session. The section stays parsed, so the
+/// create/restore check still refuses it when the file is edited at runtime.
+#[test]
+fn from_file_reports_invalid_environment_declarations() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    // Declaring the built-in local environment is a config error, reported now.
+    std::fs::write(&path, "[environments.dev]\ntype = \"local\"\n").unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert_eq!(
+        config.config_warnings.len(),
+        1,
+        "{:?}",
+        config.config_warnings
+    );
+    assert!(
+        config.config_warnings[0].contains("'environments'"),
+        "{}",
+        config.config_warnings[0]
+    );
+    assert!(
+        config.config_warnings[0].contains("built in"),
+        "{}",
+        config.config_warnings[0]
+    );
+    // Not dropped: the declaration remains for the freeze/restore backstop.
+    assert_eq!(
+        config.environments.entries["dev"].kind.as_deref(),
+        Some("local")
+    );
+
+    // An unknown transport is the same class of error.
+    std::fs::write(&path, "[environments.dev]\ntype = \"podman\"\n").unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("podman")),
+        "{:?}",
+        config.config_warnings
+    );
+
+    // A dangling `default` too.
+    std::fs::write(&path, "[environments]\ndefault = \"missing\"\n").unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("missing")),
+        "{:?}",
+        config.config_warnings
+    );
+
+    // A reserved id cannot be declared as an entry.
+    std::fs::write(&path, "[environments.local]\ntype = \"ssh\"\n").unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("reserved")),
+        "{:?}",
+        config.config_warnings
+    );
+
+    // Nor can an id with surrounding whitespace.
+    std::fs::write(&path, "[environments.\" dev\"]\ntype = \"ssh\"\n").unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("whitespace")),
+        "{:?}",
+        config.config_warnings
+    );
+
+    // An entry without a `type` is a declaration error, not a remote target.
+    std::fs::write(&path, "[environments.dev]\nhost = \"example.test\"\n").unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("has no type")),
+        "{:?}",
+        config.config_warnings
+    );
+
+    // A malformed entry (not a table) fails the section schema, which
+    // `buildValidated` reports and drops — the same fallback to the section
+    // default v2 takes, so the rest of the file still loads.
+    std::fs::write(&path, "[environments]\ndev = 3\n").unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("Ignored invalid config section 'environments'")),
+        "{:?}",
+        config.config_warnings
+    );
+    assert!(config.environments.entries.is_empty());
+
+    // A well-formed declaration set is silent: declaring a remote entry is not
+    // an error, only selecting one is.
+    std::fs::write(
+        &path,
+        "[environments.dev]\ntype = \"ssh\"\nhost = \"example.test\"\n",
+    )
+    .unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        config.config_warnings.is_empty(),
+        "{:?}",
+        config.config_warnings
+    );
+}
+
+/// v2 `buildValidated` (`configService.ts:753-771`): a section that fails its
+/// schema is reported and dropped, the rest of the file still loads, and a
+/// top-level key with no schema is reported instead of vanishing silently.
+#[test]
+fn from_file_reports_unknown_and_invalid_sections() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[loop_control]
+max_steps_per_turn = 7
+max_steps_per_run = 5
+
+[not_a_section]
+value = 1
+
+[[hooks]]
+event = "PreToolUse"
+command = "echo hi"
+timeout = 0
+"#,
+    )
+    .unwrap();
+
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("Ignored invalid config section 'not_a_section'")),
+        "{:?}",
+        config.config_warnings
+    );
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("Ignored invalid config section 'hooks'")),
+        "the out-of-range timeout must reject the section: {:?}",
+        config.config_warnings
+    );
+    // The valid section still loads instead of taking the file down.
+    assert_eq!(config.loop_control.max_steps_per_turn, Some(7));
+    assert!(config.hooks.is_empty());
+    // v2 `collectKeyDeprecations`: the renamed key still resolves, with a
+    // diagnostic pointing at the new spelling.
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("'max_steps_per_run' is deprecated")),
+        "{:?}",
+        config.config_warnings
     );
 }
 
@@ -2185,6 +2423,72 @@ fn mcp_section_parses_the_global_deferred_default() {
     assert_eq!(absent.mcp.default_deferred, None);
 }
 
+/// B13/B14/B15/B18: the `[models.<alias>]` request-body knobs are carried onto
+/// the native transport verbatim. Absent knobs stay `None`, so the transport
+/// keeps the body byte-identical (pinned by `RequestOptions::is_inert`).
+#[test]
+fn model_request_knobs_reach_the_native_transport() {
+    let config = KimiConfig::from_str(
+        r#"
+[providers.openai]
+type = "openai"
+api_key = "sk-test"
+base_url = "https://api.openai.com/v1"
+
+[models.custom]
+provider = "openai"
+model = "gpt-x"
+responseFormat = { type = "json_schema", jsonSchema = { name = "out", schema = { type = "object" }, strict = true } }
+sampling = { temperature = 0.2, topP = 0.9 }
+determinism = { seed = 7 }
+extraParams = { openai = { logit_bias = { "1" = 2 } } }
+
+[models.bare]
+provider = "openai"
+model = "gpt-y"
+"#,
+    )
+    .unwrap();
+
+    let resolved = config.extract_native_llm(Some("custom")).unwrap();
+    let llm = config.native_llm_config(&resolved);
+    assert_eq!(
+        llm.response_format,
+        Some(crate::rpc::types::NativeResponseFormat::JsonSchema {
+            json_schema: crate::rpc::types::NativeJsonSchema {
+                name: "out".into(),
+                schema: serde_json::json!({ "type": "object" }),
+                strict: Some(true),
+                description: None,
+            },
+        })
+    );
+    assert_eq!(
+        llm.sampling,
+        Some(crate::rpc::types::NativeSampling {
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+        })
+    );
+    assert_eq!(
+        llm.determinism,
+        Some(crate::rpc::types::NativeDeterminism { seed: Some(7) })
+    );
+    assert_eq!(
+        llm.extra_params
+            .as_ref()
+            .and_then(|params| params.openai.get("logit_bias")),
+        Some(&serde_json::json!({ "1": 2 }))
+    );
+
+    let resolved = config.extract_native_llm(Some("bare")).unwrap();
+    let llm = config.native_llm_config(&resolved);
+    assert_eq!(llm.response_format, None);
+    assert_eq!(llm.sampling, None);
+    assert_eq!(llm.determinism, None);
+    assert_eq!(llm.extra_params, None);
+}
+
 /// An adaptive anthropic model takes the level on `output_config.effort` and
 /// never a token budget (v2 `encodeThinking` adaptive mode), so the resolved
 /// transport must carry the effort string — including an explicit `off`.
@@ -2207,12 +2511,12 @@ default_effort = "high"
     )
     .unwrap();
     let resolved = config.extract_native_llm(Some("adaptive")).unwrap();
-    let llm = super::native_llm_config(resolved, Some("medium"), None);
+    let llm = super::native_llm_config(resolved, Some("medium"), None, None);
     assert_eq!(llm.thinking_budget, None, "adaptive mode sends no budget");
     assert_eq!(llm.reasoning_effort.as_deref(), Some("medium"));
 
     let resolved = config.extract_native_llm(Some("adaptive")).unwrap();
-    let off = super::native_llm_config(resolved, Some("off"), None);
+    let off = super::native_llm_config(resolved, Some("off"), None, None);
     assert_eq!(
         off.reasoning_effort.as_deref(),
         Some("off"),
@@ -2235,7 +2539,700 @@ model = "claude-sonnet"
     )
     .unwrap();
     let resolved = config.extract_native_llm(Some("plain")).unwrap();
-    let plain = super::native_llm_config(resolved, Some("high"), None);
+    let plain = super::native_llm_config(resolved, Some("high"), None, None);
     assert_eq!(plain.thinking_budget, Some(32_000));
     assert_eq!(plain.reasoning_effort, None);
+}
+
+/// Owns `KIMI_TOKEN_COUNTING_STRATEGY` for the duration of a test.
+///
+/// `resolve_token_counting_strategy` and `token_counting_warnings` read the
+/// process environment, so every test asserting on them has to take the same
+/// lock *and* start from "unset" — otherwise a parallel test that sets the
+/// variable is visible here (that race produced `left: Estimated` against a
+/// default that should have been `MeasuredAndEstimated`).
+fn token_counting_env() -> std::sync::MutexGuard<'static, ()> {
+    let guard = crate::session::token_counting::tests::env_lock();
+    unsafe { std::env::remove_var("KIMI_TOKEN_COUNTING_STRATEGY") };
+    guard
+}
+
+/// D10: with no `[tokenCounting]` section and no env binding the strategy is
+/// the historical `measured+estimated`, so the gauge cannot change just by
+/// adding the config surface.
+#[test]
+fn token_counting_strategy_defaults_to_the_historical_behaviour() {
+    use crate::session::token_counting::TokenCountingStrategy;
+    let _env = token_counting_env();
+    for source in ["", "[tokenCounting]\n"] {
+        let config = KimiConfig::from_str(source).unwrap();
+        assert_eq!(
+            config.resolve_token_counting_strategy(),
+            TokenCountingStrategy::MeasuredAndEstimated,
+            "{source:?}"
+        );
+        assert!(config.token_counting_warnings().is_empty());
+    }
+}
+
+/// D10: an explicit section value takes effect (both spellings of the table
+/// name), and an invalid one is reported at load time and by name.
+#[test]
+fn token_counting_strategy_reads_the_section_and_reports_invalid_values() {
+    use crate::session::token_counting::TokenCountingStrategy;
+    let _env = token_counting_env();
+    let measured = KimiConfig::from_str("[tokenCounting]\nstrategy = \"measured\"\n").unwrap();
+    assert_eq!(
+        measured.resolve_token_counting_strategy(),
+        TokenCountingStrategy::Measured
+    );
+    let estimated = KimiConfig::from_str("[token_counting]\nstrategy = \"estimated\"\n").unwrap();
+    assert_eq!(
+        estimated.resolve_token_counting_strategy(),
+        TokenCountingStrategy::Estimated
+    );
+
+    let invalid = KimiConfig::from_str("[tokenCounting]\nstrategy = \"both\"\n").unwrap();
+    assert_eq!(
+        invalid.resolve_token_counting_strategy(),
+        TokenCountingStrategy::MeasuredAndEstimated,
+        "an invalid value must not be silently accepted, but the gauge keeps the default"
+    );
+    let warnings = invalid.token_counting_warnings();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("'both'"), "{warnings:?}");
+    assert!(warnings[0].contains("measured+estimated"), "{warnings:?}");
+}
+
+/// D10: the env binding wins over the file; an invalid env spelling is
+/// reported and falls through to the file value rather than being ignored
+/// silently or masking a valid section.
+#[test]
+fn token_counting_strategy_env_overrides_and_falls_through() {
+    use crate::session::token_counting::TokenCountingStrategy;
+    let _env = token_counting_env();
+    const ENV: &str = "KIMI_TOKEN_COUNTING_STRATEGY";
+    let file = KimiConfig::from_str("[tokenCounting]\nstrategy = \"measured\"\n").unwrap();
+
+    unsafe { std::env::set_var(ENV, " ESTIMATED ") };
+    assert_eq!(
+        file.resolve_token_counting_strategy(),
+        TokenCountingStrategy::Estimated
+    );
+
+    unsafe { std::env::set_var(ENV, "bogus") };
+    assert_eq!(
+        file.resolve_token_counting_strategy(),
+        TokenCountingStrategy::Measured,
+        "an invalid env value must not override a valid file value"
+    );
+
+    let empty = KimiConfig::from_str("").unwrap();
+    assert_eq!(
+        empty.resolve_token_counting_strategy(),
+        TokenCountingStrategy::MeasuredAndEstimated
+    );
+
+    unsafe { std::env::remove_var(ENV) };
+    // The valid section is still honoured after the env binding disappears.
+    assert_eq!(
+        file.resolve_token_counting_strategy(),
+        TokenCountingStrategy::Measured
+    );
+}
+
+/// v2 `[read]` (`agent/tools/os/read/configSection.ts`): both the snake_case
+/// file contract and the camelCase alias resolve, a non-positive budget is
+/// ignored (with a load-time warning) so the built-in limits stand.
+#[test]
+fn read_section_resolves_both_spellings_and_rejects_non_positive() {
+    let empty = KimiConfig::from_str("").unwrap();
+    assert_eq!(empty.resolve_read_limits(), (None, None));
+
+    let snake =
+        KimiConfig::from_str("[read]\ndefault_max_chars = 1200\nmax_chars = 4000\n").unwrap();
+    assert_eq!(snake.resolve_read_limits(), (Some(1200), Some(4000)));
+
+    let camel = KimiConfig::from_str("[read]\ndefaultMaxChars = 1200\nmaxChars = 4000\n").unwrap();
+    assert_eq!(camel.resolve_read_limits(), (Some(1200), Some(4000)));
+
+    let zero = KimiConfig::from_str("[read]\nmax_chars = 0\n").unwrap();
+    assert_eq!(
+        zero.resolve_read_limits(),
+        (None, None),
+        "a zero ceiling must not clamp every read to nothing"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[read]\nmax_chars = 0\n").unwrap();
+    let loaded = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        loaded
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("[read].max_chars")),
+        "{:?}",
+        loaded.config_warnings
+    );
+}
+
+/// v2 `[llm_requester].requestByteBudget`: env over file over the 32 MiB
+/// default; blank, zero and non-numeric values never win.
+#[test]
+fn llm_request_byte_budget_prefers_env_then_file_then_default() {
+    let _env = crate::test_support::EnvScope::unset(&["KIMI_LLM_REQUEST_BYTE_BUDGET"]);
+
+    assert_eq!(
+        KimiConfig::from_str("")
+            .unwrap()
+            .resolve_llm_request_byte_budget(),
+        DEFAULT_LLM_REQUEST_BYTE_BUDGET
+    );
+
+    let file = KimiConfig::from_str("[llm_requester]\nrequest_byte_budget = 4096\n").unwrap();
+    assert_eq!(file.resolve_llm_request_byte_budget(), 4096);
+
+    let camel = KimiConfig::from_str("[llmRequester]\nrequestByteBudget = 8192\n").unwrap();
+    assert_eq!(
+        camel.resolve_llm_request_byte_budget(),
+        8192,
+        "the camelCase alias must not fall through to the default"
+    );
+
+    unsafe { std::env::set_var("KIMI_LLM_REQUEST_BYTE_BUDGET", "2048") };
+    assert_eq!(file.resolve_llm_request_byte_budget(), 2048);
+
+    for invalid in ["0", "", "  ", "abc"] {
+        unsafe { std::env::set_var("KIMI_LLM_REQUEST_BYTE_BUDGET", invalid) };
+        assert_eq!(
+            file.resolve_llm_request_byte_budget(),
+            4096,
+            "{invalid:?} must not override the file value"
+        );
+    }
+}
+
+/// v2 `[sandbox].mode`: the enum resolves; an unknown spelling stays off and
+/// is reported on load instead of silently becoming a sandbox the user did
+/// not write.
+#[test]
+fn sandbox_mode_resolves_and_reports_unknown_spellings() {
+    assert_eq!(
+        KimiConfig::from_str("").unwrap().resolve_sandbox_mode(),
+        None,
+        "unset keeps the sandbox off"
+    );
+    for (value, expected) in [
+        ("off", crate::tools::sandbox::SandboxMode::Off),
+        ("read-only", crate::tools::sandbox::SandboxMode::ReadOnly),
+        (
+            "workspace-write",
+            crate::tools::sandbox::SandboxMode::WorkspaceWrite,
+        ),
+    ] {
+        let config = KimiConfig::from_str(&format!("[sandbox]\nmode = \"{value}\"\n")).unwrap();
+        assert_eq!(config.resolve_sandbox_mode(), Some(expected), "{value}");
+    }
+
+    let typo = KimiConfig::from_str("[sandbox]\nmode = \"readonlyy\"\n").unwrap();
+    assert_eq!(typo.resolve_sandbox_mode(), None);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[sandbox]\nmode = \"readonlyy\"\n").unwrap();
+    let loaded = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        loaded
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("[sandbox].mode")),
+        "{:?}",
+        loaded.config_warnings
+    );
+}
+
+/// v2 `[builtinProductSkills]`: default on, file can disable it, and the env
+/// switch wins over the file in both directions.
+#[test]
+fn builtin_product_skills_env_overrides_file() {
+    let _env = crate::test_support::EnvScope::unset(&["KIMI_CODE_BUILTIN_PRODUCT_SKILLS"]);
+
+    assert!(
+        KimiConfig::from_str("")
+            .unwrap()
+            .resolve_builtin_product_skills()
+    );
+
+    let off = KimiConfig::from_str("builtin_product_skills = false\n").unwrap();
+    assert!(!off.resolve_builtin_product_skills());
+
+    let camel = KimiConfig::from_str("builtinProductSkills = false\n").unwrap();
+    assert!(!camel.resolve_builtin_product_skills());
+
+    unsafe { std::env::set_var("KIMI_CODE_BUILTIN_PRODUCT_SKILLS", "1") };
+    assert!(
+        off.resolve_builtin_product_skills(),
+        "a truthy env switch must re-enable product skills"
+    );
+
+    unsafe { std::env::set_var("KIMI_CODE_BUILTIN_PRODUCT_SKILLS", "0") };
+    assert!(
+        !KimiConfig::from_str("")
+            .unwrap()
+            .resolve_builtin_product_skills(),
+        "a falsy env switch must disable them even with no file value"
+    );
+
+    unsafe { std::env::set_var("KIMI_CODE_BUILTIN_PRODUCT_SKILLS", "banana") };
+    assert!(
+        KimiConfig::from_str("")
+            .unwrap()
+            .resolve_builtin_product_skills(),
+        "an unrecognized env value is not a switch"
+    );
+}
+
+/// v2 `thinking.forcedEffort` / `KIMI_MODEL_THINKING_EFFORT`: the forced value
+/// outranks `effort` while thinking is on; an explicit `off` is not a forced
+/// effort; thinking disabled still sends the model's off token.
+#[test]
+fn thinking_forced_effort_outranks_the_chosen_effort() {
+    let _env = crate::test_support::EnvScope::unset(&["KIMI_MODEL_THINKING_EFFORT"]);
+
+    let file =
+        KimiConfig::from_str("[thinking]\neffort = \"low\"\nforced_effort = \"high\"\n").unwrap();
+    assert_eq!(file.resolve_effort(None).as_deref(), Some("high"));
+
+    let camel =
+        KimiConfig::from_str("[thinking]\neffort = \"low\"\nforcedEffort = \"high\"\n").unwrap();
+    assert_eq!(camel.resolve_effort(None).as_deref(), Some("high"));
+
+    unsafe { std::env::set_var("KIMI_MODEL_THINKING_EFFORT", "max") };
+    assert_eq!(
+        file.resolve_effort(None).as_deref(),
+        Some("max"),
+        "the env-forced effort must beat the file"
+    );
+    for invalid in ["", "  "] {
+        unsafe { std::env::set_var("KIMI_MODEL_THINKING_EFFORT", invalid) };
+        assert_eq!(
+            file.resolve_effort(None).as_deref(),
+            Some("high"),
+            "{invalid:?} must not override the file"
+        );
+    }
+    // v2 passes a non-empty forced value through verbatim, `off` included.
+    unsafe { std::env::set_var("KIMI_MODEL_THINKING_EFFORT", "off") };
+    assert_eq!(file.resolve_effort(None).as_deref(), Some("off"));
+
+    let disabled = KimiConfig::from_str(
+        "[thinking]\nenabled = false\neffort = \"low\"\nforced_effort = \"high\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        disabled.resolve_effort(Some("none")).as_deref(),
+        Some("none"),
+        "disabled thinking bypasses the effort entirely"
+    );
+}
+
+/// v2 `resolveAgentTaskConfig`: `[task]` wins over the legacy `[background]`
+/// for every shared key, and the task env bindings win over both.
+#[test]
+fn task_section_overrides_background_and_env_overrides_task() {
+    let _env = crate::test_support::EnvScope::unset(&[
+        "KIMI_CODE_BACKGROUND_BASH_TASK_TIMEOUT_S",
+        "KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT",
+        "KIMI_CODE_BACKGROUND_PRINT_WAIT_CEILING_S",
+        "KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE",
+        "KIMI_CODE_BACKGROUND_PRINT_MAX_TURNS",
+    ]);
+
+    let merged = KimiConfig::from_str(
+        r#"
+[background]
+bash_task_timeout_s = 120
+kill_grace_period_ms = 1000
+keep_alive_on_exit = true
+bash_auto_background_on_timeout = false
+max_settled_tasks = 5
+
+[task]
+bash_task_timeout_s = 240
+kill_grace_period_ms = 2000
+keep_alive_on_exit = false
+bash_auto_background_on_timeout = true
+max_settled_tasks = 7
+print_wait_ceiling_s = 30
+print_background_mode = "drain"
+print_max_turns = 4
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(merged.resolve_bash_task_timeout_s(), Some(240));
+    assert_eq!(merged.resolve_kill_grace_period_ms(), Some(2000));
+    assert_eq!(merged.resolve_keep_alive_on_exit(), Some(false));
+    assert_eq!(merged.resolve_bash_auto_background_on_timeout(), Some(true));
+    assert_eq!(merged.resolve_max_settled_tasks(), Some(7));
+    assert_eq!(merged.resolve_print_wait_ceiling_s(), Some(30));
+    assert_eq!(merged.resolve_print_background_mode(), "drain");
+    assert_eq!(merged.resolve_print_max_turns(), Some(4));
+
+    let limits = merged.background_limits();
+    assert_eq!(limits.bash_task_timeout_s, Some(240));
+    assert_eq!(limits.kill_grace_period_ms, Some(2000));
+    assert_eq!(limits.keep_alive_on_exit, Some(false));
+    assert_eq!(limits.bash_auto_background_on_timeout, Some(true));
+
+    unsafe {
+        std::env::set_var("KIMI_CODE_BACKGROUND_BASH_TASK_TIMEOUT_S", "999");
+        std::env::set_var("KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT", "1");
+        std::env::set_var("KIMI_CODE_BACKGROUND_PRINT_WAIT_CEILING_S", "60");
+        std::env::set_var("KIMI_CODE_BACKGROUND_PRINT_MAX_TURNS", "9");
+    }
+    assert_eq!(merged.resolve_bash_task_timeout_s(), Some(999));
+    assert_eq!(merged.resolve_keep_alive_on_exit(), Some(true));
+    assert_eq!(merged.resolve_print_wait_ceiling_s(), Some(60));
+    assert_eq!(merged.resolve_print_max_turns(), Some(9));
+
+    // An unrecognized print mode falls back to the keep-alive default.
+    unsafe { std::env::set_var("KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE", "bogus") };
+    assert_eq!(
+        merged.resolve_print_background_mode(),
+        "drain",
+        "keep_alive_on_exit is on, so the default is drain"
+    );
+    unsafe { std::env::set_var("KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE", "exit") };
+    assert_eq!(merged.resolve_print_background_mode(), "exit");
+
+    unsafe {
+        std::env::remove_var("KIMI_CODE_BACKGROUND_BASH_TASK_TIMEOUT_S");
+        std::env::remove_var("KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT");
+        std::env::remove_var("KIMI_CODE_BACKGROUND_PRINT_WAIT_CEILING_S");
+        std::env::remove_var("KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE");
+        std::env::remove_var("KIMI_CODE_BACKGROUND_PRINT_MAX_TURNS");
+    }
+    let defaults = KimiConfig::from_str("").unwrap();
+    assert_eq!(defaults.resolve_print_background_mode(), "steer");
+}
+
+/// v2 `permissionFromToml`: legacy `deny` / `allow` / `ask` lists are folded
+/// into the snapshot with their implied decision, including the
+/// `{ tool, match }` shorthand; the same shorthand works in `[[rules]]`.
+#[test]
+fn legacy_permission_lists_and_tool_match_shorthand_resolve() {
+    let config = KimiConfig::from_str(
+        r#"
+[permission]
+deny = ["Write(secret.txt)", { tool = "Bash", match = "rm -rf *" }, { tool = "WebFetch" }]
+allow = "Read(*)"
+ask = ["Edit(*)"]
+
+[[permission.rules]]
+decision = "deny"
+tool = "Bash"
+match = "curl *"
+"#,
+    )
+    .unwrap();
+    let snapshot = config.build_policy_snapshot(None);
+    assert_eq!(
+        snapshot.deny_rules,
+        vec![
+            "Bash(curl *)",
+            "Write(secret.txt)",
+            "Bash(rm -rf *)",
+            "WebFetch"
+        ]
+    );
+    assert_eq!(snapshot.allow_rules, vec!["Read(*)"]);
+    assert_eq!(snapshot.ask_rules, vec!["Edit(*)"]);
+}
+
+/// v2 `[model_overrides]`: env over file, with out-of-range values dropped so
+/// a malformed override cannot reach the wire.
+#[test]
+fn model_overrides_prefer_env_and_drop_out_of_range_values() {
+    let _env = crate::test_support::EnvScope::unset(&[
+        "KIMI_MODEL_TEMPERATURE",
+        "KIMI_MODEL_TOP_P",
+        "KIMI_MODEL_MAX_COMPLETION_TOKENS",
+        "KIMI_MODEL_MAX_TOKENS",
+        "KIMI_MODEL_THINKING_KEEP",
+    ]);
+
+    let defaults = KimiConfig::from_str("").unwrap().resolve_model_overrides();
+    assert_eq!(defaults, ResolvedModelOverrides::default());
+
+    let file = KimiConfig::from_str(
+        r#"
+[model_overrides]
+temperature = 0.3
+top_p = 0.9
+thinking_keep = "all"
+max_completion_tokens = 2048
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        file.resolve_model_overrides(),
+        ResolvedModelOverrides {
+            temperature: Some(0.3),
+            top_p: Some(0.9),
+            thinking_keep: Some("all".into()),
+            max_completion_tokens: Some(2048),
+        }
+    );
+
+    unsafe {
+        std::env::set_var("KIMI_MODEL_TEMPERATURE", "0.7");
+        std::env::set_var("KIMI_MODEL_TOP_P", "0.5");
+        std::env::set_var("KIMI_MODEL_MAX_COMPLETION_TOKENS", "4096");
+    }
+    let env = file.resolve_model_overrides();
+    assert_eq!(env.temperature, Some(0.7));
+    assert_eq!(env.top_p, Some(0.5));
+    assert_eq!(env.max_completion_tokens, Some(4096));
+
+    let bad = KimiConfig::from_str(
+        "[model_overrides]\ntemperature = 5.0\ntop_p = -1.0\nmax_completion_tokens = 0\n",
+    )
+    .unwrap();
+    unsafe {
+        std::env::remove_var("KIMI_MODEL_TEMPERATURE");
+        std::env::remove_var("KIMI_MODEL_TOP_P");
+        std::env::remove_var("KIMI_MODEL_MAX_COMPLETION_TOKENS");
+    }
+    assert_eq!(
+        bad.resolve_model_overrides().temperature,
+        Some(5.0),
+        "v2 does not bound temperature, so it is passed through"
+    );
+    assert_eq!(bad.resolve_model_overrides().top_p, Some(-1.0));
+    assert_eq!(
+        bad.resolve_model_overrides().max_completion_tokens,
+        None,
+        "maxCompletionTokens is positive-only"
+    );
+
+    unsafe { std::env::set_var("KIMI_MODEL_TEMPERATURE", "NaN") };
+    assert_eq!(
+        file.resolve_model_overrides().temperature,
+        Some(0.3),
+        "a non-finite env value falls back to the file"
+    );
+}
+
+/// A stdio MCP server bound to a declared environment cannot be reached by
+/// this engine; the load reports it instead of running the server silently on
+/// the local host. The local id stays quiet.
+#[test]
+fn mcp_environment_binding_is_reported_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[mcp_servers.remote]
+command = "tool"
+environment_id = "devbox"
+
+[mcp_servers.local]
+command = "tool"
+environment_id = "local"
+"#,
+    )
+    .unwrap();
+    let config = KimiConfig::from_file(&path).unwrap();
+    assert_eq!(
+        config.mcp_servers["remote"].environment_id.as_deref(),
+        Some("devbox")
+    );
+    assert!(
+        config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("[mcp_servers.remote].environment_id")),
+        "{:?}",
+        config.config_warnings
+    );
+    assert!(
+        !config
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("[mcp_servers.local]")),
+        "{:?}",
+        config.config_warnings
+    );
+}
+
+/// Provider and service fields the host/model refresh reads must survive a
+/// read instead of being dropped by serde's unknown-field handling.
+#[test]
+fn provider_and_service_auxiliary_fields_parse() {
+    let config = KimiConfig::from_str(
+        r#"
+[providers.gateway]
+type = "openai"
+api_key = "sk-x"
+modelSource = "oauth-catalog"
+env = { GATEWAY_TENANT = "team-a" }
+
+[services.moonshot_search]
+base_url = "https://search.example"
+oauth = { account = "me" }
+"#,
+    )
+    .unwrap();
+    let provider = &config.providers["gateway"];
+    assert_eq!(provider.model_source.as_deref(), Some("oauth-catalog"));
+    assert_eq!(
+        provider
+            .env
+            .as_ref()
+            .and_then(|env| env.get("GATEWAY_TENANT")),
+        Some(&"team-a".to_string())
+    );
+    assert!(
+        config
+            .services
+            .moonshot_search
+            .as_ref()
+            .unwrap()
+            .oauth
+            .is_some()
+    );
+}
+
+/// v2 `kimiModelEnvOverlay`: `KIMI_MODEL_NAME` plus the reserved provider
+/// bindings produce an env-only deployment without a file declaring anything;
+/// the catalog defaults and alias are filled in.
+#[test]
+fn env_model_overlay_builds_the_reserved_provider_and_alias() {
+    let _env = crate::test_support::EnvScope::unset(&[
+        "KIMI_MODEL_NAME",
+        "KIMI_MODEL_API_KEY",
+        "KIMI_MODEL_PROVIDER_TYPE",
+        "KIMI_MODEL_BASE_URL",
+        "KIMI_MODEL_MAX_CONTEXT_SIZE",
+        "KIMI_MODEL_MAX_OUTPUT_SIZE",
+        "KIMI_MODEL_CAPABILITIES",
+        "KIMI_MODEL_ADAPTIVE_THINKING",
+        "KIMI_MODEL_DISPLAY_NAME",
+        "KIMI_MODEL_REASONING_KEY",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "").unwrap();
+
+    let plain = KimiConfig::load_or_default(&path);
+    assert!(plain.models.get(ENV_MODEL_ALIAS_KEY).is_none());
+    assert!(plain.providers.get(ENV_MODEL_PROVIDER_KEY).is_none());
+
+    unsafe {
+        std::env::set_var("KIMI_MODEL_NAME", "env-model");
+        std::env::set_var("KIMI_MODEL_API_KEY", "sk-env");
+        std::env::set_var("KIMI_MODEL_PROVIDER_TYPE", "kimi");
+    }
+    let config = KimiConfig::load_or_default(&path);
+    assert_eq!(config.default_model.as_deref(), Some(ENV_MODEL_ALIAS_KEY));
+    let alias = &config.models[ENV_MODEL_ALIAS_KEY];
+    assert_eq!(alias.provider.as_deref(), Some(ENV_MODEL_PROVIDER_KEY));
+    assert_eq!(alias.model.as_deref(), Some("env-model"));
+    assert_eq!(alias.max_context_size, Some(262_144));
+    assert_eq!(
+        alias.capabilities.as_deref(),
+        Some(["image_in".to_string(), "thinking".to_string()].as_slice())
+    );
+
+    let native = config.extract_native_llm(None).unwrap();
+    assert_eq!(native.model, "env-model");
+    assert_eq!(native.api_key, "sk-env");
+    assert_eq!(native.provider_type, "kimi");
+    assert_eq!(native.base_url, "https://api.moonshot.ai/v1");
+
+    // The provider type defaults to `kimi` when only a name/key is given.
+    unsafe { std::env::remove_var("KIMI_MODEL_PROVIDER_TYPE") };
+    let defaulted = KimiConfig::load_or_default(&path);
+    assert_eq!(
+        defaulted.providers[ENV_MODEL_PROVIDER_KEY]
+            .provider_type
+            .as_deref(),
+        Some("kimi")
+    );
+}
+
+/// v2 raises `CONFIG_INVALID` for a malformed overlay value; the load must
+/// fail instead of silently running the file config as if the env were unset.
+#[test]
+fn env_model_overlay_rejects_malformed_values() {
+    let _env = crate::test_support::EnvScope::unset(&[
+        "KIMI_MODEL_NAME",
+        "KIMI_MODEL_MAX_CONTEXT_SIZE",
+        "KIMI_MODEL_MAX_OUTPUT_SIZE",
+        "KIMI_MODEL_ADAPTIVE_THINKING",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "default_model = \"file-model\"\n").unwrap();
+    unsafe { std::env::set_var("KIMI_MODEL_NAME", "env-model") };
+
+    for (key, value) in [
+        ("KIMI_MODEL_MAX_CONTEXT_SIZE", "abc"),
+        ("KIMI_MODEL_MAX_CONTEXT_SIZE", "0"),
+        ("KIMI_MODEL_MAX_OUTPUT_SIZE", "-1"),
+    ] {
+        unsafe { std::env::set_var(key, value) };
+        let failed = KimiConfig::load_or_default(&path);
+        assert!(
+            failed
+                .config_warnings
+                .iter()
+                .any(|warning| warning.contains(key)),
+            "{key}={value}: {:?}",
+            failed.config_warnings
+        );
+        assert_eq!(
+            failed.default_model, None,
+            "a failed overlay must not leave the file config applied"
+        );
+        unsafe { std::env::remove_var(key) };
+    }
+
+    unsafe { std::env::set_var("KIMI_MODEL_ADAPTIVE_THINKING", "maybe") };
+    let failed = KimiConfig::load_or_default(&path);
+    assert!(
+        failed
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("KIMI_MODEL_ADAPTIVE_THINKING")),
+        "{:?}",
+        failed.config_warnings
+    );
+}
+
+/// v2 `loopControl.maxRalphIterations` is accepted (min -1) and reported when
+/// below the floor, rather than being dropped as an unknown nested key.
+#[test]
+fn max_ralph_iterations_parses_and_reports_below_floor() {
+    let config = KimiConfig::from_str("[loop_control]\nmax_ralph_iterations = 3\n").unwrap();
+    assert_eq!(config.loop_control.max_ralph_iterations, Some(3));
+
+    let camel = KimiConfig::from_str("[loop_control]\nmaxRalphIterations = 5\n").unwrap();
+    assert_eq!(camel.loop_control.max_ralph_iterations, Some(5));
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[loop_control]\nmax_ralph_iterations = -2\n").unwrap();
+    let loaded = KimiConfig::from_file(&path).unwrap();
+    assert!(
+        loaded
+            .config_warnings
+            .iter()
+            .any(|warning| warning.contains("maxRalphIterations")),
+        "{:?}",
+        loaded.config_warnings
+    );
 }

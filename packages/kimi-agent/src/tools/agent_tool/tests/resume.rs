@@ -1,9 +1,6 @@
 use super::super::*;
 use super::common::*;
 
-/// v2 `agentTool.ts` refuses to resume an agent the caller does not own.
-/// Without it any agent could name any other agent's id in `resume` and
-/// drive a turn inside its conversation.
 #[tokio::test]
 async fn a_resume_of_another_agents_subagent_is_refused() {
     let llm = Arc::new(RecordingPromptLlm::new(vec!["theirs".into()]));
@@ -22,7 +19,7 @@ async fn a_resume_of_another_agents_subagent_is_refused() {
             subagents: None,
         })
         .await;
-    // A subagent belonging to somebody else.
+
     let foreign = crate::tools::CALLER_AGENT_ID
         .scope(
             "other-agent".to_string(),
@@ -34,7 +31,6 @@ async fn a_resume_of_another_agents_subagent_is_refused() {
         .run_foreground_turn(&foreign, "their work", None)
         .await;
 
-    // This agent tries to resume it.
     let result = as_main_agent(execute_resume(
         &manager,
         None,
@@ -57,8 +53,6 @@ async fn a_resume_of_another_agents_subagent_is_refused() {
     );
 }
 
-/// v2 `agentTool.ts`: an agent already running its own turn is not
-/// resumable into a second concurrent turn.
 #[tokio::test]
 async fn a_resume_of_a_running_agent_is_refused() {
     let llm = Arc::new(RecordingPromptLlm::new(vec!["busy".into()]));
@@ -160,7 +154,7 @@ async fn resume_continues_a_completed_foreground_conversation() {
         assert!(!second.is_error);
         assert!(second.content.contains("follow-up answer"));
         assert_eq!(llm.call_count(), 2);
-        // The resume turn saw the full prior conversation.
+
         let second_messages = llm.prompts.lock().unwrap().len();
         assert_eq!(second_messages, 2);
     })
@@ -183,9 +177,6 @@ async fn unknown_resume_ids_stay_host_owned() {
     assert!(result.is_none(), "unknown resume ids fall back to the host");
 }
 
-/// A tower worker's foreground resume is refused with the background
-/// hint (v2 `towerService` veto, #3648): the tower never needs a worker's
-/// return value inline, and a blocking resume jams the whole fleet.
 #[tokio::test]
 async fn tower_roster_foreground_resume_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -226,8 +217,6 @@ async fn tower_roster_foreground_resume_is_refused() {
     };
     store.save(&state).await.unwrap();
 
-    // The roster hit answers through the exposed resolver, and the gate
-    // produces the run_in_background hint for a tower profile.
     let target = crate::tools::tower::tower_resume_target(Some(repo_root.clone()), "subagent-42")
         .await
         .expect("roster state is readable")
@@ -247,11 +236,6 @@ async fn tower_roster_foreground_resume_is_refused() {
     assert!(denial.contains("resume=\"subagent-42\""), "{denial}");
 }
 
-/// P2-2 regression: the roster lookup resolves the tower repo root from
-/// the *passed* root, not the process cwd. With the tower state living
-/// under `root` and the process cwd parked somewhere tower-less, the gate
-/// must still deny (it used to consult the cwd's tower and let the resume
-/// through), and the fallback without a root keeps reading the cwd.
 #[tokio::test]
 async fn tower_resume_denial_uses_passed_root_not_process_cwd() {
     let dir = tempfile::tempdir().unwrap();
@@ -291,14 +275,9 @@ async fn tower_resume_denial_uses_passed_root_not_process_cwd() {
     };
     store.save(&state).await.unwrap();
 
-    // The process cwd sits in a second, tower-less temp dir. `CwdScope` holds
-    // the suite-wide cwd lock, so no other test spawns a child inside this
-    // window, and the directory is restored even if an assertion below panics.
     let towerless = tempfile::tempdir().unwrap();
     let _cwd = crate::test_support::CwdScope::enter(towerless.path()).await;
 
-    // With the canonical root passed, the gate denies even though the cwd
-    // has no tower state at all — the roster is found via `root`.
     let denial = tower_resume_denial(
         Some(repo_root.clone()),
         "research",
@@ -310,8 +289,6 @@ async fn tower_resume_denial_uses_passed_root_not_process_cwd() {
     .expect("roster resolves through the passed root, not the cwd");
     assert!(denial.contains("worker-p22"), "{denial}");
 
-    // Without a root (no-toolset call site), the fallback reads the
-    // process cwd — tower-less here, so nothing is gated.
     assert!(
         tower_resume_denial(None, "research", "subagent-p22", Some(false), true)
             .await
@@ -320,11 +297,8 @@ async fn tower_resume_denial_uses_passed_root_not_process_cwd() {
     );
 }
 
-/// A non-roster resume path is untouched: the gate stays silent for a
-/// plain profile, a non-member id, and an explicit background call.
 #[tokio::test]
 async fn non_tower_foreground_resume_is_unchanged() {
-    // No roster file anywhere: the gate passes everything through.
     let cwd = tempfile::tempdir().unwrap().path().to_path_buf();
     assert!(
         tower_resume_denial(
@@ -338,7 +312,7 @@ async fn non_tower_foreground_resume_is_unchanged() {
         .is_none(),
         "no tower state.json = no gate"
     );
-    // A roster member with run_in_background=true goes through.
+
     let dir = tempfile::tempdir().unwrap();
     let store = crate::tools::tower::store::TowerStore::new(dir.path());
     let state_dir = store
@@ -388,9 +362,7 @@ async fn non_tower_foreground_resume_is_unchanged() {
         .is_none(),
         "background resume is allowed"
     );
-    // A non-tower profile is only the tower's business when its id sits
-    // in the roster: "research" + roster member subagent-42 is denied
-    // through the roster arm, "research" + unknown id is not gated.
+
     let denial = tower_resume_denial(
         Some(dir.path().to_path_buf()),
         "research",
@@ -413,9 +385,7 @@ async fn non_tower_foreground_resume_is_unchanged() {
         .is_none(),
         "a plain profile outside the roster is not gated"
     );
-    // No background availability (no TaskList/TaskOutput/TaskStop on the
-    // host table): v2 lets the foreground resume through rather than
-    // leaving the agent unrecovered.
+
     assert!(
         tower_resume_denial(
             Some(dir.path().to_path_buf()),
@@ -428,8 +398,7 @@ async fn non_tower_foreground_resume_is_unchanged() {
         .is_none(),
         "without a task runner the foreground resume is the only form"
     );
-    // An unknown id is not a roster member, so a plain profile stays
-    // allowed...
+
     assert!(
         crate::tools::tower::tower_resume_target(Some(dir.path().to_path_buf()), "subagent-999")
             .await
@@ -448,8 +417,7 @@ async fn non_tower_foreground_resume_is_unchanged() {
         .is_none(),
         "a plain profile outside the roster is not denied"
     );
-    // ...but the tower-worker profile alone denies: the profile hit is
-    // enough (mission spec: profile hit OR roster membership).
+
     let denial = tower_resume_denial(
         Some(dir.path().to_path_buf()),
         "tower-worker",
@@ -462,10 +430,6 @@ async fn non_tower_foreground_resume_is_unchanged() {
     assert!(denial.contains("run_in_background=true"), "{denial}");
 }
 
-/// The mandated recovery form actually runs: `Agent(resume=…,
-/// run_in_background=true)` returns immediately with the running shape
-/// (no duplicate spawned/started pair) and the resumed turn completes
-/// detached, reporting one `subagent.completed`.
 #[tokio::test]
 async fn background_resume_runs_detached_and_reports_once() {
     let _owned = as_main_agent(async {
@@ -529,17 +493,15 @@ async fn background_resume_runs_detached_and_reports_once() {
             "{}",
             second.content
         );
-        // Without a task runner there is no task entry, so the running shape
-        // carries only the stable agent id.
+
         assert!(
             !second.content.contains("task_id:"),
             "no runner, no task id: {}",
             second.content
         );
-        // The call returns without awaiting the resumed turn.
+
         assert_eq!(llm.call_count(), 1, "the resumed turn has not run yet");
 
-        // The detached turn completes and reports exactly one terminal event.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         for _ in 0..50 {
             if llm.call_count() == 2 {
@@ -570,8 +532,6 @@ async fn background_resume_runs_detached_and_reports_once() {
     .await;
 }
 
-/// The same availability gate guards the resume arm: it must reject before
-/// the detached turn starts, not merely change the Agent description.
 #[tokio::test]
 async fn background_resume_is_refused_without_task_output() {
     as_main_agent(async {
@@ -629,11 +589,6 @@ async fn background_resume_is_refused_without_task_output() {
     .await;
 }
 
-/// The regression for the round-1 review P1-1: background resume tasks
-/// are registered under a *fresh* task id, because TaskRunner keeps
-/// settled entries and rejects duplicate ids — under the stable agent id
-/// the second background resume of the same tower agent used to be a
-/// silently swallowed no-op. Both resumes here must actually run.
 #[tokio::test]
 async fn second_background_resume_of_the_same_agent_still_runs() {
     let _owned = as_main_agent(async {
@@ -680,8 +635,8 @@ async fn second_background_resume_of_the_same_agent_still_runs() {
 
     let resume_args = |prompt: &str| serde_json::json!({ "resume": agent_id, "prompt": prompt, "run_in_background": true });
 
-    // First background resume: registered, and its fresh task id is the
-    // one the running shape advertises (TaskList/TaskStop key off it).
+
+
     let second = execute_agent(
         &manager,
         None,
@@ -709,7 +664,7 @@ async fn second_background_resume_of_the_same_agent_still_runs() {
         "the agent id stays in the shape: {}",
         second.content
     );
-    // The registered task exists and eventually settles as completed.
+
     for _ in 0..50 {
         if llm.call_count() == 2 {
             break;
@@ -721,8 +676,8 @@ async fn second_background_resume_of_the_same_agent_still_runs() {
         crate::storage::TaskWaitResult::Completed(_)
     ));
 
-    // Second background resume of the SAME agent: must register and run,
-    // not silently no-op behind a duplicate-id rejection.
+
+
     let third = execute_agent(
         &manager,
         None,
@@ -760,7 +715,7 @@ async fn second_background_resume_of_the_same_agent_still_runs() {
         runner.wait(&second_task_id, 5000).await,
         crate::storage::TaskWaitResult::Completed(_)
     ));
-    // Both turns reported their own completion to the host.
+
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let events = recorder.events.lock().unwrap();
     let completed: Vec<&serde_json::Value> = events
@@ -777,10 +732,6 @@ async fn second_background_resume_of_the_same_agent_still_runs() {
     }).await;
 }
 
-/// v2 `agentTool.ts` refuses a resume that also names a `subagent_type` before
-/// it touches the lifecycle: the resumed agent keeps its own profile. The fork
-/// accepted both and silently ignored the type, and the schema description
-/// already claimed the combination was rejected.
 #[tokio::test]
 async fn resume_with_a_subagent_type_is_refused() {
     let _owned = as_main_agent(async {

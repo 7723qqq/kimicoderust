@@ -1,37 +1,12 @@
-//! Goal-operation guard — approval routing and stale-call veto (G-6 #7/#8).
-//! The symbol names mirror v2's `features/goal/goalService.ts`
-//! (`isGoalMutationTool`, `GOAL_STALE_TOOL_RESULT`); the routing shape is the
-//! fork's own, since the engine cannot render the host's review panel.
-//!
-//! Two responsibilities:
-//! - **#7 CreateGoal approval**: in v2, a goal start is reviewed whenever
-//!   the permission mode is not `auto`. The engine cannot render the review
-//!   panel or switch the host's permission mode, so it routes CreateGoal to
-//!   the host instead — the host's full veto chain (permission gate →
-//!   goal-start review → stale veto) fires unchanged (P6: decisions stay
-//!   with the host). `auto` mode keeps the native execution.
-//! - **#8 stale-call veto**: a turn is bound to the goal that was active
-//!   when it started (`run_turn` records it via `set_turn_goal`); calls to
-//!   goal mutation tools when the current goal no longer matches are
-//!   rejected with the v2 message.
-//!
-//! The budget-grace half of v2's stale protection needs no mirror: `run_turn`
-//! hard-stops a turn when a goal budget is exceeded (step-head check), so no
-//! tool call can run after the budget — the data protection is structural.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::callbacks::HostCallbacks;
 use crate::permission::PermissionMode;
 
-/// The v2 stale-call veto text (`GOAL_STALE_TOOL_RESULT`).
 const STALE_GOAL_TOOL_RESULT: &str =
     "Goal changed since this turn started; ignored stale goal tool call.";
 
-/// Goal mutation tools guarded by the stale check (v2 `isGoalMutationTool`:
-/// CreateGoal | UpdateGoal | SetGoalBudget; GetGoal is read-only and exempt).
-/// Both spellings are matched like the plan guard.
 fn is_goal_mutation_tool(tool_name: &str) -> bool {
     matches!(
         tool_name.to_ascii_lowercase().as_str(),
@@ -51,18 +26,11 @@ fn is_create_goal(tool_name: &str) -> bool {
     )
 }
 
-/// The per-session goal guard: turn-start goal bindings plus the permission
-/// mode snapshot. Mounted on [`crate::callbacks::NativeToolCallbacks`].
 pub struct GoalGuard {
-    /// `turn_id -> goal_id` bound when the turn started. `None` records a
-    /// turn that started with no active goal.
     pub bindings: Arc<Mutex<HashMap<String, Option<String>>>>,
-    /// Permission mode from the policy snapshot, live-updated on a
-    /// `set_mode` switch (same lifetime as the in-process permission
-    /// engine's own mode lock).
+
     mode: RwLock<Option<PermissionMode>>,
-    /// Route non-auto CreateGoal to the host (product paths). The REPL's
-    /// dummy host cannot execute CreateGoal, so it stays native.
+
     route_to_host: bool,
 }
 
@@ -75,16 +43,10 @@ impl GoalGuard {
         }
     }
 
-    /// Track a live permission-mode switch (`PermissionEngine::set_mode`):
-    /// the guard's `requires_host` verdict must follow the mode the engine
-    /// actually evaluates with, not the session's startup snapshot.
     pub fn set_mode(&self, mode: Option<PermissionMode>) {
         *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
     }
 
-    /// Bind a turn to the goal that was active when it started. `None`
-    /// records a turn with no active goal — the stale check skips such
-    /// turns (v2: an unbound turn is never stale).
     pub fn bind_turn(&self, turn_id: &str, goal_id: Option<&str>) {
         self.bindings
             .lock()
@@ -92,18 +54,11 @@ impl GoalGuard {
             .insert(turn_id.to_string(), goal_id.map(str::to_string));
     }
 
-    /// Whether a CreateGoal call must run on the host so its goal-start
-    /// review fires (v2: any mode other than `auto`). An unknown mode fails
-    /// closed — route to the host, which decides.
     pub fn requires_host(&self, tool_name: &str) -> bool {
         let mode = self.mode.read().unwrap_or_else(|e| e.into_inner());
         self.route_to_host && is_create_goal(tool_name) && *mode != Some(PermissionMode::Auto)
     }
 
-    /// The stale-call veto for goal mutation tools (v2 `isStaleGoalToolCall`:
-    /// the turn's bound goal must equal the current goal, compared by id
-    /// only — a cleared goal also matches). Unbound turns and broken goal
-    /// reads pass.
     pub async fn stale_denial(
         &self,
         inner: &dyn HostCallbacks,
@@ -119,8 +74,7 @@ impl GoalGuard {
             .unwrap_or_else(|e| e.into_inner())
             .get(turn_id)
             .cloned()?;
-        // A succeeded read with no goal means the goal was cleared — that is
-        // stale, not fail-open. Only a broken read passes.
+
         let current = inner.goal().await.ok()?;
         if current.map(|g| g.goal_id) != bound {
             return Some(STALE_GOAL_TOOL_RESULT.into());
@@ -138,9 +92,6 @@ mod tests {
     };
     use crate::turn_loop::types::GoalContext;
 
-    /// Host stub answering a scripted current goal, counting reads. A
-    /// `broken` read returns an error (fail-open); otherwise the scripted
-    /// goal is served (`None` = goal cleared → stale).
     struct GoalScriptCallbacks {
         current: std::sync::Mutex<Option<GoalContext>>,
         broken: std::sync::atomic::AtomicBool,
@@ -235,9 +186,9 @@ mod tests {
         guard.bind_turn("t1", Some("g1"));
 
         assert_eq!(guard.stale_denial(&host, "t1", "UpdateGoal").await, None);
-        // Unbound turns never veto (v2 `goalTurnTarget === undefined`).
+
         assert_eq!(guard.stale_denial(&host, "t2", "UpdateGoal").await, None);
-        // GetGoal is read-only and exempt.
+
         assert_eq!(guard.stale_denial(&host, "t1", "GetGoal").await, None);
         assert_eq!(host.reads.load(std::sync::atomic::Ordering::Relaxed), 1);
     }

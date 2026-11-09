@@ -33,7 +33,7 @@ async fn test_raw_turn_events_are_forwarded_to_the_client() {
         "arguments": { "path": "a.txt" },
         "content": "file body",
         "is_error": false,
-        "note": null,
+        "note": "<system>1 line read.</system>",
     }));
 
     let mut updates = Vec::new();
@@ -56,6 +56,10 @@ async fn test_raw_turn_events_are_forwarded_to_the_client() {
     assert_eq!(
         updates[2]["update"]["content"][0]["content"]["text"],
         "file body"
+    );
+    assert_eq!(
+        updates[2]["update"]["note"], "<system>1 line read.</system>",
+        "the model-facing note must reach the client on the terminal update"
     );
 }
 

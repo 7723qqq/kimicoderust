@@ -1,28 +1,36 @@
-//! OpenAI Chat Completions request projection and response parsing.
-//!
-//! Pure functions only — no HTTP. The transport layer (reqwest) and credential
-//! wiring are added in a later step; these functions own the provider-specific
-//! JSON shape and are unit-tested against fixtures.
-
 use serde_json::{Value, json};
 
+use crate::llm::model_family::{ignored_sampling_params_for_model, resolve_model_family};
+use crate::llm::request_options::{RequestOptions, strip_ignored_sampling};
+use crate::llm::usage::read_openai_cache_fields;
 use crate::llm::wire::{StreamDelta, WireMessage};
 use crate::rpc::types::TokenUsage;
-use crate::turn_loop::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
+use kimi_core::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
 
-/// Build an OpenAI Chat Completions request body.
-///
-/// - Assistant tool calls become `tool_calls[]` with `function.arguments`
-///   serialized to a JSON **string** (OpenAI's encoding).
-/// - Tool results become `{ role: "tool", tool_call_id, content }`.
-/// - An assistant turn that only calls tools sends `content: null`.
+pub const TOOL_RESULT_MEDIA_PROMPT: &str = "Attached media from tool result:";
+pub const TOOL_RESULT_MEDIA_PLACEHOLDER: &str = "(see attached media)";
+const OMITTED_AUDIO_PLACEHOLDER: &str = "(audio omitted: not supported by this provider)";
+const OMITTED_VIDEO_PLACEHOLDER: &str = "(video omitted: not supported by this provider)";
+
+pub fn normalize_kimi_tools(tools: &[ToolInfo]) -> Result<Vec<ToolInfo>, String> {
+    tools
+        .iter()
+        .map(|tool| {
+            Ok(ToolInfo {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: crate::llm::kimi_schema::normalize_kimi_tool_schema(
+                    &tool.input_schema,
+                )?,
+            })
+        })
+        .collect()
+}
+
 pub fn build_request(model: &str, messages: &[WireMessage], tools: &[ToolInfo]) -> Value {
     build_request_full(model, messages, tools, false, None, None, None)
 }
 
-/// Build an OpenAI Chat Completions request body, optionally streaming.
-/// Streaming requests set `stream_options.include_usage` so the final
-/// chunk carries token usage.
 pub fn build_request_with_options(
     model: &str,
     messages: &[WireMessage],
@@ -32,15 +40,6 @@ pub fn build_request_with_options(
     build_request_full(model, messages, tools, stream, None, None, None)
 }
 
-/// Build an OpenAI Chat Completions request body with streaming, optional
-/// reasoning effort, and optional preserved-thinking passthrough
-/// (`thinking.keep`; the host filters off-values and gates on Thinking).
-///
-/// `reasoning_key` is the model's declared reasoning field
-/// (`[models.<alias>].reasoning_key`). When set, replayed think blocks go back
-/// in that field instead of being flattened into the assistant text — v2
-/// #3910 restores the provider's reasoning context rather than presenting the
-/// model's own reasoning as prose.
 pub fn build_request_full(
     model: &str,
     messages: &[WireMessage],
@@ -65,16 +64,6 @@ pub fn build_request_full(
     )
 }
 
-/// [`build_request_full`] for a known provider family. `provider_type` is the
-/// resolved `[providers.*].type`: Kimi shares Chat Completions with every other
-/// OpenAI-compatible vendor but encodes thinking in a `thinking` object
-/// (`{type, effort?, keep?}`) instead of a top-level `reasoning_effort` (v2
-/// `kimiOpenAITrait.thinking`). `None` keeps the generic encoding.
-///
-/// `reasoning_key` is the model's declared reasoning field and
-/// `detected_reasoning_key` the dialect the current model was observed
-/// streaming in (v2 `detectedReasoningKeys`); both feed
-/// [`resolve_reasoning_key`] for the replay of unmarked history think parts.
 #[allow(clippy::too_many_arguments)]
 pub fn build_request_for_provider(
     model: &str,
@@ -89,11 +78,48 @@ pub fn build_request_for_provider(
     max_tokens: Option<u32>,
     detected_reasoning_key: Option<&str>,
 ) -> Value {
+    build_request_for_provider_with_options(
+        model,
+        messages,
+        tools,
+        stream,
+        reasoning_effort,
+        thinking_keep,
+        reasoning_key,
+        provider_type,
+        cache_key,
+        max_tokens,
+        detected_reasoning_key,
+        &RequestOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_request_for_provider_with_options(
+    model: &str,
+    messages: &[WireMessage],
+    tools: &[ToolInfo],
+    stream: bool,
+    reasoning_effort: Option<&str>,
+    thinking_keep: Option<&str>,
+    reasoning_key: Option<&str>,
+    provider_type: Option<&str>,
+    cache_key: Option<&str>,
+    max_tokens: Option<u32>,
+    detected_reasoning_key: Option<&str>,
+    options: &RequestOptions,
+) -> Value {
     let is_kimi = provider_type.is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
     let resolved_key = resolve_reasoning_key(messages, reasoning_key, detected_reasoning_key);
-    let msgs: Vec<Value> = messages
+    let prepared = if is_kimi {
+        std::borrow::Cow::Borrowed(messages)
+    } else {
+        extract_tool_media(messages)
+    };
+    let msgs: Vec<Value> = prepared
         .iter()
-        .map(|message| project_message(message, resolved_key.as_deref()))
+        .filter(|message| tools.is_empty() || !is_empty_system_projection(message))
+        .map(|message| project_message(message, resolved_key.as_deref(), is_kimi))
         .collect();
 
     let mut req = json!({
@@ -105,22 +131,7 @@ pub fn build_request_for_provider(
         req["stream_options"] = json!({ "include_usage": true });
     }
     if let Some(cache_key) = cache_key.filter(|key| !key.is_empty()) {
-        // v2 `encodeOpenAICacheKey` / the Kimi trait's `encodeCacheKey`: the
-        // session id goes out as `prompt_cache_key`, which is what lets an
-        // OpenAI-compatible provider route consecutive turns of one session
-        // onto the same prompt cache.
         req["prompt_cache_key"] = json!(cache_key);
-    }
-    if let Some(cap) = max_tokens {
-        // v2 `encodeMaxCompletionTokens`: a declared output cap is clamped to
-        // the provider's ceiling and spelled `max_completion_tokens` for the
-        // o-series / gpt-5 family; Kimi always takes the completion spelling.
-        let capped = cap.clamp(1, 128 * 1024);
-        if is_kimi || uses_max_completion_tokens(model) {
-            req["max_completion_tokens"] = json!(capped);
-        } else {
-            req["max_tokens"] = json!(capped);
-        }
     }
     if is_kimi {
         apply_kimi_thinking(&mut req, reasoning_effort, thinking_keep);
@@ -128,20 +139,42 @@ pub fn build_request_for_provider(
         if let Some(effort) = crate::llm::effort::wire_reasoning_effort(reasoning_effort) {
             req["reasoning_effort"] = json!(effort);
         }
-        // A resolved non-Kimi provider has no wire encoding for `keep` (v2
-        // only the Kimi and anthropic traits consume it). An unresolved
-        // provider keeps the historical Moonshot passthrough, which is the
-        // only caller that ever set `keep` without a provider type.
         if provider_type.is_none()
             && let Some(keep) = thinking_keep
             && !keep.is_empty()
         {
-            // Moonshot preserved-thinking passthrough (`thinking.keep`):
-            // merged onto the `thinking` object so a companion config set
-            // alongside survives.
             let mut thinking = req.get("thinking").cloned().unwrap_or_else(|| json!({}));
             thinking["keep"] = json!(keep);
             req["thinking"] = thinking;
+        }
+    }
+    if let Some(seed) = options.seed_for(model, messages) {
+        req["seed"] = json!(seed);
+    }
+    if let Some(format) = options.response_format.as_ref() {
+        req["response_format"] = format.to_openai_value();
+    }
+    if let Some(cap) = max_tokens {
+        let capped = cap.clamp(1, 128 * 1024);
+        if is_kimi || uses_max_completion_tokens(model) {
+            req["max_completion_tokens"] = json!(capped);
+        } else {
+            req["max_tokens"] = json!(capped);
+        }
+    }
+    if let Value::Object(map) = &mut req {
+        for (key, value) in &options.extra_params.openai {
+            map.insert(key.clone(), value.clone());
+        }
+        let sampling = options.openai_sampling();
+        for (key, value) in sampling {
+            map.entry(key).or_insert(value);
+        }
+        strip_ignored_sampling(map, ignored_sampling_params_for_model(model));
+        if !tools.is_empty()
+            && resolve_model_family(model).is_some_and(|family| family.id == "deepseek")
+        {
+            map.remove("response_format");
         }
     }
 
@@ -149,6 +182,12 @@ pub fn build_request_for_provider(
         let tool_defs: Vec<Value> = tools
             .iter()
             .map(|t| {
+                if is_kimi && t.name.starts_with('$') {
+                    return json!({
+                        "type": "builtin_function",
+                        "function": { "name": t.name }
+                    });
+                }
                 json!({
                     "type": "function",
                     "function": {
@@ -165,24 +204,120 @@ pub fn build_request_for_provider(
     req
 }
 
-/// v2 `encodeOpenAIMaxCompletionTokens`' model gate: the o-series and gpt-5
-/// reject the legacy `max_tokens` spelling, everything else still takes it.
+fn is_empty_system_projection(message: &WireMessage) -> bool {
+    message.role == "system" && message.content.is_empty() && message.blocks.is_empty()
+}
+
+fn is_extractable_media(block: &ContentBlock) -> bool {
+    match block {
+        ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. } => true,
+        ContentBlock::VideoUrl { url, .. } => !url.starts_with("data:"),
+        _ => false,
+    }
+}
+
+fn extract_tool_media(messages: &[WireMessage]) -> std::borrow::Cow<'_, [WireMessage]> {
+    if !messages
+        .iter()
+        .any(|message| message.role == "tool" && message.blocks.iter().any(is_extractable_media))
+    {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+    let mut out: Vec<WireMessage> = Vec::with_capacity(messages.len());
+    let mut index = 0;
+    while index < messages.len() {
+        if messages[index].role != "tool" {
+            out.push(messages[index].clone());
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < messages.len() && messages[index].role == "tool" {
+            index += 1;
+        }
+        let run = &messages[start..index];
+        let media: Vec<ContentBlock> = run
+            .iter()
+            .flat_map(|message| {
+                message
+                    .blocks
+                    .iter()
+                    .filter(|block| is_extractable_media(block))
+                    .cloned()
+            })
+            .collect();
+        if media.is_empty() {
+            out.extend_from_slice(run);
+            continue;
+        }
+        for message in run {
+            let mut stripped = message.clone();
+            stripped.blocks.retain(|block| !is_extractable_media(block));
+            let had_image = message.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. }
+                )
+            });
+            let has_text = stripped
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text, .. } if !text.is_empty()));
+            let has_audio = stripped
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::AudioUrl { .. }));
+            let has_data_video = stripped
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::VideoUrl { url, .. } if url.starts_with("data:")));
+            if !has_text && !has_audio && !has_data_video && had_image {
+                if stripped.blocks.is_empty() {
+                    stripped.content = TOOL_RESULT_MEDIA_PLACEHOLDER.to_string();
+                } else {
+                    stripped.blocks.insert(
+                        0,
+                        ContentBlock::Text {
+                            text: TOOL_RESULT_MEDIA_PLACEHOLDER.to_string(),
+                            meta: None,
+                        },
+                    );
+                }
+            }
+            out.push(stripped);
+        }
+        let mut blocks = Vec::with_capacity(media.len() + 1);
+        blocks.push(ContentBlock::Text {
+            text: TOOL_RESULT_MEDIA_PROMPT.to_string(),
+            meta: None,
+        });
+        blocks.extend(media);
+        out.push(WireMessage::with_blocks("user", blocks));
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn uses_max_completion_tokens(model: &str) -> bool {
     let name = model.to_ascii_lowercase();
     let o_series = name.strip_prefix('o').is_some_and(|rest| {
-        let mut chars = rest.chars();
-        chars.next().is_some_and(|first| first.is_ascii_digit())
-            && matches!(chars.next(), None | Some('-') | Some('.'))
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        !digits.is_empty() && matches!(rest.chars().nth(digits.len()), None | Some('-') | Some('.'))
     });
-    o_series || name == "gpt-5" || name.starts_with("gpt-5-") || name.starts_with("gpt-5.")
+    let gpt_series = name.strip_prefix("gpt-").is_some_and(|rest| {
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty()
+            || rest
+                .chars()
+                .nth(digits.len())
+                .is_some_and(|c| c != '-' && c != '.')
+        {
+            return false;
+        }
+        digits.len() >= 2 || digits.parse::<u32>().is_ok_and(|version| version >= 5)
+    });
+    o_series || gpt_series
 }
 
-/// Kimi's Chat Completions thinking encoding (v2 `kimiOpenAITrait.thinking`):
-/// the effort rides a `thinking` object — `{type:'disabled'}` when off,
-/// `{type:'enabled'}` for the boolean `"on"` (or no effort), and
-/// `{type:'enabled', effort}` for a declared level — and `keep` merges onto
-/// the same object. No top-level `reasoning_effort` is sent: Kimi validates
-/// that field against its own set and ignores it in favor of `thinking`.
 fn apply_kimi_thinking(
     req: &mut Value,
     reasoning_effort: Option<&str>,
@@ -204,10 +339,6 @@ fn apply_kimi_thinking(
     req["thinking"] = thinking;
 }
 
-/// The reasoning-field probe list, in the order gateways are known to use
-/// them — wider than v2's `KNOWN_REASONING_KEYS`: `reasoning_text` and
-/// `thought` are read-only conveniences (the opencode free tier speaks
-/// `reasoning`), they never become a replay dialect.
 const REASONING_PROBE_KEYS: [&str; 4] = [
     "reasoning_content",
     "reasoning",
@@ -215,17 +346,8 @@ const REASONING_PROBE_KEYS: [&str; 4] = [
     "thought",
 ];
 
-/// The keys v2 accepts as a replay dialect (`KNOWN_REASONING_KEYS` minus
-/// `reasoning_details`): the detected and history fallbacks only ever name
-/// one of these, so a probe-only spelling never reaches the wire.
 const REASONING_WRITE_KEYS: [&str; 2] = ["reasoning_content", "reasoning"];
 
-/// v2 #4485 `resolveOpenAIReasoningKey`: the key unmarked history think
-/// parts are replayed under — the declared key, then the dialect the
-/// current model was observed streaming in, then the most recent key the
-/// history itself used. The order is deliberate: a model switch keeps the
-/// old dialect on marked parts but moves unmarked parts to the current
-/// model's own field, instead of dragging the old model's key along.
 pub fn resolve_reasoning_key(
     messages: &[WireMessage],
     declared: Option<&str>,
@@ -237,8 +359,6 @@ pub fn resolve_reasoning_key(
         .or_else(|| history_reasoning_key(messages))
 }
 
-/// v2 `historyReasoningKey`: the reasoning key of the newest marked think
-/// part in the history, restricted to the writeable dialects.
 fn history_reasoning_key(messages: &[WireMessage]) -> Option<String> {
     for message in messages.iter().rev() {
         for block in message.blocks.iter().rev() {
@@ -256,18 +376,78 @@ fn history_reasoning_key(messages: &[WireMessage]) -> Option<String> {
     None
 }
 
-fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
+fn project_tool_content(m: &WireMessage, keep_parts: bool) -> Value {
+    let parts: Vec<&ContentBlock> = m
+        .blocks
+        .iter()
+        .filter(|block| !matches!(block, ContentBlock::Think { .. }))
+        .collect();
+    if keep_parts {
+        if parts.len() == 1 {
+            if let ContentBlock::Text { text, .. } = parts[0] {
+                return json!(text);
+            }
+        }
+        if parts.is_empty() {
+            return json!(m.content);
+        }
+        return json!(
+            parts
+                .iter()
+                .map(|block| project_block(block))
+                .collect::<Vec<_>>()
+        );
+    }
+    let mut text = String::new();
+    let mut text_only = true;
+    for block in &parts {
+        match block {
+            ContentBlock::Text { text: part, .. } => text.push_str(part),
+            ContentBlock::MediaRef { kind, .. } => {
+                text.push_str(crate::llm::media_resolver::unavailable_text(*kind));
+            }
+            _ => text_only = false,
+        }
+    }
+    if text_only {
+        return if m.blocks.is_empty() {
+            json!(m.content)
+        } else {
+            json!(text)
+        };
+    }
+    let mut lines: Vec<String> = Vec::new();
+    if !text.is_empty() {
+        lines.push(text);
+    }
+    if parts
+        .iter()
+        .any(|block| matches!(block, ContentBlock::AudioUrl { .. }))
+    {
+        lines.push(OMITTED_AUDIO_PLACEHOLDER.to_string());
+    }
+    if parts.iter().any(
+        |block| matches!(block, ContentBlock::VideoUrl { url, .. } if url.starts_with("data:")),
+    ) {
+        lines.push(OMITTED_VIDEO_PLACEHOLDER.to_string());
+    }
+    if lines.is_empty()
+        && parts.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. }
+            )
+        })
+    {
+        return json!(TOOL_RESULT_MEDIA_PLACEHOLDER);
+    }
+    json!(lines.join("\n"))
+}
+
+fn project_message(m: &WireMessage, reasoning_key: Option<&str>, tool_keep_parts: bool) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("role".into(), json!(m.role));
 
-    // Replay: v2 `lowerMessage` (openai/lower.ts) partitions the assistant's
-    // think parts by their stamp. A `detailsIndex` rebuilds the provider's
-    // `reasoning_details` array; a `reasoningKey` accumulates into that
-    // field; unstamped text goes to the model's declared key — and, with no
-    // key declared, flattens into the content text (the fork's pre-#3910
-    // fallback, kept for models that speak no reasoning dialect). Only when
-    // no part carries any stamp does the whole thinking collapse into the
-    // declared key.
     let think_blocks: Vec<&ContentBlock> = if m.role == "assistant" {
         m.blocks
             .iter()
@@ -291,9 +471,6 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
         else {
             continue;
         };
-        // `think` is the displayable text, `details_summary` the array entry's
-        // payload. They never overlap unless the model speaks no string dialect
-        // at all, in which case the summary is also what the user must read.
         all_thinking.push_str(think);
         if details_index.is_some() {
             if let Some(summary) = details_summary {
@@ -317,10 +494,6 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
     }
     let redirected = reasoning_key.is_some() || !details.is_empty() || !string_fields.is_empty();
     if redirected && !unstamped.is_empty() {
-        // The declared key is where unstamped text goes. Without a declared
-        // key it still has a home when the message speaks the details
-        // dialect — the default field — and only a message with no dialect
-        // at all flattens the text into the content array.
         let key = match reasoning_key {
             Some(key) => Some(key.to_string()),
             None if !details.is_empty() => Some(DEFAULT_REASONING_KEY.to_string()),
@@ -331,10 +504,9 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
         }
     }
 
-    // Multimodal blocks project to the content-parts array form. An
-    // assistant turn that only calls tools carries a null content per the
-    // OpenAI schema; everything else carries its (possibly empty) text.
-    if !m.blocks.is_empty() {
+    if m.role == "tool" {
+        obj.insert("content".into(), project_tool_content(m, tool_keep_parts));
+    } else if !m.blocks.is_empty() {
         let parts: Vec<Value> = m
             .blocks
             .iter()
@@ -353,8 +525,6 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
     }
     if !details.is_empty() {
         obj.insert(REASONING_DETAILS_KEY.into(), json!(details));
-        // v2: the default key carries its own string field when one was
-        // accumulated, and the whole thinking otherwise.
         let default_value = string_field(&string_fields, DEFAULT_REASONING_KEY)
             .cloned()
             .unwrap_or_else(|| all_thinking.clone());
@@ -364,9 +534,6 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
         obj.insert(key.clone(), json!(value));
     }
     if !redirected && !all_thinking.is_empty() {
-        // No stamp and no declared key: the thinking stays flattened in the
-        // content array (the fork's pre-#3910 fallback). A declared key
-        // takes the whole thinking, the way it always did.
         if let Some(key) = reasoning_key {
             obj.insert(key.to_string(), json!(all_thinking));
         }
@@ -382,7 +549,6 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        // OpenAI expects arguments as a JSON-encoded string.
                         "arguments": serde_json::to_string(&tc.arguments)
                             .unwrap_or_else(|_| "{}".to_string()),
                     }
@@ -399,17 +565,10 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>) -> Value {
     Value::Object(obj)
 }
 
-/// The provider field the `reasoning_details` array dialect lives in (v2
-/// `REASONING_DETAILS_KEY`).
 pub const REASONING_DETAILS_KEY: &str = "reasoning_details";
 
-/// The provider field unstamped reasoning text defaults to (v2
-/// `DEFAULT_REASONING_KEY`).
 pub const DEFAULT_REASONING_KEY: &str = "reasoning_content";
 
-/// Accumulate `text` into the per-key string field, creating it on first
-/// sight (v2 `lowerMessage`'s `stringFields` — a keyed part with empty text
-/// still creates its field, the way v2's does).
 fn push_string_field(fields: &mut Vec<(String, String)>, key: &str, text: &str) {
     if let Some(entry) = fields.iter_mut().find(|(existing, _)| existing == key) {
         entry.1.push_str(text);
@@ -425,7 +584,6 @@ fn string_field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a Str
         .map(|(_, value)| value)
 }
 
-/// Project a single content block to the OpenAI content-parts form.
 fn project_block(b: &ContentBlock) -> Value {
     match b {
         ContentBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
@@ -457,9 +615,6 @@ fn project_block(b: &ContentBlock) -> Value {
             json!({ "type": "video_url", "video_url": video })
         }
         ContentBlock::Think { think, .. } => json!({ "type": "text", "text": think }),
-        // A reference that reached the wire was never resolved: the resolver
-        // runs before every request. Degrade visibly rather than hand the
-        // provider a `kimi-file://` URL it cannot fetch.
         ContentBlock::MediaRef { kind, .. } => json!({
             "type": "text",
             "text": crate::llm::media_resolver::unavailable_text(*kind),
@@ -467,7 +622,6 @@ fn project_block(b: &ContentBlock) -> Value {
     }
 }
 
-/// Parse an OpenAI Chat Completions (non-streaming) response.
 pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
     let choice = v
         .get("choices")
@@ -505,11 +659,6 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            // `arguments` is a JSON string in this dialect. v2
-            // `parseToolCallArguments` keeps a call whose payload will not
-            // decode and records the reason, so the loop answers that call with
-            // an error result; a fabricated `{}` would run Bash/Write with no
-            // inputs, and dropping the call would leave the model no feedback.
             let (arguments, args_parse_error) = match func.get("arguments") {
                 Some(serde_json::Value::String(raw)) => {
                     crate::llm::tool_args::parse_tool_arguments(Some(raw.as_str()))
@@ -565,34 +714,29 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
         .and_then(|x| x.as_u64())
         .unwrap_or(0) as u32;
 
-    let mut cached = 0u32;
-    let mut miss: Option<u32> = None;
+    let split = read_openai_cache_fields(
+        u.get("cached_tokens")
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u32),
+        u.get("prompt_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u32),
+        u.get("input_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u32),
+        u.get("prompt_cache_hit_tokens")
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u32),
+        u.get("prompt_cache_miss_tokens")
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u32),
+        prompt_tokens,
+    );
+    let cached = split.cached();
+    let input_tokens = split.input_other(prompt_tokens);
 
-    // 1. DeepSeek's own fields: top-level prompt_cache_hit_tokens / prompt_cache_miss_tokens
-    if let Some(hit) = u.get("prompt_cache_hit_tokens").and_then(|x| x.as_u64()) {
-        cached = hit as u32;
-        if let Some(m) = u.get("prompt_cache_miss_tokens").and_then(|x| x.as_u64()) {
-            miss = Some(m as u32);
-        }
-    } else if let Some(top_cached) = u.get("cached_tokens").and_then(|x| x.as_u64()) {
-        // 2. Moonshot AI (Kimi)'s own field: top-level cached_tokens
-        cached = top_cached as u32;
-    } else if let Some(details) = u.get("prompt_tokens_details") {
-        // 3. OpenAI's official spec field: prompt_tokens_details.cached_tokens
-        if let Some(detail_cached) = details.get("cached_tokens").and_then(|x| x.as_u64()) {
-            cached = detail_cached as u32;
-        }
-    }
-
-    let input_tokens = match miss {
-        Some(m) => m,
-        None => prompt_tokens.saturating_sub(cached),
-    };
-
-    // `input_tokens` is the uncached remainder (the host's `inputOther`), so
-    // the provider total — or, when it is absent, the reconstruction — has to
-    // add the cached prompt back; charging only the remainder under-counted
-    // every cache hit.
     let total_tokens = u
         .get("total_tokens")
         .and_then(|x| x.as_u64())
@@ -612,10 +756,6 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
     }
 }
 
-// ── Streaming (SSE) accumulation ───────────────────────────────────────
-
-/// A tool call being accumulated across stream chunks, keyed by its
-/// provider-assigned `index`.
 #[derive(Debug, Default, Clone)]
 struct PartialToolCall {
     id: String,
@@ -623,47 +763,19 @@ struct PartialToolCall {
     arguments: String,
 }
 
-/// Upper bound on tool calls a single streamed response may open. Generous
-/// for real responses; small enough that a hostile `index` cannot exhaust
-/// memory.
 const MAX_STREAM_TOOL_CALLS: usize = 256;
 
-/// Accumulates OpenAI Chat Completions stream chunks into a final
-/// [`LLMChatResponse`]. Feed each SSE `data:` JSON payload to
-/// [`StreamAccumulator::feed`]; text or thinking deltas are returned so the caller can
-/// forward them to the host.
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     content: String,
     thinking: String,
-    /// Think parts extracted from the provider's `reasoning_details` array
-    /// dialect, stamped with their position (v2 #3910's unported half). They
-    /// ride the final message beside the unstamped `thinking` text so the
-    /// replay can rebuild the array.
-    ///
-    /// The summary text is parked in `details_summary` and the decision to
-    /// *display* it is deferred to [`Self::finish`], because a gateway may put
-    /// the array before the string dialect: judging per chunk would render a
-    /// summary that the string then repeats.
     stamped: Vec<ContentBlock>,
-    /// Whether the stream carried the `reasoning_content` string dialect
-    /// (v2's `seenReasoningContent`): when it did, the details-derived
-    /// summaries stay replay-only, so the reasoning is not shown twice.
     saw_reasoning_text: bool,
     tool_calls: Vec<PartialToolCall>,
     finish_reason: Option<String>,
     usage: TokenUsage,
-    /// The wire field carrying reasoning content for this model
-    /// (`[models.<alias>].reasoning_key`); the built-in probe list is the
-    /// fallback when the model declares none.
     reasoning_key: Option<String>,
-    /// The first writeable dialect this stream was observed using (v2
-    /// `detectedReasoningKeys`, restricted to [`REASONING_WRITE_KEYS`]):
-    /// recorded once, read by the transport for the next request's replay.
     detected_reasoning_key: Option<&'static str>,
-    /// Tool-call argument fragments the last [`Self::feed`] carried, drained by
-    /// the caller through [`Self::take_tool_call_deltas`]. Kept out of `feed`'s
-    /// return value so a text-only chunk allocates nothing.
     pending_tool_calls: Vec<StreamDelta>,
 }
 
@@ -672,23 +784,15 @@ impl StreamAccumulator {
         Self::default()
     }
 
-    /// Drain the tool-call argument fragments the last [`Self::feed`] carried,
-    /// in arrival order.
     pub fn take_tool_call_deltas(&mut self) -> Vec<StreamDelta> {
         std::mem::take(&mut self.pending_tool_calls)
     }
 
-    /// Declare the model's reasoning field: it is then the only field read, so
-    /// a gateway that returns reasoning under a non-standard name still
-    /// surfaces it as thinking.
     pub fn with_reasoning_key(mut self, key: Option<&str>) -> Self {
         self.reasoning_key = key.map(str::to_string);
         self
     }
 
-    /// The reasoning text in one delta: the model's declared field when it
-    /// declares one, otherwise the probe list of names gateways are known to
-    /// use.
     fn reasoning_delta<'a>(&self, delta: &'a Value) -> Option<&'a str> {
         if let Some(key) = self.reasoning_key.as_deref() {
             return delta.get(key).and_then(|c| c.as_str());
@@ -698,31 +802,15 @@ impl StreamAccumulator {
             .find_map(|key| delta.get(key).and_then(|c| c.as_str()))
     }
 
-    /// The first writeable dialect this stream was observed using (v2
-    /// `detectedReasoningKeys`): `None` until a probe key carries non-empty
-    /// reasoning text.
     pub fn detected_reasoning_key(&self) -> Option<&'static str> {
         self.detected_reasoning_key
     }
 
-    /// Whether this delta carried reasoning as **text** (v2's
-    /// `seenReasoningContent`). It must answer from the same fields as
-    /// [`Self::reasoning_delta`]: a gateway that spells the field `reasoning`
-    /// — the opencode free tier does — streams the string dialect perfectly
-    /// well, and asking only for `reasoning_content` would report "no string
-    /// reasoning" for it, leaving the `reasoning_details` summaries eligible
-    /// for display and so rendering reasoning the user already read twice.
     fn saw_reasoning_text(&self, delta: &Value) -> bool {
         self.reasoning_delta(delta)
             .is_some_and(|text| !text.is_empty())
     }
 
-    /// Resolve the tool-call slot for a streamed index, or `None` when the
-    /// index is implausible.
-    ///
-    /// The index comes from the provider, and growing the vec to satisfy an
-    /// arbitrary one lets a single chunk allocate until the process dies —
-    /// which in the napi build takes the host down with it.
     fn tool_call_slot(&mut self, index: usize) -> Option<&mut PartialToolCall> {
         if index >= MAX_STREAM_TOOL_CALLS {
             return None;
@@ -733,10 +821,7 @@ impl StreamAccumulator {
         self.tool_calls.get_mut(index)
     }
 
-    /// Feed one stream chunk. Returns the text or thinking delta contained in the
-    /// chunk, if any.
     pub fn feed(&mut self, v: &Value) -> Option<StreamDelta> {
-        // The final usage-only chunk has an empty `choices` array.
         if let Some(usage) = v.get("usage")
             && !usage.is_null()
         {
@@ -762,8 +847,6 @@ impl StreamAccumulator {
                 let arguments_fragment = function
                     .and_then(|f| f.get("arguments"))
                     .and_then(|x| x.as_str());
-                // An out-of-range index is dropped rather than honoured: it
-                // would otherwise grow the vec without bound.
                 let Some(slot) = self.tool_call_slot(index) else {
                     continue;
                 };
@@ -776,8 +859,6 @@ impl StreamAccumulator {
                 if let Some(args) = arguments_fragment {
                     slot.arguments.push_str(args);
                 }
-                // The fragment goes out with the id accumulated so far: the id
-                // itself arrives once, the arguments keep coming.
                 if let Some(args) = arguments_fragment {
                     let id = slot.id.clone();
                     self.pending_tool_calls.push(StreamDelta::ToolCall {
@@ -793,11 +874,6 @@ impl StreamAccumulator {
         if let Some(think) = self.reasoning_delta(delta)
             && !think.is_empty()
         {
-            // v2 `onReasoningKey` (protocolAdapterRegistry): the first
-            // writeable dialect the model is observed using is remembered
-            // for the replay of unmarked history parts. Detection only runs
-            // without a declared key, the way v2 only hands the detected key
-            // to models that declare none.
             if self.reasoning_key.is_none()
                 && self.detected_reasoning_key.is_none()
                 && let Some(key) = REASONING_PROBE_KEYS.iter().find(|key| {
@@ -813,18 +889,9 @@ impl StreamAccumulator {
             self.thinking.push_str(think);
             think_delta = Some(StreamDelta::Think(think.to_string()));
         }
-        // v2 `seenReasoningContent`: once the `reasoning_content` string has
-        // been seen, the details-derived parts keep their *position* only —
-        // the replay keeps their array entries, and because a stamped part is
-        // replay-only, no text is left to show twice.
         if self.saw_reasoning_text(delta) {
             self.saw_reasoning_text = true;
         }
-        // v2 `extractReasoningDetails`: a model that declares no reasoning
-        // key speaks the raw `reasoning_details` dialect — each array
-        // element becomes a stamped think part carrying its position, which
-        // the request replay rebuilds into the array (v2 #3910's unported half).
-        // The live stream shows the string dialect.
         if self.reasoning_key.is_none() {
             self.stamped
                 .extend(reasoning_details_parts(delta, self.saw_reasoning_text));
@@ -843,19 +910,12 @@ impl StreamAccumulator {
         None
     }
 
-    /// Finalize the accumulated stream into a response.
     pub fn finish(self) -> LLMChatResponse {
         let tool_calls = self
             .tool_calls
             .into_iter()
             .filter(|tc| !tc.name.is_empty())
             .map(|tc| {
-                // A truncated stream leaves `arguments` unparseable. The call is
-                // kept and the reason travels with it (v2
-                // `parseToolCallArguments`): the model reads an error result for
-                // the call it issued, no tool runs on a fabricated `{}`, and a
-                // strict provider still sees the `tool_use` paired with a
-                // `tool_result`.
                 let (arguments, args_parse_error) =
                     crate::llm::tool_args::parse_tool_arguments(Some(tc.arguments.as_str()));
                 ToolCall {
@@ -880,16 +940,7 @@ impl StreamAccumulator {
             }]
         };
         let mut thinking = thinking;
-        // The stamped parts follow the unstamped text: the replay partitions
-        // by stamp, so the order only affects how a reader folds them.
         thinking.extend(self.stamped);
-        // Settle displayability now that the whole stream is in. With a string
-        // dialect present, the streamed text is the user's copy and the parked
-        // summaries stay replay-only — `reasoning_details_parts` already left
-        // `think` empty, so there is nothing to undo. Only a stream that carried
-        // no string at all promotes its summaries into the visible text.
-        // Deciding per chunk would miss a gateway that sends the array first
-        // and the string after.
         if !self.saw_reasoning_text {
             for block in &mut thinking {
                 if let ContentBlock::Think {
@@ -916,24 +967,6 @@ impl StreamAccumulator {
     }
 }
 
-/// The think parts a delta's `reasoning_details` array names (v2
-/// `extractReasoningDetails` + `convertReasoningDetails`): each element's
-/// position is the part's `detailsIndex`, a summary element carries its
-/// text, an encrypted element its attestation. An element that is neither
-/// is dropped, the way v2's converter drops it.
-/// The think parts a delta's `reasoning_details` array names (v2
-/// `extractReasoningDetails` + `convertReasoningDetails`): each element's
-/// position is the part's `detailsIndex`, a summary element carries its
-/// text, an encrypted element its attestation. An element that is neither
-/// is dropped, the way v2's converter drops it.
-///
-/// `string_dialect_seen` is accepted for symmetry with v2's
-/// `seenReasoningContent`, but the display decision is deliberately *not* made
-/// here: a gateway may put the `reasoning_details` array **before** the string
-/// dialect, and a per-chunk judgement would then render a summary the string
-/// goes on to repeat. Every summary is parked in `details_summary` here and
-/// [`StreamAccumulator::finish`] promotes it to `think` only if the stream
-/// turned out to carry no string at all.
 fn reasoning_details_parts(delta: &Value, _string_dialect_seen: bool) -> Vec<ContentBlock> {
     let Some(array) = delta.get(REASONING_DETAILS_KEY).and_then(Value::as_array) else {
         return Vec::new();
@@ -956,8 +989,6 @@ fn reasoning_details_parts(delta: &Value, _string_dialect_seen: bool) -> Vec<Con
             }
         };
         if kind != "encrypted" && summary.is_some_and(|text| !text.is_empty()) {
-            // Display is settled in `finish`, once the whole stream has said
-            // whether a string dialect appeared at all.
             parts.push(stamped(
                 String::new(),
                 None,
@@ -978,6 +1009,8 @@ fn reasoning_details_parts(delta: &Value, _string_dialect_seen: bool) -> Vec<Con
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::llm::request_options::ResponseFormat;
 
     #[test]
     fn build_request_projects_roles_tools_and_stringifies_arguments() {
@@ -1009,27 +1042,23 @@ mod tests {
         let msgs = req["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 4);
 
-        // Assistant with only tool calls -> content null, tool_calls present.
         let assistant = &msgs[2];
         assert!(assistant["content"].is_null());
         let tc = &assistant["tool_calls"][0];
         assert_eq!(tc["id"], "call_1");
         assert_eq!(tc["type"], "function");
         assert_eq!(tc["function"]["name"], "Read");
-        // arguments must be a STRING, not an object.
         let args = tc["function"]["arguments"].as_str().unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(args).unwrap(),
             json!({ "path": "a.txt" })
         );
 
-        // Tool result carries tool_call_id.
         let tool_msg = &msgs[3];
         assert_eq!(tool_msg["role"], "tool");
         assert_eq!(tool_msg["tool_call_id"], "call_1");
         assert_eq!(tool_msg["content"], "file body");
 
-        // Tools projected under {type:function, function:{...}}.
         assert_eq!(req["tools"][0]["type"], "function");
         assert_eq!(req["tools"][0]["function"]["name"], "Read");
         assert_eq!(
@@ -1042,6 +1071,203 @@ mod tests {
     fn build_request_omits_tools_when_empty() {
         let req = build_request("m", &[WireMessage::text("user", "x")], &[]);
         assert!(req.get("tools").is_none());
+    }
+
+    fn tool_media_messages() -> Vec<WireMessage> {
+        vec![
+            WireMessage::text("user", "look at this"),
+            WireMessage::assistant_tool_calls(
+                "",
+                vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "readMedia".into(),
+                    arguments: json!({ "path": "a.png" }),
+                    extras: None,
+                    args_parse_error: None,
+                }],
+            ),
+            WireMessage {
+                role: "tool".into(),
+                content: "<image path=\"a.png\">".into(),
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "<image path=\"a.png\">".into(),
+                        meta: None,
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".into(),
+                        data: "QUJD".into(),
+                        name: None,
+                    },
+                ],
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call_1".into()),
+            },
+        ]
+    }
+
+    #[test]
+    fn kimi_tool_result_keeps_media_inside_the_tool_message() {
+        let messages = tool_media_messages();
+        let req = build_request_for_provider(
+            "kimi-k2",
+            &messages,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some("kimi"),
+            None,
+            None,
+            None,
+        );
+
+        let msgs = req["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2]["role"], "tool");
+        let parts = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+    }
+
+    #[test]
+    fn other_providers_replace_tool_media_with_a_following_user_message() {
+        let messages = tool_media_messages();
+        let req = build_request_for_provider(
+            "gpt-4o",
+            &messages,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some("openai"),
+            None,
+            None,
+            None,
+        );
+
+        let msgs = req["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["content"], "<image path=\"a.png\">");
+        assert_eq!(msgs[3]["role"], "user");
+        let parts = msgs[3]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "Attached media from tool result:");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+    }
+
+    #[test]
+    fn an_image_only_tool_result_is_replaced_by_the_placeholder() {
+        let messages = vec![
+            WireMessage::text("user", "look at this"),
+            WireMessage {
+                role: "tool".into(),
+                content: String::new(),
+                blocks: vec![ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "QUJD".into(),
+                    name: None,
+                }],
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call_2".into()),
+            },
+        ];
+
+        let req = build_request_for_provider(
+            "gpt-4o",
+            &messages,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some("openai"),
+            None,
+            None,
+            None,
+        );
+
+        let msgs = req["messages"].as_array().unwrap();
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["content"], "(see attached media)");
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][1]["type"], "image_url");
+    }
+
+    #[test]
+    fn a_text_only_tool_result_is_a_string_on_every_provider() {
+        let messages = vec![
+            WireMessage::text("user", "read it"),
+            WireMessage {
+                role: "tool".into(),
+                content: "file body".into(),
+                blocks: vec![ContentBlock::Text {
+                    text: "file body".into(),
+                    meta: None,
+                }],
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call_1".into()),
+            },
+        ];
+        for provider in ["kimi", "openai"] {
+            let req = build_request_for_provider(
+                "m",
+                &messages,
+                &[],
+                false,
+                None,
+                None,
+                None,
+                Some(provider),
+                None,
+                None,
+                None,
+            );
+            let msgs = req["messages"].as_array().unwrap();
+            assert_eq!(msgs[1]["role"], "tool");
+            assert_eq!(msgs[1]["content"], "file body", "provider={provider}");
+        }
+    }
+
+    #[test]
+    fn a_multi_part_tool_result_without_media_stays_a_string() {
+        let messages = vec![WireMessage {
+            role: "tool".into(),
+            content: String::new(),
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "alpha".into(),
+                    meta: None,
+                },
+                ContentBlock::Text {
+                    text: "beta".into(),
+                    meta: None,
+                },
+            ],
+            tool_calls: Vec::new(),
+            tool_call_id: Some("call_1".into()),
+        }];
+        let req = build_request_for_provider(
+            "m",
+            &messages,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some("openai"),
+            None,
+            None,
+            None,
+        );
+        let msgs = req["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"], "alphabeta");
     }
 
     #[test]
@@ -1087,8 +1313,6 @@ mod tests {
         let parsed = parse_response(&v).unwrap();
         assert_eq!(parsed.usage.input_cache_read, 30);
         assert_eq!(parsed.usage.input_tokens, 10);
-        // `input_tokens` is the uncached remainder; the provider's
-        // `total_tokens` covers the whole prompt (30 cached + 10 other + 5).
         assert_eq!(parsed.usage.total_tokens, 45);
         assert_eq!(parsed.usage.input_cache_creation, 0);
     }
@@ -1113,7 +1337,6 @@ mod tests {
         let parsed = parse_response(&v).unwrap();
         assert!(parsed.tool_calls.is_empty());
         assert_eq!(parsed.finish_reason.as_deref(), Some("stop"));
-        // total_tokens absent -> derived from prompt + completion.
         assert_eq!(parsed.usage.total_tokens, 5);
     }
 
@@ -1129,10 +1352,6 @@ mod tests {
         assert_eq!(req["stream_options"]["include_usage"], true);
     }
 
-    /// v2 #3910: a declared reasoning field takes the model's thinking back on
-    /// the next request instead of flattening it into assistant prose. Without
-    /// a declared key the old text fallback stands (the OpenAI family has no
-    /// standard reasoning-in slot).
     #[test]
     fn replayed_thinking_rides_the_declared_reasoning_field() {
         let assistant = WireMessage {
@@ -1170,14 +1389,11 @@ mod tests {
             first["reasoning_content"], "I should add the numbers first.",
             "the think block rides the declared field"
         );
-        // The redirected block is not duplicated in the content array.
         let parts = first["content"].as_array().unwrap();
         assert_eq!(parts.len(), 1, "only the text block remains in content");
         assert_eq!(parts[0]["type"], "text");
         assert_eq!(parts[0]["text"], "The answer is 7.");
 
-        // Without a declared key the old fallback stands: thinking stays in the
-        // content array as text, and no reasoning field is invented.
         let req = build_request_full("m", &messages, &[], true, None, None, None);
         let parts = req["messages"][0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
@@ -1200,36 +1416,25 @@ mod tests {
         }
     }
 
-    /// v2 #4485 `resolveOpenAIReasoningKey`: declared, then the dialect the
-    /// current model was observed streaming in, then the newest key the
-    /// history itself used — the swap that keeps a model switch from
-    /// dragging the old model's field onto unmarked parts.
     #[test]
     fn resolve_reasoning_key_orders_declared_detected_history() {
         let history = vec![assistant_with_think_key(Some("reasoning"))];
-        // A declared key outranks both fallbacks.
         assert_eq!(
             resolve_reasoning_key(&history, Some("reasoning_content"), Some("reasoning"))
                 .as_deref(),
             Some("reasoning_content")
         );
-        // The detected dialect outranks the history key (the #4485 swap).
         assert_eq!(
             resolve_reasoning_key(&history, None, Some("reasoning_content")).as_deref(),
             Some("reasoning_content")
         );
-        // History fills the gap when nothing was detected.
         assert_eq!(
             resolve_reasoning_key(&history, None, None).as_deref(),
             Some("reasoning")
         );
-        // Nothing anywhere: no reasoning field at all.
         assert_eq!(resolve_reasoning_key(&[], None, None), None);
     }
 
-    /// The history scan takes the NEWEST marked part and only ever names a
-    /// writeable dialect: a `reasoning_details` stamp and the probe-only
-    /// spellings are skipped.
     #[test]
     fn history_reasoning_key_takes_the_newest_writeable_mark() {
         let history = vec![
@@ -1254,8 +1459,6 @@ mod tests {
         assert_eq!(resolve_reasoning_key(&history, None, None), None);
     }
 
-    /// The resolved key reaches the wire: an unmarked history think part is
-    /// replayed under the current model's detected dialect.
     #[test]
     fn unmarked_thinking_replays_under_the_detected_dialect() {
         let messages = vec![assistant_with_think_key(None)];
@@ -1277,10 +1480,6 @@ mod tests {
         assert!(first.get("reasoning_content").is_none());
     }
 
-    /// v2 #3910's unported half: think parts stamped with a `detailsIndex`
-    /// replay as the provider's `reasoning_details` array (summary +
-    /// encrypted entries), with the default reasoning field carrying the
-    /// unstamped text — instead of every part collapsing into one string.
     #[test]
     fn stamped_think_parts_replay_as_the_reasoning_details_array() {
         let assistant = WireMessage {
@@ -1326,8 +1525,6 @@ mod tests {
                 { "type": "encrypted", "encrypted": "sig-abc" },
             ]),
         );
-        // The default field carries the unstamped text; the stamped parts
-        // are not duplicated into the content array.
         assert_eq!(first["reasoning_content"], "and the plain rest");
         let parts = first["content"].as_array().unwrap();
         assert_eq!(parts.len(), 1, "only the text block remains in content");
@@ -1335,8 +1532,6 @@ mod tests {
         assert_eq!(parts[0]["text"], "done");
     }
 
-    /// A part naming its own reasoning field accumulates into that field
-    /// (v2 `lowerMessage`'s per-key string fields), not the default one.
     #[test]
     fn keyed_think_parts_replay_into_their_own_field() {
         let assistant = WireMessage {
@@ -1369,10 +1564,6 @@ mod tests {
         assert!(first["content"].is_null(), "no non-think block remains");
     }
 
-    /// The parse side of the dialect: a delta carrying a
-    /// `reasoning_details` array (a model that declares no reasoning key)
-    /// yields think parts stamped with their position, which the replay
-    /// above rebuilds.
     #[test]
     fn a_reasoning_details_delta_produces_stamped_think_parts() {
         let mut acc = StreamAccumulator::new();
@@ -1394,9 +1585,6 @@ mod tests {
                     encrypted: None,
                     details_index: Some(0),
                     reasoning_key: Some("reasoning_details".into()),
-                    // No string dialect in this stream, so the summary is also
-                    // what the user reads — and the array entry keeps its own
-                    // copy for the replay.
                     details_summary: Some("step one".into()),
                 },
                 ContentBlock::Think {
@@ -1411,11 +1599,6 @@ mod tests {
         );
     }
 
-    /// v2 `seenReasoningContent`: once the stream carried the
-    /// `reasoning_content` string, the details-derived summary has already been
-    /// shown, so it moves into `details_summary` and `think` — the only field a
-    /// client renders — stays empty. The array entry still round-trips, and the
-    /// provider still sees the reasoning once.
     #[test]
     fn a_seen_summary_keeps_its_array_entry_without_repeating_its_text() {
         let mut acc = StreamAccumulator::new();
@@ -1439,8 +1622,6 @@ mod tests {
                     details_summary: None,
                 },
                 ContentBlock::Think {
-                    // Nothing for a client to render: the user already read the
-                    // reasoning through the string dialect.
                     think: String::new(),
                     encrypted: None,
                     details_index: Some(0),
@@ -1470,7 +1651,6 @@ mod tests {
             None,
         );
         let first = &req["messages"][0];
-        // The array entry stands, with its summary intact.
         assert_eq!(
             first["reasoning_details"],
             json!([{ "type": "summary", "summary": "the long form" }]),
@@ -1478,10 +1658,6 @@ mod tests {
         assert_eq!(first["reasoning_content"], "the short form");
     }
 
-    /// The array arriving **before** the string is the ordering that made this
-    /// show up on one gateway only: judging per chunk would have rendered the
-    /// summary, which the string then repeated. The final message must carry
-    /// the string as the displayable text and the summary as replay payload.
     #[test]
     fn an_array_before_the_string_still_yields_one_visible_copy() {
         let mut acc = StreamAccumulator::new();
@@ -1520,11 +1696,6 @@ mod tests {
         );
     }
 
-    /// The field-name mismatch this guards: a gateway that spells the string
-    /// dialect `reasoning` (the opencode free tier does) must count as *having*
-    /// shown its reasoning, so a `reasoning_details` summary arriving alongside
-    /// it stays replay-only. Asking only about `reasoning_content` reported "no
-    /// string reasoning" here and promoted the summary into the visible text.
     #[test]
     fn a_reasoning_field_counts_as_the_string_dialect() {
         let mut acc = StreamAccumulator::new();
@@ -1557,9 +1728,6 @@ mod tests {
         );
     }
 
-    /// The mirror image: a model that speaks *only* the array dialect has no
-    /// streamed string to show, so the summary stays displayable — and the
-    /// replay still rebuilds the array from the same part.
     #[test]
     fn an_array_only_summary_stays_visible_and_keeps_its_entry() {
         let mut acc = StreamAccumulator::new();
@@ -1604,7 +1772,7 @@ mod tests {
 
     #[test]
     fn build_request_projects_image_blocks() {
-        use crate::turn_loop::types::ContentBlock;
+        use kimi_core::types::ContentBlock;
         let msg = WireMessage::with_blocks(
             "user",
             vec![
@@ -1636,7 +1804,7 @@ mod tests {
 
     #[test]
     fn build_request_projects_audio_and_video_blocks() {
-        use crate::turn_loop::types::ContentBlock;
+        use kimi_core::types::ContentBlock;
         let msg = WireMessage::with_blocks(
             "user",
             vec![
@@ -1676,13 +1844,11 @@ mod tests {
     fn stream_accumulator_collects_text_and_tool_calls() {
         let mut acc = StreamAccumulator::new();
 
-        // Text deltas.
         let d1 = acc.feed(&json!({ "choices": [{ "delta": { "content": "Hel" } }] }));
         assert_eq!(d1, Some(StreamDelta::Text("Hel".into())));
         let d2 = acc.feed(&json!({ "choices": [{ "delta": { "content": "lo" } }] }));
         assert_eq!(d2, Some(StreamDelta::Text("lo".into())));
 
-        // Tool call split across chunks (arguments arrive in fragments).
         acc.feed(&json!({ "choices": [{ "delta": { "tool_calls": [
             { "index": 0, "id": "call_1", "function": { "name": "Grep", "arguments": "{\"q\":" } }
         ] } }] }));
@@ -1690,7 +1856,6 @@ mod tests {
             { "index": 0, "function": { "arguments": "\"foo\"}" } }
         ] } }] }));
 
-        // Finish + usage-only chunk.
         acc.feed(&json!({ "choices": [{ "delta": {}, "finish_reason": "tool_calls" }] }));
         acc.feed(
             &json!({ "choices": [], "usage": { "prompt_tokens": 7, "completion_tokens": 3 } }),
@@ -1723,8 +1888,6 @@ mod tests {
 
     #[test]
     fn stream_accumulator_ignores_implausible_tool_call_index() {
-        // The index comes from the provider; honouring an arbitrary one grew
-        // the accumulator without bound until the process died.
         let mut acc = StreamAccumulator::new();
         acc.feed(&json!({ "choices": [{ "delta": { "tool_calls": [
             { "index": 0, "id": "a", "function": { "name": "Read", "arguments": "{}" } },
@@ -1738,9 +1901,6 @@ mod tests {
 
     #[test]
     fn finish_after_truncated_stream_keeps_partial_content() {
-        // A provider that drops the stream mid-flight (no trailing usage
-        // chunk and no [DONE]) must still surface the text received so far
-        // instead of panicking or returning empty.
         let mut acc = StreamAccumulator::default();
         acc.feed(&json!({ "choices": [{ "delta": { "content": "hel" } }] }));
         acc.feed(&json!({ "choices": [{ "delta": { "content": "lo" } }] }));
@@ -1752,11 +1912,6 @@ mod tests {
 
     #[test]
     fn truncated_tool_call_arguments_keep_the_call_and_its_reason() {
-        // A stream cut inside the JSON arguments must NOT execute a tool call
-        // with an empty argument object (e.g. Bash without a command), and must
-        // not drop it either: the assistant message keeps its `tool_use` and the
-        // loop answers the call with an error result the model can read (v2
-        // `parseToolCallArguments`).
         let mut acc = StreamAccumulator::default();
         acc.feed(&json!({
             "choices": [{
@@ -1831,15 +1986,12 @@ mod tests {
 
     #[test]
     fn declared_reasoning_key_is_read_before_the_probe_list() {
-        // A gateway that returns reasoning under a non-standard field: the
-        // declared key wins over the built-in probe list.
         let mut declared = StreamAccumulator::new().with_reasoning_key(Some("thinking_text"));
         let delta = declared.feed(&json!({
             "choices": [{ "delta": { "thinking_text": "step by step" } }]
         }));
         assert_eq!(delta, Some(StreamDelta::Think("step by step".into())));
 
-        // Without a declared key the probe list still applies.
         let mut probed = StreamAccumulator::new();
         let delta = probed.feed(&json!({
             "choices": [{ "delta": { "reasoning_content": "probed" } }]
@@ -1847,13 +1999,9 @@ mod tests {
         assert_eq!(delta, Some(StreamDelta::Think("probed".into())));
     }
 
-    /// v2 #4485 `onReasoningKey`: the first writeable dialect a stream is
-    /// observed using is recorded for the transport — the replay key of
-    /// unmarked history parts on the next request.
     #[test]
     fn the_first_writeable_reasoning_dialect_is_detected() {
         let mut acc = StreamAccumulator::new();
-        // An empty sighting is not a dialect.
         acc.feed(&json!({ "choices": [{ "delta": { "reasoning": "" } }] }));
         assert_eq!(acc.detected_reasoning_key(), None);
 
@@ -1861,14 +2009,10 @@ mod tests {
         assert_eq!(delta, Some(StreamDelta::Think("step".into())));
         assert_eq!(acc.detected_reasoning_key(), Some("reasoning"));
 
-        // First-seen wins: a later chunk in another writeable dialect does
-        // not move the record.
         acc.feed(&json!({ "choices": [{ "delta": { "reasoning_content": "more" } }] }));
         assert_eq!(acc.detected_reasoning_key(), Some("reasoning"));
     }
 
-    /// Probe-only spellings (`reasoning_text`, `thought`) are read as
-    /// thinking but never recorded as a replay dialect.
     #[test]
     fn probe_only_spellings_are_not_a_replay_dialect() {
         let mut acc = StreamAccumulator::new();
@@ -1877,8 +2021,6 @@ mod tests {
         assert_eq!(acc.detected_reasoning_key(), None);
     }
 
-    /// A declared reasoning key suppresses detection (v2 arms
-    /// `onReasoningKey` only for models that declare none).
     #[test]
     fn a_declared_reasoning_key_suppresses_detection() {
         let mut acc = StreamAccumulator::new().with_reasoning_key(Some("thinking_text"));
@@ -1930,16 +2072,9 @@ mod tests {
         let req_off = build_request_full("gpt-4o", &msgs, &[], true, Some("off"), None, None);
         assert!(req_off.get("reasoning_effort").is_none());
 
-        // The boolean-model sentinel: the host resolves a model that declares
-        // `thinking` but no `support_efforts` to `on`, which is not a wire
-        // value. Forwarding it verbatim is a 400 from every OpenAI-compatible
-        // vendor ("Invalid option: expected one of max|xhigh|high|medium|low|
-        // minimal|none"). v2 encodes it silently, so the field is omitted.
         let req_on = build_request_full("gpt-4o", &msgs, &[], true, Some("on"), None, None);
         assert!(req_on.get("reasoning_effort").is_none());
 
-        // A declared `off_effort` of `none` is a real wire value — dropping it
-        // left thinking on for every model that encodes "off" that way.
         let req_none = build_request_full("gpt-4o", &msgs, &[], true, Some("none"), None, None);
         assert_eq!(req_none["reasoning_effort"], "none");
 
@@ -1976,17 +2111,14 @@ mod tests {
             )
         };
 
-        // Off is a protocol-level disable, not an omitted field.
         let off = build(Some("off"), None);
         assert_eq!(off["thinking"], json!({ "type": "disabled" }));
         assert!(off.get("reasoning_effort").is_none());
 
-        // `on` is the boolean sentinel: enabled, no effort level.
         let on = build(Some("on"), Some("all"));
         assert_eq!(on["thinking"], json!({ "type": "enabled", "keep": "all" }));
         assert!(on.get("reasoning_effort").is_none());
 
-        // A declared level rides inside the object.
         let high = build(Some("high"), Some("all"));
         assert_eq!(
             high["thinking"],
@@ -1994,13 +2126,10 @@ mod tests {
         );
         assert!(high.get("reasoning_effort").is_none());
 
-        // Nothing configured: no thinking field at all.
         let absent = build(None, None);
         assert!(absent.get("thinking").is_none());
         assert!(absent.get("reasoning_effort").is_none());
 
-        // The same effort on any other OpenAI-compatible provider keeps the
-        // top-level encoding and never grows a thinking object.
         let generic = build_request_for_provider(
             "gpt-4o",
             &msgs,
@@ -2022,8 +2151,6 @@ mod tests {
     fn test_build_request_cache_key_and_completion_budget() {
         let msgs = vec![WireMessage::text("user", "hello")];
 
-        // Generic OpenAI: the session key rides `prompt_cache_key`; the cap
-        // keeps the legacy `max_tokens` spelling for non o-series/gpt-5 ids.
         let generic = build_request_for_provider(
             "gpt-4o",
             &msgs,
@@ -2041,7 +2168,6 @@ mod tests {
         assert_eq!(generic["max_tokens"], 50_000);
         assert!(generic.get("max_completion_tokens").is_none());
 
-        // v2's model gate: gpt-5 / o-series reject `max_tokens`.
         for model in ["gpt-5", "gpt-5-mini", "o3", "o4-mini"] {
             let req = build_request_for_provider(
                 model,
@@ -2063,8 +2189,6 @@ mod tests {
             assert!(req.get("max_tokens").is_none(), "{model}");
         }
 
-        // Kimi always takes `max_completion_tokens`, clamped to v2's 128k
-        // chat-completions ceiling.
         let kimi = build_request_for_provider(
             "kimi-k3",
             &msgs,
@@ -2085,7 +2209,6 @@ mod tests {
 
     #[test]
     fn test_parse_usage_cache_variants() {
-        // 1. DeepSeek's own format (prompt_cache_hit_tokens)
         let ds_usage = json!({
             "prompt_tokens": 100,
             "completion_tokens": 20,
@@ -2096,11 +2219,8 @@ mod tests {
         assert_eq!(ds_res.input_cache_read, 80);
         assert_eq!(ds_res.input_tokens, 20);
         assert_eq!(ds_res.output_tokens, 20);
-        // The grand total covers the whole prompt: 80 cached + 20 miss + 20
-        // output, not just the uncached input.
         assert_eq!(ds_res.total_tokens, 120);
 
-        // 2. Moonshot AI (Kimi)'s own format (cached_tokens)
         let moonshot_usage = json!({
             "prompt_tokens": 1000,
             "completion_tokens": 50,
@@ -2111,7 +2231,6 @@ mod tests {
         assert_eq!(ms_res.input_tokens, 100);
         assert_eq!(ms_res.output_tokens, 50);
 
-        // 3. OpenAI's official nested format (prompt_tokens_details.cached_tokens)
         let openai_usage = json!({
             "prompt_tokens": 500,
             "completion_tokens": 30,
@@ -2123,5 +2242,270 @@ mod tests {
         assert_eq!(oai_res.input_cache_read, 350);
         assert_eq!(oai_res.input_tokens, 150);
         assert_eq!(oai_res.output_tokens, 30);
+    }
+
+    fn read_tool() -> ToolInfo {
+        ToolInfo {
+            name: "Read".into(),
+            description: "read a file".into(),
+            input_schema: json!({ "type": "object" }),
+        }
+    }
+
+    #[test]
+    fn an_empty_system_turn_is_dropped_only_when_tools_are_offered() {
+        let messages = vec![
+            WireMessage::text("system", ""),
+            WireMessage::text("user", "hi"),
+        ];
+
+        let with_tools =
+            build_request_full("gpt-4o", &messages, &[read_tool()], true, None, None, None);
+        let roles: Vec<&str> = with_tools["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, vec!["user"]);
+
+        let without_tools = build_request_full("gpt-4o", &messages, &[], true, None, None, None);
+        assert_eq!(
+            without_tools["messages"].as_array().unwrap().len(),
+            2,
+            "v2 keeps it when there are no tools to ferry"
+        );
+    }
+
+    #[test]
+    fn request_options_carry_seed_format_and_sampling() {
+        let messages = vec![WireMessage::text("user", "hi")];
+        let options = RequestOptions {
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "answer".into(),
+                schema: json!({ "type": "object" }),
+                strict: Some(true),
+                description: None,
+            }),
+            seed: Some(7),
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            ..RequestOptions::default()
+        };
+
+        let req = build_request_for_provider_with_options(
+            "gpt-4o",
+            &messages,
+            &[],
+            true,
+            None,
+            None,
+            None,
+            Some("openai"),
+            None,
+            None,
+            None,
+            &options,
+        );
+        assert_eq!(req["seed"], 7);
+        assert_eq!(req["response_format"]["type"], "json_schema");
+        assert_eq!(req["response_format"]["json_schema"]["name"], "answer");
+        assert_eq!(req["response_format"]["json_schema"]["strict"], true);
+        assert!(
+            req["response_format"]["json_schema"]
+                .get("description")
+                .is_none(),
+            "an unset description is omitted, not sent as null"
+        );
+        assert_eq!(req["temperature"], 0.2);
+        assert_eq!(req["top_p"], 0.9);
+
+        let json_object = RequestOptions {
+            response_format: Some(ResponseFormat::JsonObject),
+            ..RequestOptions::default()
+        };
+        let req = build_request_for_provider_with_options(
+            "gpt-4o",
+            &messages,
+            &[],
+            true,
+            None,
+            None,
+            None,
+            Some("openai"),
+            None,
+            None,
+            None,
+            &json_object,
+        );
+        assert_eq!(req["response_format"], json!({ "type": "json_object" }));
+    }
+
+    #[test]
+    fn a_derived_seed_is_stable_for_the_same_turn() {
+        let messages = vec![WireMessage::text("user", "hi")];
+        let options = RequestOptions {
+            derive_seed: true,
+            ..RequestOptions::default()
+        };
+        let build = || {
+            build_request_for_provider_with_options(
+                "deepseek-chat",
+                &messages,
+                &[],
+                true,
+                None,
+                None,
+                None,
+                Some("openai"),
+                None,
+                None,
+                None,
+                &options,
+            )
+        };
+        let expected =
+            crate::llm::request_options::derive_determinism_seed("deepseek-chat", &messages);
+        assert_eq!(build()["seed"], expected);
+        assert_eq!(build()["seed"], build()["seed"]);
+    }
+
+    #[test]
+    fn extra_params_override_the_writer_and_families_strip_sampling() {
+        let messages = vec![WireMessage::text("user", "hi")];
+        let mut options = RequestOptions {
+            temperature: Some(0.2),
+            ..RequestOptions::default()
+        };
+        options
+            .extra_params
+            .openai
+            .insert("temperature".into(), json!(0.7));
+        options
+            .extra_params
+            .openai
+            .insert("service_tier".into(), json!("flex"));
+
+        let req = build_request_for_provider_with_options(
+            "gpt-4o",
+            &messages,
+            &[],
+            true,
+            None,
+            None,
+            None,
+            Some("openai"),
+            None,
+            None,
+            None,
+            &options,
+        );
+        assert_eq!(req["temperature"], 0.7, "extraParams wins over the writer");
+        assert_eq!(req["service_tier"], "flex");
+
+        let mut options = RequestOptions {
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            response_format: Some(ResponseFormat::JsonObject),
+            ..RequestOptions::default()
+        };
+        options
+            .extra_params
+            .openai
+            .insert("presence_penalty".into(), json!(0.5));
+        let req = build_request_for_provider_with_options(
+            "deepseek-chat",
+            &messages,
+            &[read_tool()],
+            true,
+            None,
+            None,
+            None,
+            Some("openai"),
+            None,
+            None,
+            None,
+            &options,
+        );
+        for stripped in ["temperature", "presence_penalty"] {
+            assert!(
+                req.get(stripped).is_none(),
+                "v2 `ignoredWhileThinking` strips {stripped}"
+            );
+        }
+        assert_eq!(req["top_p"], 0.9, "top_p is not in the ignored set");
+        assert!(
+            req.get("response_format").is_none(),
+            "a DeepSeek tool constraint preempts the response format"
+        );
+    }
+
+    #[test]
+    fn stamped_reasoning_replays_identically_with_and_without_tools() {
+        let assistant = WireMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            blocks: vec![ContentBlock::Think {
+                think: "weighing options".into(),
+                encrypted: None,
+                details_index: Some(0),
+                reasoning_key: Some("reasoning_details".into()),
+                details_summary: None,
+            }],
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        };
+        let with_tools = build_request_full(
+            "gpt-4o",
+            std::slice::from_ref(&assistant),
+            &[read_tool()],
+            true,
+            None,
+            None,
+            None,
+        );
+        let without_tools = build_request_full("gpt-4o", &[assistant], &[], true, None, None, None);
+        assert_eq!(with_tools["messages"], without_tools["messages"]);
+        assert_eq!(
+            with_tools["messages"][0]["reasoning_details"],
+            json!([{ "type": "summary", "summary": "weighing options" }])
+        );
+    }
+
+    #[test]
+    fn usage_reads_the_third_cache_spelling_and_guards_contradictions() {
+        let nested = json!({
+            "prompt_tokens": 500,
+            "completion_tokens": 30,
+            "input_tokens_details": { "cached_tokens": 350 }
+        });
+        let res = parse_usage(Some(&nested));
+        assert_eq!(res.input_cache_read, 350);
+        assert_eq!(res.input_tokens, 150);
+
+        let explicit_plus_nested = json!({
+            "prompt_tokens": 500,
+            "completion_tokens": 30,
+            "cached_tokens": 100,
+            "input_tokens_details": { "cached_tokens": 350 }
+        });
+        assert_eq!(
+            parse_usage(Some(&explicit_plus_nested)).input_cache_read,
+            100
+        );
+
+        let contradictory = json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "cached_tokens": 70,
+            "prompt_cache_hit_tokens": 90,
+            "prompt_cache_miss_tokens": 40
+        });
+        let res = parse_usage(Some(&contradictory));
+        assert_eq!(res.input_cache_read, 70);
+        assert_eq!(
+            res.input_tokens, 30,
+            "the contradiction collapses to prompt - cached"
+        );
     }
 }

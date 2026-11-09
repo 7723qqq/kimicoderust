@@ -27,9 +27,6 @@ impl TowerGateBlock {
     }
 }
 
-/// Select the latest review that is authoritative for this mission. Legacy
-/// unbound reviews remain valid on an unshared branch; on a shared branch they
-/// are selected only so the gate can report the binding mismatch explicitly.
 pub fn select_mission_review(
     reviews: &[TowerReviewInfo],
     mission: &TowerMission,
@@ -493,9 +490,6 @@ pub fn scopes_overlap(a: &str, b: &str) -> bool {
         && (a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/")))
 }
 
-/// Whether one mission already reaches another through the open dependency
-/// graph. Checking both directions before adding an edge preserves the
-/// existing serialization order and prevents automatic cycles.
 pub fn dep_path_exists(missions: &[TowerMission], from: &str, to: &str) -> bool {
     let Some(origin) = missions.iter().find(|mission| mission.id == from) else {
         return false;
@@ -519,9 +513,6 @@ pub fn dep_path_exists(missions: &[TowerMission], from: &str, to: &str) -> bool 
     false
 }
 
-/// Serialize a mission behind every older open build mission whose scope it
-/// overlaps. Existing paths win, so transitive and reverse edges are not
-/// duplicated and an update cannot introduce a dependency cycle.
 pub fn add_auto_dependencies(missions: &mut [TowerMission], target_index: usize) {
     let Some(target) = missions.get(target_index) else {
         return;

@@ -685,6 +685,78 @@ fn test_native_llm_config_oauth_mode() {
 }
 
 #[test]
+fn native_llm_request_knobs_round_trip_and_stay_absent_when_unset() {
+    // The host spells these camelCase; the engine accepts both spellings and
+    // serializes its own snake_case form, so a round trip must preserve the
+    // values and an unset config must add no keys at all.
+    let json = serde_json::json!({
+        "protocol": "openai",
+        "base_url": "https://api.example.com/v1",
+        "api_key": "k",
+        "model": "m",
+        "responseFormat": {
+            "type": "json_schema",
+            "jsonSchema": { "name": "out", "schema": { "type": "object" }, "strict": true }
+        },
+        "sampling": { "temperature": 0.2, "topP": 0.9 },
+        "determinism": { "seed": 7 },
+        "extraParams": { "openai": { "logit_bias": { "1": 2 } } }
+    });
+    let config: NativeLlmConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        config.response_format,
+        Some(NativeResponseFormat::JsonSchema {
+            json_schema: NativeJsonSchema {
+                name: "out".into(),
+                schema: serde_json::json!({ "type": "object" }),
+                strict: Some(true),
+                description: None,
+            },
+        })
+    );
+    assert_eq!(
+        config.sampling,
+        Some(NativeSampling {
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+        })
+    );
+    assert_eq!(
+        config.determinism,
+        Some(NativeDeterminism { seed: Some(7) })
+    );
+    assert_eq!(
+        config.extra_params,
+        Some(NativeExtraParams {
+            openai: [("logit_bias".to_string(), serde_json::json!({ "1": 2 }))]
+                .into_iter()
+                .collect(),
+            ..NativeExtraParams::default()
+        })
+    );
+
+    let serialized = serde_json::to_value(&config).unwrap();
+    let reparsed: NativeLlmConfig = serde_json::from_value(serialized).unwrap();
+    assert_eq!(reparsed.response_format, config.response_format);
+    assert_eq!(reparsed.sampling, config.sampling);
+    assert_eq!(reparsed.determinism, config.determinism);
+    assert_eq!(reparsed.extra_params, config.extra_params);
+
+    let bare = NativeLlmConfig {
+        protocol: "openai".into(),
+        model: "m".into(),
+        ..NativeLlmConfig::default()
+    };
+    let value = serde_json::to_value(&bare).unwrap();
+    for key in ["response_format", "sampling", "determinism", "extra_params"] {
+        assert!(
+            value.get(key).is_none(),
+            "an unset knob must not appear in the wire config: {key}"
+        );
+    }
+}
+
+#[test]
 fn test_llm_provider_def_deserialize() {
     let json = serde_json::json!({
         "name": "fast-llm",

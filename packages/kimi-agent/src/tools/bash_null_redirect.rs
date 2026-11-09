@@ -1,21 +1,3 @@
-//! v2 `agent/tools/os/bash/bashTool.ts:317-530` — Windows `NUL` redirect
-//! rewriting.
-//!
-//! A Bash tool on Windows runs Git Bash, which has no `NUL` device. A model that
-//! writes `cmd > NUL` (the cmd.exe idiom v2's users expect) would create a file
-//! named `NUL` in the workspace instead of discarding output, so v2 rewrites the
-//! target to `/dev/null` before spawning.
-//!
-//! The rewrite is shell-aware. It must not touch `NUL` inside a single quote, a
-//! heredoc body, or a line comment; it must still reach `NUL` inside a command
-//! substitution or backticks, including when those appear inside a double-quoted
-//! string. The recursion mirrors v2's `rewriteNulRedirects`.
-//!
-//! v2 walks UTF-16 code units; this port walks `char` indices so a non-ASCII
-//! character is one step rather than several bytes. Both are one step per
-//! character for the ASCII shell syntax that drives the state machine, and the
-//! char walk preserves the surrounding text byte for byte.
-
 const NUL_TARGET_BOUNDARY: fn(char) -> bool =
     |ch: char| matches!(ch, ' ' | '\t' | '\n' | '\r' | '|' | '&' | ';' | ')');
 
@@ -24,9 +6,6 @@ struct HeredocDelimiter {
     start: usize,
 }
 
-/// The public entry: v2 `rewriteWindowsNullRedirect`, called only when the host
-/// reports `osKind === 'Windows'` (`bashTool.ts:182`). The caller owns that gate;
-/// this function is pure so it is testable on any platform.
 pub fn rewrite_windows_null_redirect(command: &str) -> String {
     rewrite_nul_redirects(&command.chars().collect::<Vec<_>>())
 }
@@ -41,8 +20,6 @@ fn is_nul_redirect_at(chars: &[char], at: usize) -> bool {
     chars.get(at + 3).is_none_or(|ch| NUL_TARGET_BOUNDARY(*ch))
 }
 
-/// The index of the `NUL` word after a `>` or `>>`, with the whitespace between
-/// skipped, if and only if it is a redirect target.
 fn nul_redirect_word_start(chars: &[char], at: usize) -> Option<usize> {
     let mut cursor = at + 1;
     if chars.get(cursor) == Some(&'>') {
@@ -124,7 +101,6 @@ fn heredoc_body_end(chars: &[char], at: usize, delimiter: &str) -> usize {
     chars.len()
 }
 
-/// The body of a `$(...)` substitution, with nested parentheses tracked.
 fn read_substitution_body(chars: &[char], at: usize) -> (String, usize) {
     let mut depth = 1usize;
     let mut cursor = at;

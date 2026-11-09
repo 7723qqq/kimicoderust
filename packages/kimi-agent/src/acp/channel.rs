@@ -3,10 +3,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tokio::sync::{Mutex, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::acp::types::{JsonRpcRequest, JsonRpcResponse};
+use crate::primitives::deadline::Deadline;
 
 /// One outbound JSON-RPC message.
 #[derive(Debug, Clone)]
@@ -65,16 +68,48 @@ impl AcpChannel {
         )));
     }
 
-    /// Send a request and wait for the client's response. Never times out —
-    /// like a permission check it waits on a human — but resolves with an
-    /// error when the client is gone.
+    /// Send a request and wait for the client's response.
+    ///
+    /// Unbounded: the reference has no generic timeout for a host round-trip,
+    /// and only the caller knows whether this particular one has a bound.
+    /// Human-answered requests use [`Self::request_human`] instead.
     pub async fn request(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        self.request_with(method, params, None, None).await
+    }
+
+    /// A server→client request answered by a human (approval, question).
+    ///
+    /// Unbounded like every other host round-trip; `cancel` lets a cancelled
+    /// turn stop waiting immediately.
+    pub async fn request_human(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<serde_json::Value, String> {
+        self.request_with(method, params, None, cancel).await
+    }
+
+    /// Send a request and wait at most `limit` for the answer, giving up
+    /// immediately when `cancel` fires.
+    pub async fn request_with(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        limit: Option<Duration>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<serde_json::Value, String> {
+        enum Waited {
+            Answer(Result<serde_json::Value, oneshot::error::RecvError>),
+            Cancelled,
+        }
+
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         self.waiters.lock().await.insert(id, tx);
         let sent = self.send(AcpOutbound::Request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -86,25 +121,77 @@ impl AcpChannel {
             self.waiters.lock().await.remove(&id);
             return Err("ACP client is not connected".into());
         }
-        match rx.await {
-            Ok(value) => {
-                if let Some(result) = value.get("result") {
-                    return Ok(result.clone());
+
+        let deadline = match limit {
+            Some(limit) => Deadline::new(method.to_string(), limit),
+            None => Deadline::unbounded(method.to_string()),
+        };
+        let outcome = deadline
+            .wait("waiting for the ACP client to answer", async {
+                match cancel {
+                    Some(token) => {
+                        tokio::select! {
+                            _ = token.cancelled() => Waited::Cancelled,
+                            answer = &mut rx => Waited::Answer(answer),
+                        }
+                    }
+                    None => Waited::Answer((&mut rx).await),
                 }
-                if let Some(error) = value.get("error") {
-                    let code = error
-                        .get("code")
-                        .and_then(serde_json::Value::as_i64)
-                        .unwrap_or(-32603);
-                    let message = error
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("Unknown client error");
-                    return Err(format!("ACP client error ({code}): {message}"));
-                }
-                Err("Invalid ACP response: expected result or error".to_string())
+            })
+            .await;
+
+        let value = match outcome {
+            Err(_elapsed) => {
+                // Drop the waiter: a late answer has nowhere to land, and the
+                // request is already reported as timed out.
+                self.waiters.lock().await.remove(&id);
+                return Err(format!(
+                    "{method} timed out after {}s waiting for the ACP client",
+                    deadline.remaining().as_secs()
+                ));
             }
-            Err(_) => Err("ACP client disconnected before answering".into()),
+            Ok(Waited::Cancelled) => {
+                self.waiters.lock().await.remove(&id);
+                return Err(format!("{method} cancelled before the ACP client answered"));
+            }
+            Ok(Waited::Answer(Err(_))) => {
+                return Err("ACP client disconnected before answering".into());
+            }
+            Ok(Waited::Answer(Ok(value))) => value,
+        };
+
+        if let Some(result) = value.get("result") {
+            return Ok(result.clone());
+        }
+        if let Some(error) = value.get("error") {
+            let code = error
+                .get("code")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(-32603);
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Unknown client error");
+            return Err(format!("ACP client error ({code}): {message}"));
+        }
+        Err("Invalid ACP response: expected result or error".to_string())
+    }
+
+    /// Stop sending and fail every pending server→client request.
+    ///
+    /// Called when stdin reaches EOF: the client can no longer answer, so a
+    /// waiter must resolve now rather than wait out its bound. Dropping the
+    /// senders wakes each `request` with "client disconnected".
+    pub async fn close(&self) {
+        self.clear_sink();
+        let mut waiters = self.waiters.lock().await;
+        let count = waiters.len();
+        waiters.clear();
+        if count > 0 {
+            tracing::warn!(
+                count,
+                "the ACP client channel closed with requests still in flight"
+            );
         }
     }
 
@@ -218,18 +305,21 @@ impl AcpChannel {
             .to_string())
     }
 
-    /// `terminal/wait_for_exit`: blocks until the terminal exits.
+    /// `terminal/wait_for_exit`: blocks until the terminal exits. Unbounded:
+    /// the reference has no generic bound for a host round-trip.
     pub async fn wait_for_terminal_exit(
         &self,
         session_id: &str,
         terminal_id: &str,
     ) -> Result<serde_json::Value, String> {
-        self.request(
+        self.request_with(
             "terminal/wait_for_exit",
             serde_json::json!({
                 "sessionId": session_id,
                 "terminalId": terminal_id,
             }),
+            None,
+            None,
         )
         .await
     }
@@ -369,6 +459,77 @@ mod tests {
             .await
             .expect_err("no sink means no client");
         assert_eq!(err, "ACP client is not connected");
+    }
+
+    #[tokio::test]
+    async fn a_client_that_never_answers_times_out() {
+        let channel = AcpChannel::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        channel.set_sink(tx);
+        let error = channel
+            .request_with(
+                "session/request_permission",
+                serde_json::json!({}),
+                Some(Duration::from_millis(20)),
+                None,
+            )
+            .await
+            .expect_err("no answer must not wait forever");
+        assert!(error.contains("session/request_permission"), "{error}");
+        assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_stops_waiting_for_the_client() {
+        let channel = AcpChannel::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        channel.set_sink(tx);
+        let cancel = CancellationToken::new();
+        let pending = {
+            let channel = channel.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                channel
+                    .request_human(
+                        "session/request_permission",
+                        serde_json::json!({}),
+                        Some(&cancel),
+                    )
+                    .await
+            })
+        };
+        cancel.cancel();
+        let error = pending.await.unwrap().expect_err("cancelled request fails");
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(
+            channel.waiters.lock().await.is_empty(),
+            "the waiter must not outlive the wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_the_channel_fails_pending_requests() {
+        let channel = AcpChannel::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        channel.set_sink(tx);
+        let pending = {
+            let channel = channel.clone();
+            tokio::spawn(async move {
+                channel
+                    .request_with(
+                        "fs/read_text_file",
+                        serde_json::json!({}),
+                        Some(Duration::from_secs(60)),
+                        None,
+                    )
+                    .await
+            })
+        };
+        // Let the request register its waiter before the channel closes.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        channel.close().await;
+        let error = pending.await.unwrap().expect_err("the client is gone");
+        assert!(error.contains("disconnected"), "{error}");
     }
 
     #[test]

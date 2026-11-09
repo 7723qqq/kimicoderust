@@ -1,24 +1,8 @@
-//! Memory file-layout pure functions, ported from v2 `app/memory/memoryPaths.ts`.
-//!
-//! The layout contract: memory types are detected from markdown frontmatter
-//! or headings, titles come from the first H1 (or the file name), snippets are
-//! built around the first case-insensitive query hit, and relative paths
-//! follow the `memory/global|projects|sessions/` layout.
-//!
-//! The project id here is a plain SHA-256 of the cwd, which is **not** v2's
-//! `projectIdFromCwd`: v2 resolves a three-tier identity (git origin → git
-//! repo root → cwd) via `app/memory/projectIdentity.ts`. That difference is
-//! recorded in `reports/runbooks/v2-parity-ledger.md`.
-//!
-//! SHA-256 (FIPS 180-4) is implemented inline; it backs both the 12-hex
-//! project id and the 12-hex content version token.
-
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::Regex;
 
-/// Memory scope, mirroring v2 `MemoryScope`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryScope {
     Global,
@@ -36,7 +20,6 @@ impl MemoryScope {
     }
 }
 
-/// Memory entry type, mirroring v2 `MemoryType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryType {
     Note,
@@ -69,10 +52,6 @@ impl MemoryType {
     }
 }
 
-/// Parsed relative memory path, mirroring v2 `parseMemoryPath`'s return
-/// shape: `global/foo.md` → global with file name `foo.md`,
-/// `projects/abc123/foo.md` → project with scope id `abc123`, and
-/// `sessions/xyz/foo.md` → session with scope id `xyz`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedMemoryPath {
     pub scope: MemoryScope,
@@ -80,28 +59,18 @@ pub struct ParsedMemoryPath {
     pub file_name: String,
 }
 
-/// Derive the project id from a cwd: the first 12 hex chars of the SHA-256
-/// digest of the cwd. v2 `projectIdFromCwd` instead resolves a three-tier
-/// identity from git origin / repo root / cwd; see the module header.
 pub fn project_id_from_cwd(cwd: &str) -> String {
     content_version(cwd)
 }
 
-/// The version token of a memory file: the first 12 hex chars of the SHA-256
-/// digest of its content. Every memory mutation is conditional on it, so a
-/// write that raced another writer is rejected instead of silently winning.
 pub fn content_version(content: &str) -> String {
     sha256_hex(content)[..12].to_string()
 }
 
-/// The memory root directory under a home dir (v2 `memoryDir`).
 pub fn memory_dir(home_dir: &Path) -> PathBuf {
     home_dir.join("memory")
 }
 
-/// The scope directory under a memory base (v2 `scopeDir`): `global/` for
-/// the global scope, `projects/<scopeId>/` for projects, and
-/// `sessions/<scopeId>/` for sessions.
 pub fn scope_dir(base: &Path, scope: MemoryScope, scope_id: &str) -> PathBuf {
     match scope {
         MemoryScope::Global => base.join("global"),
@@ -110,9 +79,6 @@ pub fn scope_dir(base: &Path, scope: MemoryScope, scope_id: &str) -> PathBuf {
     }
 }
 
-/// Parse a relative memory path into scope components (v2
-/// `parseMemoryPath`). Returns `None` for paths that do not start with a
-/// known scope root or that lack the required scope id segment.
 pub fn parse_memory_path(rel_path: &str) -> Option<ParsedMemoryPath> {
     let parts: Vec<&str> = rel_path.split('/').collect();
     if parts.len() < 2 {
@@ -138,10 +104,6 @@ pub fn parse_memory_path(rel_path: &str) -> Option<ParsedMemoryPath> {
     }
 }
 
-/// Extract a title from markdown content — the first H1 heading, or the
-/// file name with a trailing `.md` stripped (v2 `extractTitle`). The H1
-/// regex mirrors JS semantics: `.` excludes `\r` / `\u2028` / `\u2029`,
-/// and a trailing `\r` (CRLF) is allowed before the line end.
 pub fn extract_title(body: &str, file_name: &str) -> String {
     static H1_RE: OnceLock<Regex> = OnceLock::new();
     let re = H1_RE.get_or_init(|| {
@@ -155,10 +117,6 @@ pub fn extract_title(body: &str, file_name: &str) -> String {
     strip_md_suffix(file_name).to_string()
 }
 
-/// Detect the memory type from markdown frontmatter (`type:` key) or a
-/// `## <type>` heading; falls back to `note` (v2 `detectType`). The
-/// frontmatter match is case-sensitive and the heading match is
-/// case-insensitive, exactly like v2.
 pub fn detect_type(body: &str) -> MemoryType {
     static FM_RE: OnceLock<Regex> = OnceLock::new();
     let fm = FM_RE.get_or_init(|| {
@@ -183,15 +141,10 @@ pub fn detect_type(body: &str) -> MemoryType {
     MemoryType::Note
 }
 
-/// Build a snippet from the body around the first case-insensitive query
-/// hit: 40 chars before and 80 after, with `...` markers at the cut edges
-/// (v2 `buildSnippet` with the default `maxLen = 200`).
 pub fn build_snippet(body: &str, query: &str) -> String {
     build_snippet_with_max_len(body, query, 200)
 }
 
-/// [`build_snippet`] with an explicit max length for the no-match fallback
-/// (v2 `buildSnippet(body, query, maxLen)`).
 pub fn build_snippet_with_max_len(body: &str, query: &str, max_len: usize) -> String {
     let lower_body = body.to_lowercase();
     let lower_query = query.to_lowercase();
@@ -203,17 +156,10 @@ pub fn build_snippet_with_max_len(body: &str, query: &str, max_len: usize) -> St
             .trim()
             .to_string();
     };
-    // Byte offsets into `lower_body` are applied to `body`. A lowercase that
-    // grows a character (`İ` → `i̇`) makes `lower_body` longer than `body`, so
-    // an offset from the former can point past the latter. Clamp to `body.len()`
-    // *before* finding char boundaries — `is_char_boundary` returns false for
-    // `index > len` — and keep `start <= end` so the window is never inverted.
+
     let raw_start = idx.saturating_sub(40);
     let raw_end = (idx + lower_query.len() + 80).min(body.len());
-    // JS's `body.slice(start, end)` clamps an out-of-range `start` to `len`
-    // instead of panicking. A lowercase that grows a character (`İ` → `i̇`)
-    // can make `raw_start` point past `body`, so clamp both bounds and keep
-    // `start <= end`; an empty window is the same result v2's slice produces.
+
     let end = floor_char_boundary(body, raw_end);
     let start = floor_char_boundary(body, raw_start.min(body.len())).min(end);
     let mut snippet = body[start..end].trim().to_string();
@@ -226,9 +172,6 @@ pub fn build_snippet_with_max_len(body: &str, query: &str, max_len: usize) -> St
     snippet
 }
 
-/// Sanitize a user-supplied file name: trim, reject empty names and any
-/// name containing `/`, `\`, or `..`, and append `.md` unless already
-/// present (v2 `sanitizeFileName` + `normalizeFileName`).
 pub fn sanitize_file_name(name: &str) -> Option<String> {
     let trimmed = name.trim();
     if trimmed.is_empty()
@@ -241,7 +184,6 @@ pub fn sanitize_file_name(name: &str) -> Option<String> {
     Some(normalize_file_name(trimmed))
 }
 
-/// Build the relative memory path for a scope (v2 `buildRelPath`).
 pub fn build_rel_path(scope: MemoryScope, scope_id: &str, file_name: &str) -> String {
     match scope {
         MemoryScope::Global => format!("global/{file_name}"),
@@ -250,13 +192,6 @@ pub fn build_rel_path(scope: MemoryScope, scope_id: &str, file_name: &str) -> St
     }
 }
 
-/// Parse the `applies_to` frontmatter patterns (v2
-/// `memoryPaths.ts:91-115`, `parseAppliesTo`).
-///
-/// Two forms are accepted, inline `[a, b]` first and a YAML block list second.
-/// An absent frontmatter block yields an empty list. Values are trimmed and
-/// surrounding quotes removed; empty values are dropped. This is the shape
-/// `Memory.write` records as an entry's `appliesTo` when a commit succeeds.
 pub fn parse_applies_to(body: &str) -> Vec<String> {
     static FRONT: OnceLock<Regex> = OnceLock::new();
     let front = FRONT
@@ -319,8 +254,6 @@ fn normalize_file_name(name: &str) -> String {
     }
 }
 
-/// Strip a trailing `.md` case-insensitively, mirroring v2's
-/// `fileName.replace(/\.md$/i, '')`.
 fn strip_md_suffix(file_name: &str) -> &str {
     if file_name.len() >= 3 && file_name[file_name.len() - 3..].eq_ignore_ascii_case(".md") {
         &file_name[..file_name.len() - 3]
@@ -336,9 +269,6 @@ fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
-/// SHA-256 (FIPS 180-4), implemented inline. Used to derive the 12-hex
-/// project id from a cwd and the 12-hex content version token of a memory
-/// file.
 fn sha256(input: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -461,7 +391,7 @@ mod tests {
         assert_eq!(content_version("abc"), "ba7816bf8f01");
         assert_eq!(content_version("abc").len(), 12);
         assert_ne!(content_version("abc"), content_version("abd"));
-        // The project id is the same digest over the cwd.
+
         assert_eq!(project_id_from_cwd("abc"), content_version("abc"));
     }
 
@@ -645,7 +575,7 @@ mod tests {
         assert!(build_snippet(body, "fox").contains("FOX"));
         let body = "x".repeat(100);
         let snippet = build_snippet(&body, "");
-        assert_eq!(snippet.len(), 83); // 80 chars + "..."
+        assert_eq!(snippet.len(), 83);
     }
 
     #[test]
@@ -660,17 +590,11 @@ mod tests {
         assert!(snippet.contains("needle"));
     }
 
-    /// `to_lowercase` can make a string longer (`İ` → `i̇`), so a match
-    /// offset from `lower_body` may point past `body`'s end. JS's
-    /// `slice(start, end)` clamps instead of panicking, and v2 returns an
-    /// empty snippet in that case; the Rust port must do the same.
     #[test]
     fn test_build_snippet_length_changing_lowercase_cannot_invert_the_window() {
         let body = format!("{}needle", "İ".repeat(80));
         let snippet = build_snippet(&body, "needle");
-        // v2 still adds the leading ellipsis when start > 0, so an empty
-        // window renders as "..." rather than "". The contract here is that
-        // the call completes and never panics on a mid-char boundary.
+
         assert_eq!(snippet, "...", "{snippet:?}");
     }
 

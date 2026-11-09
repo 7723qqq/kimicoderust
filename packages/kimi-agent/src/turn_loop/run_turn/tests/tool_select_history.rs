@@ -40,12 +40,12 @@ impl LLM for CapturingLlm {
     }
 }
 
-/// v2 #4719 / #4720: a history recorded while the model could load tools
-/// must not keep telling a model without that capability to call
-/// `select_tools`. The turn loop rewrites the prior announcement into the
-/// runtime-change reminder before the provider sees it.
+/// v2 `shapeHistory` (`toolSelectService.ts:125-130`): a model without
+/// dynamic tool loading must not see a prior `<tools_added>` announcement
+/// telling it to call `select_tools`, so the announcement is stripped before
+/// the provider sees it.
 #[tokio::test]
-async fn an_unsupported_prior_announcement_reaches_the_model_as_a_runtime_reminder() {
+async fn an_unsupported_prior_announcement_is_stripped_from_history() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let dir = tempfile::tempdir().unwrap();
@@ -62,9 +62,15 @@ async fn an_unsupported_prior_announcement_reaches_the_model_as_a_runtime_remind
         previous_turn_aborted: false,
         turn_id: "tool-select-history".into(),
         llm: &llm,
-        messages: vec![LLMMessage::user(
-            "<tools_added>\nmcp__srv__search\n</tools_added>",
-        )],
+        messages: vec![
+            crate::injection::injection_message_named(
+                crate::injection::wrap_system_reminder(
+                    "<tools_added>\nmcp__srv__search\n</tools_added>",
+                ),
+                crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+            ),
+            LLMMessage::user("hello"),
+        ],
         tools: &[],
         tool_defs: vec![],
         max_steps: 1,
@@ -84,93 +90,36 @@ async fn an_unsupported_prior_announcement_reaches_the_model_as_a_runtime_remind
     run_turn(input, &callbacks).await.unwrap();
     let requests = requests.lock().unwrap();
     let sent = requests.first().expect("one provider request");
-    let reminder = sent
-        .iter()
-        .find(|message| message.role == "user")
-        .expect("the user message is still sent");
     assert!(
-        reminder
-            .content
-            .contains("Use the tool definitions provided in this request."),
-        "the prior select_tools announcement must be rewritten: {:?}",
-        reminder.content
+        !sent
+            .iter()
+            .any(|message| message.content.contains("<tools_added>")),
+        "the stale announcement must be stripped: {sent:?}"
     );
     assert!(
-        reminder
-            .content
-            .contains("<tools_added>\nmcp__srv__search\n</tools_added>")
-    );
-    assert!(
-        !reminder
-            .content
-            .contains("Only the announced names are loadable")
+        sent.iter().any(|message| message.content == "hello"),
+        "the real prompt survives: {sent:?}"
     );
 }
 
-/// v2 #4733 `notifyUpdatedTools`: a same-name MCP update stays pending and
-/// the next turn carries one reminder that the update is not applied in this
-/// session.
+/// v2 `shapeHistory`: with dynamic loading on, only the newest
+/// `<tools_relevant>` block survives; an older one would describe a stale
+/// catalogue.
 #[tokio::test]
-async fn a_pinned_same_name_update_notifies_the_model_once() {
-    let server = Arc::new(RpcServer::new());
-    let callbacks = rpc_callbacks(server.clone());
-    let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(crate::mcp::McpManager::new());
-    let old = vec![crate::mcp::types::McpTool {
-        name: "search".into(),
-        description: Some("old search".into()),
-        input_schema: serde_json::json!({ "type": "object" }),
-    }];
-    manager
-        .add_client(crate::mcp::McpClient::mock_with_tools("srv", old))
-        .await;
-    let updated = vec![crate::mcp::types::McpTool {
-        name: "search".into(),
-        description: Some("updated search".into()),
-        input_schema: serde_json::json!({ "type": "object" }),
-    }];
-    manager
-        .add_client(crate::mcp::McpClient::mock_with_tools("srv", updated))
-        .await;
-    let toolset = Arc::new(
-        crate::tools::NativeToolset::new(dir.path().to_str().unwrap(), None)
-            .unwrap()
-            .with_mcp(manager)
-            .with_tool_select_enabled(true)
-            .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()])),
-    );
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let llm = CapturingLlm {
-        requests: Arc::clone(&requests),
-    };
-    let input = RunTurnInput {
-        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
-        previous_turn_aborted: false,
-        turn_id: "tool-update-once".into(),
-        llm: &llm,
-        messages: vec![LLMMessage::user("continue")],
-        tools: &[],
-        tool_defs: vec![],
-        max_steps: 1,
-        max_attempts: None,
-        max_context_tokens: None,
-        compaction_max_attempts: None,
-        permission_mode: None,
-        goal: None,
-        cancellation: None,
-        hook_guard: None,
-        media: None,
-        media_dropped: None,
-        media_recovery: None,
-        toolset: Some(toolset),
-    };
-    run_turn(input, &callbacks).await.unwrap();
-    let requests = requests.lock().unwrap();
-    let sent = requests.first().expect("one provider request");
-    assert!(
-        sent.iter().any(|message| message
-            .content
-            .contains("has an update, but the update is not applied in this session")),
-        "the pinned update reminder must reach the model: {sent:?}"
-    );
+async fn only_the_newest_retrieved_announcement_survives_shaping() {
+    fn retrieved(text: &str) -> LLMMessage {
+        crate::injection::injection_message_named(
+            crate::injection::wrap_system_reminder(text),
+            crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+        )
+    }
+    let messages = vec![
+        retrieved("<tools_relevant>\nold — first\n</tools_relevant>"),
+        LLMMessage::user("continue"),
+        retrieved("<tools_relevant>\nnew — second\n</tools_relevant>"),
+    ];
+    let shaped = crate::tools::tool_select_state::shape_history(messages, true);
+    assert_eq!(shaped.len(), 2);
+    assert!(shaped[1].content.contains("new — second"));
+    assert!(!shaped.iter().any(|m| m.content.contains("old — first")));
 }

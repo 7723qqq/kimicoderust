@@ -57,6 +57,7 @@ pub fn estimate_tokens_batch(texts: &[&str]) -> usize {
 /// `estimate_tokens`, and stops at the first code point that would
 /// push the running total over the budget. Mirrors
 /// `truncateTextToTokens` in `agent/contextMemory/compactionHandoff.ts`.
+#[cfg(test)]
 pub fn truncate_text_to_tokens(text: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
         return String::new();

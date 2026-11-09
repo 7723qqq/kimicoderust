@@ -11,6 +11,7 @@
 //! tail is kept verbatim.
 
 pub mod micro;
+pub(crate) mod window;
 
 use crate::rpc::types::TokenUsage;
 use crate::turn_loop::retry::{RetryConfig, retry_delay};
@@ -128,19 +129,22 @@ pub fn estimate_tokens(text: &str) -> u32 {
     (ascii_count.div_ceil(4) + non_ascii_count) as u32
 }
 
-/// Estimate tokens for JSON-serialized content. The multiplier compensates
-/// for the heuristic's under-counting of JSON's dense punctuation (matching kosong `JSON_TOKEN_MULTIPLIER = 1.3`).
+/// Estimate tokens for JSON-serialized content. v2 estimates
+/// `JSON.stringify(...)` with the same character heuristic as plain text —
+/// `estimateTokensForMessage` for tool arguments and
+/// `estimateToolParametersTokens` for schemas — so there is no multiplier.
 pub fn estimate_tokens_for_json(text: &str) -> u32 {
-    ((estimate_tokens(text) as f64) * 1.3).ceil() as u32
+    estimate_tokens(text)
 }
 
 /// Flat token cost assigned to media parts, mirroring kosong `MEDIA_TOKEN_ESTIMATE = 2000`.
 pub const MEDIA_TOKEN_ESTIMATE: u32 = 2000;
 
-/// Rough token estimate for a single message: text content, multimodal
-/// blocks, tool call names/arguments, and the tool call id.
+/// Rough token estimate for a single message: role, text content, multimodal
+/// blocks, tool call names/arguments, and the tool call id (v2
+/// `estimateTokensForMessage`).
 pub fn estimate_message_tokens(message: &LLMMessage) -> u32 {
-    let mut tokens = estimate_tokens(&message.content);
+    let mut tokens = estimate_tokens(&message.role) + estimate_tokens(&message.content);
     for block in &message.blocks {
         tokens += match block {
             ContentBlock::Text { text, .. } => estimate_tokens(text),
@@ -149,7 +153,14 @@ pub fn estimate_message_tokens(message: &LLMMessage) -> u32 {
             | ContentBlock::ImageUrl { .. }
             | ContentBlock::AudioUrl { .. }
             | ContentBlock::VideoUrl { .. } => MEDIA_TOKEN_ESTIMATE,
-            ContentBlock::Think { think, .. } => estimate_tokens(think),
+            // v2 keeps a details-derived summary in `think`; Rust parks it in
+            // `details_summary`, so count the parked text or the estimate
+            // silently drops it.
+            ContentBlock::Think {
+                think,
+                details_summary,
+                ..
+            } => estimate_tokens(think) + details_summary.as_deref().map_or(0, estimate_tokens),
         };
     }
     for call in &message.tool_calls {
@@ -179,7 +190,7 @@ pub fn rebased_tokens(history: &[LLMMessage], summary_output_tokens: Option<u32>
     };
     let Some(summary) = history
         .iter()
-        .find(|message| message.content.starts_with(COMPACTION_SUMMARY_PREFIX))
+        .find(|message| is_compaction_summary_message(message))
     else {
         return estimate;
     };
@@ -280,21 +291,11 @@ fn apply_compaction(messages: &[LLMMessage], count: u32) -> Vec<LLMMessage> {
 /// split, so a manual compaction keeps only the smallest safe tail
 /// (v2 `computeCompactCount` manual branch).
 pub fn compute_compact_count_manual(messages: &[LLMMessage], config: &CompactionConfig) -> u32 {
-    let n = messages.len();
-    if n <= 1 {
-        return 0;
-    }
-    for index in (1..n).rev() {
-        if can_split_after(messages, index) {
-            let count = fit_compact_count_to_window(messages, (index + 1) as u32, config);
-            // A count of 1 would mean compacting only the header (index 0),
-            // which is never allowed — the same floor the auto branch
-            // applies. Without it the "compaction" would insert a summary
-            // without removing anything.
-            return if count <= 1 { 0 } else { count };
-        }
-    }
-    0
+    let count = window::compute_compact_count(messages, config, true);
+    // A count of 1 would mean compacting only the header (index 0), which is
+    // never allowed — the same floor the auto branch applies. Without it the
+    // "compaction" would insert a summary without removing anything.
+    if count <= 1 { 0 } else { count }
 }
 
 /// Status codes whose overflow wording v2 trusts. `isContextOverflowStatusError`
@@ -307,14 +308,15 @@ const OVERFLOW_KEYWORD_STATUSES: [u16; 3] = [400, 413, 422];
 /// overflow. v2 `OVERFLOW_STATUS_RECOVERY_RATIO` (fullCompactionService.ts:79).
 const OVERFLOW_STATUS_RECOVERY_RATIO: f64 = 0.5;
 
-/// Observed effective windows per model (v2 `observedMaxContextTokensByModel`,
-/// fullCompactionService.ts:215). The fork's window is host-resolved per turn;
-/// this in-process cache lowers it after an observed overflow so the next
-/// request — and the auto-compaction trigger — use the conservative value
-/// instead of re-overflowing every turn. v2 persists the map through
-/// `defineState`; the fork's engine is per-process, so an observation is
-/// relearned after a restart (recorded difference). Keyed by model name: the
-/// real window is a property of the provider/model, not of the session.
+/// Observed effective windows per `(agent, model)` (v2
+/// `observedWindows` is agent state, fullCompactionService.ts:215). The fork's
+/// window is host-resolved per turn; this in-process cache lowers it after an
+/// observed overflow so the next request — and the auto-compaction trigger —
+/// use the conservative value instead of re-overflowing every turn. v2
+/// persists the map through `defineState`; the fork's engine is per-process,
+/// so an observation is relearned after a restart (recorded difference).
+/// Keyed by agent *and* model: a subagent that overflows must not shrink the
+/// main agent's window (nor a sibling's).
 static OBSERVED_MAX_TOKENS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, u64>>,
 > = std::sync::OnceLock::new();
@@ -323,11 +325,17 @@ fn observed_map() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     OBSERVED_MAX_TOKENS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+fn observed_key(agent_id: &str, model: &str) -> String {
+    format!("{agent_id}\u{1f}{model}")
+}
+
 /// v2 `observeContextOverflow` (fullCompactionService.ts:320-331): after an
 /// observed overflow, remember `max(1, floor(estimated × 0.85))` as the
 /// model's effective window — only ever lowering it, and never below what
-/// the host already configured.
-pub fn observe_context_overflow(
+/// the host already configured. Scoped to `agent_id` (v2 keeps this in agent
+/// state), so one agent's overflow never shrinks another's window.
+pub fn observe_context_overflow_for(
+    agent_id: &str,
     model: &str,
     estimated_request_tokens: u32,
     configured: Option<u32>,
@@ -338,24 +346,38 @@ pub fn observe_context_overflow(
     let observed = ((f64::from(estimated_request_tokens)) * OVERFLOW_CONTEXT_SAFETY_RATIO)
         .floor()
         .max(1.0) as u64;
-    let current = effective_max_tokens(model, configured).unwrap_or(0);
+    let key = observed_key(agent_id, model);
+    let current = effective_max_tokens_for(agent_id, model, configured).unwrap_or(0);
     if current > 0 && observed >= u64::from(current) {
         return;
     }
     observed_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(model.to_string(), observed);
+        .insert(key, observed);
+}
+
+/// [`observe_context_overflow_for`] without an agent scope.
+pub fn observe_context_overflow(
+    model: &str,
+    estimated_request_tokens: u32,
+    configured: Option<u32>,
+) {
+    observe_context_overflow_for("", model, estimated_request_tokens, configured);
 }
 
 /// v2 `getEffectiveMaxContextTokens` (fullCompactionService.ts:258-267):
 /// `min(configured, observed)`; the configured value stands when nothing was
 /// observed, and a lone observation (no configured window) stands on its own.
-pub fn effective_max_tokens(model: &str, configured: Option<u32>) -> Option<u32> {
+pub fn effective_max_tokens_for(
+    agent_id: &str,
+    model: &str,
+    configured: Option<u32>,
+) -> Option<u32> {
     let observed = observed_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(model)
+        .get(&observed_key(agent_id, model))
         .copied();
     match (configured, observed) {
         (Some(configured), Some(observed)) => Some(configured.min(observed as u32)),
@@ -363,6 +385,11 @@ pub fn effective_max_tokens(model: &str, configured: Option<u32>) -> Option<u32>
         (None, Some(observed)) => Some(observed as u32),
         (None, None) => None,
     }
+}
+
+/// [`effective_max_tokens_for`] without an agent scope.
+pub fn effective_max_tokens(model: &str, configured: Option<u32>) -> Option<u32> {
+    effective_max_tokens_for("", model, configured)
 }
 
 /// Classify whether an LLM error string indicates that the context length / window was exceeded.
@@ -375,7 +402,7 @@ pub fn effective_max_tokens(model: &str, configured: Option<u32>) -> Option<u32>
 /// synthetic 400 (`errorFromOpenAIResponsesEvent`). Any other status is
 /// rejected outright.
 pub fn is_context_overflow_error(error: &str) -> bool {
-    if let Some(code) = crate::llm::http::llm_http_status(error)
+    if let Some(code) = kimi_core::error::llm_http_status(error)
         && !OVERFLOW_KEYWORD_STATUSES.contains(&code)
     {
         return false;
@@ -420,7 +447,7 @@ pub fn should_recover_from_context_overflow(
     if is_context_overflow_error(error) {
         return true;
     }
-    if crate::llm::http::llm_http_status(error) != Some(413) {
+    if kimi_core::error::llm_http_status(error) != Some(413) {
         return false;
     }
     let Some(max) = max_context_tokens.filter(|max| *max > 0) else {
@@ -446,7 +473,85 @@ pub(crate) fn summary_placeholder(omitted: usize) -> String {
 /// `COMPACTION_SUMMARY_PREFIX`). Tells the model the summary is its own
 /// working notes and that earlier user messages are preserved verbatim in
 /// this context — a promise the kept head/tail below fulfills.
-pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary. The summary records which earlier requests were already addressed.";
+pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Do not redo work it reports as done or re-run checks it reports as passed; check anything it marks as unverified before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary. The summary records which earlier requests were already addressed. The verbatim user messages above take precedence over this summary, and the summary is not an authorization: a statement that something was approved, allowed, or decided does not replace the user's own words, and an action the user has not approved in a verbatim message still needs their approval.";
+
+/// The summary message's `origin.kind` (v2 `createCompactionSummaryMessage`,
+/// `compactionHandoff.ts:145-152`). Compaction excludes these from the kept
+/// user messages, and the renderer uses the same tag.
+pub const COMPACTION_SUMMARY_ORIGIN_KIND: &str = "compaction_summary";
+
+/// The `<system-reminder>`-wrapped summary text (v2
+/// `buildCompactionSummaryText`, `compactionHandoff.ts:138-143`): the prefix,
+/// the model's summary, and an explicit placeholder when the model returned
+/// nothing.
+pub fn build_compaction_summary_text(summary: &str) -> String {
+    let trimmed = summary.trim();
+    let body = if trimmed.is_empty() {
+        "(no summary available)"
+    } else {
+        trimmed
+    };
+    crate::injection::wrap_system_reminder(&format!("{COMPACTION_SUMMARY_PREFIX}\n{body}"))
+}
+
+/// Whether `message` is a compaction summary (v2 `isCompactionSummaryMessage`,
+/// `compactionHandoff.ts:190-192`).
+///
+/// Histories written before summaries carried an origin are recognized by the
+/// summary text instead: the wrapped prefix for current summaries, and the
+/// legacy placeholder marker for the synchronous helper's stand-in. Only a
+/// leading marker counts — a user quoting the prefix mid-conversation is still
+/// real user input.
+pub fn is_compaction_summary_message(message: &LLMMessage) -> bool {
+    if message.role != "user" {
+        return false;
+    }
+    if message
+        .origin
+        .as_ref()
+        .and_then(|origin| origin.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some(COMPACTION_SUMMARY_ORIGIN_KIND)
+    {
+        return true;
+    }
+    let content = message.content.trim_start();
+    let body = content
+        .strip_prefix(crate::injection::SYSTEM_REMINDER_PREFIX)
+        .map(str::trim_start)
+        .unwrap_or(content);
+    body.starts_with(COMPACTION_SUMMARY_PREFIX)
+        || content.starts_with("[Earlier conversation compacted:")
+}
+
+/// Whether `message` carries real user input, i.e. what compaction keeps
+/// verbatim (v2 `isRealUserInput` / `compactionUserMessageDisposition`,
+/// `compactionHandoff.ts:184-224`).
+///
+/// Injected reminders, shell/task/cron triggers and older compaction summaries
+/// are all `user`-role messages but not user *intent*; keeping them would fill
+/// the kept segment with reminder text and suppress the matching reminder later.
+/// Messages without an origin keep v2's `keep`, except for the two shapes this
+/// engine wrote before it tagged them: system-reminder injections and the
+/// legacy compaction placeholder.
+pub fn is_real_user_input(message: &LLMMessage) -> bool {
+    if message.role != "user" {
+        return false;
+    }
+    let Some(origin) = &message.origin else {
+        return !crate::injection::is_system_reminder(&message.content)
+            && !message
+                .content
+                .starts_with("[Earlier conversation compacted:");
+    };
+    match origin.get("kind").and_then(serde_json::Value::as_str) {
+        Some("user") => true,
+        Some("skill_activation") | Some("plugin_command") => {
+            origin.get("trigger").and_then(serde_json::Value::as_str) == Some("user-slash")
+        }
+        _ => false,
+    }
+}
 
 /// Head budget for user messages kept verbatim across compaction (v2
 /// `COMPACT_USER_MESSAGE_HEAD_TOKENS`).
@@ -463,140 +568,61 @@ fn compaction_elision_text(omitted_tokens: u32) -> String {
     ))
 }
 
-/// Truncate text to at most `max_tokens` estimated tokens, keeping the END
-/// (v2 `truncateTextToTokensFromEnd`).
-fn truncate_text_to_tokens_from_end(text: &str, max_tokens: u32) -> &str {
-    if max_tokens == 0 {
-        return "";
-    }
-    let mut ascii_count: u32 = 0;
-    let mut non_ascii_count: u32 = 0;
-    let mut start = text.len();
-    for (byte_offset, ch) in text.char_indices().rev() {
-        if ch.is_ascii() {
-            ascii_count += 1;
-        } else {
-            non_ascii_count += 1;
-        }
-        if ascii_count.div_ceil(4) + non_ascii_count > max_tokens {
-            break;
-        }
-        start = byte_offset;
-    }
-    &text[start..]
-}
-
-/// Truncate text to at most `max_tokens` estimated tokens, keeping the HEAD
-/// (v2 `truncateTextToTokens`).
-fn truncate_text_to_tokens(text: &str, max_tokens: u32) -> &str {
-    if max_tokens == 0 {
-        return "";
-    }
-    let mut ascii_count: u32 = 0;
-    let mut non_ascii_count: u32 = 0;
-    let mut end = text.len();
-    for (byte_offset, ch) in text.char_indices() {
-        if ch.is_ascii() {
-            ascii_count += 1;
-        } else {
-            non_ascii_count += 1;
-        }
-        if ascii_count.div_ceil(4) + non_ascii_count > max_tokens {
-            break;
-        }
-        end = byte_offset + ch.len_utf8();
-    }
-    &text[..end]
-}
-
 /// The kept-verbatim user messages v2's `selectCompactionUserMessages`
 /// picks from the compacted range, returned as the assembled v2 kept
 /// sequence: the head fills `head_tokens` (oldest input, possibly
 /// truncated — one truncating message ends the head), then the elision
 /// note (when anything was omitted), then the tail fits `max_tokens` (the
 /// newest input, possibly suffix-truncated at the boundary).
+///
+/// The selection itself lives in [`window::select_user_messages`]; this only
+/// assembles the chosen slices back into messages.
 fn select_kept_user_messages(user_messages: &[LLMMessage]) -> Vec<LLMMessage> {
-    let total_tokens: u32 = user_messages.iter().map(estimate_message_tokens).sum();
-    if total_tokens <= COMPACT_USER_MESSAGE_MAX_TOKENS {
+    let selection = window::select_user_messages(
+        user_messages,
+        COMPACT_USER_MESSAGE_MAX_TOKENS,
+        COMPACT_USER_MESSAGE_HEAD_TOKENS,
+    );
+    if !selection.elided {
         return user_messages.to_vec();
     }
 
-    let head_budget = COMPACT_USER_MESSAGE_HEAD_TOKENS.min(COMPACT_USER_MESSAGE_MAX_TOKENS);
-    let tail_budget = COMPACT_USER_MESSAGE_MAX_TOKENS - head_budget;
-
-    let mut tail: Vec<LLMMessage> = Vec::new();
-    let mut tail_remaining = tail_budget;
-    let mut head_end_exclusive = user_messages.len();
-    let mut tail_boundary_prefix: Option<String> = None;
-    for index in (0..user_messages.len()).rev() {
-        // v2 `i >= 0 && tailRemaining > 0`: once the tail budget is spent the
-        // loop stops before straddling — the next message belongs whole to
-        // the head side, and no empty suffix message is emitted.
-        if tail_remaining == 0 {
-            break;
-        }
-        let message = &user_messages[index];
-        let tokens = estimate_message_tokens(message);
-        if tokens <= tail_remaining {
-            tail.push(message.clone());
-            tail_remaining -= tokens;
-            head_end_exclusive = index;
-            continue;
-        }
-        let full_text = message.content.clone();
-        let kept_suffix = truncate_text_to_tokens_from_end(&full_text, tail_remaining);
-        let mut kept = message.clone();
-        kept.content = kept_suffix.to_string();
-        tail.push(kept);
-        head_end_exclusive = index;
-        let dropped = &full_text[..full_text.len() - kept_suffix.len()];
-        if !dropped.is_empty() {
-            let mut prefix = message.clone();
-            prefix.content = dropped.to_string();
-            tail_boundary_prefix = Some(prefix.content);
-        }
-        break;
-    }
-    tail.reverse();
-
-    let mut head: Vec<LLMMessage> = Vec::new();
-    let mut head_remaining = head_budget;
-    let head_candidates_len = head_end_exclusive + usize::from(tail_boundary_prefix.is_some());
-    #[allow(clippy::needless_range_loop)] // indexes user_messages and the boundary prefix
-    for index in 0..head_candidates_len {
-        if head_remaining == 0 {
-            break;
-        }
-        if tail_boundary_prefix.is_some() && index == head_end_exclusive {
-            // v2 order: truncate the head-side half to the remaining budget
-            // FIRST (truncateUserMessage), then spend exactly that many
-            // tokens — the truncation itself must not be driven to empty by
-            // a budget the message is about to consume.
-            let text = tail_boundary_prefix.as_deref().unwrap_or_default();
-            let kept_text = truncate_text_to_tokens(text, head_remaining);
-            head_remaining = head_remaining.saturating_sub(estimate_tokens(kept_text));
-            let mut head_message = user_messages[index].clone();
-            head_message.content = kept_text.to_string();
-            head.push(head_message);
-        } else {
-            let message = &user_messages[index];
-            let tokens = estimate_message_tokens(message);
-            if tokens <= head_remaining {
-                head.push(message.clone());
-                head_remaining -= tokens;
-            } else {
-                let mut truncated = message.clone();
-                truncated.content =
-                    truncate_text_to_tokens(&message.content, head_remaining).to_string();
-                head.push(truncated);
-                // v2: one truncated message ends the head — without this the
-                // budget is never spent and every further candidate is
-                // truncated and kept too.
-                break;
+    let head: Vec<LLMMessage> = selection
+        .head_indices
+        .iter()
+        .map(|&index| {
+            let message = &user_messages[index as usize];
+            match selection.head_truncate {
+                Some((truncated, kept)) if truncated == index => {
+                    let mut head_message = message.clone();
+                    head_message.content = message.content[..kept as usize].to_string();
+                    head_message
+                }
+                _ => message.clone(),
             }
-        }
-    }
+        })
+        .collect();
 
+    // `tail_indices` is newest-first; the assembled tail is oldest-first.
+    let tail: Vec<LLMMessage> = selection
+        .tail_indices
+        .iter()
+        .rev()
+        .map(|&index| {
+            let message = &user_messages[index as usize];
+            match selection.tail_truncate {
+                Some((truncated, kept)) if truncated == index => {
+                    let mut tail_message = message.clone();
+                    let start = message.content.len() - kept as usize;
+                    tail_message.content = message.content[start..].to_string();
+                    tail_message
+                }
+                _ => message.clone(),
+            }
+        })
+        .collect();
+
+    let total_tokens: u32 = user_messages.iter().map(estimate_message_tokens).sum();
     let kept_tokens: u32 = head
         .iter()
         .chain(tail.iter())
@@ -606,11 +632,18 @@ fn select_kept_user_messages(user_messages: &[LLMMessage]) -> Vec<LLMMessage> {
     let elision = LLMMessage {
         role: "user".into(),
         content: compaction_elision_text(omitted),
+        // v2 `createCompactionElisionMessage` tags the note as an injection so
+        // a later compaction does not mistake it for user input.
+        origin: Some(serde_json::json!({
+            "kind": "injection",
+            "variant": "compaction_elision",
+        })),
         ..Default::default()
     };
-    head.push(elision);
-    head.extend(tail);
-    head
+    let mut kept = head;
+    kept.push(elision);
+    kept.extend(tail);
+    kept
 }
 
 /// Continuation reminder appended after context compaction, matching upstream #3537.
@@ -621,15 +654,21 @@ pub fn compaction_continuation_message() -> LLMMessage {
     LLMMessage {
         role: "user".into(),
         content: COMPACTION_CONTINUATION_TEXT.into(),
+        // v2 `createCompactionContinuationMessage` tags the note as an
+        // injection; compaction's kept-user selection must not re-keep it.
+        origin: Some(serde_json::json!({
+            "kind": "injection",
+            "variant": "compaction_continuation",
+        })),
         ..Default::default()
     }
 }
 
 /// v2's handoff template — `agent/fullCompaction/compaction-instruction.md`,
-/// byte-identical (SHA256 `9578d8c2088f64d0b58f2ec0f10b4a0cf2a70caa9b08d46c847a8d12e6ec6545`)
-/// to the copy `human/compaction/` ships. Model input, so it stays English like
-/// the rest of the prompt surface. The trailing `${custom_instruction_block}` is
-/// filled by [`render_compaction_instruction`].
+/// ported verbatim: the nine-section recovery block (Current request …
+/// Next steps). Model input, so it stays English like the rest of the prompt
+/// surface. The trailing `${custom_instruction_block}` is filled by
+/// [`render_compaction_instruction`].
 const COMPACTION_INSTRUCTION_TEMPLATE: &str = include_str!("compaction-instruction.md");
 
 /// v2 `renderCompactionInstruction` (`fullCompaction/compactionInstruction.ts`)
@@ -695,6 +734,9 @@ fn summarization_prompt(omitted: &[LLMMessage], instruction: Option<&str>) -> Ve
 pub enum CompactionError {
     Cancelled,
     EmptySummary,
+    /// v2 `CompactionTruncatedError`: the summarizer hit its output limit
+    /// before finishing, so the text it produced is not a complete summary.
+    Truncated,
     Provider {
         error: Box<dyn std::error::Error + Send + Sync>,
         /// v2 `CompactionFailedEvent.retry_count`: the backoff retries spent
@@ -718,6 +760,11 @@ impl std::fmt::Display for CompactionError {
                 "{}",
                 crate::i18n::LocalizedText::new("engine.compaction.emptySummary").render()
             ),
+            Self::Truncated => write!(
+                f,
+                "{}",
+                crate::i18n::LocalizedText::new("engine.compaction.truncated").render()
+            ),
             Self::Provider { error, .. } => std::fmt::Display::fmt(error, f),
         }
     }
@@ -727,7 +774,7 @@ impl std::error::Error for CompactionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Provider { error, .. } => Some(error.as_ref()),
-            Self::Cancelled | Self::EmptySummary => None,
+            Self::Cancelled | Self::EmptySummary | Self::Truncated => None,
         }
     }
 }
@@ -744,6 +791,13 @@ pub struct SummaryOutcome {
     /// Backoff retries performed in this round (v2 `retryCount`); a recovery
     /// shrink resets it, exactly like v2.
     pub retry_count: u32,
+    /// Messages dropped before the successful summarizer request (v2
+    /// `generation.droppedCount`).
+    pub dropped_count: u32,
+    /// v2 `prompt_cache_probe` with `source: 'compaction'`: how the summarizer
+    /// request's cache reads compare with the agent's last turn request. `None`
+    /// only when no request completed.
+    pub cache_probe: Option<crate::session::cache_observation::CacheProbeObservation>,
 }
 
 /// Generate a usable summary before any history is replaced. Empty responses
@@ -755,11 +809,19 @@ pub async fn summarize_with_llm(
     cancel: Option<&CancellationToken>,
     max_attempts: Option<u32>,
 ) -> Result<String, CompactionError> {
-    Ok(
-        summarize_with_llm_budgeted(omitted, llm, instruction, cancel, max_attempts, None)
-            .await?
-            .summary,
+    Ok(summarize_with_llm_budgeted(
+        omitted,
+        llm,
+        instruction,
+        cancel,
+        max_attempts,
+        None,
+        "",
+        None,
+        None,
     )
+    .await?
+    .summary)
 }
 
 /// [`summarize_with_llm`] with the effective model window, so the summarizer's
@@ -779,8 +841,18 @@ pub async fn summarize_with_llm_budgeted(
     cancel: Option<&CancellationToken>,
     max_attempts: Option<u32>,
     effective_max_tokens: Option<u32>,
+    agent_id: &str,
+    // v2 `llmRequesterService`'s compaction baseline: the agent's last turn
+    // request, captured before the summarizer request starts.
+    cache_probe_baseline: Option<&crate::session::cache_observation::CacheProbeRequest>,
+    // The turn that triggered compaction (v2 `request.source.turnId`).
+    cache_probe_turn_id: Option<&str>,
 ) -> Result<SummaryOutcome, CompactionError> {
     let pre_shrunk = pre_shrink_to_window_budget(omitted, instruction, effective_max_tokens);
+    let mut dropped_count = match &pre_shrunk {
+        Some(shrunken) => omitted.len().saturating_sub(shrunken.len()) as u32,
+        None => 0,
+    };
     // The overflow shrink below replaces the working set, so it owns its
     // buffer; the common path borrows the caller's slice untouched.
     let mut current: std::borrow::Cow<'_, [LLMMessage]> = match pre_shrunk {
@@ -802,8 +874,25 @@ pub async fn summarize_with_llm_budgeted(
             return Err(CompactionError::Cancelled);
         }
         attempt += 1;
-        let mut history: &[LLMMessage] = &current;
-        let prompt = summarization_prompt(history, instruction);
+        let history: &[LLMMessage] = &current;
+        // v2 snips oversized tool results per attempt, before the request is
+        // built: a single 5000-line log must not push the summarization
+        // request over the window it is meant to relieve.
+        let snipped = snip_large_tool_results(history);
+        let prompt = summarization_prompt(&snipped, instruction);
+        // The summarizer request as `prompt_cache_probe` records it. The
+        // request has no tools and its own system prompt, so those hashes are
+        // the empty-set/empty-prompt ones; the history hash is the full
+        // message list, and the prefix check compares its head with the
+        // last turn request (v2 `historyPrefixMatch`).
+        let probe_message_count = prompt.len();
+        let probe_history_hash = crate::session::cache_observation::fingerprint(
+            &serde_json::to_string(&prompt).unwrap_or_default(),
+        );
+        let probe_history_prefix_match = cache_probe_baseline.map(|baseline| {
+            crate::session::cache_observation::compaction_history_prefix_matches(&prompt, baseline)
+        });
+        let probe_started_at = chrono::Utc::now().timestamp_millis();
         // v2 #4456: report the estimated request size as `used_context_tokens`
         // (with the 2% estimate margin) so the transport clamps the completion
         // budget to the window actually left — the full history leaves less
@@ -840,35 +929,88 @@ pub async fn summarize_with_llm_budgeted(
         }
         match response {
             Ok(response) => {
+                let finish = response.finish_reason.as_deref();
+                // v2 `collectSummary` (`compactionUtils.ts`): a truncated
+                // response is never a usable summary even when the provider
+                // streamed text — it would end mid-sentence. Drop the oldest
+                // message and retry; fail with the truncation error once the
+                // history cannot shrink further.
+                if crate::turn_loop::run_turn::provider_finish_reason(finish) == Some("truncated") {
+                    if attempt >= retry_config.max_attempts || current.len() <= 1 {
+                        return Err(CompactionError::Truncated);
+                    }
+                    let reduced = drop_oldest_and_leading_tool_results(&current);
+                    if reduced.is_empty() {
+                        return Err(CompactionError::Truncated);
+                    }
+                    // A recovery, not a backoff retry: reset the ladder.
+                    retry_count = 0;
+                    dropped_count =
+                        dropped_count.saturating_add((current.len() - reduced.len()) as u32);
+                    current = std::borrow::Cow::Owned(reduced);
+                    continue;
+                }
                 let trimmed = response.content.trim();
                 if !trimmed.is_empty() {
                     // v2 reports the usage of the attempt that succeeded
                     // (`attempt.usage`), not a sum across retries.
                     let usage = (response.usage.measured_context_tokens() > 0)
                         .then(|| response.usage.clone());
+                    let own = crate::session::cache_observation::CacheProbeRequest {
+                        model_alias: llm
+                            .model_alias()
+                            .unwrap_or_else(|| llm.model_name())
+                            .to_string(),
+                        tools_hash: crate::session::cache_observation::fingerprint("[]"),
+                        system_prompt_hash: crate::session::cache_observation::fingerprint(""),
+                        message_count: probe_message_count,
+                        history_hash: probe_history_hash.clone(),
+                        input_tokens: usage
+                            .as_ref()
+                            .map(crate::session::cache_observation::input_total),
+                        started_at: probe_started_at,
+                        finished_at: chrono::Utc::now().timestamp_millis(),
+                    };
+                    let cache_probe = Some(crate::session::cache_observation::build_cache_probe(
+                        crate::session::cache_observation::CacheProbeSource::Compaction,
+                        cache_probe_turn_id,
+                        llm.provider_type(),
+                        llm.protocol(),
+                        usage.as_ref(),
+                        &own,
+                        cache_probe_baseline,
+                        probe_history_prefix_match,
+                    ));
                     return Ok(SummaryOutcome {
                         summary: trimmed.to_string(),
                         usage,
                         retry_count,
+                        dropped_count,
+                        cache_probe,
                     });
                 }
-                if attempt >= retry_config.max_attempts || history.len() <= 1 {
+                // v2's empty-response recovery excludes a *filtered* empty
+                // answer: `APIEmptyResponseError` with `finishReason ===
+                // 'filtered'` is constructed non-retryable and fails the
+                // round, while an ordinary empty answer drops a message.
+                if crate::turn_loop::turn_step::is_content_filtered(finish) {
+                    return Err(CompactionError::EmptySummary);
+                }
+                if attempt >= retry_config.max_attempts || current.len() <= 1 {
                     return Err(CompactionError::EmptySummary);
                 }
                 // v2 resets the retry count on every recovery path: a dropped
                 // message already shrinks the request, so the next attempt is
-                // not a backoff retry.
+                // not a backoff retry. The drop must be persisted in
+                // `current`, or the next attempt re-sends the same history.
                 retry_count = 0;
-                history = &history[1..];
-                while history
-                    .first()
-                    .is_some_and(|message| message.role == "tool")
-                {
-                    history = &history[1..];
-                }
-                if history.is_empty() {
+                let reduced = drop_oldest_and_leading_tool_results(&current);
+                if reduced.is_empty() {
                     return Err(CompactionError::EmptySummary);
                 }
+                dropped_count =
+                    dropped_count.saturating_add((current.len() - reduced.len()) as u32);
+                current = std::borrow::Cow::Owned(reduced);
             }
             Err(err) => {
                 let err_str = err.to_string();
@@ -881,7 +1023,7 @@ pub async fn summarize_with_llm_budgeted(
                 // still refuse the summarization request — shrink the history
                 // by this attempt's ratio and retry instead of failing the
                 // compaction.
-                let prompt = summarization_prompt(&current, instruction);
+                let prompt = summarization_prompt(&snip_large_tool_results(&current), instruction);
                 let estimated_request_tokens = prompt
                     .iter()
                     .map(estimate_message_tokens)
@@ -895,7 +1037,8 @@ pub async fn summarize_with_llm_budgeted(
                     // the summarization request that just overflowed is
                     // evidence the real window is smaller than configured —
                     // remember it so the next turn uses the conservative value.
-                    observe_context_overflow(
+                    observe_context_overflow_for(
+                        agent_id,
                         llm.model_name(),
                         estimated_request_tokens,
                         effective_max_tokens,
@@ -927,6 +1070,8 @@ pub async fn summarize_with_llm_budgeted(
                     // A shrink is a recovery, not a backoff retry (v2 resets
                     // `retryCount` here).
                     retry_count = 0;
+                    dropped_count =
+                        dropped_count.saturating_add((current.len() - shrunk.len()) as u32);
                     current = std::borrow::Cow::Owned(shrunk);
                     continue;
                 }
@@ -1047,6 +1192,98 @@ fn take_recent_within_budget(history: &[LLMMessage], budget: u32) -> Vec<LLMMess
     slice
 }
 
+/// v2 `dropOldestMessageAndLeadingToolResults` (`compactionUtils.ts`): drop the
+/// oldest message, then any tool results that lost their call. A tool result
+/// without its call is not a sequence a provider accepts.
+fn drop_oldest_and_leading_tool_results(history: &[LLMMessage]) -> Vec<LLMMessage> {
+    if history.len() <= 1 {
+        return Vec::new();
+    }
+    let mut slice = history[1..].to_vec();
+    while slice.first().is_some_and(|message| message.role == "tool") {
+        slice.remove(0);
+    }
+    slice
+}
+
+/// v2 `SNIPPED_TOOL_RESULT_MARKER` (`fullCompaction/compactionUtils.ts`): the
+/// prefix of an already-snipped tool result. A result that already carries it
+/// is never snipped twice — the second pass would count the marker's own lines
+/// as content and shorten the head/tail again.
+const SNIPPED_TOOL_RESULT_MARKER: &str = "[snipped tool result — ";
+
+/// v2 `DEFAULT_TOOL_RESULT_SNIP_MIN_BYTES`.
+const DEFAULT_TOOL_RESULT_SNIP_MIN_BYTES: usize = 1024;
+
+/// v2 `DEFAULT_TOOL_RESULT_SNIP_HEAD_LINES`.
+const DEFAULT_TOOL_RESULT_SNIP_HEAD_LINES: usize = 40;
+
+/// v2 `DEFAULT_TOOL_RESULT_SNIP_TAIL_LINES`.
+const DEFAULT_TOOL_RESULT_SNIP_TAIL_LINES: usize = 40;
+
+/// Replace a large tool result with its head and tail before it is summarized
+/// (v2 `snipLargeToolResults`, `fullCompaction/compactionUtils.ts:122-173`).
+///
+/// The summarizer does not need the middle of a 5000-line build log to write a
+/// faithful summary, and sending it is how a compaction request overflows the
+/// window it was supposed to relieve. Only the first text part is rewritten (v2
+/// looks up a single `type: 'text'` part); other roles pass through untouched.
+fn snip_large_tool_results(messages: &[LLMMessage]) -> std::borrow::Cow<'_, [LLMMessage]> {
+    let mut changed: Option<Vec<LLMMessage>> = None;
+    for (index, message) in messages.iter().enumerate() {
+        let content = (message.role == "tool")
+            .then(|| snip_tool_result_content(&message.content))
+            .flatten();
+        match content {
+            Some(content) => {
+                if changed.is_none() {
+                    changed = Some(messages[..index].to_vec());
+                }
+                let mut next = message.clone();
+                next.content = content;
+                if let Some(changed) = changed.as_mut() {
+                    changed.push(next);
+                }
+            }
+            None => {
+                if let Some(changed) = changed.as_mut() {
+                    changed.push(message.clone());
+                }
+            }
+        }
+    }
+    match changed {
+        Some(changed) => std::borrow::Cow::Owned(changed),
+        None => std::borrow::Cow::Borrowed(messages),
+    }
+}
+
+/// v2 `snipToolResultContent`: `None` when the text is already short enough,
+/// already snipped, or has no head/tail gap to cut.
+fn snip_tool_result_content(text: &str) -> Option<String> {
+    if text.starts_with(SNIPPED_TOOL_RESULT_MARKER) {
+        return None;
+    }
+    // v2 measures `text.length` (UTF-16 code units); counting chars is the
+    // closest Rust equivalent and keeps multi-byte content from being cut
+    // earlier than the reference implementation would cut it.
+    if text.chars().count() < DEFAULT_TOOL_RESULT_SNIP_MIN_BYTES {
+        return None;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.len() <= DEFAULT_TOOL_RESULT_SNIP_HEAD_LINES + DEFAULT_TOOL_RESULT_SNIP_TAIL_LINES {
+        return None;
+    }
+    let head = lines[..DEFAULT_TOOL_RESULT_SNIP_HEAD_LINES].join("\n");
+    let tail = lines[lines.len() - DEFAULT_TOOL_RESULT_SNIP_TAIL_LINES..].join("\n");
+    let omitted =
+        lines.len() - DEFAULT_TOOL_RESULT_SNIP_HEAD_LINES - DEFAULT_TOOL_RESULT_SNIP_TAIL_LINES;
+    Some(format!(
+        "{SNIPPED_TOOL_RESULT_MARKER}{omitted} lines omitted for compaction; re-run the tool if the \
+full output is needed]\n{head}\n[... {omitted} lines omitted ...]\n{tail}"
+    ))
+}
+
 /// v2 `postProcessSummary` (fullCompactionService.ts:844-851): when the
 /// session has todos, the compaction summary carries the rendered list so the
 /// model's working notes keep the todo state once the history is folded away.
@@ -1106,8 +1343,17 @@ pub async fn force_compact_messages_with_summary(
     instruction: Option<&str>,
     cancel: Option<&CancellationToken>,
 ) -> Result<Vec<LLMMessage>, CompactionError> {
-    force_compact_messages_with_summary_budgeted(messages, config, llm, instruction, cancel, None)
-        .await
+    force_compact_messages_with_summary_budgeted(
+        messages,
+        config,
+        llm,
+        instruction,
+        cancel,
+        None,
+        "",
+        false,
+    )
+    .await
 }
 
 /// [`force_compact_messages_with_summary`] with the model's effective window,
@@ -1122,6 +1368,8 @@ pub async fn force_compact_messages_with_summary_budgeted(
     instruction: Option<&str>,
     cancel: Option<&CancellationToken>,
     effective_max_tokens: Option<u32>,
+    agent_id: &str,
+    in_flight: bool,
 ) -> Result<Vec<LLMMessage>, CompactionError> {
     let tokens_before = estimate_messages_tokens(messages);
     Ok(force_compact_messages_with_summary_report(
@@ -1132,6 +1380,10 @@ pub async fn force_compact_messages_with_summary_budgeted(
         cancel,
         effective_max_tokens,
         tokens_before,
+        None,
+        agent_id,
+        in_flight,
+        None,
         None,
     )
     .await?
@@ -1145,6 +1397,9 @@ pub async fn force_compact_messages_with_summary_budgeted(
 pub struct CompactionReport {
     pub summary: String,
     pub compacted_count: u32,
+    /// Messages the summarization round dropped before its final request
+    /// (v2 `droppedCount`); `0` when nothing had to be dropped.
+    pub dropped_count: u32,
     pub tokens_before: u32,
     pub tokens_after: u32,
     /// Usage of the summarization request that produced the summary (v2
@@ -1156,6 +1411,9 @@ pub struct CompactionReport {
     /// Wall-clock time the compaction took, summarizer call included (v2
     /// `duration_ms`).
     pub duration_ms: u64,
+    /// The summarizer request's `prompt_cache_probe` (v2
+    /// `source: 'compaction'`); `None` when no request ran.
+    pub cache_probe: Option<crate::session::cache_observation::CacheProbeObservation>,
 }
 
 impl CompactionReport {
@@ -1183,6 +1441,9 @@ impl CompactionReport {
         });
         if let Some(index) = turn_index {
             payload["turn_id"] = serde_json::json!(index);
+        }
+        if self.dropped_count > 0 {
+            payload["dropped_count"] = serde_json::json!(self.dropped_count);
         }
         if let Some(usage) = &self.usage {
             // v2 `usageTelemetry`: `input_tokens` is the *total* input — the
@@ -1216,6 +1477,12 @@ pub async fn force_compact_messages_with_summary_report(
     effective_max_tokens: Option<u32>,
     tokens_before: u32,
     todos: Option<String>,
+    agent_id: &str,
+    in_flight: bool,
+    // v2 compaction probe baseline (the agent's last turn request).
+    cache_probe_baseline: Option<&crate::session::cache_observation::CacheProbeRequest>,
+    // The turn that triggered compaction (v2 `request.source.turnId`).
+    cache_probe_turn_id: Option<&str>,
 ) -> Result<(Vec<LLMMessage>, CompactionReport), CompactionError> {
     let count = compute_compact_count(messages, config);
     if count == 0 {
@@ -1224,15 +1491,31 @@ pub async fn force_compact_messages_with_summary_report(
             CompactionReport {
                 summary: String::new(),
                 compacted_count: 0,
+                dropped_count: 0,
                 tokens_before,
                 tokens_after: tokens_before,
                 usage: None,
                 retry_count: 0,
                 duration_ms: 0,
+                cache_probe: None,
             },
         ));
     }
-    let omitted = &messages[1..count as usize];
+    // v2 summarizes the history it replaces. Since the shape below keeps only
+    // real user input and the in-flight turn, everything up to the in-flight
+    // start has to enter the summarizer request (the budgeted call pre-shrinks
+    // it when needed, v2 #3911).
+    let omitted_end = if in_flight {
+        messages
+            .iter()
+            .rposition(|message| is_real_user_input(message))
+            .map(|index| index + 1)
+            .unwrap_or(messages.len())
+            .max(count as usize)
+    } else {
+        messages.len()
+    };
+    let omitted = &messages[1..omitted_end.min(messages.len())];
     let started = std::time::Instant::now();
     let outcome = summarize_with_llm_budgeted(
         omitted,
@@ -1241,22 +1524,27 @@ pub async fn force_compact_messages_with_summary_report(
         cancel,
         config.max_attempts,
         effective_max_tokens,
+        agent_id,
+        cache_probe_baseline,
+        cache_probe_turn_id,
     )
     .await?;
     let duration_ms = started.elapsed().as_millis() as u64;
     let summary = post_process_summary(outcome.summary, todos);
-    let compacted = apply_compaction_with_summary(messages, count, summary.clone());
+    let compacted = apply_compaction_with_summary(messages, count, summary.clone(), in_flight);
     let tokens_after = estimate_messages_tokens(&compacted);
     Ok((
         compacted,
         CompactionReport {
             summary,
             compacted_count: count,
+            dropped_count: outcome.dropped_count,
             tokens_before,
             tokens_after,
             usage: outcome.usage,
             retry_count: outcome.retry_count,
             duration_ms,
+            cache_probe: outcome.cache_probe,
         },
     ))
 }
@@ -1281,10 +1569,38 @@ pub async fn force_compact_messages_manual_with_summary(
     cancel: Option<&CancellationToken>,
     effective_max_tokens: Option<u32>,
     todos: Option<String>,
+    agent_id: &str,
 ) -> Result<(Vec<LLMMessage>, String), CompactionError> {
+    let (compacted, summary, _usage) = force_compact_messages_manual_with_summary_report(
+        messages,
+        config,
+        llm,
+        instruction,
+        cancel,
+        effective_max_tokens,
+        todos,
+        agent_id,
+    )
+    .await?;
+    Ok((compacted, summary))
+}
+
+/// [`force_compact_messages_manual_with_summary`] plus the summarizer's usage.
+/// Every compaction is a real LLM call; callers that own session accounting
+/// need the usage to bill it without re-deriving it from the text.
+pub async fn force_compact_messages_manual_with_summary_report(
+    messages: &[LLMMessage],
+    config: &CompactionConfig,
+    llm: &dyn LLM,
+    instruction: Option<&str>,
+    cancel: Option<&CancellationToken>,
+    effective_max_tokens: Option<u32>,
+    todos: Option<String>,
+    agent_id: &str,
+) -> Result<(Vec<LLMMessage>, String, Option<TokenUsage>), CompactionError> {
     let count = compute_compact_count_manual(messages, config);
     if count == 0 {
-        return Ok((messages.to_vec(), String::new()));
+        return Ok((messages.to_vec(), String::new(), None));
     }
     let omitted = &messages[1..count as usize];
     let outcome = summarize_with_llm_budgeted(
@@ -1294,11 +1610,15 @@ pub async fn force_compact_messages_manual_with_summary(
         cancel,
         config.max_attempts,
         effective_max_tokens,
+        agent_id,
+        None,
+        None,
     )
     .await?;
+    let usage = outcome.usage.clone();
     let summary = post_process_summary(outcome.summary, todos);
-    let compacted = apply_compaction_with_summary(messages, count, summary.clone());
-    Ok((compacted, summary))
+    let compacted = apply_compaction_with_summary(messages, count, summary.clone(), false);
+    Ok((compacted, summary, usage))
 }
 
 /// Threshold-gated compaction with a real LLM summary.
@@ -1345,6 +1665,10 @@ pub async fn compact_messages_with_summary_at(
         cancel,
         None,
         None,
+        "",
+        false,
+        None,
+        None,
     )
     .await?
     .map(|(messages, _)| messages))
@@ -1365,6 +1689,10 @@ pub async fn compact_messages_with_summary_at_report(
     cancel: Option<&CancellationToken>,
     effective_max_tokens: Option<u32>,
     todos: Option<String>,
+    agent_id: &str,
+    in_flight: bool,
+    cache_probe_baseline: Option<&crate::session::cache_observation::CacheProbeRequest>,
+    cache_probe_turn_id: Option<&str>,
 ) -> Result<Option<(Vec<LLMMessage>, CompactionReport)>, CompactionError> {
     if !should_compact(used_tokens, config) {
         return Ok(None);
@@ -1379,47 +1707,108 @@ pub async fn compact_messages_with_summary_at_report(
             effective_max_tokens,
             used_tokens,
             todos,
+            agent_id,
+            in_flight,
+            cache_probe_baseline,
+            cache_probe_turn_id,
         )
         .await?,
     ))
 }
 
-/// Project `count` leading messages into a summary, keeping the system
-/// message (index 0) and the tail untouched. Like [`apply_compaction`] but
-/// uses the provided `summary` text instead of [`summary_placeholder`].
+/// The synthetic tool result v2 appends for a call still open when the
+/// in-flight turn is carried across compaction (`openToolExchange.ts:5-6`).
+const INHERITED_IN_FLIGHT_TOOL_OUTPUT: &str = "This tool call was still executing when this conversation snapshot was inherited from the source agent, so its result is not part of this context. The outcome is unknown — do not assume it succeeded or failed, and do not wait for it.";
+
+/// The in-flight turn v2 `inFlightTurnOf` carries verbatim
+/// (`fullCompactionService.ts:754-765`): everything after the last real user
+/// input, with any trailing unresolved tool exchange closed.
+fn in_flight_turn_messages(messages: &[LLMMessage], in_flight: bool) -> Vec<LLMMessage> {
+    if !in_flight {
+        return Vec::new();
+    }
+    let Some(last_user) = messages
+        .iter()
+        .rposition(|message| is_real_user_input(message))
+    else {
+        return Vec::new();
+    };
+    close_trailing_open_tool_exchange(&messages[last_user + 1..])
+}
+
+/// Close a trailing assistant tool call that has no recorded result
+/// (v2 `closeTrailingOpenToolExchange`, `openToolExchange.ts:8-35`).
+fn close_trailing_open_tool_exchange(history: &[LLMMessage]) -> Vec<LLMMessage> {
+    let mut last_non_tool = history.len() as isize - 1;
+    while last_non_tool >= 0 && history[last_non_tool as usize].role == "tool" {
+        last_non_tool -= 1;
+    }
+    if last_non_tool < 0 {
+        return history.to_vec();
+    }
+    let assistant = &history[last_non_tool as usize];
+    if assistant.role != "assistant" || assistant.tool_calls.is_empty() {
+        return history.to_vec();
+    }
+    let answered: std::collections::HashSet<&str> = history[last_non_tool as usize + 1..]
+        .iter()
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect();
+    let open_calls: Vec<_> = assistant
+        .tool_calls
+        .iter()
+        .filter(|call| !answered.contains(call.id.as_str()))
+        .collect();
+    if open_calls.is_empty() {
+        return history.to_vec();
+    }
+    let mut closed = history.to_vec();
+    closed.extend(
+        open_calls
+            .into_iter()
+            .map(|call| LLMMessage::tool_result(call.id.clone(), INHERITED_IN_FLIGHT_TOOL_OUTPUT)),
+    );
+    closed
+}
+
+/// Project the history into v2's compaction shape
+/// (`buildContextCompactionShape`, `compactionHandoff.ts:70-136`): the system
+/// message (index 0), the real user input kept verbatim from the whole history
+/// (head 2k tokens + elision note + tail 20k tokens), the in-flight turn, the
+/// prefixed summary and the continuation note. Completed-turn assistant/tool
+/// messages are dropped — they are covered by the summary. The older
+/// `legacyTail` shape (summary + untouched tail) is not used by v2's engine
+/// path either.
 pub(crate) fn apply_compaction_with_summary(
     messages: &[LLMMessage],
     count: u32,
     summary: String,
+    in_flight: bool,
 ) -> Vec<LLMMessage> {
     if count == 0 {
         return messages.to_vec();
     }
-    // v2 `buildContextCompactionShape`: the compacted range's real user input
-    // survives verbatim — head (2k tokens) + elision note + tail (20k tokens)
-    // — then the prefixed summary and the continuation note close the block.
-    // The system message (index 0) and the uncompacted tail are untouched.
-    let user_in_range: Vec<LLMMessage> = messages[1..count as usize]
+    let user_in_range: Vec<LLMMessage> = messages[1..]
         .iter()
-        .filter(|m| m.role == "user")
+        .filter(|m| is_real_user_input(m) && !is_compaction_summary_message(m))
         .cloned()
         .collect();
     let kept = select_kept_user_messages(&user_in_range);
-    let summary_text = format!(
-        "{COMPACTION_SUMMARY_PREFIX}
-{}",
-        summary.trim()
-    );
-    let mut compacted = Vec::with_capacity(1 + kept.len() + 2 + (messages.len() - count as usize));
+    let in_flight_turn = in_flight_turn_messages(messages, in_flight);
+    let summary_text = build_compaction_summary_text(&summary);
+    let mut compacted = Vec::with_capacity(1 + kept.len() + in_flight_turn.len() + 2);
     compacted.push(messages[0].clone());
     compacted.extend(kept);
+    compacted.extend(in_flight_turn);
     compacted.push(LLMMessage {
         role: "user".into(),
         content: summary_text,
+        // v2 `createCompactionSummaryMessage`: the origin lets a later
+        // compaction and the renderer tell this from typed user input.
+        origin: Some(serde_json::json!({ "kind": COMPACTION_SUMMARY_ORIGIN_KIND })),
         ..Default::default()
     });
     compacted.push(compaction_continuation_message());
-    compacted.extend_from_slice(&messages[count as usize..]);
     compacted
 }
 
@@ -1430,39 +1819,7 @@ pub(crate) fn apply_compaction_with_summary(
 /// compacted, so N is either 0 (no compaction) or >= 2. Mirrors the auto
 /// path of `computeCompactCount` in strategy.ts.
 pub fn compute_compact_count(messages: &[LLMMessage], config: &CompactionConfig) -> u32 {
-    let n = messages.len();
-    if n <= 1 {
-        return 0;
-    }
-    let max_size = config.max_context_tokens as f64;
-    let mut recent_messages = 1usize;
-    let mut recent_user_messages = 0u32;
-    let mut recent_size = 0u32;
-    let mut best_n: Option<u32> = None;
-
-    while recent_messages < n {
-        let m_idx = n - recent_messages;
-        let m = &messages[m_idx];
-        if m.role == "user" {
-            recent_user_messages += 1;
-        }
-        recent_size = recent_size.saturating_add(estimate_message_tokens(m));
-
-        let split_index = m_idx - 1;
-        if can_split_after(messages, split_index) {
-            best_n = Some((split_index + 1) as u32);
-        }
-
-        let reaches_max_count = (recent_messages as u32) >= config.max_recent_messages;
-        let reaches_max_user = recent_user_messages >= config.max_recent_user_messages;
-        let reaches_max_size = (recent_size as f64) >= max_size * config.max_recent_size_ratio;
-        if (reaches_max_count || reaches_max_user || reaches_max_size) && best_n.is_some() {
-            break;
-        }
-        recent_messages += 1;
-    }
-
-    let count = fit_compact_count_to_window(messages, best_n.unwrap_or(0), config);
+    let count = window::compute_compact_count(messages, config, false);
     // A count of 1 would mean compacting only the system prompt, which is
     // never allowed — treat it as "nothing to compact".
     if count <= 1 { 0 } else { count }
@@ -1470,34 +1827,13 @@ pub fn compute_compact_count(messages: &[LLMMessage], config: &CompactionConfig)
 
 /// Shrink `compacted_count` so the compacted prefix fits within the
 /// context window. Mirrors `fitCompactCountToWindow` in strategy.ts.
+#[cfg(test)]
 fn fit_compact_count_to_window(
     messages: &[LLMMessage],
     compacted_count: u32,
     config: &CompactionConfig,
 ) -> u32 {
-    if config.max_context_tokens == 0 || compacted_count == 0 {
-        return compacted_count;
-    }
-    let mut compacted_size: u32 = messages
-        .iter()
-        .take(compacted_count as usize)
-        .map(estimate_message_tokens)
-        .sum();
-    if compacted_size <= config.max_context_tokens {
-        return compacted_count;
-    }
-    let mut best_n: Option<u32> = None;
-    for n in (1..compacted_count as usize).rev() {
-        compacted_size = compacted_size.saturating_sub(estimate_message_tokens(&messages[n]));
-        if !can_split_after(messages, n - 1) {
-            continue;
-        }
-        best_n = Some(n as u32);
-        if compacted_size <= config.max_context_tokens {
-            return n as u32;
-        }
-    }
-    best_n.unwrap_or(compacted_count)
+    window::fit_compact_count_to_window(messages, compacted_count, config)
 }
 
 /// Whether a compaction split is safe to place immediately after
@@ -1512,50 +1848,15 @@ fn fit_compact_count_to_window(
 ///   - the compacted prefix itself does not end with an unresolved tool
 ///     exchange (pending tool results must stay in the tail).
 pub fn can_split_after(messages: &[LLMMessage], index: usize) -> bool {
-    let m = match messages.get(index) {
-        Some(m) => m,
-        None => return false,
-    };
-    if m.role == "user" {
-        return false;
-    }
-    if m.role == "assistant" && !m.tool_calls.is_empty() {
-        return false;
-    }
-    if messages.get(index + 1).is_some_and(|m| m.role == "tool") {
-        return false;
-    }
-    if prefix_ends_with_open_tool_exchange(messages, index) {
-        return false;
-    }
-    true
+    window::can_split_after(messages, index)
 }
 
 /// Whether the prefix `messages[0..=index]` ends with an unresolved tool
 /// exchange — a trailing tool result whose owning assistant issued more
 /// calls than the trailing results satisfy.
+#[cfg(test)]
 fn prefix_ends_with_open_tool_exchange(messages: &[LLMMessage], index: usize) -> bool {
-    let m = match messages.get(index) {
-        Some(m) => m,
-        None => return false,
-    };
-    if m.role != "tool" {
-        return false;
-    }
-
-    let mut tool_result_count = 0u32;
-    for i in (0..=index).rev() {
-        let msg = match messages.get(i) {
-            Some(m) => m,
-            None => return false,
-        };
-        if msg.role == "tool" {
-            tool_result_count += 1;
-            continue;
-        }
-        return msg.role == "assistant" && msg.tool_calls.len() as u32 > tool_result_count;
-    }
-    false
+    window::prefix_ends_with_open_tool_exchange(messages, index)
 }
 
 #[cfg(test)]

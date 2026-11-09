@@ -1,27 +1,3 @@
-//! Background memory filing pass.
-//!
-//! The memory section of the system prompt promises that durable filing
-//! happens automatically after each turn, so the model never files on its own
-//! initiative. This module is that promise: a spawned task re-reads the
-//! finished exchange, asks the secondary model what is durable, and applies
-//! the answer through [`crate::tools::memory_store`].
-//!
-//! Four rules shape the pass:
-//!
-//! - **Additive only.** It appends lines to an existing file or creates a new
-//!   one; it never overwrites and never deletes. A "forget" is a boundary the
-//!   pass cannot cross, and a turn that already wrote or deleted memory is
-//!   skipped entirely, so the model's own change is the one that stands.
-//! - **Secondary model only.** The pass costs one LLM call per turn; with no
-//!   `[secondary_model]` configured it does not run at all rather than spend
-//!   the session model's budget.
-//! - **Best-effort.** Memory is not load-bearing: a failed call, unparseable
-//!   output or rejected write is logged and dropped, never surfaced to the
-//!   user and never allowed to fail a turn.
-//! - **Off by default.** The pass runs only when the gate is on *and* the
-//!   memory section is in the system prompt, so a session that never saw the
-//!   memory tools never files anything.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,37 +8,22 @@ use crate::tools::memory_paths::{MemoryType, parse_memory_path};
 use crate::tools::memory_store;
 use crate::turn_loop::types::{LLM, LLMChatParams, LLMMessage, ToolCall};
 
-/// The env switch, following the crate's `KIMI_AGENT_TRACE` idiom.
 pub const FILING_ENV: &str = "KIMI_AGENT_MEMORY_FILING";
 
-/// The `[experimental]` key that enables the pass.
 pub const FILING_CONFIG_KEY: &str = "memory_filing";
 
-/// Most files one pass may touch. A pass that wants more than this is
-/// misreading the exchange, and the cap bounds the blast radius of one bad
-/// call.
 const MAX_ENTRIES: usize = 8;
 
-/// Longest tool-activity line the prompt carries.
 const TOOL_LINE_MAX_CHARS: usize = 160;
 
-/// Most aliases one created file may carry (the memory section's own cap).
 const MAX_ALIASES: usize = 8;
 
-/// Wall-clock bound on one pass. The task is spawned and never awaited, so
-/// without this a provider that never answers would leak it for the life of
-/// the process.
 const FILING_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The `KIMI_AGENT_MEMORY_FILING` override, `None` when unset or
-/// unrecognized so [`resolve_gate`] can defer to the config entry.
 pub fn env_switch() -> Option<bool> {
     crate::env::parse_bool_env(std::env::var(FILING_ENV).ok().as_deref())
 }
 
-/// The `[experimental].memory_filing` entry: `true`, or any string but
-/// `false`/empty, enables the pass. `None` when the entry is unset, so the
-/// caller can tell "not configured" from an explicit `false`.
 pub fn config_flag(config: &crate::config::KimiConfig) -> Option<bool> {
     match config.experimental.get(FILING_CONFIG_KEY) {
         Some(crate::config::ExperimentalValue::Bool(value)) => Some(*value),
@@ -73,20 +34,10 @@ pub fn config_flag(config: &crate::config::KimiConfig) -> Option<bool> {
     }
 }
 
-/// Resolve the gate: the env override wins over the config entry. The pass
-/// runs whenever the memory section is in the prompt, so an unset value on
-/// both sides leaves it on — the section promises automatic filing, and a
-/// silent opt-out would make the prompt lie. Set either switch to `false` to
-/// stop spending the per-turn LLM call.
 pub fn resolve_gate(env: Option<bool>, config: Option<bool>) -> bool {
-    env.or(config).unwrap_or(true)
+    env.or(config).unwrap_or(false)
 }
 
-/// The model the pass should run on, or `None` when it must not run at all.
-///
-/// Every condition is a reason to stand down: the gate is off, the memory
-/// section never reached the prompt, no secondary model is configured, or the
-/// turn already wrote or deleted memory itself.
 pub fn filing_model(
     gate: bool,
     memory_in_prompt: bool,
@@ -99,33 +50,21 @@ pub fn filing_model(
     secondary_llm
 }
 
-/// The memory tools that mutate the store, in both the snake spelling the
-/// memory section documents and the squashed alias the tool table accepts.
-const MEMORY_MUTATION_TOOLS: [&str; 8] = [
-    "memory_write",
-    "memorywrite",
-    "memory_str_replace",
-    "memorystrreplace",
-    "memory_append",
-    "memoryappend",
-    "memory_delete",
-    "memorydelete",
-];
+const MEMORY_MUTATION_ACTIONS: [&str; 2] = ["write", "delete"];
 
-/// Whether the turn performed a memory mutation itself. Such a turn owns its
-/// memory change — the pass leaves it alone so the model's write stands.
 pub fn turn_wrote_memory(messages: &[LLMMessage]) -> bool {
     messages.iter().any(|message| {
-        message
-            .tool_calls
-            .iter()
-            .any(|call| MEMORY_MUTATION_TOOLS.contains(&call.name.to_ascii_lowercase().as_str()))
+        message.tool_calls.iter().any(|call| {
+            call.name.eq_ignore_ascii_case("memory")
+                && call
+                    .arguments
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|action| MEMORY_MUTATION_ACTIONS.contains(&action))
+        })
     })
 }
 
-/// One line per tool call the turn made, for the prompt's `<tool_activity>`
-/// block: the name plus the argument that names the target. Results are left
-/// out — they are the fetched content the pass must not file.
 pub fn tool_activity(messages: &[LLMMessage]) -> Vec<String> {
     messages
         .iter()
@@ -153,15 +92,12 @@ fn render_tool_call(call: &ToolCall) -> String {
     }
 }
 
-/// One finished exchange, as the pass sees it.
 pub struct Exchange {
     pub user_message: String,
     pub assistant_reply: String,
     pub tool_activity: Vec<String>,
 }
 
-/// A ready-to-run filing pass: the model to ask, the store to write to, and
-/// the exchange to read.
 pub struct FilingPass {
     pub llm: Arc<dyn LLM>,
     pub base: PathBuf,
@@ -170,9 +106,6 @@ pub struct FilingPass {
 }
 
 impl FilingPass {
-    /// Run the pass and report how many files it touched. Every failure is
-    /// logged and swallowed: memory is best-effort, so nothing here may reach
-    /// the user or fail a turn.
     pub async fn run(self) -> usize {
         let listing = memory_store::render_listing(&memory_store::list_entries_for(
             &self.base,
@@ -214,14 +147,11 @@ impl FilingPass {
         apply_entries(&self.base, &entries)
     }
 
-    /// Spawn the pass on the runtime and return immediately, so the turn
-    /// report and the user-visible reply are never delayed by it.
     pub fn spawn(self) {
         tokio::spawn(self.run());
     }
 }
 
-/// One memory the model wants to file.
 #[derive(Debug, Deserialize)]
 struct FilingEntry {
     path: String,
@@ -241,8 +171,6 @@ struct FilingOutput {
     memories: Vec<FilingEntry>,
 }
 
-/// Parse the model's answer. The model is asked for bare JSON, but a fenced
-/// block is common enough that the outermost braces are extracted first.
 fn parse_filing_output(content: &str) -> Option<Vec<FilingEntry>> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
@@ -253,9 +181,6 @@ fn parse_filing_output(content: &str) -> Option<Vec<FilingEntry>> {
     Some(output.memories)
 }
 
-/// Apply the parsed entries through the store, reporting how many files were
-/// touched. Each entry is independent: one rejected write never stops the
-/// others.
 fn apply_entries(base: &Path, entries: &[FilingEntry]) -> usize {
     let mut touched = 0;
     for entry in entries.iter().take(MAX_ENTRIES) {
@@ -279,7 +204,6 @@ fn apply_entry(base: &Path, entry: &FilingEntry) -> Result<(), String> {
         return Err("the entry carries no lines".into());
     }
     match memory_store::read(base, path) {
-        // The file exists: add the lines and keep everything already in it.
         Ok((content, version)) => {
             let fresh = without_existing(&content, &lines);
             if fresh.is_empty() {
@@ -287,8 +211,7 @@ fn apply_entry(base: &Path, entry: &FilingEntry) -> Result<(), String> {
             }
             memory_store::append(base, path, &fresh, &version).map(|_| ())
         }
-        // A new file: the pass renders the frontmatter itself, because the
-        // store's write path stores whatever it is handed.
+
         Err(_) => {
             let content = render_file(path, entry, &lines)?;
             memory_store::write(base, path, &content, "new").map(|_| ())
@@ -296,9 +219,6 @@ fn apply_entry(base: &Path, entry: &FilingEntry) -> Result<(), String> {
     }
 }
 
-/// Drop the lines the file already carries. The pass sees the listing, not
-/// the file bodies, so this is the only guard against the same fact landing
-/// twice when it comes up again in a later turn.
 fn without_existing(content: &str, lines: &str) -> String {
     let existing: Vec<&str> = content.lines().map(str::trim).collect();
     lines
@@ -308,10 +228,6 @@ fn without_existing(content: &str, lines: &str) -> String {
         .join("\n")
 }
 
-/// Render the entry's facts as `[stated]` content lines. The tag is the only
-/// one the pass writes, so it is added here rather than trusted from the
-/// model — and a line the model tagged `[observed]` or `[inferred]` is
-/// dropped, because those are not the pass's to write.
 fn render_lines(lines: &[String]) -> String {
     lines
         .iter()
@@ -333,9 +249,6 @@ fn render_line(line: &str) -> Option<String> {
     (!text.is_empty()).then(|| format!("- [stated] {text}"))
 }
 
-/// Render a new memory file: the memory section's frontmatter plus the
-/// `[stated]` lines. `name` is the path stem, and `sources` is always `chat`
-/// — the pass files what the user said in this conversation.
 fn render_file(path: &str, entry: &FilingEntry, lines: &str) -> Result<String, String> {
     if parse_memory_path(path).is_none() {
         return Err(format!("`{path}` is not a memory path"));
@@ -375,8 +288,6 @@ fn render_file(path: &str, entry: &FilingEntry, lines: &str) -> Result<String, S
     ))
 }
 
-/// A frontmatter value must stay on one line, or it breaks the block it sits
-/// in.
 fn single_line(value: &str) -> Option<String> {
     let line = value.replace(['\n', '\r'], " ").trim().to_string();
     (!line.is_empty()).then_some(line)
@@ -391,9 +302,6 @@ fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
-/// The filing instructions. They restate the memory section's calibration
-/// rules for a model that sees one exchange and no conversation: what counts
-/// as durable, how to phrase it, and where it goes.
 const FILING_SYSTEM_PROMPT: &str = "\
 You file durable memories from one finished exchange between a user and an assistant.
 
@@ -478,8 +386,6 @@ mod tests {
 
     const PROFILE: &str = "---\nname: profile\ndescription: Who they are.\ntype: note\nsources: [chat]\naliases: []\n---\n\n- [stated] Works on the kimi-code CLI.\n";
 
-    /// A scripted secondary model: one canned answer, and the prompts it was
-    /// asked recorded for inspection.
     struct ScriptedLlm {
         answer: Result<String, String>,
         seen: Mutex<Vec<String>>,
@@ -576,9 +482,26 @@ mod tests {
         }
     }
 
+    fn memory_call(action: &str) -> LLMMessage {
+        LLMMessage {
+            role: "assistant".into(),
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "Memory".into(),
+                arguments: serde_json::json!({ "action": action }),
+                extras: None,
+                args_parse_error: None,
+            }],
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn the_gate_is_on_unless_a_switch_says_otherwise() {
-        assert!(resolve_gate(None, None), "unset follows the memory section");
+    fn the_gate_is_off_unless_a_switch_turns_it_on() {
+        assert!(
+            !resolve_gate(None, None),
+            "unset follows v2: no turn-end filing"
+        );
         assert!(!resolve_gate(None, Some(false)));
         assert!(
             !resolve_gate(Some(false), Some(true)),
@@ -619,10 +542,6 @@ mod tests {
 
     #[test]
     fn an_unrecognized_switch_falls_through_to_the_config_entry() {
-        // `env_switch` parses through the shared `env::parse_bool_env`, so an
-        // unrecognized value is `None` rather than a guess. `resolve_gate` must
-        // then defer to `[experimental].memory_filing` instead of reading the
-        // typo as a disable.
         for typo in ["maybe", "", "  "] {
             let parsed = crate::env::parse_bool_env(Some(typo));
             assert_eq!(parsed, None, "{typo:?} must stay unrecognized");
@@ -635,11 +554,11 @@ mod tests {
                 "{typo:?} must defer to config"
             );
         }
-        // An explicit value does not defer.
+
         assert!(!resolve_gate(Some(false), Some(true)));
         assert!(resolve_gate(Some(true), Some(false)));
-        // Neither side set: the pass stays on (the prompt promises it).
-        assert!(resolve_gate(None, None));
+
+        assert!(!resolve_gate(None, None));
     }
 
     #[test]
@@ -666,20 +585,14 @@ mod tests {
 
     #[test]
     fn a_turn_that_mutated_memory_is_recognized() {
-        for name in [
-            "memory_write",
-            "memory_str_replace",
-            "memory_append",
-            "memory_delete",
-            "MemoryWrite",
-            "memorywrite",
-            "memorystrreplace",
-        ] {
-            assert!(turn_wrote_memory(&[call(name)]), "{name}");
+        for action in ["write", "delete"] {
+            assert!(turn_wrote_memory(&[memory_call(action)]), "{action}");
         }
-        for name in ["memory_read", "memory_list", "Read", "Write"] {
-            assert!(!turn_wrote_memory(&[call(name)]), "{name}");
+        for action in ["read", "list", "search", "log", "revert"] {
+            assert!(!turn_wrote_memory(&[memory_call(action)]), "{action}");
         }
+        assert!(!turn_wrote_memory(&[call("Read")]));
+        assert!(!turn_wrote_memory(&[call("Write")]));
         assert!(!turn_wrote_memory(&[LLMMessage::user("hello")]));
     }
 
@@ -789,7 +702,6 @@ mod tests {
             "---\nname: sister\ndescription: The user's sister.\ntype: note\nsources: [chat]\naliases: [anna]\n---\n\n- [stated] Planning [[spain-trip]] together.\n"
         );
 
-        // The prompt the model saw carried the listing and the exchange.
         let prompts = llm.prompts();
         assert_eq!(prompts.len(), 2, "one system message and one user message");
         assert!(prompts[0].contains("did the user say this"));
@@ -847,7 +759,6 @@ mod tests {
             "{content}"
         );
 
-        // A pass whose every line is already filed writes nothing at all.
         let repeat = ScriptedLlm::answering(
             r#"{"memories":[{"path":"global/profile.md","lines":["Lives in Berlin."]}]}"#,
         );

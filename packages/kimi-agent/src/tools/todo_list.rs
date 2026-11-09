@@ -1,12 +1,3 @@
-//! Native execution of the TodoList tool (state bridge protocol, design doc
-//! milestone 7).
-//!
-//! The engine reads and writes the host's todo state through
-//! [`crate::callbacks::HostCallbacks::state_read`] / `state_write` (the
-//! `host/state_read` / `host/state_write` RPCs). The host stays the
-//! persistence + undo authority; this module only parses the tool arguments,
-//! normalizes the todo items, and renders the v2-aligned output.
-
 use serde_json::Value;
 
 use super::{arg_error, arg_error_text, err_result, ok_result};
@@ -15,10 +6,6 @@ use crate::rpc::types::{StateReadRequest, StateWriteRequest};
 use crate::tools::todo_item::{read_todo_items, render_todo_list};
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// The next-step hint appended to a non-empty write output (v2 `nextStepHint`
-/// from `da5918c0c8`, which deleted the static `todo-list-write-reminder.md`
-/// echo): it steers the list toward exactly one in_progress item and names
-/// what to do next. `None` when the write closed every item.
 fn next_step_hint(stored: &[crate::tools::todo_item::TodoItem]) -> Option<String> {
     let progress = crate::tools::todo_item::todo_progress(stored);
     if progress.open == 0 {
@@ -48,14 +35,8 @@ fn next_step_hint(stored: &[crate::tools::todo_item::TodoItem]) -> Option<String
     ))
 }
 
-/// Failure message when the connected host does not implement the state
-/// bridge. The model must not retry the tool — the host cannot persist todo
-/// state for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot persist todo list changes.";
 
-/// Execute the TodoList tool natively: omit `todos` to read the current
-/// list, pass an empty array to clear it, pass a full replacement list
-/// (v2 semantics), or pass `updates` to patch items in place by id.
 pub async fn execute_todo_list(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -89,10 +70,6 @@ pub async fn execute_todo_list(
     write_todo_list(callbacks, args, normalized).await
 }
 
-/// Incremental mode (`updates`): read the host list, apply each patch by id,
-/// write the result back. Only the fields present on a patch change; an id
-/// that is not in the current list is an error naming the known ids, so a
-/// stale id cannot silently no-op.
 async fn update_todo_list(callbacks: &dyn HostCallbacks, args: &Value) -> ExecutableToolResult {
     let Some(patches) = args.get("updates").and_then(|v| v.as_array()) else {
         return err_result(
@@ -182,8 +159,6 @@ async fn update_todo_list(callbacks: &dyn HostCallbacks, args: &Value) -> Execut
     write_todo_list(callbacks, args, items).await
 }
 
-/// Read the current list for the incremental path, mapping host errors the
-/// same way the read tool does.
 async fn read_current_items(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -208,7 +183,6 @@ async fn read_current_items(
     }
 }
 
-/// Read mode: `state_read` the todo domain and render the host's list.
 async fn read_todo_list(callbacks: &dyn HostCallbacks, args: &Value) -> ExecutableToolResult {
     let request = StateReadRequest {
         domain: "todo".into(),
@@ -230,16 +204,11 @@ async fn read_todo_list(callbacks: &dyn HostCallbacks, args: &Value) -> Executab
     }
 }
 
-/// Write mode: normalize the submitted items (id assignment, progress
-/// clamping), `state_write` them as undoable, and render the host's
-/// post-write state.
 async fn write_todo_list(
     callbacks: &dyn HostCallbacks,
     args: &Value,
     normalized: Vec<crate::tools::todo_item::TodoItem>,
 ) -> ExecutableToolResult {
-    // Fail closed: a serialization failure must not degrade into "write an
-    // empty list", which would clear the user's todos and still report success.
     let value = match serde_json::to_value(&normalized) {
         Ok(value) => value,
         Err(error) => {
@@ -266,8 +235,6 @@ async fn write_todo_list(
     };
     match callbacks.state_write(request).await {
         Ok(response) => {
-            // The host's response value is the authoritative post-write
-            // state (it re-normalizes the submitted items).
             let stored = read_todo_items(&response.value);
             if stored.is_empty() {
                 ok_result("Todo list cleared.".into())
@@ -283,9 +250,6 @@ async fn write_todo_list(
     }
 }
 
-/// Strictly validate the submitted entries against the v2 zod contract
-/// (non-empty title, valid status; extra fields are ignored like zod's
-/// default strip). `None` when any entry violates the shape.
 fn normalize_write_items(entries: &[Value]) -> Option<Vec<crate::tools::todo_item::TodoItem>> {
     for entry in entries {
         let obj = entry.as_object()?;
@@ -300,15 +264,10 @@ fn normalize_write_items(entries: &[Value]) -> Option<Vec<crate::tools::todo_ite
             return None;
         }
     }
-    // Validation passed; `read_todo_items` performs the v2 normalization
-    // (id assignment, progress clamping) on the raw entries.
+
     Some(read_todo_items(&Value::Array(entries.to_vec())))
 }
 
-/// Map a state bridge error to a tool result: an unwired host (message
-/// carries the `does not support state bridge` phrase) gets the dedicated
-/// failure message; everything else is passed through verbatim — the engine
-/// never retries a failed state write.
 fn map_state_error(error: String) -> ExecutableToolResult {
     if error.contains("does not support state bridge") {
         err_result(STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE.into())
@@ -317,9 +276,6 @@ fn map_state_error(error: String) -> ExecutableToolResult {
     }
 }
 
-/// Engine tool definition for TodoList, so the model can discover and call
-/// it (used by the standalone REPL and native tool listing). The schema
-/// mirrors v2 `TodoListInputSchema`.
 pub fn todo_list_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "TodoList".into(),
@@ -400,8 +356,6 @@ mod tests {
     use crate::rpc::types::{BoxFuture, PermissionDecision, StateReadResponse, StateWriteResponse};
     use std::sync::Arc;
 
-    /// Scripted callbacks: records the received state requests and answers
-    /// with canned responses.
     struct ScriptedCallbacks {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,
@@ -540,7 +494,7 @@ mod tests {
         assert_eq!(request.domain, "todo");
         assert_eq!(request.key, "todo");
         assert!(request.undoable);
-        // The submitted value is normalized: ids assigned, progress clamped.
+
         assert_eq!(request.value[0]["id"], "T1");
         assert_eq!(request.value[0]["title"], "Read session-control.ts");
         assert_eq!(request.value[0]["status"], "in_progress");
@@ -550,8 +504,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_mode_uses_host_response_when_present() {
-        // The host's post-write state wins over the submitted value (it is
-        // authoritative after re-normalization).
         let (callbacks, _, _) = scripted(
             read_ok(Value::Null),
             write_ok(serde_json::json!([
@@ -580,9 +532,6 @@ mod tests {
         assert!(request.undoable);
     }
 
-    /// The write echo's next-step hint (v2 `nextStepHint`): it reacts to the
-    /// stored list — no in_progress item, several, the last open one, or the
-    /// ordinary case — and disappears once every item is done.
     #[tokio::test]
     async fn test_write_echo_next_step_hint_variants() {
         let cases: [(Value, &str); 4] = [
@@ -629,7 +578,6 @@ mod tests {
             );
         }
 
-        // All done: the updated echo carries no hint.
         let (callbacks, _, _) = scripted(
             read_ok(Value::Null),
             write_ok(serde_json::json!([
@@ -648,10 +596,6 @@ mod tests {
         );
     }
 
-    /// The `updates` path used to fall through to the read branch (the schema
-    /// had no `updates` property), so a model following the tool description
-    /// silently read the list instead of patching it. It now reads the current
-    /// list, patches by id, and writes the result back.
     #[tokio::test]
     async fn test_updates_patches_items_in_place() {
         let (callbacks, read_received, write_received) = scripted(
@@ -680,7 +624,7 @@ mod tests {
             "the patch reads first"
         );
         let request = write_received.lock().unwrap().clone().unwrap();
-        // Untouched fields survive; the patched ones changed.
+
         assert_eq!(request.value[0]["title"], "Phase 1");
         assert_eq!(request.value[0]["status"], "pending");
         assert_eq!(request.value[1]["id"], "T1");

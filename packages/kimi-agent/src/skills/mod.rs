@@ -4,7 +4,7 @@
 //! (`~/.kimi-code/skills`, `~/.agents/skills`), and builtin product skills with
 //! precedence: Project > User > Builtin.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,12 @@ pub struct SkillDescriptor {
     /// declaring a `type` field it never receives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_type: Option<String>,
+    /// Frontmatter `when-to-use` / `when_to_use` / `whenToUse` (v2
+    /// `METADATA_ALIASES`, `parser.ts:46-51`). The model listing renders it as
+    /// a `When to use:` line under the description (v2 `formatModelSkill`,
+    /// `registry.ts:230-232`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_to_use: Option<String>,
 }
 
 /// Skill scope values (v2 `SkillScope`, #3843): `tui` | `web`. `None` keeps
@@ -93,6 +99,8 @@ pub struct ParsedSkillMeta {
     /// Frontmatter `type` (v2 `SkillMetadata.type`): `prompt` | `inline` |
     /// `flow` | `reference`. `None` defaults to `inline` at render time.
     pub skill_type: Option<String>,
+    /// Frontmatter `when-to-use` / `when_to_use` / `whenToUse`.
+    pub when_to_use: Option<String>,
     /// Named arguments declared via frontmatter `arguments` — a bare string,
     /// an inline `[a, b]` list, or a block `- a` list — filtered to valid
     /// names (non-empty, not all digits).
@@ -120,6 +128,7 @@ pub fn parse_skill_frontmatter(content: &str, fallback_name: &str) -> ParsedSkil
         disable_model_invocation: false,
         scopes: None,
         skill_type: None,
+        when_to_use: None,
         argument_names: Vec::new(),
         has_sub_skill: false,
     };
@@ -151,6 +160,13 @@ pub fn parse_skill_frontmatter(content: &str, fallback_name: &str) -> ParsedSkil
     if let Some(kind) = non_empty_string(data.get("type")) {
         meta.skill_type = Some(kind);
     }
+    // v2 `METADATA_ALIASES` accepts all three spellings of `whenToUse`.
+    for key in ["whenToUse", "when-to-use", "when_to_use"] {
+        if let Some(when_to_use) = non_empty_string(data.get(key)) {
+            meta.when_to_use = Some(when_to_use);
+            break;
+        }
+    }
     // v2 `METADATA_ALIASES` accepts both spellings of each of these two keys.
     for key in ["disable-model-invocation", "disable_model_invocation"] {
         if data.get(key).and_then(Value::as_bool) == Some(true) {
@@ -169,6 +185,62 @@ pub fn parse_skill_frontmatter(content: &str, fallback_name: &str) -> ParsedSkil
         meta.description = first_prose_line(&parsed.body);
     }
     meta
+}
+
+/// v2 `isInlineSkillType` (`catalog/types.ts:92-94`): the types the model
+/// listing advertises and the `Skill` tool accepts.
+pub fn is_inline_skill_type(skill_type: Option<&str>) -> bool {
+    matches!(skill_type, None | Some("prompt") | Some("inline"))
+}
+
+/// v2 `isUserActivatableSkillType` (`catalog/types.ts:96-98`): the inline types
+/// plus `flow`, which only the user's `/skill` path may start.
+pub fn is_user_activatable_skill_type(skill_type: Option<&str>) -> bool {
+    is_inline_skill_type(skill_type) || skill_type == Some("flow")
+}
+
+/// v2 `isSupportedSkillType` (`catalog/types.ts:100-102`): anything outside
+/// this set makes the skill file invalid, so discovery skips it.
+pub fn is_supported_skill_type(skill_type: Option<&str>) -> bool {
+    is_user_activatable_skill_type(skill_type) || skill_type == Some("reference")
+}
+
+/// v2 `parseSkillText` (`catalog/parser.ts:53-106`) as discovery applies it:
+/// a directory `SKILL.md` must open with `---`, the frontmatter must be valid
+/// YAML, `type` must be supported, and a directory skill must declare `name`
+/// and `description`.
+///
+/// Returns the reason to skip the file. [`parse_skill_frontmatter`] stays
+/// lenient for the callers that only want best-effort metadata; discovery is
+/// where v2 rejects, so the model listing and the `Skill` tool never see a
+/// half-parsed skill.
+fn parse_skill_for_discovery(
+    content: &str,
+    fallback_name: &str,
+    require_frontmatter: bool,
+) -> Result<ParsedSkillMeta, String> {
+    if require_frontmatter && content.lines().next().unwrap_or_default().trim() != "---" {
+        return Err("Missing frontmatter".to_string());
+    }
+    let parsed = crate::frontmatter::parse_frontmatter(content)
+        .map_err(|error| format!("Invalid frontmatter: {error}"))?;
+    let meta = parse_skill_frontmatter(content, fallback_name);
+    if !is_supported_skill_type(meta.skill_type.as_deref()) {
+        return Err(format!(
+            "unsupported skill type \"{}\"",
+            meta.skill_type.as_deref().unwrap_or_default()
+        ));
+    }
+    if require_frontmatter {
+        // v2 `parser.ts:86-91`: both fields are required on a directory skill.
+        if non_empty_string(parsed.data.get("name")).is_none() {
+            return Err("Missing required frontmatter field \"name\"".to_string());
+        }
+        if non_empty_string(parsed.data.get("description")).is_none() {
+            return Err("Missing required frontmatter field \"description\"".to_string());
+        }
+    }
+    Ok(meta)
 }
 
 /// The document's body: everything after the closing fence, or the whole text
@@ -298,6 +370,37 @@ fn scan_plugin_directory(
     scan_directory_for_plugin(dir, "extra", Some(plugin_id), out, seen);
 }
 
+/// v2 `MAX_SKILL_SCAN_DEPTH` (`fileSkillDiscovery.ts:12`): a `SKILL.md` nested
+/// deeper than this is not discovered.
+const MAX_SKILL_SCAN_DEPTH: usize = 8;
+
+/// v2 `isSkillScanExcludedEntry` (`fileSkillDiscovery.ts:14-16`): the walk
+/// never descends into `node_modules` or a dot directory. A `SKILL.md` inside
+/// such a directory *is* still registered when the directory sits in a scanned
+/// directory, because upstream collects `directorySkills` before applying this
+/// filter.
+fn is_scan_excluded_entry(name: &str) -> bool {
+    name == "node_modules" || name.starts_with('.')
+}
+
+/// The `SKILL.md` (or the fork's lowercase `skill.md`) inside `dir`.
+fn skill_file_in(dir: &Path) -> Option<PathBuf> {
+    let upper = dir.join("SKILL.md");
+    if upper.is_file() {
+        return Some(upper);
+    }
+    let lower = dir.join("skill.md");
+    lower.is_file().then_some(lower)
+}
+
+/// v2 `walkSkillDir` (`fileSkillDiscovery.ts:38-141`): recursive discovery over
+/// a skill root.
+///
+/// Directories holding a `SKILL.md` are registered at whatever depth they sit
+/// (≤ [`MAX_SKILL_SCAN_DEPTH`]); a directory skill that did not opt into
+/// `has-sub-skill` hides its children; a `has-sub-skill: true` parent names its
+/// descendants `<parent>.<child>` (v2 `allowedSubSkillBundles`); bare `<name>.md`
+/// files are parsed only at the root of the scan.
 fn scan_directory_for_plugin(
     dir: &Path,
     source: &str,
@@ -305,6 +408,23 @@ fn scan_directory_for_plugin(
     out: &mut Vec<SkillDescriptor>,
     seen: &mut HashSet<String>,
 ) {
+    walk_skill_dir(dir, source, plugin_id, true, 0, None, out, seen);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_skill_dir(
+    dir: &Path,
+    source: &str,
+    plugin_id: Option<&str>,
+    is_top_level: bool,
+    depth: usize,
+    sub_skill_parent: Option<&str>,
+    out: &mut Vec<SkillDescriptor>,
+    seen: &mut HashSet<String>,
+) {
+    if depth > MAX_SKILL_SCAN_DEPTH {
+        return;
+    }
     let read_dir = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,
@@ -313,59 +433,138 @@ fn scan_directory_for_plugin(
     let mut entries: Vec<_> = read_dir.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
 
-    for entry in entries {
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
+    // v2 `directorySkills`: every direct child directory holding a `SKILL.md`,
+    // collected before the scan-exclusion filter so a dot-directory skill is
+    // still registered.
+    let mut directory_skills: Vec<(String, PathBuf)> = Vec::new();
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for entry in &entries {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
         };
-        let file_name = entry.file_name().to_string_lossy().to_string();
-
-        if file_type.is_dir() {
-            // Check sub_dir/SKILL.md or sub_dir/skill.md
-            let mut skill_file = entry.path().join("SKILL.md");
-            if !skill_file.exists() {
-                skill_file = entry.path().join("skill.md");
-            }
-            if skill_file.is_file()
-                && let Ok(content) = std::fs::read_to_string(&skill_file)
-                && let Some(meta) = push_descriptor(
-                    &content,
-                    &file_name,
-                    &skill_file.to_string_lossy(),
-                    source,
-                    out,
-                    seen,
-                    NameQualifiers {
-                        sub_skill_parent: None,
-                        plugin_id,
-                    },
-                )
-                && meta.has_sub_skill
-            {
-                // A `has-sub-skill: true` parent: its directory children become
-                // `<parent>.<child>` sub-skills (v2 `allowedSubSkillBundles`).
-                scan_sub_skills(&entry.path(), &meta.name, source, out, seen);
-            }
-        } else if file_type.is_file()
-            && file_name.ends_with(".md")
-            && !file_name.eq_ignore_ascii_case("readme.md")
-        {
-            let base_name = file_name.trim_end_matches(".md");
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                push_descriptor(
-                    &content,
-                    base_name,
-                    &entry.path().to_string_lossy(),
-                    source,
-                    out,
-                    seen,
-                    NameQualifiers {
-                        sub_skill_parent: None,
-                        plugin_id,
-                    },
-                );
-            }
+        if !file_type.is_dir() {
+            continue;
         }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(skill_file) = skill_file_in(&entry.path()) {
+            directory_skills.push((name.clone(), skill_file));
+        }
+        if is_scan_excluded_entry(&name) {
+            continue;
+        }
+        subdirs.push(entry.path());
+    }
+
+    // Register this level's directory skills, remembering the ones whose
+    // children are sub-skills (v2 `allowedSubSkillBundles`, keyed by directory
+    // entry name but holding the *qualified* skill name).
+    let mut allowed_sub_skill_parents: HashMap<String, String> = HashMap::new();
+    let mut directory_skill_names: HashSet<String> = HashSet::new();
+    for (name, skill_file) in &directory_skills {
+        directory_skill_names.insert(name.clone());
+        let Ok(content) = std::fs::read_to_string(skill_file) else {
+            continue;
+        };
+        let meta = push_descriptor(
+            &content,
+            name,
+            &skill_file.to_string_lossy(),
+            source,
+            true,
+            out,
+            seen,
+            NameQualifiers {
+                sub_skill_parent,
+                plugin_id,
+            },
+        );
+        if let Some(meta) = meta.filter(|meta| meta.has_sub_skill) {
+            allowed_sub_skill_parents.insert(name.clone(), meta.name);
+        }
+    }
+
+    if is_top_level {
+        // v2 registers a plugin root's own `SKILL.md` (its directory name is
+        // the skill name). Roots whose manifest opts into `root-skill-only`
+        // scanning still walk their children here; that manifest flag is
+        // carried by the plugin layer (B10-12), not by the scan root.
+        if plugin_id.is_some()
+            && let Some(skill_file) = skill_file_in(dir)
+            && let Ok(content) = std::fs::read_to_string(&skill_file)
+        {
+            let root_name = dir
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            push_descriptor(
+                &content,
+                &root_name,
+                &skill_file.to_string_lossy(),
+                source,
+                true,
+                out,
+                seen,
+                NameQualifiers {
+                    sub_skill_parent,
+                    plugin_id,
+                },
+            );
+        }
+        // Bare `<name>.md` files are a root-level convenience (v2 parses them
+        // only when `isTopLevel`): a directory skill of the same name wins.
+        for entry in &entries {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if !file_name.ends_with(".md") || file_name == "SKILL.md" {
+                continue;
+            }
+            let base_name = file_name.trim_end_matches(".md");
+            if directory_skill_names.contains(base_name) {
+                continue;
+            }
+            if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            push_descriptor(
+                &content,
+                base_name,
+                &entry.path().to_string_lossy(),
+                source,
+                false,
+                out,
+                seen,
+                NameQualifiers {
+                    sub_skill_parent,
+                    plugin_id,
+                },
+            );
+        }
+    }
+
+    for subdir in subdirs {
+        let dir_name = subdir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // A directory skill that did not opt into sub-skills hides its
+        // children (v2 `fileSkillDiscovery.ts:131`).
+        let child_parent = match allowed_sub_skill_parents.get(&dir_name) {
+            Some(parent) => Some(parent.as_str()),
+            None if directory_skill_names.contains(&dir_name) => continue,
+            None => sub_skill_parent,
+        };
+        walk_skill_dir(
+            &subdir,
+            source,
+            plugin_id,
+            false,
+            depth + 1,
+            child_parent,
+            out,
+            seen,
+        );
     }
 }
 
@@ -402,17 +601,29 @@ struct NameQualifiers<'a> {
 /// first, so a plugin's `<parent>.<child>` chain qualifies exactly once.
 ///
 /// Returns the metadata of the descriptor it appended, so the caller can act
-/// on `has_sub_skill`; `None` when the name was already taken.
+/// on `has_sub_skill`; `None` when the file is invalid or the name was already
+/// taken.
 fn push_descriptor(
     content: &str,
     fallback_name: &str,
     path: &str,
     source: &str,
+    require_frontmatter: bool,
     out: &mut Vec<SkillDescriptor>,
     seen: &mut HashSet<String>,
     qualifiers: NameQualifiers<'_>,
 ) -> Option<ParsedSkillMeta> {
-    let mut meta = parse_skill_frontmatter(content, fallback_name);
+    let mut meta = match parse_skill_for_discovery(content, fallback_name, require_frontmatter) {
+        Ok(meta) => meta,
+        Err(reason) => {
+            // v2 `parseAndRegister` (`fileSkillDiscovery.ts:191-204`): a skill
+            // that cannot be parsed is skipped with a warning, never
+            // registered — registering it would put a half-parsed entry in both
+            // the model listing and the `Skill` tool.
+            tracing::warn!(path, reason = %reason, "Skipping invalid skill");
+            return None;
+        }
+    };
     if let Some(parent) = qualifiers.sub_skill_parent {
         meta.name = qualify_sub_skill_name(parent, &meta.name);
     }
@@ -431,6 +642,7 @@ fn push_descriptor(
         scopes: meta.scopes.clone(),
         is_sub_skill: qualifiers.sub_skill_parent.map(|_| true),
         skill_type: meta.skill_type.clone(),
+        when_to_use: meta.when_to_use.clone(),
     });
     Some(meta)
 }
@@ -469,6 +681,11 @@ pub struct PluginSkillDir {
     pub dir: PathBuf,
     pub plugin_id: String,
     pub instructions: Option<String>,
+    /// The skill this plugin activates when a session starts (v2
+    /// `manifest.sessionStart.skill`). Repeated on every root the plugin
+    /// contributes; the session-start renderer keys on the plugin id, not the
+    /// root, so only one block per plugin is emitted.
+    pub session_start: Option<String>,
 }
 
 impl SkillScanRoots {
@@ -489,6 +706,45 @@ impl SkillScanRoots {
     /// `plugin` (5) — `SKILL_SOURCE_PRIORITY`, where the higher number wins.
     pub fn roots_in_precedence_order(&self) -> Vec<PathBuf> {
         roots_in_precedence_order(&self.extra_dirs, &self.plugin_dirs)
+    }
+
+    /// Every directory [`Self::catalog`] will read, in scan order. Absent roots
+    /// are included (the scan tolerates them); this list exists so a change
+    /// detector can ask which of them failed before trusting an empty catalog.
+    pub fn scanned_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        for group in [project_skill_dirs(self.root.as_deref()), user_skill_dirs()] {
+            if self.merge_all_available_skills {
+                roots.extend(group);
+            } else if let Some(first) = group.into_iter().find(|dir| dir.is_dir()) {
+                roots.push(first);
+            }
+        }
+        roots.extend(self.extra_dirs.iter().cloned());
+        roots.extend(self.plugin_dirs.iter().map(|entry| entry.dir.clone()));
+        roots
+    }
+
+    /// [`Self::catalog`] with a root-level read failure kept distinct from an
+    /// empty catalog. A configured root that exists but cannot be listed makes
+    /// the whole scan `Unreadable`: a change detector must never read that as
+    /// "every skill was deleted" and send a false reminder.
+    pub fn catalog_outcome(&self) -> crate::primitives::read::ReadOutcome<Vec<SkillDescriptor>> {
+        for root in self.scanned_roots() {
+            match std::fs::read_dir(&root) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return crate::primitives::read::ReadOutcome::Unreadable(
+                        crate::primitives::read::UnreadableCause::new(
+                            root.display().to_string(),
+                            error,
+                        ),
+                    );
+                }
+            }
+        }
+        crate::primitives::read::ReadOutcome::Found(self.catalog())
     }
 
     /// The plugin a skill root came from, if any — the counterpart of v2's
@@ -512,66 +768,18 @@ pub fn roots_in_precedence_order(
         .collect()
 }
 
-/// Register a `has-sub-skill: true` parent's directory children as
-/// `<parent>.<child>` sub-skills (v2 `walkSkillDir`'s
-/// `allowedSubSkillBundles` branch). Sub-skills are user-invocable, so the
-/// prompt's catalog keeps them out and only the parent is advertised to the
-/// model.
-fn scan_sub_skills(
-    parent_dir: &Path,
-    parent_name: &str,
-    source: &str,
-    out: &mut Vec<SkillDescriptor>,
-    seen: &mut HashSet<String>,
-) {
-    let Ok(read_dir) = std::fs::read_dir(parent_dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = read_dir.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        let child_name = entry.file_name().to_string_lossy().to_string();
-        let mut skill_file = entry.path().join("SKILL.md");
-        if !skill_file.exists() {
-            skill_file = entry.path().join("skill.md");
-        }
-        if !skill_file.is_file() {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&skill_file) else {
-            continue;
-        };
-        push_descriptor(
-            &content,
-            &child_name,
-            &skill_file.to_string_lossy(),
-            source,
-            out,
-            seen,
-            // The parent already carries any plugin qualification; the
-            // `<parent>.<child>` chain inherits it through the parent name.
-            NameQualifiers {
-                sub_skill_parent: Some(parent_name),
-                plugin_id: None,
-            },
-        );
-    }
-}
-
 /// A builtin product skill: its catalog descriptor plus the embedded body
 /// the `Skill` tool loads (v2 ships the same content through `*.md?raw`).
 pub struct BuiltinSkillDef {
     pub descriptor: SkillDescriptor,
     pub body: &'static str,
+    /// v2 `productSpecific`: hidden when `builtinProductSkills` is disabled
+    /// (`builtin.ts:30-32`).
+    pub product_specific: bool,
 }
 
 const CHECK_KIMI_CODE_DOCS_BODY: &str = include_str!("builtin/check-kimi-code-docs.md");
+const MCP_CONFIG_BODY: &str = include_str!("builtin/mcp-config.md");
 const UPDATE_CONFIG_BODY: &str = include_str!("builtin/update-config.md");
 const WRITE_GOAL_BODY: &str = include_str!("builtin/write-goal.md");
 const CUSTOM_THEME_BODY: &str = include_str!("builtin/custom-theme.md");
@@ -583,22 +791,30 @@ const SUB_SKILL_CONSOLIDATE_BODY: &str = include_str!("builtin/sub-skill/consoli
 /// Every builtin product skill, derived from its embedded `SKILL.md`: the
 /// descriptor's name/description and the body the tool loads stay one source
 /// (v2's `parseSkillText`, then the path/dir override).
+///
+/// This is the unfiltered list; [`builtin_skills`] applies v2's
+/// `productSpecific` gate.
 pub fn builtin_skill_defs() -> Vec<BuiltinSkillDef> {
     vec![
+        // v2 `MCP_CONFIG_SKILL` (`builtin/mcp-config.ts:15-25`): an inline
+        // product skill the model must not start on its own.
+        builtin_def("mcp-config", MCP_CONFIG_BODY, None, true, true),
         builtin_def(
             "check-kimi-code-docs",
             CHECK_KIMI_CODE_DOCS_BODY,
             None,
             false,
+            true,
         ),
-        builtin_def("update-config", UPDATE_CONFIG_BODY, None, false),
-        builtin_def("write-goal", WRITE_GOAL_BODY, None, false),
+        builtin_def("update-config", UPDATE_CONFIG_BODY, None, false, true),
+        builtin_def("write-goal", WRITE_GOAL_BODY, None, false, false),
         // v2's `custom-theme` wrapper override: user-only (model invocation
         // disabled) and TUI-scoped.
         builtin_def(
             "custom-theme",
             CUSTOM_THEME_BODY,
             Some(vec!["tui".into()]),
+            true,
             true,
         ),
         // v2 `IMPORT_FROM_CC_CODEX_SKILL`: a user-only product skill (it
@@ -608,6 +824,7 @@ pub fn builtin_skill_defs() -> Vec<BuiltinSkillDef> {
             "import-from-cc-codex",
             IMPORT_FROM_CC_CODEX_BODY,
             None,
+            true,
             true,
         ),
         // v2's `sub-skill` bundle: the parent container plus its two
@@ -631,6 +848,7 @@ fn builtin_def(
     body: &'static str,
     scopes: Option<Vec<String>>,
     disable_model_invocation: bool,
+    product_specific: bool,
 ) -> BuiltinSkillDef {
     let parsed = parse_skill_frontmatter(body, name);
     BuiltinSkillDef {
@@ -647,8 +865,10 @@ fn builtin_def(
             },
             is_sub_skill: None,
             skill_type: parsed.skill_type,
+            when_to_use: parsed.when_to_use,
         },
         body,
+        product_specific,
     }
 }
 
@@ -669,15 +889,29 @@ fn sub_skill_def(name: &str, pseudo_path: &str, body: &'static str) -> BuiltinSk
             scopes: parsed.scopes,
             is_sub_skill: (name != "sub-skill").then_some(true),
             skill_type: parsed.skill_type,
+            when_to_use: parsed.when_to_use,
         },
         body,
+        product_specific: false,
     }
 }
 
-/// Builtin descriptors (see [`builtin_skill_defs`]).
+/// Builtin descriptors (see [`builtin_skill_defs`]), filtered the way v2's
+/// `visibleBuiltinSkills` (`builtin/builtin.ts:25-37`) does:
+///
+/// - `productSpecific` skills are hidden when `builtinProductSkills` is `false`
+///   (`KIMI_CODE_BUILTIN_PRODUCT_SKILLS`, documented default `true`);
+/// - an `experimentalFlag` would gate the rest, but no builtin currently
+///   declares one, so that filter is vacuous today.
+///
+/// Runtime contributions (`registerBuiltinSkill`) are a host-side API v2 takes
+/// from TS plugin packages; the fork's equivalent is a plugin skill root, which
+/// the scan adds under the `plugin` rank instead.
 pub fn builtin_skills() -> Vec<SkillDescriptor> {
+    let product_skills = crate::config::KimiConfig::resolved_builtin_product_skills();
     builtin_skill_defs()
         .into_iter()
+        .filter(|def| product_skills || !def.product_specific)
         .map(|def| def.descriptor)
         .collect()
 }
@@ -732,6 +966,45 @@ pub fn scan_all_skills_with_extra_and_merge(
     )
 }
 
+/// v2 `findProjectRoot` (`skillRoots.ts:100-105`): the nearest ancestor of
+/// `workspace_root` holding `.git`, falling back to `workspace_root` itself
+/// when there is none.
+fn resolve_project_root(workspace_root: &Path) -> PathBuf {
+    for ancestor in workspace_root.ancestors() {
+        if ancestor.join(".git").exists() {
+            return ancestor.to_path_buf();
+        }
+    }
+    workspace_root.to_path_buf()
+}
+
+/// The project-scope skill roots for `workspace_root`, in scan order. Shared by
+/// the catalog scan and [`SkillScanRoots::scanned_roots`] so the change
+/// detector probes exactly the directories the scan reads.
+fn project_skill_dirs(workspace_root: Option<&Path>) -> Vec<PathBuf> {
+    workspace_root
+        .map(resolve_project_root)
+        .map(|root| {
+            vec![
+                root.join(".agents").join("skills"),
+                root.join(".kimi-code").join("skills"),
+            ]
+        })
+        .unwrap_or_default()
+}
+
+/// The user-scope skill roots, in scan order (same home resolution as the scan).
+fn user_skill_dirs() -> Vec<PathBuf> {
+    let home_path = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".into());
+    let home = PathBuf::from(home_path);
+    vec![
+        home.join(".kimi-code").join("skills"),
+        home.join(".agents").join("skills"),
+    ]
+}
+
 /// [`scan_all_skills_with_extra_and_merge`] plus plugin-contributed roots
 /// (v2 `manager.pluginSkillRoots`): scanned after the declared extra roots and
 /// before the builtins (`extra` 10 > `plugin` 5 > `builtin` 0), each
@@ -746,17 +1019,11 @@ pub fn scan_all_skills_with_extra_merge_and_plugins(
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    // 1. Project skills
-    let project_dirs: Vec<PathBuf> = workspace_root
-        .map(|root| {
-            vec![
-                root.join(".agents").join("skills"),
-                root.join(".kimi-code").join("skills"),
-            ]
-        })
-        .unwrap_or_default();
+    // 1. Project skills. v2 `findProjectRoot` (`skillRoots.ts:100-105`) walks
+    // up from the work dir to the nearest `.git`, so a session started in a
+    // repository subdirectory still sees the repository-level skills.
     scan_scope_group(
-        &project_dirs,
+        &project_skill_dirs(workspace_root),
         "project",
         merge_all_available_skills,
         &mut out,
@@ -764,17 +1031,8 @@ pub fn scan_all_skills_with_extra_merge_and_plugins(
     );
 
     // 2. User skills
-    let home_path = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".into());
-    let home = PathBuf::from(home_path);
-
-    let user_dirs = vec![
-        home.join(".kimi-code").join("skills"),
-        home.join(".agents").join("skills"),
-    ];
     scan_scope_group(
-        &user_dirs,
+        &user_skill_dirs(),
         "user",
         merge_all_available_skills,
         &mut out,
@@ -831,6 +1089,38 @@ fn scan_scope_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::read::ReadOutcome;
+
+    /// A root that exists but is not a directory cannot be listed. The change
+    /// notifier must see `Unreadable`, not an empty catalog, or it would report
+    /// that every skill was deleted.
+    #[test]
+    fn test_catalog_outcome_separates_an_unreadable_root_from_an_empty_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let readable = SkillScanRoots {
+            root: None,
+            extra_dirs: vec![dir.path().join("does-not-exist")],
+            plugin_dirs: Vec::new(),
+            merge_all_available_skills: true,
+        };
+        assert!(
+            matches!(readable.catalog_outcome(), ReadOutcome::Found(_)),
+            "an absent root is an empty catalog, not a failure"
+        );
+
+        let file_root = dir.path().join("skills-is-a-file");
+        std::fs::write(&file_root, "not a directory").unwrap();
+        let unreadable = SkillScanRoots {
+            root: None,
+            extra_dirs: vec![file_root],
+            plugin_dirs: Vec::new(),
+            merge_all_available_skills: true,
+        };
+        assert!(
+            matches!(unreadable.catalog_outcome(), ReadOutcome::Unreadable(_)),
+            "a root that cannot be listed must not read as empty"
+        );
+    }
 
     #[test]
     fn test_parse_skill_metadata_frontmatter() {
@@ -884,6 +1174,123 @@ This is the first paragraph describing the skill.
 
         // Builtins should also be included
         assert!(list.iter().any(|s| s.name == "check-kimi-code-docs"));
+    }
+
+    /// v2 `walkSkillDir` (`fileSkillDiscovery.ts:38-141`): `SKILL.md` files are
+    /// found at any depth ≤ 8, the walk does not descend into `node_modules` /
+    /// dot directories (a direct child skill in one still registers), and a
+    /// bare `.md` file is parsed only at the root of a scan root.
+    #[test]
+    fn test_discovery_walks_nested_directories() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project = temp_dir.path();
+        let skills_root = project.join(".kimi-code").join("skills");
+
+        let nested = skills_root.join("group").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: nested-skill\ndescription: Found two levels down.\n---\n",
+        )
+        .unwrap();
+
+        let hidden = skills_root.join(".hidden");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(
+            hidden.join("SKILL.md"),
+            "---\nname: hidden-skill\ndescription: Dot directory.\n---\n",
+        )
+        .unwrap();
+
+        let modules = skills_root.join("node_modules").join("dep");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(
+            modules.join("SKILL.md"),
+            "---\nname: dependency-skill\ndescription: Must not be scanned.\n---\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            skills_root.join("loose.md"),
+            "Loose skill body without frontmatter.\n",
+        )
+        .unwrap();
+
+        let list = scan_all_skills(Some(project));
+        assert!(list.iter().any(|skill| skill.name == "nested-skill"));
+        // A dot directory holding a SKILL.md is registered (upstream collects
+        // `directorySkills` before the exclusion filter) ...
+        assert!(list.iter().any(|skill| skill.name == "hidden-skill"));
+        // ... but `node_modules` is never walked into.
+        assert!(!list.iter().any(|skill| skill.name == "dependency-skill"));
+        // Root-level bare `.md` files still register.
+        assert!(list.iter().any(|skill| skill.name == "loose"));
+    }
+
+    /// v2 `findProjectRoot` (`skillRoots.ts:100-105`): the project scope is the
+    /// nearest ancestor holding `.git`, not the session's work dir.
+    #[test]
+    fn test_project_skills_resolve_from_the_git_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = temp_dir.path();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let skill_dir = repo.join(".kimi-code").join("skills").join("repo-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: repo-skill\ndescription: Lives at the repo root.\n---\n",
+        )
+        .unwrap();
+
+        let subdir = repo.join("packages").join("app");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let list = scan_all_skills(Some(&subdir));
+        assert!(list.iter().any(|skill| skill.name == "repo-skill"));
+    }
+
+    /// v2 `parseSkillText` + `parseAndRegister` (`catalog/parser.ts:53-106`,
+    /// `fileSkillDiscovery.ts:191-204`): a directory `SKILL.md` without
+    /// frontmatter, with an unsupported `type`, or without `name`/`description`
+    /// is skipped instead of registered with degraded metadata.
+    #[test]
+    fn test_invalid_directory_skills_are_skipped() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let proj_root = temp_dir.path();
+        let skills_dir = proj_root.join(".agents").join("skills");
+
+        let write = |name: &str, content: &str| {
+            let dir = skills_dir.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), content).unwrap();
+        };
+
+        write("missing-frontmatter", "# Just a title\n\nBody.\n");
+        write(
+            "unsupported-type",
+            "---\nname: unsupported-type\ndescription: nope\ntype: banana\n---\nBody.\n",
+        );
+        write(
+            "missing-description",
+            "---\nname: missing-description\n---\nBody.\n",
+        );
+        write(
+            "valid-skill",
+            "---\nname: valid-skill\ndescription: fine\n---\nBody.\n",
+        );
+
+        let list = scan_all_skills(Some(proj_root));
+        assert!(list.iter().any(|s| s.name == "valid-skill"));
+        for skipped in [
+            "missing-frontmatter",
+            "unsupported-type",
+            "missing-description",
+        ] {
+            assert!(
+                !list.iter().any(|s| s.name == skipped),
+                "{skipped} must not be registered"
+            );
+        }
     }
 
     /// v2's ranking (`SKILL_SOURCE_PRIORITY`, `features/skill/catalog/skillSource.ts:11-17`,
@@ -990,6 +1397,7 @@ This is the first paragraph describing the skill.
                 dir: plugin_root,
                 plugin_id: "demo".into(),
                 instructions: None,
+                session_start: None,
             }],
             merge_all_available_skills: true,
         };
@@ -1038,11 +1446,13 @@ This is the first paragraph describing the skill.
                     dir: plugin_a,
                     plugin_id: "plugin-a".into(),
                     instructions: None,
+                    session_start: None,
                 },
                 PluginSkillDir {
                     dir: plugin_b,
                     plugin_id: "plugin-b".into(),
                     instructions: None,
+                    session_start: None,
                 },
             ],
             merge_all_available_skills: true,
@@ -1093,6 +1503,7 @@ This is the first paragraph describing the skill.
                 dir: plugin_root,
                 plugin_id: "superpowers".into(),
                 instructions: None,
+                session_start: None,
             }],
             merge_all_available_skills: true,
         };
@@ -1130,6 +1541,7 @@ This is the first paragraph describing the skill.
                 dir: plugin_root,
                 plugin_id: "lark".into(),
                 instructions: None,
+                session_start: None,
             }],
             merge_all_available_skills: true,
         };

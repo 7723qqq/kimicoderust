@@ -204,10 +204,6 @@ async fn lifecycle_events_mirror_the_v2_surface() {
         vec![
             "subagent.spawned".to_string(),
             "subagent.started".to_string(),
-            // The subagent runs a full turn loop, so the loop's own step
-            // boundary pair fires between the lifecycle pair, the way v2's
-            // `turn.step.started` / `turn.step.completed` do inside a
-            // subagent run.
             "llm.step.begin".to_string(),
             "llm.step.end".to_string(),
             "subagent.completed".to_string(),
@@ -220,12 +216,9 @@ async fn lifecycle_events_mirror_the_v2_surface() {
     assert_eq!(spawned["description"], "Scout");
     assert_eq!(spawned["run_in_background"], false);
     let agent_id = spawned["subagent_id"].as_str().unwrap();
-    assert!(agent_id.starts_with("subagent-"));
+    assert!(agent_id.starts_with("agent-"));
     assert_eq!(events[1]["subagent_id"], spawned["subagent_id"]);
-    // events[2]/events[3] are the step boundary pair (upstream #3938
-    // carries the request timing on the end; the mock transport reports
-    // none, so the field is null here — the projector test covers the
-    // populated shape).
+
     assert_eq!(events[2]["type"], "llm.step.begin");
     assert_eq!(events[3]["type"], "llm.step.end");
     assert!(events[3]["step"].is_number());
@@ -234,10 +227,6 @@ async fn lifecycle_events_mirror_the_v2_surface() {
     assert!(completed["usage"]["total_tokens"].is_number());
 }
 
-/// The session-level subagent hooks ride the emit helpers: removing the
-/// dispatch inside `emit_spawned_started` / `emit_completed` (the single
-/// seam every launch site funnels through) leaves the capture files
-/// empty.
 #[tokio::test]
 async fn subagent_hooks_fire_from_the_emit_helpers() {
     use crate::tools::external_hooks::capture;

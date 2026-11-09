@@ -231,6 +231,7 @@ mod skill_command_tests {
             scopes: None,
             is_sub_skill: None,
             skill_type: skill_type.map(str::to_string),
+            when_to_use: None,
         }
     }
 

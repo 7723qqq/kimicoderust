@@ -23,6 +23,7 @@ const MAX_RPC_LINE_BYTES: usize = 8 * 1024 * 1024;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::oneshot;
 
+use crate::primitives::deadline::Deadline;
 use crate::rpc::types::*;
 
 type AsyncMethodHandler = Arc<
@@ -93,9 +94,9 @@ impl RpcServer {
     /// Multiple concurrent `call_host` calls are supported — responses are
     /// matched by their unique request ID.
     ///
-    /// `timeout` bounds how long the host may take to answer; `None` waits
-    /// indefinitely, which is right for a permission check answered by a
-    /// human.
+    /// `timeout` bounds how long the host may take to answer. `None` leaves
+    /// the wait unbounded: the reference host RPC has no generic timeout, so a
+    /// request that is never answered parks until the host closes the channel.
     pub async fn call_host(
         &self,
         method: &str,
@@ -137,10 +138,7 @@ impl RpcServer {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
-        self.pending
-            .lock()
-            .map_err(|e| format!("lock error: {e}"))?
-            .insert(id, tx);
+        self.pending_map().insert(id, tx);
 
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -154,27 +152,72 @@ impl RpcServer {
             serde_json::to_string(&request).map_err(|e| e.to_string())?
         );
 
-        // A host that never answers would otherwise park the turn forever and
-        // leak the pending entry. Give up instead, and drop the entry so a
-        // late response has nowhere to land.
-        let outcome = match timeout {
-            Some(limit) => match tokio::time::timeout(limit, rx).await {
-                Ok(outcome) => outcome,
-                Err(_) => {
-                    self.pending
-                        .lock()
-                        .map_err(|e| format!("lock error: {e}"))?
-                        .remove(&id);
-                    return Err(format!(
-                        "{method} timed out after {}s with no host response",
-                        limit.as_secs()
-                    ));
-                }
-            },
-            None => rx.await,
+        // Only the call site decides the bound; an absent one is unbounded,
+        // exactly like the reference host RPC. On a timeout the pending entry
+        // is dropped so a late response has nowhere to land.
+        let deadline = match timeout {
+            Some(limit) => Deadline::new(method.to_string(), limit),
+            None => Deadline::unbounded(method.to_string()),
         };
+        let outcome = deadline.wait("waiting for the host to answer", rx).await;
 
-        outcome.map_err(|_| "response channel closed".to_string())?
+        match outcome {
+            // The host answered with a result.
+            Ok(Ok(Ok(value))) => Ok(value),
+            // The host answered with a JSON-RPC error.
+            Ok(Ok(Err(message))) => Err(message),
+            // The sender was dropped without answering (the host closed).
+            Ok(Err(_)) => {
+                self.pending_map().remove(&id);
+                Err(format!(
+                    "{method} could not be answered: the host closed the response channel"
+                ))
+            }
+            Err(wait_timeout) => {
+                self.pending_map().remove(&id);
+                Err(wait_timeout.to_string())
+            }
+        }
+    }
+
+    /// The pending map, recovered from poisoning rather than given up on.
+    ///
+    /// Poisoning means a thread panicked while holding this lock; the map itself
+    /// is still a valid `HashMap`. Treating it as gone would leave every waiter
+    /// parked with no sender left to wake it, so the guard is reused and the
+    /// condition is reported.
+    fn pending_map(&self) -> std::sync::MutexGuard<'_, HashMap<u32, PendingRequest>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "the rpc pending map was poisoned; reusing it to keep the waiters reachable"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    /// Wake every in-flight `call_host` waiter when the host side goes away.
+    ///
+    /// Closing stdin used to just break the read loop: each parked waiter kept
+    /// its oneshot sender alive only through this map, so they sat until the
+    /// process died and the turn looked like it was still thinking. The map is
+    /// drained as well, so a late response has nowhere to land.
+    fn fail_pending(&self, reason: &str) {
+        let waiters = std::mem::take(&mut *self.pending_map());
+        let count = waiters.len();
+        for (_, tx) in waiters {
+            if tx.send(Err(reason.to_string())).is_err() {
+                tracing::debug!(
+                    "an rpc waiter had already given up before the host channel closed"
+                );
+            }
+        }
+        if count > 0 {
+            tracing::warn!(
+                count,
+                reason,
+                "host channel closed with requests still in flight"
+            );
+        }
     }
 
     /// Invoke a method, preferring a locally-registered handler and falling
@@ -226,7 +269,10 @@ impl RpcServer {
             // whole server — and with it the engine — down.
             match reader.read_until(b'\n', &mut raw).await {
                 Ok(0) => {
-                    // EOF (stdin closed)
+                    // EOF (stdin closed): the host side is gone, so nothing will
+                    // ever answer the in-flight requests. Wake them now — they
+                    // would otherwise stay parked until the process exits.
+                    server.fail_pending("the host closed its side of the rpc channel (EOF)");
                     break;
                 }
                 Ok(_) => {
@@ -248,6 +294,9 @@ impl RpcServer {
                 }
                 Err(e) => {
                     eprintln!("stdin read error: {e}");
+                    // The channel is unusable from here on, so the waiters are
+                    // in the same position as at EOF.
+                    server.fail_pending(&format!("the rpc channel failed: {e}"));
                     break;
                 }
             }
@@ -284,22 +333,27 @@ impl RpcServer {
             if let Some(id_val) = parsed.get("id")
                 && let Some(id) = id_val.as_u64()
             {
-                let mut pending = match server.pending.lock() {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
-                if let Some(tx) = pending.remove(&(id as u32)) {
-                    if let Some(error) = parsed.get("error") {
+                // A poisoned map still holds the waiters, so recover it: the
+                // alternative (returning here) drops the response on the floor
+                // and the caller waits for a bound that was already answered.
+                let tx = server.pending_map().remove(&(id as u32));
+                if let Some(tx) = tx {
+                    let delivered = if let Some(error) = parsed.get("error") {
                         let msg = error
                             .get("message")
                             .and_then(|m| m.as_str())
                             .unwrap_or("unknown error");
-                        let _ = tx.send(Err(msg.to_string()));
+                        tx.send(Err(msg.to_string()))
                     } else {
-                        let _ = tx.send(Ok(parsed
+                        tx.send(Ok(parsed
                             .get("result")
                             .cloned()
-                            .unwrap_or(serde_json::Value::Null)));
+                            .unwrap_or(serde_json::Value::Null)))
+                    };
+                    if delivered.is_err() {
+                        // The caller already gave up (timeout or cancel); the
+                        // response is simply late, not a failure of this path.
+                        tracing::debug!(id, "a host response arrived after its wait had given up");
                     }
                 }
             }
@@ -326,7 +380,20 @@ impl RpcServer {
         }
 
         let response = {
-            let handler = server.methods.lock().unwrap().get(&request.method).cloned();
+            // Recover from poisoning here too: panicking out of this task would
+            // leave the host request unanswered, and the host would wait for a
+            // response that can never come.
+            let handler = server
+                .methods
+                .lock()
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!(
+                        "the rpc method registry was poisoned; recovering it to answer the request"
+                    );
+                    poisoned.into_inner()
+                })
+                .get(&request.method)
+                .cloned();
             match handler {
                 Some(handler) => match handler(request.params.clone()).await {
                     Ok(result) => {
@@ -618,5 +685,58 @@ mod tests {
             server.pending.lock().unwrap().is_empty(),
             "the pending entry must be removed on timeout"
         );
+    }
+
+    /// Closing the host channel must wake every in-flight waiter with the
+    /// reason, instead of leaving them parked until the process exits.
+    #[tokio::test]
+    async fn eof_wakes_the_in_flight_waiters() {
+        let server = RpcServer::new();
+        let (result, ()) = tokio::join!(
+            server.call_host_value("host/permission", serde_json::json!({}), None),
+            async {
+                // `call_host_value` registers before its first await, so a
+                // yield is enough for the entry to exist.
+                while server.pending_map().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                server.fail_pending("the host closed its side of the rpc channel (EOF)");
+            }
+        );
+        let err = result.expect_err("EOF must fail the waiting call");
+        assert!(err.contains("closed"), "unexpected error: {err}");
+        assert!(
+            server.pending_map().is_empty(),
+            "the waiters must be drained, not left for a late response"
+        );
+    }
+
+    /// A poisoned pending map must still hand responses to their waiters:
+    /// dropping the response would leave the caller waiting for an answer that
+    /// already arrived.
+    #[tokio::test]
+    async fn a_poisoned_pending_map_still_delivers_the_response() {
+        let server = Arc::new(RpcServer::new());
+        let (tx, rx) = oneshot::channel();
+
+        // Poison the mutex the way a panicking holder would.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = server.pending.lock().unwrap();
+            panic!("poison the pending map on purpose");
+        }));
+        assert!(poisoned.is_err());
+
+        server.pending_map().insert(7, tx);
+        RpcServer::handle_incoming(
+            server.clone(),
+            serde_json::json!({"jsonrpc": "2.0", "id": 7, "result": {"ok": true}}).to_string(),
+        )
+        .await;
+
+        let value = rx
+            .await
+            .expect("the waiter must be woken despite the poison")
+            .expect("a result response is not an error");
+        assert_eq!(value["ok"], true);
     }
 }

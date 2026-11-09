@@ -119,6 +119,10 @@ pub(crate) struct SessionEntry {
     /// a parent abort flips the same cancel flag but must not arm the
     /// "interrupted by the user" reminder.
     pub(crate) user_cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// The session's hook dispatcher, kept so `session_dispose` can fire the
+    /// `SessionEnd` hooks the way the REPL and the HTTP delete route do
+    /// (v2 `sessionExternalHooksService.triggerSessionEnd`).
+    hook_guard: Option<Arc<crate::tools::external_hooks::HookGuard>>,
 }
 
 pub(crate) fn session_entry(session_id: &str) -> napi::Result<SessionEntry> {
@@ -127,7 +131,13 @@ pub(crate) fn session_entry(session_id: &str) -> napi::Result<SessionEntry> {
         .unwrap_or_else(|e| e.into_inner())
         .get(session_id)
         .cloned()
-        .ok_or_else(|| napi::Error::from_reason(format!("unknown session: {session_id}")))
+        .ok_or_else(|| {
+            errors::napi_error(
+                "session.unknown",
+                format!("unknown session: {session_id}"),
+                Some(serde_json::json!({ "sessionId": session_id })),
+            )
+        })
 }
 
 fn make_tsfn(
@@ -343,6 +353,21 @@ pub fn create_engine_session(
             // the drain (the pump) is gone with it.
             let host_session_id = params.session_id.clone().unwrap_or_default();
             let session = Arc::new(session);
+            // History-dependent policies read the live session history:
+            // `CompactionAuthorizationGuard` asks again for irreversible Bash
+            // commands once the context was compacted, and the guardian review
+            // takes its transcript from it (v2 reads context memory the same
+            // way). The weak handle keeps the provider from pinning the
+            // session's registry entry.
+            if let Some(engine) = pipeline.permission_engine.as_ref() {
+                let session_for_history = Arc::downgrade(&session);
+                engine.set_conversation_provider(Arc::new(move || {
+                    session_for_history
+                        .upgrade()
+                        .map(|session| session.snapshot_history())
+                        .unwrap_or_default()
+                }));
+            }
             // Interactive cron: the native host has no daemon tick loop, so the
             // engine starts one per workspace (see `spawn_cron_dispatcher`).
             spawn_cron_dispatcher(params.workspace_root.as_deref().unwrap_or_default());
@@ -385,8 +410,27 @@ pub fn create_engine_session(
                         mcp_status,
                         last_turn_aborted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         user_cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        hook_guard: pipeline.hook_guard.clone(),
                     },
                 );
+            // v2 `sessionExternalHooksService.triggerSessionStart`: the napi
+            // host path fires it at creation (source `startup`) like the REPL
+            // and the HTTP create route, so session hooks behave the same on
+            // every transport. Observational — matching hooks run and their
+            // verdicts are dropped.
+            if let Some(guard) = pipeline.hook_guard.clone() {
+                guard
+                    .notify_session_lifecycle(
+                        "SessionStart",
+                        "startup",
+                        serde_json::json!({
+                            "source": "startup",
+                            "session_title": "",
+                            "model": params.model_name,
+                        }),
+                    )
+                    .await;
+            }
             Ok(session_id)
         }),
         |env, id: String| env.create_string(&id),
@@ -484,9 +528,14 @@ pub fn session_turn_outcome(env: Env, session_id: String, turn_id: f64) -> napi:
         outcomes
             .remove(&(session_id.clone(), turn_id as u64))
             .ok_or_else(|| {
-                napi::Error::from_reason(format!(
-                    "no outcome pending for {session_id} turn {turn_id}"
-                ))
+                errors::napi_error(
+                    "session.outcome_missing",
+                    format!("no outcome pending for {session_id} turn {turn_id}"),
+                    Some(serde_json::json!({
+                        "sessionId": session_id,
+                        "turnId": turn_id as u64,
+                    })),
+                )
             })?
     };
     let entry = session_entry(&session_id)?;
@@ -498,8 +547,16 @@ pub fn session_turn_outcome(env: Env, session_id: String, turn_id: f64) -> napi:
         async move {
             let outcome = receiver
                 .await
-                .map_err(|_| napi::Error::from_reason("session dropped"))?
-                .map_err(napi::Error::from_reason)?;
+                .map_err(|_| {
+                    errors::napi_error(
+                        "session.dropped",
+                        format!("session {session_id} dropped before the turn settled"),
+                        Some(serde_json::json!({ "sessionId": session_id })),
+                    )
+                })?
+                .map_err(|message| {
+                    errors::napi_error_message("engine.turn_failed", message, None)
+                })?;
             Ok(outcome)
         },
         move |env, outcome: TurnOutcome| {
@@ -574,6 +631,10 @@ pub fn session_set_permission_mode(session_id: String, mode: String) -> napi::Re
             }
         };
         engine.set_mode(new_mode);
+        // v2 `broadcastPermissionMode`: agents that inherited the session mode
+        // follow the switch; a pinned agent (tower worker → `auto`) keeps its
+        // binding.
+        crate::napi_bindings::turn::SUBAGENT_MANAGER.broadcast_permission_mode(new_mode);
         Ok(true)
     })
 }
@@ -1015,7 +1076,11 @@ pub fn session_settled(env: Env, session_id: String) -> napi::Result<JsObject> {
     let session = entry.session;
     env.execute_tokio_future(
         async move {
-            session.settled().await;
+            // The napi shape is a `Promise<void>`, so the drain bound is
+            // reported rather than turned into a rejection.
+            if let Err(timeout) = session.settled().await {
+                tracing::warn!(%timeout, "session settle did not finish before the drain bound");
+            }
             Ok(())
         },
         |env, ()| env.get_undefined(),
@@ -1089,17 +1154,22 @@ pub fn session_get_history(session_id: String) -> napi::Result<String> {
 /// export returns `undefined`, which `await` accepts — that host keeps the old
 /// "signalled, not released" semantics rather than getting a stronger promise
 /// than the engine keeps.
+///
+/// If the release bound expires, the promise **rejects** with
+/// `session.release_timeout`: the host must not delete the session's files
+/// while the engine still owns them. A second `session_dispose` for the same
+/// id shares the same wait.
 #[napi]
 pub fn session_dispose(env: Env, session_id: String) -> napi::Result<JsObject> {
     // Synchronous section: everything here runs under the registry lock, and
     // nothing here awaits. Waiting while holding the lock would deadlock —
     // the pump takes the same lock on its way out.
-    let session = guard_sync_panic(|| {
+    let (session, hook_guard) = guard_sync_panic(|| {
         let entry = SESSION_REGISTRY
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&session_id);
-        let session = match entry {
+        let (session, hook_guard) = match entry {
             Some(entry) => {
                 entry.session.shutdown();
                 // Remember the wait, so a second dispose for this id shares it
@@ -1108,21 +1178,24 @@ pub fn session_dispose(env: Env, session_id: String) -> napi::Result<JsObject> {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(session_id.clone(), entry.session.clone());
-                Some(entry.session)
+                (Some(entry.session), entry.hook_guard)
             }
             // Already being disposed: join that wait instead of pretending
             // the session is gone.
-            None => RELEASE_PENDING
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&session_id)
-                .cloned(),
+            None => (
+                RELEASE_PENDING
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&session_id)
+                    .cloned(),
+                None,
+            ),
         };
         SESSION_OUTCOMES
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(session, _), _| session != &session_id);
-        Ok(session)
+        Ok((session, hook_guard))
     })?;
     let wait_id = session_id.clone();
     env.execute_tokio_future(
@@ -1130,8 +1203,38 @@ pub fn session_dispose(env: Env, session_id: String) -> napi::Result<JsObject> {
             // Cleanup first, so the entry goes even if the wait below is
             // dropped mid-flight (a runtime shutdown aborts the task).
             let _cleanup = PendingReleaseCleanup(wait_id);
+            // v2 `sessionExternalHooksService.triggerSessionEnd`: disposing the
+            // handle is the close reason `exit` (archival is the server's
+            // DELETE). Fired before the drain wait, like the REPL's exit hook.
+            if let Some(guard) = hook_guard {
+                guard
+                    .notify_session_lifecycle(
+                        "SessionEnd",
+                        "exit",
+                        serde_json::json!({ "reason": "exit", "session_title": "" }),
+                    )
+                    .await;
+            }
             if let Some(session) = session {
-                session.released().await;
+                if let Err(timeout) = session.released().await {
+                    // The release bound is a real failure: the host is about to
+                    // delete the session's directory and must not proceed while
+                    // the engine still owns its files. Report it with the code
+                    // and the stage, instead of resolving as if it were clean.
+                    let release_id = _cleanup.0.clone();
+                    return Err(errors::napi_error(
+                        "session.release_timeout",
+                        format!(
+                            "session {release_id} did not release before the drain bound: {timeout}"
+                        ),
+                        Some(serde_json::json!({
+                            "sessionId": release_id,
+                            "stage": timeout.stage,
+                            "limitMs": timeout.limit.as_millis() as u64,
+                            "waitedMs": timeout.waited.as_millis() as u64,
+                        })),
+                    ));
+                }
             }
             Ok(())
         },
@@ -1260,10 +1363,16 @@ pub fn session_btw_prompt(
                     Some(Ok(crate::subagent::manager::ForegroundTurnOutcome::ParentCancelled)) => {
                         Ok((String::new(), "Aborted".to_string()))
                     }
-                    Some(Err(message)) => Err(napi::Error::from_reason(message)),
-                    None => Err(napi::Error::from_reason(format!(
-                        "unknown btw side-channel instance: {agent_id}"
-                    ))),
+                    Some(Err(message)) => Err(errors::napi_error_message(
+                        "engine.turn_failed",
+                        message,
+                        None,
+                    )),
+                    None => Err(errors::napi_error(
+                        "btw.unknown_instance",
+                        format!("unknown btw side-channel instance: {agent_id}"),
+                        Some(serde_json::json!({ "agentId": agent_id })),
+                    )),
                 }
             },
             |env, (content, stop_reason): (String, String)| {
@@ -1420,22 +1529,34 @@ async fn compact_session_with_summary(
     let cancel = crate::turn_loop::run_turn::TurnCancellation::from_flag(Some(flag.clone()));
     // v2 #3911: pre-shrink the summarizer's first request to the effective
     // window (configured, lowered by any in-process overflow observation).
-    let window =
-        crate::compaction::effective_max_tokens(llm.model_name(), entry.max_context_tokens);
+    let window = crate::compaction::effective_max_tokens_for(
+        crate::callbacks::MAIN_AGENT_ID,
+        llm.model_name(),
+        entry.max_context_tokens,
+    );
     // v2 `postProcessSummary`: carry the todo state into the summary when the
     // session has one; a host without the state bridge degrades to None.
     let todos = crate::compaction::read_todos_for_summary(entry.callbacks.as_ref()).await;
-    let (compacted, summary) = crate::compaction::force_compact_messages_manual_with_summary(
-        &messages,
-        &config,
-        llm.as_ref(),
-        instruction.as_deref(),
-        Some(cancel.token()),
-        window,
-        todos,
-    )
-    .await
-    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let (compacted, summary, usage) =
+        crate::compaction::force_compact_messages_manual_with_summary_report(
+            &messages,
+            &config,
+            llm.as_ref(),
+            instruction.as_deref(),
+            Some(cancel.token()),
+            window,
+            todos,
+            crate::callbacks::MAIN_AGENT_ID,
+        )
+        .await
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    // The summarizer request is billable even when the user cancels right
+    // after it returns; record it before the cancellation check.
+    if let Some(usage) = &usage {
+        entry
+            .session
+            .record_compaction_usage(llm.model_name(), usage);
+    }
     if flag.load(Ordering::Relaxed) {
         return Err(napi::Error::from_reason(
             crate::i18n::LocalizedText::new("engine.compaction.cancelled").render(),

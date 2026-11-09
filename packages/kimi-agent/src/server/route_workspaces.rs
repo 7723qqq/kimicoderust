@@ -408,7 +408,10 @@ impl HttpServer {
                     )
                     .await
                 {
-                    Ok(wire) => HttpResponse::ok(&json!({ "stopped": true, "task": wire })),
+                    Ok(outcome) => {
+                        let wire = outcome.wire;
+                        HttpResponse::ok(&json!({ "stopped": true, "task": wire }))
+                    }
                     Err(_) => HttpResponse::not_found(),
                 }
             }

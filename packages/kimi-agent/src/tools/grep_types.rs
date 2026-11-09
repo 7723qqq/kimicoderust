@@ -1,12 +1,3 @@
-//! ripgrep file-type table (`rg --type`), transcribed from `rg --type-list`
-//! (ripgrep 15.0.0). Each entry maps a type name to the basename globs ripgrep
-//! associates with it; `--type NAME` restricts the walk to files whose name
-//! matches any of NAME's globs. Kept in lockstep with the host, which forwards
-//! `--type` straight to the bundled ripgrep binary.
-//!
-//! Reference-only data table - no cross-package dependency (ROADMAP P21 D-3).
-
-/// (type name, basename globs), sorted by name as `rg --type-list` emits them.
 pub(crate) const RG_FILE_TYPES: &[(&str, &[&str])] = &[
     ("ada", &["*.adb", "*.ads"]),
     ("agda", &["*.agda", "*.lagda"]),
@@ -522,11 +513,6 @@ pub(crate) const RG_FILE_TYPES: &[(&str, &[&str])] = &[
     ("zstd", &["*.zst", "*.zstd"]),
 ];
 
-/// Look up a ripgrep file type by name (case-sensitive, matching ripgrep's
-/// `--type` resolution). Returns `None` for an unknown type, which the caller
-/// reports as `unrecognized file type: <name>`: this table is a fast path
-/// transcribed from one rg release, while a host running rg on `PATH` would
-/// additionally honour user `--type-add` definitions from `.ripgreprc`.
 pub(crate) fn rg_type_globs(name: &str) -> Option<&'static [&'static str]> {
     RG_FILE_TYPES
         .iter()
@@ -542,8 +528,7 @@ mod tests {
     #[test]
     fn lookup_is_case_sensitive_like_ripgrep() {
         assert_eq!(rg_type_globs("rust"), Some(["*.rs"].as_slice()));
-        // rg resolves `--type` case-sensitively; a different spelling is an
-        // unknown type (and therefore an error), not a near miss.
+
         assert_eq!(rg_type_globs("Rust"), None);
         assert_eq!(rg_type_globs(""), None);
         assert_eq!(rg_type_globs("kimiunknown"), None);
@@ -551,9 +536,6 @@ mod tests {
 
     #[test]
     fn table_is_sorted_and_free_of_duplicates() {
-        // `rg --type-list` emits names in sorted order and never repeats one;
-        // keeping the same shape makes a binary search possible later and makes
-        // transcription diffs reviewable.
         let mut seen = std::collections::BTreeSet::new();
         let mut previous: Option<&str> = None;
         for (name, globs) in RG_FILE_TYPES {
@@ -570,15 +552,10 @@ mod tests {
             }
             previous = Some(name);
         }
-        // The table is a transcription of ripgrep 15.0.0's 217 built-in types;
-        // a large change here means it was regenerated against another release
-        // and the reconciliation test below must be re-read.
+
         assert_eq!(RG_FILE_TYPES.len(), 217, "type count drifted");
     }
 
-    /// Reconcile the table against a real `rg --type-list`. Skipped when no rg
-    /// binary is reachable (CI images and offline checkouts), because the table
-    /// is a fast path rather than a hard dependency — the host owns the binary.
     #[test]
     fn table_agrees_with_the_local_ripgrep_type_list() {
         let Some(listing) = run_ripgrep_type_list() else {
@@ -590,9 +567,6 @@ mod tests {
             .map(|(name, globs)| (*name, *globs))
             .collect();
 
-        // Every type we claim must exist in rg with exactly the same globs: a
-        // stale entry silently narrows a native search that the host would have
-        // run correctly. Types rg knows but we do not are fine — they fall back.
         let mut mismatched: Vec<String> = Vec::new();
         let mut matched = 0usize;
         for (name, globs) in &ours {
@@ -612,15 +586,13 @@ mod tests {
             mismatched.join("\n")
         );
         assert_eq!(matched, ours.len());
-        // Informational only: a newer rg may add types, which cost us a host
-        // fallback but never a wrong answer.
+
         let rg_only = listing.len().saturating_sub(matched);
         if rg_only > 0 {
             eprintln!("note: {rg_only} rg type(s) are not in the engine table");
         }
     }
 
-    /// Element-wise glob comparison across the `String` / `&str` split.
     fn same_globs(theirs: &[String], ours: &[&str]) -> bool {
         theirs.len() == ours.len()
             && theirs
@@ -629,8 +601,6 @@ mod tests {
                 .all(|(a, b)| a.as_str() == *b)
     }
 
-    /// Parse `rg --type-list` into name -> globs. Returns `None` when no rg
-    /// binary can be executed.
     fn run_ripgrep_type_list() -> Option<BTreeMap<String, Vec<String>>> {
         let output = std::process::Command::new("rg")
             .arg("--type-list")

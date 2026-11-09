@@ -1,15 +1,19 @@
-//! v2 `app/memory/tools/memoryTool.ts:38-59, :114-134`: the single `Memory`
-//! tool's action vocabulary, input schema and unknown-action refusal.
-//!
-//! This is the schema/vocabulary module. The handlers are ported one at a
-//! time (`read`, `write`, `list` and `delete` have handlers so far); the
-//! six `memory_*` tool definitions stay until all seven exist.
+use std::path::Path;
 
 use serde_json::{Value, json};
 
 use crate::i18n::{LocalizedText, i18n_params};
+use crate::tools::memory_delete;
+use crate::tools::memory_history;
+use crate::tools::memory_list_handler;
+use crate::tools::memory_read_handler;
+use crate::tools::memory_search;
+use crate::tools::memory_tool::MemoryContext;
+use crate::tools::memory_write_handler;
+use crate::turn_loop::types::ExecutableToolResult;
 
-/// The seven actions v2's `MemoryActionSchema` accepts.
+pub const ASSOCIATIVE_MEMORY_FLAG_ENV: &str = "KIMI_CODE_EXPERIMENTAL_ASSOCIATIVE_MEMORY";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryAction {
     Search,
@@ -48,8 +52,6 @@ impl MemoryAction {
     }
 }
 
-/// v2 `MemoryToolInputSchema` rendered as JSON Schema. The field descriptions
-/// are v2's `.describe()` text, verbatim.
 pub fn memory_input_schema() -> Value {
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -87,10 +89,6 @@ pub fn memory_input_schema() -> Value {
     })
 }
 
-/// The display description v2 shows on the approval card
-/// (`memoryTool.ts:93`, `toolsV2.memory.memoryAction`). The engine names the
-/// same key under its own `engine.tools.*` namespace, as `check:engine-i18n`
-/// requires.
 pub fn action_display(action: MemoryAction) -> String {
     LocalizedText::with_params(
         "engine.tools.memoryAction",
@@ -99,14 +97,72 @@ pub fn action_display(action: MemoryAction) -> String {
     .render()
 }
 
-/// v2's `default` arm (`memoryTool.ts:129-133`): an action outside the enum is
-/// an error result for the model, not a dropped call.
 pub fn unknown_action_message(action: &str) -> String {
     LocalizedText::with_params(
         "engine.tools.unknownMemoryAction",
         i18n_params!["action" => action],
     )
     .render()
+}
+
+pub fn memory_tool_enabled() -> bool {
+    memory_tool_enabled_from(Some(crate::env::env_switch_default_off(
+        ASSOCIATIVE_MEMORY_FLAG_ENV,
+    )))
+}
+
+pub fn memory_tool_enabled_from(associative_memory_enabled: Option<bool>) -> bool {
+    associative_memory_enabled != Some(true)
+}
+
+pub fn main_agent_only_message() -> String {
+    LocalizedText::new("engine.tools.memory.mainAgentOnly").render()
+}
+
+pub fn unavailable_message() -> String {
+    LocalizedText::new("engine.tools.memory.associativeMemoryEnabled").render()
+}
+
+fn error_result(text: String) -> ExecutableToolResult {
+    ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
+        delivery: None,
+        stop_turn: false,
+        content: text,
+        is_error: true,
+        note: None,
+        display: None,
+    }
+}
+
+pub fn execute(workspace_root: &Path, args: &Value, session_id: &str) -> ExecutableToolResult {
+    if !memory_tool_enabled() {
+        return error_result(unavailable_message());
+    }
+    match MemoryContext::resolve(workspace_root) {
+        Ok(context) => run(&context, args, session_id),
+        Err(error) => error_result(error),
+    }
+}
+
+pub fn run(context: &MemoryContext, args: &Value, session_id: &str) -> ExecutableToolResult {
+    let raw = args
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(action) = MemoryAction::parse(raw) else {
+        return error_result(unknown_action_message(raw));
+    };
+    match action {
+        MemoryAction::Search => memory_search::search_action(context, args, session_id),
+        MemoryAction::Read => memory_read_handler::read_action(context, args),
+        MemoryAction::Write => memory_write_handler::write_action(context, args, session_id),
+        MemoryAction::List => memory_list_handler::list_action(context, args, session_id),
+        MemoryAction::Delete => memory_delete::delete_action(context, args),
+        MemoryAction::Log => memory_history::log_action(context),
+        MemoryAction::Revert => memory_history::revert_action(context, args),
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +208,33 @@ mod tests {
     fn the_action_display_names_the_action() {
         let text = action_display(MemoryAction::Write);
         assert!(text.contains("write"), "{text}");
+    }
+
+    #[test]
+    fn the_associative_memory_flag_suppresses_the_tool() {
+        assert!(memory_tool_enabled_from(None));
+        assert!(memory_tool_enabled_from(Some(false)));
+        assert!(!memory_tool_enabled_from(Some(true)));
+    }
+
+    #[test]
+    fn the_three_history_and_search_actions_reach_their_handlers() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = MemoryContext::new(dir.path().join("memory"), dir.path());
+        let search = run(&context, &json!({ "action": "search" }), "");
+        assert!(search.is_error, "search without a query must refuse");
+        let log = run(&context, &json!({ "action": "log" }), "");
+        assert!(!log.is_error, "{}", log.content);
+        let revert = run(&context, &json!({ "action": "revert" }), "");
+        assert!(revert.is_error, "revert without a sha must refuse");
+    }
+
+    #[test]
+    fn an_unknown_action_reaches_the_refusal_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = MemoryContext::new(dir.path().join("memory"), dir.path());
+        let result = run(&context, &json!({ "action": "append" }), "");
+        assert!(result.is_error);
+        assert!(result.content.contains("append"), "{}", result.content);
     }
 }

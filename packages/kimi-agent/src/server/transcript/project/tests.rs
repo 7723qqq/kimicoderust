@@ -1664,3 +1664,39 @@ fn an_unclosed_model_started_swarm_stays_out_of_cold_and_live_modes() {
     assert_eq!(cold_modes, live_modes);
     assert_eq!(live_modes.and_then(|modes| modes.swarm), None);
 }
+
+/// v2 `onPromptQueued` / `onPromptStarted` (`coreEventMap.ts:1391-1430`): the
+/// queued announcement seeds a prompt entity, and the start moves it to
+/// `running` without losing the content the queued event carried.
+#[test]
+fn queued_and_started_fold_the_prompt_status() {
+    let mut projector = TranscriptProjector::new();
+    let queued = projector.apply_event(&EngineEvent::Custom(json!({
+        "type": "prompt.queued",
+        "promptId": "prompt-q",
+        "content": [{ "type": "text", "text": "second" }],
+        "queueLength": 1,
+    })));
+    let TranscriptOperation::PromptUpsert { prompt } = &queued[0] else {
+        panic!("expected a prompt upsert, got {queued:?}");
+    };
+    assert_eq!(prompt.status, TranscriptPromptStatus::Queued);
+    assert_eq!(
+        prompt.content,
+        Some(json!([{ "type": "text", "text": "second" }]))
+    );
+
+    let started = projector.apply_event(&EngineEvent::Custom(json!({
+        "type": "prompt.started",
+        "promptId": "prompt-q",
+    })));
+    let TranscriptOperation::PromptUpsert { prompt } = &started[0] else {
+        panic!("expected a prompt upsert, got {started:?}");
+    };
+    assert_eq!(prompt.status, TranscriptPromptStatus::Running);
+    assert_eq!(
+        prompt.content,
+        Some(json!([{ "type": "text", "text": "second" }]))
+    );
+    assert!(prompt.finished_at.is_none());
+}

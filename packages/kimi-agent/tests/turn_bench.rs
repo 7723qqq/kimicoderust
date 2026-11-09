@@ -54,8 +54,32 @@ impl LLM for BenchLlm {
 
     fn chat(
         &self,
-        _: LLMChatParams,
+        params: LLMChatParams,
     ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>> {
+        // Both the main loop and compaction prepend a system message, but the
+        // main loop's is this fake LLM's own `system_prompt()` ("bench").
+        // Compaction's is the fixed summarizer instruction. Match that text so
+        // the summarizer gets a real summary (avoiding EmptySummary after 200
+        // accumulated steps) while the main loop still never finishes on its
+        // own and runs the full step budget.
+        let is_summarizer = params.messages.first().is_some_and(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .starts_with("You are a conversation summarizer.")
+        });
+        if is_summarizer {
+            return Box::pin(async {
+                Ok(LLMChatResponse {
+                    content: "bench summary".to_string(),
+                    thinking: vec![],
+                    tool_calls: vec![],
+                    finish_reason: Some("stop".into()),
+                    usage: TokenUsage::default(),
+                    timing: None,
+                })
+            });
+        }
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let calls: Vec<ToolCall> = self
             .paths
@@ -252,6 +276,7 @@ async fn bench_native_vs_host(dir: &std::path::Path) {
         tower_enabled: false,
         notify_user_enabled: true,
         sandbox_policy: None,
+        before_execute: None,
     });
     run_turn_sync(&llm, &native, WARMUP_STEPS).await;
     let started = Instant::now();

@@ -1,27 +1,8 @@
-//! Engine-owned native tool table and the global `[tools]` switch.
-//!
-//! Host-driven sessions (the napi addon, the standalone server, stdio) run
-//! tool calls through [`super::NativeToolset`], so the engine also owns the
-//! definitions advertised to the model: [`native_tool_defs`] assembles the
-//! set and [`ToolsFilter`] intersects it with the user's `[tools]` global
-//! enable/disable lists (v2 `toolPolicy` service). The host's own tool table
-//! and MCP-discovered tools are merged on top by `NativeToolCallbacks`.
-//!
-//! The rest of the v2 `toolPolicy` evaluator lives here too:
-//! [`ToolPolicyLayers`] + [`is_tool_active_composed`] reproduce
-//! `isToolActiveComposed` (workspace veto → profile → global → session), and
-//! [`resolve_active_tool_names`], [`literal_tool_names`] and
-//! [`find_inactive_tool_patterns`] mirror the other three exports of
-//! `agent/toolPolicy/evaluate.ts`.
-
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use crate::turn_loop::types::ToolInfo;
 
-/// Global `[tools]` switch (v2 `tools.enabled` / `tools.disabled`): an
-/// allowlist applied first, then a denylist. Built-in tools match by exact
-/// name; MCP tools match with `mcp__` globs (`mcp__github__*`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolsFilter {
     #[serde(default)]
@@ -31,15 +12,10 @@ pub struct ToolsFilter {
 }
 
 impl ToolsFilter {
-    /// Whether the filter constrains anything (both lists empty = pass-through).
     pub fn is_active(&self) -> bool {
         !self.enabled.is_empty() || !self.disabled.is_empty()
     }
 
-    /// Whether `name` survives the global switch: it must pass the allowlist
-    /// when one is configured, then must not match any denylist entry.
-    /// Delegated to [`is_tool_active`] so the `[tools]` table and the
-    /// composed layers cannot drift apart.
     pub fn allows(&self, name: &str) -> bool {
         is_tool_active_ref(
             PolicyRef {
@@ -51,7 +27,6 @@ impl ToolsFilter {
         )
     }
 
-    /// Drop every definition the filter rejects, keeping the input order.
     pub fn apply(&self, defs: Vec<ToolInfo>) -> Vec<ToolInfo> {
         if !self.is_active() {
             return defs;
@@ -61,13 +36,6 @@ impl ToolsFilter {
             .collect()
     }
 
-    /// Whether a native tool *call* must be refused. This is the one place
-    /// that deliberately diverges from v2's exact `includes`: enforcement is
-    /// case-insensitive for built-ins, because the engine dispatches on the
-    /// lowercase wire name while the configured table spells them `Read`, so
-    /// a disabled tool is refused even when the model calls it from memory.
-    /// The advertised-table check ([`Self::allows`]) stays case-sensitive,
-    /// exactly like v2.
     pub fn blocks_call(&self, name: &str) -> bool {
         if !self.is_active() {
             return false;
@@ -79,21 +47,22 @@ impl ToolsFilter {
                 pattern.eq_ignore_ascii_case(name)
             }
         };
+        let denies = |pattern: &str| {
+            if is_mcp_tool_name(pattern) {
+                denies_tool_pattern(pattern, name)
+            } else {
+                pattern.eq_ignore_ascii_case(name)
+            }
+        };
         let enabled = self.enabled.is_empty() || self.enabled.iter().any(|p| matches(p));
-        !enabled || self.disabled.iter().any(|p| matches(p))
+        !enabled || self.disabled.iter().any(|p| denies(p))
     }
 }
 
-/// Whether `name` is an MCP tool name (v2 `isMcpToolName`, which falls back
-/// to a `mcp__` prefix test when no native helper is bound).
 pub fn is_mcp_tool_name(name: &str) -> bool {
     name.starts_with("mcp__")
 }
 
-/// `mcp__` patterns match as picomatch globs; every other name matches
-/// exactly and case-sensitively, mirroring the v2 global tool switch.
-/// Shared with the per-profile policy (v2 `isToolActive`), which applies the
-/// same source-dependent rule.
 pub fn matches_tool_pattern(pattern: &str, name: &str) -> bool {
     if !is_mcp_tool_name(pattern) {
         return pattern == name;
@@ -101,12 +70,6 @@ pub fn matches_tool_pattern(pattern: &str, name: &str) -> bool {
     glob_match(pattern, name)
 }
 
-/// The per-profile allowlist match rule (v2 `isToolActive`): MCP patterns
-/// are globs; built-ins match exactly and case-insensitively, because the
-/// engine dispatches on the lowercase wire name while profile tables spell
-/// them `Read`. Shared by the subagent policy filter and by the runtime
-/// availability filter behind the Agent tool's `Tools:` listing, so the
-/// advertised table and the gate can never drift apart on matching.
 pub fn matches_profile_tool_pattern(pattern: &str, tool_name: &str) -> bool {
     if pattern.starts_with("mcp__") {
         matches_tool_pattern(pattern, tool_name)
@@ -115,18 +78,9 @@ pub fn matches_profile_tool_pattern(pattern: &str, tool_name: &str) -> bool {
     }
 }
 
-/// Compiled `mcp__` globs. Patterns come from user config and are matched
-/// once per tool per policy layer, so the compiled form is cached
-/// process-wide (the same `LazyLock` shape as `native/catalog.rs`).
 static MCP_GLOB_CACHE: LazyLock<Mutex<HashMap<String, Option<globset::GlobMatcher>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// v2 matches an MCP pattern with `picomatch.isMatch`, so `*`, `?`, `[...]`,
-/// `{a,b}` and `**` are all metacharacters. `globset` is this crate's
-/// picomatch stand-in (`permission/mod.rs::compile_tool_glob` uses the same
-/// builder): `*` stays cross-`/`, and a pattern that fails to compile
-/// (`"[abc"`, `{a,}`) falls back to a literal compare rather than matching
-/// everything.
 fn mcp_glob_matcher(pattern: &str) -> Option<globset::GlobMatcher> {
     if let Some(cached) = MCP_GLOB_CACHE
         .lock()
@@ -135,37 +89,40 @@ fn mcp_glob_matcher(pattern: &str) -> Option<globset::GlobMatcher> {
     {
         return cached;
     }
-    let compiled = globset::GlobBuilder::new(pattern)
+    let compiled = match globset::GlobBuilder::new(pattern)
         .case_insensitive(false)
         .build()
-        .ok()
-        .map(|glob| glob.compile_matcher());
+    {
+        Ok(glob) => Some(glob.compile_matcher()),
+        Err(error) => {
+            tracing::error!(
+                pattern,
+                %error,
+                "tool policy glob could not be compiled; no tool may match this pattern"
+            );
+            None
+        }
+    };
     if let Ok(mut cache) = MCP_GLOB_CACHE.lock() {
         cache.insert(pattern.to_string(), compiled.clone());
     }
     compiled
 }
 
-/// glob matcher for a tool-name pattern. Covers the full picomatch syntax
-/// `mcp__github__*` needs plus `mcp__github__tool_[0-9]`-style class and
-/// brace patterns.
 fn glob_match(pattern: &str, name: &str) -> bool {
-    match mcp_glob_matcher(pattern) {
-        Some(matcher) => matcher.is_match(name),
-        None => pattern == name,
-    }
+    mcp_glob_matcher(pattern).is_some_and(|matcher| matcher.is_match(name))
 }
 
-/// The characters that make a configured pattern a glob instead of a literal
-/// tool name (v2 `GLOB_MAGIC` = `/[*?[\]{}]/`).
+fn denies_tool_pattern(pattern: &str, name: &str) -> bool {
+    mcp_glob_matcher(pattern).is_none_or(|matcher| matcher.is_match(name))
+}
+
 fn has_glob_magic(pattern: &str) -> bool {
     pattern
         .chars()
         .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
 }
 
-/// Where a tool comes from (v2 `ToolSource`). Only `Mcp` changes how a
-/// pattern list is read, so `Builtin` and `User` share one arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolSource {
     #[default]
@@ -175,10 +132,6 @@ pub enum ToolSource {
 }
 
 impl ToolSource {
-    /// Infer the source from a tool name. The engine's [`ToolInfo`] carries
-    /// no source field and every MCP tool name carries the `mcp__` prefix, so
-    /// this is the Rust spelling of v2's
-    /// `isMcpToolName(name) ? 'mcp' : 'builtin'`.
     pub fn of_name(name: &str) -> Self {
         if is_mcp_tool_name(name) {
             Self::Mcp
@@ -188,9 +141,6 @@ impl ToolSource {
     }
 }
 
-/// One allow/deny layer (v2 `ToolActivationPolicy`). `None` means the layer
-/// says nothing; `Some(vec![])` is a real allowlist that admits nothing,
-/// which is how v2's `policy.tools !== undefined` check behaves.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolActivationPolicy {
     #[serde(default)]
@@ -199,7 +149,6 @@ pub struct ToolActivationPolicy {
     pub disallowed_tools: Option<Vec<String>>,
 }
 
-/// The user's `[tools]` layer (v2 `GlobalToolsPolicy`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GlobalToolsPolicy {
     #[serde(default)]
@@ -208,10 +157,6 @@ pub struct GlobalToolsPolicy {
     pub disabled: Option<Vec<String>>,
 }
 
-/// The four policy layers in the order v2 `isToolActiveComposed` applies
-/// them: the workspace gate vetoes first, then the profile, then the global
-/// switch, then the session list. A tool is advertised only when every layer
-/// admits it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolPolicyLayers {
     #[serde(default)]
@@ -225,12 +170,6 @@ pub struct ToolPolicyLayers {
 }
 
 impl From<&ToolsFilter> for GlobalToolsPolicy {
-    /// The legacy `[tools]` table stores both lists as plain arrays, where an
-    /// empty list means "not configured". v2's composed evaluator applies the
-    /// same normalization to the global layer
-    /// (`global?.enabled?.length ? global.enabled : undefined`), because it
-    /// feeds that layer to `isToolActive`, where a present empty list would
-    /// otherwise read as "nothing is admitted".
     fn from(filter: &ToolsFilter) -> Self {
         Self {
             enabled: (!filter.enabled.is_empty()).then(|| filter.enabled.clone()),
@@ -239,8 +178,6 @@ impl From<&ToolsFilter> for GlobalToolsPolicy {
     }
 }
 
-/// Borrowed form of [`ToolActivationPolicy`], so the composed evaluator can
-/// pass each layer through without cloning the configured lists.
 struct PolicyRef<'a> {
     tools: Option<&'a [String]>,
     disallowed_tools: Option<&'a [String]>,
@@ -255,16 +192,12 @@ impl<'a> From<&'a ToolActivationPolicy> for PolicyRef<'a> {
     }
 }
 
-/// One layer's verdict (v2 `isToolActive`): the allowlist is checked first
-/// when present, then the denylist subtracts from it.
 pub fn is_tool_active(policy: &ToolActivationPolicy, name: &str, source: ToolSource) -> bool {
     is_tool_active_ref(policy.into(), name, source)
 }
 
 fn is_tool_active_ref(policy: PolicyRef<'_>, name: &str, source: ToolSource) -> bool {
     if let Some(tools) = policy.tools {
-        // Only an MCP tool is matched by glob, and only against `mcp__`
-        // patterns; every other tool is compared literally.
         let allowed = if source == ToolSource::Mcp {
             tools
                 .iter()
@@ -288,18 +221,12 @@ fn is_tool_active_ref(policy: PolicyRef<'_>, name: &str, source: ToolSource) -> 
     !disallowed_tools
         .iter()
         .filter(|pattern| is_mcp_tool_name(pattern.as_str()))
-        .any(|pattern| glob_match(pattern, name))
+        .any(|pattern| denies_tool_pattern(pattern, name))
 }
 
-/// The composed verdict across all four layers (v2
-/// `isToolActiveComposed`): a tool is active only when every layer admits
-/// it, so the workspace gate and the session list veto a tool the profile
-/// and the global switch both allow.
 pub fn is_tool_active_composed(layers: &ToolPolicyLayers, name: &str, source: ToolSource) -> bool {
     let global = layers.global.as_ref();
     let global_layer = PolicyRef {
-        // An empty global allowlist means "unconfigured", not "nothing",
-        // matching v2's `global?.enabled?.length ? ... : undefined`.
         tools: global
             .and_then(|policy| policy.enabled.as_deref())
             .filter(|enabled| !enabled.is_empty()),
@@ -319,9 +246,6 @@ pub fn is_tool_active_composed(layers: &ToolPolicyLayers, name: &str, source: To
         && is_tool_active_ref(session_layer, name, source)
 }
 
-/// The names a profile actually admits (v2 `resolveActiveToolNames`): its
-/// declared `tools` minus the ones its own denylist removes. `None` when the
-/// profile declares no allowlist, which callers render as "unrestricted".
 pub fn resolve_active_tool_names(policy: &ToolActivationPolicy) -> Option<Vec<String>> {
     let tools = policy.tools.as_ref()?;
     Some(
@@ -339,9 +263,29 @@ pub fn resolve_active_tool_names(policy: &ToolActivationPolicy) -> Option<Vec<St
     )
 }
 
-/// The configured patterns that name a tool outright (v2 `literalToolNames`):
-/// MCP patterns and globs are excluded, so the result can be checked against
-/// the known tool vocabulary.
+/// Narrow an allowlist to what a bound agent profile permits. An empty
+/// allowlist adopts the profile's list outright; a non-empty one keeps only
+/// entries the profile also allows. MCP entries compare as globs, other names
+/// exactly (v2 `resolveActiveToolNames` composed with the session filter).
+pub fn restrict_to_profile(enabled: &mut Vec<String>, profile_tools: &[String]) {
+    if profile_tools.is_empty() {
+        return;
+    }
+    if enabled.is_empty() {
+        *enabled = profile_tools.to_vec();
+        return;
+    }
+    enabled.retain(|pattern| {
+        if is_mcp_tool_name(pattern.as_str()) {
+            profile_tools
+                .iter()
+                .any(|allowed| is_mcp_tool_name(allowed.as_str()) && glob_match(allowed, pattern))
+        } else {
+            profile_tools.iter().any(|allowed| allowed == pattern)
+        }
+    });
+}
+
 pub fn literal_tool_names(patterns: &[String]) -> Vec<String> {
     patterns
         .iter()
@@ -353,30 +297,21 @@ pub fn literal_tool_names(patterns: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Why a configured pattern can never match a tool (v2
-/// `InactiveToolPatternKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InactiveToolPatternKind {
-    /// A glob without the `mcp__` prefix: built-ins are matched literally, so
-    /// the wildcard can never fire.
     WildcardNotMcp,
-    /// An `mcp__` literal that is missing the `server__tool` half.
+
     IncompleteMcpName,
-    /// A literal naming no tool in the known vocabulary.
+
     UnknownTool,
 }
 
-/// A configured pattern that matches nothing (v2 `InactiveToolPattern`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InactiveToolPattern {
     pub pattern: String,
     pub kind: InactiveToolPatternKind,
 }
 
-/// Report the configured patterns that can never match (v2
-/// `findInactiveToolPatterns`), so a typo or a case-mismatched built-in name
-/// surfaces as a warning instead of silently shrinking the tool set. The
-/// vocabulary is optional; without it the `unknown-tool` check is skipped.
 pub fn find_inactive_tool_patterns(
     patterns: &[String],
     is_known_tool_name: Option<&dyn Fn(&str) -> bool>,
@@ -411,8 +346,6 @@ pub fn find_inactive_tool_patterns(
     issues
 }
 
-/// Subagent orchestration definitions (the `Agent` / `AgentSwarm` surface),
-/// carrying the `[secondary_model]` pool when one is configured.
 fn subagent_defs(
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> Vec<ToolInfo> {
@@ -422,10 +355,6 @@ fn subagent_defs(
     ]
 }
 
-/// Every engine-owned tool definition for a host-driven session, filtered by
-/// the user's `[tools]` switch. The list mirrors what [`super::NativeToolset`]
-/// executes natively plus the host-routed subagent orchestration tools; MCP
-/// tools and host-registered tools are appended by the callbacks layer.
 pub fn native_tool_defs(
     github_available: bool,
     tower_enabled: bool,
@@ -441,12 +370,6 @@ pub fn native_tool_defs(
     )
 }
 
-/// [`native_tool_defs`] with the NotifyUser availability split out
-/// (upstream #4054/#4153: `notifyUserAvailable(flags, bootstrap)` — the flag
-/// AND a host that can actually show an update). `notify_user_enabled` is the
-/// resolved flag AND host-capability answer; `false` keeps the tool out of
-/// the advertised table instead of registering a tool whose updates land
-/// nowhere.
 pub fn native_tool_defs_with_notify(
     github_available: bool,
     tower_enabled: bool,
@@ -458,8 +381,9 @@ pub fn native_tool_defs_with_notify(
     defs.extend(subagent_defs(secondary_model));
     defs.push(crate::tools::todo_list::todo_list_tool_def());
     defs.push(crate::tools::ask_user_question::ask_user_question_tool_def());
-    defs.push(crate::tools::plan_mode::enter_plan_mode_tool_def());
     defs.push(crate::tools::exit_plan_mode::exit_plan_mode_tool_def());
+    defs.push(crate::tools::spec_mode::enter_spec_mode_tool_def());
+    defs.push(crate::tools::spec_mode::exit_spec_mode_tool_def());
     defs.push(crate::tools::get_goal::get_goal_tool_def());
     defs.push(crate::tools::create_goal::create_goal_tool_def());
     defs.push(crate::tools::goal_tools::update_goal_tool_def());
@@ -473,8 +397,14 @@ pub fn native_tool_defs_with_notify(
     defs.push(crate::tools::task_tools::wait_for_tool_def());
     defs.push(crate::tools::skill::skill_tool_def());
     defs.push(crate::tools::knowledge_tool::knowledge_tool_def());
-    defs.extend(crate::tools::core_tool_defs::memory_tool_defs());
+
+    if crate::tools::memory_action::memory_tool_enabled() {
+        defs.push(crate::tools::core_tool_defs::memory_tool_def());
+    }
     defs.push(crate::tools::workflow::workflow_tool_def());
+    defs.push(crate::tools::run_code::run_code_tool_def());
+
+    defs.push(crate::tools::core_tool_defs::session_query_tool_def());
     if github_available {
         defs.extend(crate::tools::github::github_tool_defs());
     }
@@ -567,7 +497,6 @@ mod tests {
 
     #[test]
     fn mcp_globs_support_the_full_picomatch_syntax() {
-        // `?` stands for exactly one character.
         assert!(glob_match(
             "mcp__github__create_issu?",
             "mcp__github__create_issue"
@@ -576,13 +505,13 @@ mod tests {
             "mcp__github__create_issu?",
             "mcp__github__create_issues"
         ));
-        // `[...]` is a character class.
+
         assert!(glob_match("mcp__github__tool_[0-9]", "mcp__github__tool_7"));
         assert!(!glob_match(
             "mcp__github__tool_[0-9]",
             "mcp__github__tool_x"
         ));
-        // `{a,b}` is an alternation.
+
         assert!(glob_match(
             "mcp__github__{read,write}",
             "mcp__github__write"
@@ -591,22 +520,19 @@ mod tests {
             "mcp__github__{read,write}",
             "mcp__github__delete"
         ));
-        // `**` spans the rest of the name.
+
         assert!(glob_match("mcp__github__**", "mcp__github__create_issue"));
         assert!(glob_match("mcp__**", "mcp__github__search"));
 
-        // The same forms reach the policy through the filter.
         let filter = ToolsFilter {
             enabled: Vec::new(),
             disabled: vec!["mcp__github__tool_?".into()],
         };
         assert!(!filter.allows("mcp__github__tool_7"));
         assert!(filter.allows("mcp__github__tool_77"), "`?` is one char");
-        // `?` matches any single character, not just a digit — so `tool_x` is
-        // matched by `tool_?` and blocked like any other single-char name.
+
         assert!(!filter.allows("mcp__github__tool_x"));
 
-        // Glob syntax is MCP-only: a built-in pattern stays literal.
         let builtin = ToolsFilter {
             enabled: Vec::new(),
             disabled: vec!["Bash?".into()],
@@ -616,8 +542,6 @@ mod tests {
 
     #[test]
     fn non_mcp_names_match_exactly_and_case_sensitively() {
-        // v2 `isToolActive` compares built-in names with `includes`, so a
-        // lowercased denylist entry does not disable `Read`.
         let lowercase_denylist = ToolActivationPolicy {
             tools: None,
             disallowed_tools: Some(vec!["read".into()]),
@@ -638,7 +562,6 @@ mod tests {
             "the allowlist is exact too"
         );
 
-        // An MCP tool is matched by glob, but only against `mcp__` patterns.
         let mcp_allowlist = ToolActivationPolicy {
             tools: Some(vec!["Read".into(), "mcp__github__*".into()]),
             disallowed_tools: None,
@@ -656,23 +579,33 @@ mod tests {
 
     #[test]
     fn call_enforcement_keeps_the_wire_name_case_insensitive() {
-        // Deliberate divergence from v2's exact `includes`: the engine
-        // dispatches built-ins on the lowercase wire name, so a
-        // case-sensitive check here would let a disabled `Read` run when the
-        // model calls it as `read`. The advertised-table check (`allows`)
-        // stays case-sensitive, like v2.
         let filter = ToolsFilter {
             enabled: Vec::new(),
             disabled: vec!["read".into()],
         };
-        // The advertised-table check compares exactly, so a lowercase denylist
-        // entry does not match `Read` there...
+
         assert!(filter.allows("Read"), "allows() is case-sensitive");
         assert!(!filter.allows("read"), "the lowercase name matches exactly");
-        // ...while call enforcement is case-insensitive, so the disabled tool
-        // stays blocked when the model calls it by either spelling.
+
         assert!(filter.blocks_call("Read"));
         assert!(filter.blocks_call("read"));
+    }
+
+    #[test]
+    fn an_uncompilable_glob_never_falls_back_to_a_literal_match() {
+        let disabled = ToolsFilter {
+            enabled: Vec::new(),
+            disabled: vec!["mcp__[".into()],
+        };
+        assert!(disabled.blocks_call("mcp__github__search"));
+        assert!(!disabled.allows("mcp__github__search"));
+
+        let enabled = ToolsFilter {
+            enabled: vec!["mcp__[".into()],
+            disabled: Vec::new(),
+        };
+        assert!(!enabled.allows("mcp__github__search"));
+        assert!(enabled.blocks_call("mcp__github__search"));
     }
 
     #[test]
@@ -703,7 +636,6 @@ mod tests {
             "the global allowlist still applies"
         );
 
-        // The workspace layer globs MCP tools.
         let workspace_glob = ToolPolicyLayers {
             workspace_disabled_tools: Some(vec!["mcp__blocked__*".into()]),
             ..Default::default()
@@ -719,7 +651,6 @@ mod tests {
             ToolSource::Mcp
         ));
 
-        // One denying layer is enough.
         let session_veto = ToolPolicyLayers {
             session_disabled_tools: Some(vec!["Bash".into()]),
             ..Default::default()
@@ -730,7 +661,6 @@ mod tests {
             ToolSource::Builtin
         ));
 
-        // An empty global allowlist means "unconfigured", not "nothing".
         let empty_global = ToolPolicyLayers {
             global: Some(GlobalToolsPolicy {
                 enabled: Some(Vec::new()),
@@ -744,7 +674,6 @@ mod tests {
             ToolSource::Builtin
         ));
 
-        // An empty profile allowlist is a real allowlist admitting nothing.
         let empty_profile = ToolPolicyLayers {
             profile: ToolActivationPolicy {
                 tools: Some(Vec::new()),
@@ -758,7 +687,6 @@ mod tests {
             ToolSource::Builtin
         ));
 
-        // The legacy `[tools]` table maps onto the global layer.
         let legacy = ToolsFilter {
             enabled: vec!["Read".into()],
             disabled: Vec::new(),
@@ -848,7 +776,7 @@ mod tests {
             ]
         );
         assert_eq!(issues[0].pattern, "Bashh");
-        // Without a vocabulary the unknown-tool check is skipped.
+
         assert!(
             find_inactive_tool_patterns(&["AnythingGoes".to_string()], None).is_empty(),
             "no vocabulary means no unknown-tool verdict"
@@ -890,8 +818,9 @@ mod tests {
             "AgentSwarm",
             "TodoList",
             "AskUserQuestion",
-            "EnterPlanMode",
             "ExitPlanMode",
+            "EnterSpecMode",
+            "ExitSpecMode",
             "GetGoal",
             "CreateGoal",
             "UpdateGoal",
@@ -906,6 +835,8 @@ mod tests {
             "Skill",
             "Knowledge",
             "Workflow",
+            "run_code",
+            "session_query",
         ] {
             assert!(
                 names.contains(&expected),

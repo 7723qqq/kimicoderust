@@ -1,17 +1,7 @@
-//! v2 `agent/toolRegistry/toolRegistryService.ts` + `tool/toolContract.ts`.
-//!
-//! A session keeps one active table and a set of pending same-name
-//! replacements. A same-name registration whose definition signature changed
-//! does **not** replace the active tool mid-session: it is held as `pending`
-//! and `list()` keeps serving the original info, while `list_live()` reports
-//! what a new session would see. This is the state machine behind #4719 /
-//! #4720 / #4733's "pin the active schema" behavior.
-
 use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-/// Where a registered tool came from (v2 `ToolSource`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSource {
     Builtin,
@@ -31,8 +21,6 @@ impl ToolSource {
     }
 }
 
-/// Whether the tool is advertised inline or disclosed on demand
-/// (v2 `ToolDisclosure`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolDisclosure {
     #[default]
@@ -49,7 +37,6 @@ impl ToolDisclosure {
     }
 }
 
-/// One registry entry's definition (v2 `ToolInfo`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolDefinition {
     pub name: String,
@@ -59,17 +46,12 @@ pub struct ToolDefinition {
     pub disclosure: ToolDisclosure,
 }
 
-/// v2 `createEntry`: the executable tool plus the immutable info snapshot
-/// taken at registration time. A same-name update replaces the executable
-/// tool but `list()` keeps serving this info while a replacement is pending.
 #[derive(Debug, Clone)]
 struct RegistryEntry {
     tool: ToolDefinition,
     info: ToolDefinition,
 }
 
-/// Recursively sort object keys so two schemas with the same content hash the
-/// same regardless of insertion order (v2 `canonicalToolValue`).
 fn canonical_value(value: &Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.iter().map(canonical_value).collect()),
@@ -87,8 +69,6 @@ fn canonical_value(value: &Value) -> Value {
     }
 }
 
-/// v2 `toolDefinitionSchemaSignature`: name + description + canonical schema.
-/// An absent schema means the empty object v2 substitutes.
 pub fn schema_signature(tool: &ToolDefinition) -> String {
     let parameters = if tool.input_schema.is_null() {
         serde_json::json!({ "type": "object", "properties": {} })
@@ -103,7 +83,6 @@ pub fn schema_signature(tool: &ToolDefinition) -> String {
     .unwrap_or_default()
 }
 
-/// v2 `toolDefinitionVersionSignature`: schema + source + disclosure.
 pub fn version_signature(tool: &ToolDefinition) -> String {
     serde_json::to_string(&serde_json::json!([
         schema_signature(tool),
@@ -113,15 +92,12 @@ pub fn version_signature(tool: &ToolDefinition) -> String {
     .unwrap_or_default()
 }
 
-/// The outcome of one `register` call (v2 `ToolRegistration.status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationStatus {
     Active,
     Pending,
 }
 
-/// The session's tool registry. `list` is what the running model sees;
-/// `list_live` is what a freshly constructed session would register.
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
     active: BTreeMap<String, RegistryEntry>,
@@ -133,9 +109,6 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// v2 `register`: a first registration is active; an identical
-    /// same-name re-registration is active with the original info kept; a
-    /// changed definition becomes pending while the active tool stays pinned.
     pub fn register(&mut self, tool: ToolDefinition) -> RegistrationStatus {
         let name = tool.name.clone();
         match self.active.get(&name).cloned() {
@@ -168,8 +141,6 @@ impl ToolRegistry {
         }
     }
 
-    /// The active definitions. A name with a pending replacement serves the
-    /// immutable info snapshot taken at its first registration (v2 `list`).
     pub fn list(&self) -> Vec<ToolDefinition> {
         self.active
             .values()
@@ -183,8 +154,6 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Active definitions overlaid with pending replacements (v2
-    /// `listLive`): what a new session would see.
     pub fn list_live(&self) -> Vec<ToolDefinition> {
         let mut live: BTreeMap<String, ToolDefinition> = self
             .active
@@ -197,12 +166,10 @@ impl ToolRegistry {
         live.into_values().collect()
     }
 
-    /// Whether a name carries a pending same-name replacement.
     pub fn has_pending(&self, name: &str) -> bool {
         self.pending.contains_key(name)
     }
 
-    /// v2 `ToolRegistration.dispose` / `unregisterMcpServer`.
     pub fn unregister(&mut self, name: &str) {
         self.pending.remove(name);
         self.active.remove(name);
@@ -250,8 +217,7 @@ mod tests {
         let new = tool("mcp__s__t", "new", serde_json::json!({ "type": "object" }));
         assert_eq!(registry.register(new.clone()), RegistrationStatus::Pending);
         assert!(registry.has_pending("mcp__s__t"));
-        // The running session keeps the old definition; a new session sees
-        // the replacement.
+
         let active = registry.list();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].description, "old");
@@ -268,8 +234,7 @@ mod tests {
             registry.register(original.clone()),
             RegistrationStatus::Active
         );
-        // A changed definition is held pending; re-registering the original
-        // signature is active again and drops the pending replacement.
+
         assert_eq!(
             registry.register(tool("X", "changed", serde_json::json!({}))),
             RegistrationStatus::Pending

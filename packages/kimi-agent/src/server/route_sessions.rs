@@ -1,6 +1,18 @@
 use super::catalog_routes::format_wire_session;
 use super::*;
 
+/// v2 `SESSION_NOT_FOUND` (`session/errors.ts`), which kap-server maps to
+/// HTTP 404 / wire code 40401.
+fn session_not_found(session_id: &str) -> HttpResponse {
+    HttpResponse::json(
+        404,
+        &json!({
+            "code": crate::server::envelope::error_codes::SESSION_NOT_FOUND,
+            "msg": format!("Session \"{session_id}\" not found"),
+        }),
+    )
+}
+
 impl HttpServer {
     pub(super) async fn route_sessions(
         &self,
@@ -80,6 +92,13 @@ impl HttpServer {
                                 }),
                             )
                         }
+                        crate::server::engine::EngineError::Stale(message) => HttpResponse::json(
+                            409,
+                            &json!({
+                                "code": crate::server::envelope::error_codes::SESSION_STALE,
+                                "msg": message,
+                            }),
+                        ),
                         other => HttpResponse::internal_error(other.to_string()),
                     },
                 }
@@ -473,6 +492,30 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
+                // v2 `fork` (sessionLifecycleService.ts:625) takes the source
+                // session's lease for the whole copy rather than refusing a
+                // running turn: a foreign process's publish denies the fork,
+                // while this process's own turn holds the same publish and the
+                // lease re-enters it.
+                let _source_lease = match crate::session::lock::SESSION_LOCKS.lease(session_id) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        return HttpResponse::json(
+                            409,
+                            &json!({
+                                "code": crate::server::envelope::error_codes::SESSION_OCCUPIED,
+                                "msg": error.to_string(),
+                            }),
+                        );
+                    }
+                };
+                // A running turn does not block the fork. v2 takes
+                // `tryAcquireHistorySnapshot()` and copies only the records
+                // before the pending work (`sliceRecordsBeforePendingWork`);
+                // this store's copy reads `turns` + `messages`, which the
+                // active turn has not written yet — its rows land at turn end
+                // — so the copy is the same committed prefix, and the source
+                // turn keeps running.
                 let body: Value = if req.body.is_empty() {
                     json!({})
                 } else {
@@ -500,10 +543,13 @@ impl HttpServer {
                     },
                 };
 
-                match self
-                    .store
-                    .fork_session(session_id, &new_session_id, title, turn_index)
-                {
+                match self.store.fork_session_with_metadata(
+                    session_id,
+                    &new_session_id,
+                    title,
+                    turn_index,
+                    body.get("metadata"),
+                ) {
                     Ok(true) => {
                         // v2 `forkSessionResponseSchema = sessionSchema`
                         // (kap-server/src/protocol/rest-session.ts:103) answered as
@@ -538,6 +584,7 @@ impl HttpServer {
                         // v2 `restoreSessionAction` answers the restored session
                         // via `okEnvelope(session, …)`
                         // (kap-server/src/routes/sessions.ts:976).
+                        self.clear_reclaimed(session_id);
                         let summary = self.store.get_session(session_id).ok().flatten();
                         let wire = match summary {
                             Some(ref session) => format_wire_session(
@@ -562,6 +609,14 @@ impl HttpServer {
                         // the lane's numbering restarts under a fresh epoch, so
                         // no client can resume the archived session's stream.
                         self.hub.evict_lane(session_id);
+                        self.clear_reclaimed(session_id);
+                        if let Some(engine) = self.engine.as_ref() {
+                            // v2 disposes the change-notifier snapshot with the
+                            // agent; an archived session has no further turns,
+                            // and a later restore must seed a fresh baseline.
+                            engine.forget_change_notifier(session_id);
+                            engine.forget_mcp_status(session_id);
+                        }
                         HttpResponse::ok(&json!({ "archived": true }))
                     }
                     Ok(false) => HttpResponse::not_found(),
@@ -570,15 +625,50 @@ impl HttpServer {
             }
             ("POST", p) if extract_session_action(p, "delete").is_some() => {
                 let session_id = extract_session_action(p, "delete").unwrap();
-                let workspace_id = self
-                    .store
-                    .get_session(session_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s.workspace_id);
+                let session = match self.store.get_session(session_id) {
+                    Ok(Some(session)) => session,
+                    Ok(None) => return session_not_found(session_id),
+                    Err(e) => {
+                        return HttpResponse::internal_error(format!("Database error: {e}"));
+                    }
+                };
+                let workspace_id = session.workspace_id.clone();
+                // v2 `sessionManagerService.delete` (`:366-392`) closes the
+                // session before the cleanup hooks run, so an in-flight turn
+                // cannot re-create rows between cleanup and the row delete.
+                self.interaction_manager.cancel_session(session_id);
+                if let Some(engine) = self.engine.as_ref() {
+                    engine.cancel_turn(session_id);
+                    // The close awaits the session's lifecycle chain; a turn
+                    // that is slow to notice cancellation is bounded at the
+                    // same 3s the lock release grace uses.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while engine.is_busy(session_id) && std::time::Instant::now() < deadline {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+                crate::session::lock::SESSION_LOCKS.release(session_id);
+                // v2 runs every `onWillDeleteSession` cleanup and rethrows the
+                // first failure, leaving the session intact.
+                if let Err(error) = self.run_session_cleanup_hooks(session_id) {
+                    return HttpResponse::json(
+                        500,
+                        &json!({
+                            "code": crate::server::envelope::error_codes::INTERNAL_ERROR,
+                            "msg": format!(
+                                "Could not clean up session \"{session_id}\": {error}"
+                            ),
+                        }),
+                    );
+                }
                 match self.store.delete_session(session_id) {
                     Ok(true) => {
-                        self.interaction_manager.cancel_session(session_id);
+                        self.clear_reclaimed(session_id);
+                        if let Some(engine) = self.engine.as_ref() {
+                            engine.forget_journal_head(session_id);
+                            engine.forget_change_notifier(session_id);
+                            engine.forget_mcp_status(session_id);
+                        }
                         // Session-level hooks run in the session's workspace
                         // (v2 #4242's session cwd, which session hooks always
                         // had upstream).
@@ -587,7 +677,7 @@ impl HttpServer {
                             .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
                             .map(|w| w.root);
                         let guard = crate::tools::external_hooks::HookGuard::new(
-                            self.config().await.hooks.clone(),
+                            self.current_hooks().await,
                         )
                         .with_session_cwd(session_cwd);
                         guard
@@ -610,7 +700,7 @@ impl HttpServer {
                         self.hub.evict_lane(session_id);
                         HttpResponse::ok(&json!({ "deleted": true, "sessionId": session_id }))
                     }
-                    Ok(false) => HttpResponse::not_found(),
+                    Ok(false) => session_not_found(session_id),
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
                 }
             }
@@ -657,27 +747,40 @@ impl HttpServer {
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
                 };
                 let child_session_id = format!("sess-{}", fastrand::u64(..));
-                let title = body.get("title").and_then(|v| v.as_str());
-                let workspace_id = parent.workspace_id.as_deref();
-                if let Err(e) =
-                    self.store
-                        .create_session_with_workspace(&child_session_id, title, workspace_id)
-                {
-                    return HttpResponse::internal_error(format!("Database error: {e}"));
+                // v2 `createChild` (`sessionLifecycleService.ts:831-846`): the
+                // default title names the parent, and the metadata document
+                // carries the parent/kind keys on top of the caller's patch.
+                let parent_title = parent
+                    .title
+                    .as_deref()
+                    .filter(|title| !crate::session::sqlite_store::is_untitled(Some(title)))
+                    .unwrap_or(parent_session_id);
+                let title = body
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("Child: {parent_title}"));
+                let mut metadata = body.get("metadata").cloned().unwrap_or_else(|| json!({}));
+                if let Some(object) = metadata.as_object_mut() {
+                    object.insert("parentSessionId".into(), json!(parent_session_id));
+                    object.insert("sessionKind".into(), json!("child"));
                 }
-                if let Err(e) = self
-                    .store
-                    .set_parent_session_id(&child_session_id, parent_session_id)
-                {
-                    return HttpResponse::internal_error(format!("Database error: {e}"));
-                }
-                if let Some(metadata) = body.get("metadata") {
-                    let _ = self.store.put_session_state(
-                        "metadata",
-                        &child_session_id,
-                        &child_session_id,
-                        metadata,
-                    );
+                // v2 `createChild` (`sessionLifecycleService.ts:831-846`) is a
+                // `fork` with a fixed title and the parent/kind metadata, so the
+                // child inherits titleKind/agents/custom and the source history.
+                match self.store.fork_session_with_metadata(
+                    parent_session_id,
+                    &child_session_id,
+                    Some(&title),
+                    None,
+                    Some(&metadata),
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return session_not_found(parent_session_id),
+                    Err(crate::session::sqlite_store::ForkError::Store(e)) => {
+                        return HttpResponse::internal_error(format!("Database error: {e}"));
+                    }
+                    Err(e) => return HttpResponse::bad_request(e.to_string()),
                 }
                 let created_session = self.store.get_session(&child_session_id).ok().flatten();
                 let session_val = if let Some(ref s) = created_session {
@@ -724,11 +827,111 @@ impl HttpServer {
                     serde_json::from_slice(&req.body).unwrap_or(json!({}))
                 };
                 let source = body.get("source").and_then(|v| v.as_str());
-                match self.store.generate_title(session_id, source) {
-                    Ok(Some(title)) => HttpResponse::ok(&json!({ "title": title })),
-                    Ok(None) => HttpResponse::bad_request(
-                        "SESSION_TITLE_UNAVAILABLE: the session has no user prompts to derive a title from",
-                    ),
+                let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+                // v2 `generateTitleOnce`: a non-forced call is a no-op while the
+                // title is host-custom or already generated. Answering the
+                // existing title (rather than regenerating) is what keeps a
+                // custom title from being overwritten by the automatic pass.
+                let existing = self.store.get_session(session_id).ok().flatten();
+                let existing_kind = existing
+                    .as_ref()
+                    .and_then(|session| session.normalized_title_kind());
+                if !force && matches!(existing_kind, Some("custom") | Some("generated")) {
+                    return HttpResponse::ok(&json!({
+                        "title": existing
+                            .as_ref()
+                            .and_then(|session| session.title.clone())
+                            .unwrap_or_default(),
+                    }));
+                }
+                let Some(engine) = self.engine.as_ref() else {
+                    // v2 `generateTitle` answers `undefined` when there is no
+                    // main agent to ask — a normal outcome, not a request error.
+                    return HttpResponse::ok(&json!({ "title": null }));
+                };
+                let Some(llm) = engine.session_llm(session_id).await else {
+                    return HttpResponse::ok(&json!({ "title": null }));
+                };
+                // One attempt per session at a time: a concurrent caller waits
+                // and then re-reads the applied title instead of issuing a
+                // second model request (v2 `_shared`).
+                let _slot = crate::session::title::title_generation_slot(session_id).await;
+                let refreshed = self.store.get_session(session_id).ok().flatten();
+                if !force
+                    && matches!(
+                        refreshed
+                            .as_ref()
+                            .and_then(|session| session.normalized_title_kind()),
+                        Some("custom") | Some("generated")
+                    )
+                {
+                    return HttpResponse::ok(&json!({
+                        "title": refreshed
+                            .as_ref()
+                            .and_then(|session| session.title.clone())
+                            .unwrap_or_default(),
+                    }));
+                }
+                let history = self
+                    .store
+                    .load_session_history(session_id)
+                    .unwrap_or_default();
+                match crate::session::title::generate_session_title(&history, source, llm.as_ref())
+                    .await
+                {
+                    Ok(Some(title)) => {
+                        match self
+                            .store
+                            .set_generated_title_if_uncustomized(session_id, &title, force)
+                        {
+                            Ok(true) => {
+                                // Mirror v2 `SessionMetaUpdated` on the existing
+                                // `session.meta.updated` contract: a patch plus
+                                // its inverse, so an undo restores the previous
+                                // title and clients fold one shape.
+                                let patch = json!({
+                                    "title": title,
+                                    "title_kind": "generated",
+                                    "titleKind": "generated",
+                                    "is_custom_title": false,
+                                    "isCustomTitle": false,
+                                });
+                                let inverse = json!({
+                                    "title": existing
+                                        .as_ref()
+                                        .and_then(|session| session.title.clone()),
+                                    "title_kind": existing_kind,
+                                    "titleKind": existing_kind,
+                                    "is_custom_title": existing_kind == Some("custom"),
+                                    "isCustomTitle": existing_kind == Some("custom"),
+                                });
+                                self.hub.bus_for(session_id).publish(
+                                    &crate::events::EngineEvent::Custom(json!({
+                                        "type": "session.meta.updated",
+                                        "agentId": crate::callbacks::MAIN_AGENT_ID,
+                                        "sessionId": session_id,
+                                        "title": title,
+                                        "patch": patch,
+                                        "inverse": inverse,
+                                    })),
+                                );
+                                HttpResponse::ok(&json!({ "title": title }))
+                            }
+                            Ok(false) => HttpResponse::ok(&json!({
+                                "title": self
+                                    .store
+                                    .get_session(session_id)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|session| session.title)
+                                    .unwrap_or_default(),
+                            })),
+                            Err(e) => HttpResponse::internal_error(format!(
+                                "Failed to persist the generated title: {e}"
+                            )),
+                        }
+                    }
+                    Ok(None) => HttpResponse::ok(&json!({ "title": null })),
                     Err(e) => HttpResponse::bad_request(e),
                 }
             }
@@ -791,14 +994,20 @@ impl HttpServer {
                     }
                 };
                 match engine.compact_session(session_id, instruction).await {
-                    Ok(report) => HttpResponse::ok(&json!({
-                        "compacted": true,
-                        "removed": report.removed,
-                        "sessionId": session_id,
-                        "compactedCount": report.compacted_count,
-                        "tokensBefore": report.tokens_before,
-                        "tokensAfter": report.tokens_after,
-                    })),
+                    Ok(report) => {
+                        // The rewrite shrank the journal; adopt the new head so
+                        // the next turn does not read our own compaction as a
+                        // foreign modification.
+                        engine.observe_journal_head(session_id);
+                        HttpResponse::ok(&json!({
+                            "compacted": true,
+                            "removed": report.removed,
+                            "sessionId": session_id,
+                            "compactedCount": report.compacted_count,
+                            "tokensBefore": report.tokens_before,
+                            "tokensAfter": report.tokens_after,
+                        }))
+                    }
                     Err(crate::server::engine::EngineError::NoModel(message)) => {
                         HttpResponse::json(503, &json!({ "error": message }))
                     }
@@ -867,6 +1076,9 @@ impl HttpServer {
                     Err(e) if e.contains("undo refused") => return HttpResponse::bad_request(e),
                     Err(e) => return HttpResponse::internal_error(format!("Database error: {e}")),
                 };
+                // Paths restored by `revert_files`, reported as v2's
+                // `checkpoint.restored` payload once the undo commits.
+                let mut restored_files: Vec<String> = Vec::new();
                 // Revert the workspace files *before* the turn rows are deleted:
                 // if a file cannot be restored we must not report a successful
                 // undo, and the history must stay intact so the operation can be
@@ -886,7 +1098,7 @@ impl HttpServer {
                             *turn_number as usize,
                             &workdir,
                         ) {
-                            Ok(_) => {}
+                            Ok(paths) => restored_files.extend(paths),
                             // A file that moved on since the tool wrote it is
                             // the user's to keep: v2 reports `manual_edit` /
                             // `deleted` and leaves the file alone. Undo is
@@ -950,6 +1162,17 @@ impl HttpServer {
                         // messages no longer apply to the session's context.
                         if let Some(engine) = self.engine.as_ref() {
                             engine.record_context_truncation(session_id);
+                            // Undo shrank the journal through this process's
+                            // own hold; adopt the new head so the next turn
+                            // does not read it as a foreign modification.
+                            engine.observe_journal_head(session_id);
+                        }
+                        // v2 `sessionOutcomeMirrorService.clearIfMatches` at
+                        // undo: removing the turn that produced the recorded
+                        // outcome invalidates it. Leaving it in place would
+                        // report the outcome of a turn the user just discarded.
+                        if let Err(e) = self.store.set_last_turn_reason(session_id, None) {
+                            tracing::warn!(%session_id, %e, "failed to clear last_turn_reason at undo");
                         }
                         // Online transcripts must learn about the cut, exactly
                         // like delete/patch publish their own events.
@@ -961,6 +1184,21 @@ impl HttpServer {
                                 "undone": undone,
                                 "turnNumbers": turn_numbers,
                             })));
+                        // v2 `CheckpointRestored` (`checkpointService.ts:27-31`):
+                        // the files the undo put back, emitted only when the
+                        // caller asked for a workspace revert and something was
+                        // actually restored. Conflicts refuse the undo above, so
+                        // the payload's conflict list is always empty here.
+                        if !restored_files.is_empty() {
+                            self.hub.bus_for(session_id).publish(
+                                &crate::events::EngineEvent::Custom(json!({
+                                    "type": "checkpoint.restored",
+                                    "sessionId": session_id,
+                                    "restored": restored_files,
+                                    "conflicts": [],
+                                })),
+                            );
+                        }
                         HttpResponse::ok(&json!({
                             "undone": undone,
                             "sessionId": session_id
@@ -1061,7 +1299,7 @@ impl HttpServer {
             ("GET", p) if extract_session_action(p, "goal").is_some() => {
                 let session_id = extract_session_action(p, "goal").unwrap();
                 if self.store.get_session(session_id).ok().flatten().is_none() {
-                    return HttpResponse::not_found();
+                    return session_not_found(session_id);
                 }
                 // The engine's goal store is the authority: the turn settle
                 // folds / pauses / blocks there, and the REST read must see

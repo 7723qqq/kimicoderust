@@ -1,28 +1,6 @@
-//! Prompt-intake media preparation — the engine half of v2's
-//! `agent/media/promptMedia.ts` + `image-compress.ts`.
-//!
-//! v2 compressed a prompt's inline images at intake: an image over the
-//! model's pixel or byte budget was resized/re-encoded, the original was
-//! persisted, and a caption naming both was inserted before the image part.
-//! The fork's TUI path does this host-side (`apps/kimi-code`'s
-//! `image-placeholder.ts` over the napi `native_compress_image`), but the
-//! HTTP prompt path — the web UI's submissions — passed inline base64
-//! images straight through with no compression and no caption (ROADMAP
-//! #3747b). This module is that path's half.
-//!
-//! Two v2 intake behaviors are deliberately not ported, because the fork's
-//! #3784 rebuild moved them to request time: the model-accepted-mime gate
-//! (the resolver emits a `<image path="…">` tag when the model cannot take
-//! the family) and the request media budget (`media_budget.rs`). What is
-//! ported here is the part with no request-time equivalent: the compression
-//! itself and its caption.
-//!
-//! The caption wording is the fork's own, byte-for-byte the one
-//! `packages/node-sdk/src/media/image-compress.ts` emits (itself a port of
-//! v2's with the fork's two substitutions: `Read` instead of the
-//! nonexistent `ReadMediaFile` tool, and the `, `-joined variant
-//! description). One caption text must read the same whichever surface
-//! compressed the image.
+//! Prompt-intake media preparation (v2 `agent/media/image-compress.ts`,
+//! `image-format-policy.ts`): the format gate, inline-image compression, and
+//! the compression caption the model reads.
 
 use std::path::PathBuf;
 
@@ -51,9 +29,17 @@ const JPEG_QUALITY_STEPS: [u8; 4] = [80, 60, 40, 20];
 /// The engine-side compression budget for a prompt's inline image — v2's
 /// `compressImageForModel` defaults.
 pub fn prompt_compress_config() -> CompressConfig {
+    prompt_compress_config_for(None)
+}
+
+/// [`prompt_compress_config`] resolved for the provider: v2
+/// `providerImagePolicy` gives kimi a 5 MiB inline budget (baseline 3.75 MiB).
+/// The compression entry compresses to the model's budget, so a kimi image
+/// between the two limits must not be re-encoded down to the baseline.
+pub fn prompt_compress_config_for(provider: Option<&str>) -> CompressConfig {
     CompressConfig {
         max_edge: MAX_IMAGE_EDGE_PX,
-        byte_budget: INLINE_IMAGE_BYTE_BUDGET,
+        byte_budget: crate::llm::image_policy::provider_image_policy(provider).inline_byte_budget,
         fallback_edges: FALLBACK_EDGES_PX.to_vec(),
         jpeg_quality_steps: JPEG_QUALITY_STEPS.to_vec(),
     }
@@ -79,28 +65,19 @@ pub fn format_byte_size(bytes: usize) -> String {
 }
 
 fn describe_image_variant(variant: &ImageVariant) -> String {
-    let mut parts = Vec::new();
+    let size = format!(
+        "{} ({})",
+        variant.mime_type,
+        format_byte_size(variant.byte_length)
+    );
     if variant.width > 0 && variant.height > 0 {
-        parts.push(format!("{}x{}", variant.width, variant.height));
+        format!("{}x{} {}", variant.width, variant.height, size)
+    } else {
+        size
     }
-    if variant.byte_length > 0 {
-        parts.push(format_byte_size(variant.byte_length));
-    }
-    if !variant.mime_type.is_empty() {
-        parts.push(
-            variant
-                .mime_type
-                .trim_start_matches("image/")
-                .to_uppercase(),
-        );
-    }
-    parts.join(", ")
 }
 
-/// The compression caption, byte-for-byte the SDK's
-/// `buildImageCompressionCaption` (v2's text with the fork's `Read`
-/// substitution — the fork has no `ReadMediaFile` tool; media reads go
-/// through `Read` itself).
+/// The compression caption, v2 `buildImageCompressionCaption`.
 pub fn build_image_compression_caption(
     original: &ImageVariant,
     final_variant: &ImageVariant,
@@ -154,6 +131,7 @@ pub fn persist_original_image(
 /// budgets passes through unchanged with no caption — v2's `passthrough`.
 pub fn prepare_inline_image(
     store: &FileStore,
+    provider: Option<&str>,
     media_type: &str,
     data_base64: &str,
     name: Option<&str>,
@@ -169,7 +147,8 @@ pub fn prepare_inline_image(
     if bytes.is_empty() || bytes.len() > MAX_IMAGE_DECODE_BYTES {
         return (None, passthrough());
     }
-    let Some(result) = compress_image(&bytes, media_type, &prompt_compress_config()) else {
+    let Some(result) = compress_image(&bytes, media_type, &prompt_compress_config_for(provider))
+    else {
         return (None, passthrough());
     };
     if !result.changed {
@@ -198,6 +177,92 @@ pub fn prepare_inline_image(
         name: name.map(str::to_string),
     };
     (Some(caption), block)
+}
+
+fn inline_image_blocks(
+    store: &FileStore,
+    provider: Option<&str>,
+    media_type: &str,
+    data: &str,
+    name: Option<&str>,
+) -> Vec<ContentBlock> {
+    let url = format!("data:{media_type};base64,{data}");
+    let Some((parsed_mime, parsed_data)) = crate::llm::image_policy::parse_image_data_url(&url)
+    else {
+        return vec![ContentBlock::Text {
+            text: crate::llm::image_policy::build_malformed_image_notice(&url),
+            meta: None,
+        }];
+    };
+    let effective = crate::llm::image_policy::resolve_effective_image_mime(
+        &parsed_mime,
+        &crate::llm::image_policy::decode_base64_prefix(&parsed_data),
+    );
+    let normalized = crate::llm::image_policy::normalize_image_mime(&effective);
+    if !crate::llm::image_policy::is_model_accepted_image_mime(&normalized, provider) {
+        return vec![ContentBlock::Text {
+            text: crate::llm::image_policy::build_unsupported_image_notice(
+                &normalized,
+                None,
+                provider,
+            ),
+            meta: None,
+        }];
+    }
+    let (caption, block) = prepare_inline_image(store, provider, &normalized, &parsed_data, name);
+    let mut blocks = Vec::new();
+    if let Some(caption) = caption {
+        blocks.push(ContentBlock::Text {
+            text: caption,
+            meta: None,
+        });
+    }
+    blocks.push(block);
+    blocks
+}
+
+pub fn image_blocks_from_base64(
+    store: &FileStore,
+    provider: Option<&str>,
+    media_type: &str,
+    data: &str,
+    name: Option<&str>,
+) -> Vec<ContentBlock> {
+    inline_image_blocks(store, provider, media_type, data, name)
+}
+
+pub fn image_blocks_from_url(
+    store: &FileStore,
+    provider: Option<&str>,
+    url: &str,
+    name: Option<&str>,
+) -> Vec<ContentBlock> {
+    if let Some((mime_type, data)) = crate::llm::image_policy::parse_image_data_url(url) {
+        return inline_image_blocks(store, provider, &mime_type, &data, name);
+    }
+    if crate::llm::image_policy::is_data_url(url) {
+        return vec![ContentBlock::Text {
+            text: crate::llm::image_policy::build_malformed_image_notice(url),
+            meta: None,
+        }];
+    }
+    if let Some(mime_type) =
+        crate::llm::image_policy::unsupported_image_mime_from_url(url, provider)
+    {
+        return vec![ContentBlock::Text {
+            text: crate::llm::image_policy::build_unsupported_image_notice(
+                &mime_type,
+                Some(url),
+                provider,
+            ),
+            meta: None,
+        }];
+    }
+    vec![ContentBlock::ImageUrl {
+        url: url.to_string(),
+        id: None,
+        name: name.map(str::to_string),
+    }]
 }
 
 #[cfg(test)]
@@ -229,6 +294,26 @@ mod tests {
     }
 
     #[test]
+    fn the_inline_budget_follows_the_provider_policy() {
+        assert_eq!(
+            prompt_compress_config().byte_budget,
+            INLINE_IMAGE_BYTE_BUDGET
+        );
+        assert_eq!(
+            prompt_compress_config_for(Some("kimi")).byte_budget,
+            5 * 1024 * 1024,
+            "v2 `KIMI_IMAGE_POLICY` raises the inline budget to 5 MiB"
+        );
+        for provider in ["openai", "anthropic", "google"] {
+            assert_eq!(
+                prompt_compress_config_for(Some(provider)).byte_budget,
+                INLINE_IMAGE_BYTE_BUDGET,
+                "{provider} keeps the baseline 3.75 MiB budget"
+            );
+        }
+    }
+
+    #[test]
     fn format_byte_size_matches_the_sdk_wording() {
         assert_eq!(format_byte_size(512), "512 B");
         assert_eq!(format_byte_size(2048), "2 KB");
@@ -236,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn the_caption_is_the_sdks_caption_verbatim() {
+    fn the_caption_matches_v2_verbatim() {
         let caption = build_image_compression_caption(
             &ImageVariant {
                 width: 4000,
@@ -254,7 +339,7 @@ mod tests {
         );
         assert_eq!(
             caption,
-            "<system>Image compressed to fit model limits: original 4000x3000, 5.0 MB, PNG -> sent 2000x1500, 1.0 MB, JPEG. Fine detail may be lost. The uncompressed original is saved at \"/cache/kimi-code-original-images/abc.png\"; if you need fine detail (e.g. small text), call Read on that path with the region parameter (original-pixel coordinates) to view a crop at full fidelity.</system>"
+            "<system>Image compressed to fit model limits: original 4000x3000 image/png (5.0 MB) -> sent 2000x1500 image/jpeg (1.0 MB). Fine detail may be lost. The uncompressed original is saved at \"/cache/kimi-code-original-images/abc.png\"; if you need fine detail (e.g. small text), call Read on that path with the region parameter (original-pixel coordinates) to view a crop at full fidelity.</system>"
         );
     }
 
@@ -286,12 +371,14 @@ mod tests {
         let store = store_in(&dir);
         let data = png_base64(4000, 3000);
 
-        let (caption, block) = prepare_inline_image(&store, "image/png", &data, Some("shot.png"));
+        let (caption, block) =
+            prepare_inline_image(&store, None, "image/png", &data, Some("shot.png"));
 
         let caption = caption.expect("an over-budget image is captioned");
         assert!(
-            caption
-                .starts_with("<system>Image compressed to fit model limits: original 4000x3000,")
+            caption.starts_with(
+                "<system>Image compressed to fit model limits: original 4000x3000 image/"
+            )
         );
         assert!(caption.contains("Fine detail may be lost."));
         assert!(caption.contains("call Read on that path"));
@@ -325,7 +412,7 @@ mod tests {
         let store = store_in(&dir);
         let data = png_base64(10, 10);
 
-        let (caption, block) = prepare_inline_image(&store, "image/png", &data, None);
+        let (caption, block) = prepare_inline_image(&store, None, "image/png", &data, None);
 
         assert!(caption.is_none(), "an in-budget image is not captioned");
         let ContentBlock::Image {
@@ -341,17 +428,96 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_bytes_pass_through_uncaptioned() {
+    fn an_unsupported_inline_format_becomes_a_notice() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(&dir);
-        let data = base64::engine::general_purpose::STANDARD.encode(b"not an image");
+        let bmp = base64::engine::general_purpose::STANDARD.encode(b"BMfakebmpdata");
 
-        let (caption, block) = prepare_inline_image(&store, "image/png", &data, None);
-
-        assert!(caption.is_none());
-        let ContentBlock::Image { data: sent, .. } = block else {
-            panic!("expected an image block");
+        let blocks =
+            image_blocks_from_base64(&store, Some("openai"), "image/bmp", &bmp, Some("a.bmp"));
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Text { text, .. } = &blocks[0] else {
+            panic!("expected a notice, got {:?}", blocks[0]);
         };
-        assert_eq!(sent, data);
+        assert!(text.contains("unsupported image format image/bmp"), "{text}");
+        assert!(text.contains("PNG, JPEG, GIF, and WebP"), "{text}");
+
+        let blocks =
+            image_blocks_from_base64(&store, Some("kimi"), "image/bmp", &bmp, Some("a.bmp"));
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Image { media_type, .. } = &blocks[0] else {
+            panic!("expected an image block, got {:?}", blocks[0]);
+        };
+        assert_eq!(media_type, "image/bmp");
+    }
+
+    #[test]
+    fn a_malformed_data_url_becomes_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        let blocks = image_blocks_from_url(&store, None, "data:image/png,AAAA", Some("a.png"));
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Text { text, .. } = &blocks[0] else {
+            panic!("expected a notice, got {:?}", blocks[0]);
+        };
+        assert!(text.contains("is not a valid data URL"), "{text}");
+    }
+
+    #[test]
+    fn a_remote_url_is_gated_by_its_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+
+        let blocks =
+            image_blocks_from_url(&store, Some("openai"), "https://x/a.heic", Some("a.heic"));
+        let ContentBlock::Text { text, .. } = &blocks[0] else {
+            panic!("expected a notice, got {:?}", blocks[0]);
+        };
+        assert!(
+            text.contains("\"https://x/a.heic\" uses unsupported image format image/heic"),
+            "{text}"
+        );
+
+        let blocks = image_blocks_from_url(&store, Some("openai"), "https://x/a.png", None);
+        assert_eq!(
+            blocks[0],
+            ContentBlock::ImageUrl {
+                url: "https://x/a.png".into(),
+                id: None,
+                name: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_inline_data_url_image_goes_through_compression() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        let data = png_base64(10, 10);
+        let url = format!("data:image/jpg;base64,{data}");
+
+        let blocks = image_blocks_from_url(&store, None, &url, None);
+
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Image {
+            media_type,
+            data: sent,
+            ..
+        } = &blocks[0]
+        else {
+            panic!("expected an image block, got {:?}", blocks[0]);
+        };
+        assert_eq!(media_type, "image/png");
+        assert_eq!(sent, &data);
+    }
+
+    #[test]
+    fn an_unsupported_format_never_reaches_the_image_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        let data = base64::engine::general_purpose::STANDARD.encode(b"\x00\x00\x00\x18ftypheic");
+        let blocks =
+            image_blocks_from_base64(&store, None, "image/heic", &data, Some("a.heic"));
+        assert!(matches!(&blocks[0], ContentBlock::Text { text, .. } if text.contains("image/heic")));
     }
 }

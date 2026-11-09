@@ -21,7 +21,9 @@ use crate::llm::files_upload::UploadError;
 use crate::llm::media_budget::Entry;
 use crate::rpc::types::{ContentBlock, MediaKind};
 use crate::server::files::FileStore;
-use crate::turn_loop::types::LLMMessage;
+use kimi_core::types::LLMMessage;
+
+pub use kimi_core::types::ResolvedRequest;
 
 /// v2 `IMAGE_UNAVAILABLE_TEXT` / `VIDEO_UNAVAILABLE_TEXT`: what a reference
 /// becomes when its blob is gone (expired, pruned, or never stored).
@@ -64,40 +66,8 @@ pub fn build_media_path_tag(kind: MediaKind, path: &str) -> String {
     )
 }
 
-/// What the resolver needs to know about the model behind an LLM (v2
-/// `ModelRequester.model`): which media it accepts, and — for a provider that
-/// takes media by reference — where the upload goes.
-#[derive(Debug, Clone, Default)]
-pub struct MediaTarget {
-    /// Wire protocol (`"openai"` / `"anthropic"`), for the upload route.
-    pub protocol: String,
-    /// API base URL, for the upload route.
-    pub base_url: String,
-    /// The provider identity the upload cache is keyed by.
-    pub provider_key: String,
-    /// The model takes images (`capabilities.image_in`).
-    pub image_in: bool,
-    /// The model takes video (`capabilities.video_in`).
-    pub video_in: bool,
-    /// The model takes audio (`capabilities.audio_in`).
-    pub audio_in: bool,
-    /// The provider takes media by reference (v2's `modelSource ===
-    /// 'oauth-catalog'` gate): the resolver uploads instead of inlining.
-    pub uploads_media: bool,
-}
+pub use kimi_core::types::MediaTarget;
 
-impl MediaTarget {
-    /// Whether the model accepts this media family. An unknown target accepts
-    /// everything — a turn with no model metadata (a test stub, a host-proxy
-    /// transport) must not silently drop the user's media.
-    fn accepts(&self, kind: MediaKind) -> bool {
-        match kind {
-            MediaKind::Image => self.image_in,
-            MediaKind::Video => self.video_in,
-            MediaKind::Audio => self.audio_in,
-        }
-    }
-}
 
 /// The daemon file id a block references, with the media family the
 /// submitting part claimed.
@@ -176,6 +146,43 @@ fn inline_bytes(block: &ContentBlock) -> usize {
     }
 }
 
+/// v2 `accountHashFor`: an upload belongs to the account that made it, so the
+/// memo and the persisted upload cache are scoped by credential. Only a
+/// truncated SHA-256 of the credential enters a key — the keys are written to
+/// the session store, so the secret itself must never appear in one.
+fn account_hash(credential: Option<&str>) -> String {
+    let Some(credential) = credential.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "no-key".to_string();
+    };
+    let identity = format!(
+        "api-key\0{}",
+        stable_jwt_subject(credential).unwrap_or_else(|| credential.to_string())
+    );
+    let digest = Sha256::digest(identity.as_bytes());
+    format!("{digest:x}")[..16].to_string()
+}
+
+fn stable_jwt_subject(token: &str) -> Option<String> {
+    let mut parts = token.split('.');
+    let payload = parts.nth(1)?;
+    let signature = parts.next()?;
+    if signature.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    for key in ["sub", "user_id"] {
+        if let Some(text) = value.get(key).and_then(|value| value.as_str())
+            && !text.is_empty()
+        {
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
 /// The budget entries a history carries with no store behind it: inline
 /// payloads only, since a reference cannot be read without one.
 pub fn inline_entries(messages: &[LLMMessage]) -> Vec<Entry> {
@@ -231,14 +238,62 @@ fn inline_budget(block: &ContentBlock) -> Option<(MediaKind, usize, String)> {
     Some((kind, bytes, format!("inline\0{:x}", hasher.finalize())))
 }
 
-/// A request after media resolution: the messages to send, plus the media the
-/// budget must weigh.
+
+/// v2 `IMAGE_MEMO_MAX_BYTES` / `IMAGE_MEMO_MAX_TOTAL_BYTES`: the bound on the
+/// inline-payload memo. An entry larger than the per-item cap is not memoized
+/// at all; the total is enforced oldest-first, like v2's `memoizeImage`.
+const INLINE_MEMO_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+const INLINE_MEMO_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// The bounded memo for resolved *inline* payloads (v2 `imageMemo`).
 ///
-/// The entries are built here because this is the side that knows which file
-/// a block came from — the resolved block itself no longer says.
-pub struct ResolvedRequest<'a> {
-    pub messages: Cow<'a, [LLMMessage]>,
-    pub entries: Vec<Entry>,
+/// Inline base64 is bytes, not an identity: it is expensive to keep and
+/// re-reading the blob is always possible, so it must never join the
+/// unbounded [`MediaResolver::resolved`] map. It still has to be cached —
+/// re-encoding a multi-megabyte image on every step of a turn is worse — so
+/// this map carries v2's byte caps.
+#[derive(Default)]
+struct InlineMemo {
+    entries: HashMap<String, (ContentBlock, usize)>,
+    /// Insertion order, oldest first — the eviction order.
+    order: std::collections::VecDeque<String>,
+    bytes: usize,
+}
+
+impl InlineMemo {
+    fn get(&mut self, key: &str) -> Option<ContentBlock> {
+        let block = self.entries.get(key)?.0.clone();
+        // Touch: v2 deletes and re-inserts on a hit, so a hot entry survives
+        // the oldest-first sweep.
+        if let Some(position) = self.order.iter().position(|existing| existing == key) {
+            self.order.remove(position);
+        }
+        self.order.push_back(key.to_string());
+        Some(block)
+    }
+
+    fn insert(&mut self, key: String, block: ContentBlock, bytes: usize) {
+        if bytes > INLINE_MEMO_MAX_ENTRY_BYTES {
+            return;
+        }
+        if let Some((_, previous)) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous);
+            if let Some(position) = self.order.iter().position(|existing| *existing == key) {
+                self.order.remove(position);
+            }
+        }
+        self.bytes += bytes;
+        self.order.push_back(key.clone());
+        self.entries.insert(key, (block, bytes));
+        while self.bytes > INLINE_MEMO_MAX_TOTAL_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, evicted)) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(evicted);
+            }
+        }
+    }
 }
 
 /// Resolves [`ContentBlock::MediaRef`] blocks against the daemon file store.
@@ -247,14 +302,18 @@ pub struct ResolvedRequest<'a> {
 /// item from being re-read — or re-uploaded — on every step of a turn.
 pub struct MediaResolver {
     store: FileStore,
-    /// Resolved blocks, keyed by `(file id, provider key)`. v2 keeps the same
-    /// map in agent state (`media.resolved`).
+    /// Resolved blocks that are *identities* — a provider-side `ms://`
+    /// reference or a small text placeholder — keyed by the full upload
+    /// identity (v2's `media.resolved` map). Inline payloads go to
+    /// [`InlineMemo`] instead, because this map has no size bound.
     resolved: Mutex<HashMap<String, ContentBlock>>,
+    /// Inline payloads, bounded (v2 `imageMemo`).
+    inline_memo: Mutex<InlineMemo>,
     /// Providers that answered an upload with "no such route" (v2
     /// `imageUploadUnsupported`): the resolver stops trying for them.
     upload_unsupported: Mutex<std::collections::HashSet<String>>,
     /// The persisted upload tier (v2's blob-store `image-upload-cache`
-    /// scope): `(file id, provider key)` → provider file id, so a daemon
+    /// scope): the full upload identity → provider file id, so a daemon
     /// restart reuses the provider-side upload instead of repeating it.
     /// `None` keeps the memo process-only (tests, store-less hosts).
     upload_cache: Option<Arc<crate::session::sqlite_store::SqliteSessionStore>>,
@@ -277,6 +336,7 @@ impl MediaResolver {
         Self {
             store,
             resolved: Mutex::new(HashMap::new()),
+            inline_memo: Mutex::new(InlineMemo::default()),
             upload_unsupported: Mutex::new(std::collections::HashSet::new()),
             upload_cache: None,
         }
@@ -334,11 +394,12 @@ impl MediaResolver {
     /// with; `None` inlines instead. A history with neither references nor
     /// inline media is returned borrowed, so a text-only turn costs nothing.
     ///
-    /// `Err` carries a rejected upload credential and nothing else (v2
-    /// `isMediaUploadAuthError` → throw, mediaResolverService.ts:356): the
-    /// user's login is broken, so the request fails with the upload's own
-    /// error instead of degrading the media and letting the chat request
-    /// report a different failure.
+    /// `Err` carries a failure that must abort the request: a rejected upload
+    /// credential (v2 `isMediaUploadAuthError` → throw,
+    /// mediaResolverService.ts:356), or a referenced file whose metadata could
+    /// not be read — the user's login is broken, or the store failed, so the
+    /// request fails with the real reason instead of degrading the media and
+    /// letting the chat request report a different failure.
     pub async fn resolve<'a>(
         &self,
         messages: &'a [LLMMessage],
@@ -413,11 +474,70 @@ impl MediaResolver {
 
     /// The saved path of one referenced file, for a caller that wants to show
     /// it (v2 `displayPaths`).
+    ///
+    /// A missing file is `None`; a metadata read that failed for any other
+    /// reason is also `None` (there is no path to show), but it is logged —
+    /// this side channel must not make an unreadable index look like an
+    /// ordinary miss.
     pub fn display_path(&self, file_id: &str) -> Option<String> {
-        self.store
-            .get(file_id)
-            .ok()
-            .map(|(_, path)| path.to_string_lossy().into_owned())
+        match self.store.get(file_id) {
+            Ok((_, path)) => Some(path.to_string_lossy().into_owned()),
+            Err((404, _, _)) => None,
+            Err((status, code, message)) => {
+                tracing::warn!(
+                    file_id,
+                    status,
+                    code,
+                    %message,
+                    "failed to read the media file metadata for its display path"
+                );
+                None
+            }
+        }
+    }
+
+    /// The memo / upload-cache identity of one reference — v2's
+    /// `image\0fileId\0providerKey\0protocol\0baseUrl\0accountHash`
+    /// (`mediaResolverService.ts:257,396`). Everything that can change what a
+    /// provider-side id means is in it: a memo keyed only by file + provider
+    /// would hand one account's upload to another after an account or
+    /// endpoint switch.
+    fn cache_key(
+        file_id: &str,
+        kind: MediaKind,
+        target: Option<&MediaTarget>,
+        credential: Option<&str>,
+    ) -> String {
+        let (provider_key, protocol, base_url) = match target {
+            Some(target) => (
+                target.provider_key.as_str(),
+                target.protocol.as_str(),
+                target.base_url.as_str(),
+            ),
+            None => ("", "", ""),
+        };
+        format!(
+            "{}\0{file_id}\0{provider_key}\0{protocol}\0{base_url}\0{}",
+            kind.as_str(),
+            account_hash(credential)
+        )
+    }
+
+    /// The memo identity of an inline payload. The bytes are the same for
+    /// every account, so the credential is not part of it — but the model
+    /// capabilities that decide whether the media is inlined at all are, or a
+    /// provider key shared by two models would let one model's data URL answer
+    /// the other's placeholder.
+    fn inline_key(file_id: &str, kind: MediaKind, target: Option<&MediaTarget>) -> String {
+        let provider_key = target
+            .map(|target| target.provider_key.as_str())
+            .unwrap_or("");
+        let accepts = target.is_none_or(|target| target.accepts(kind));
+        let inline_video = target.is_none_or(|target| target.inline_video);
+        format!(
+            "{}\0{file_id}\0{provider_key}\0{accepts}\0{inline_video}",
+            kind.as_str()
+        )
     }
 
     async fn resolve_one(
@@ -427,10 +547,7 @@ impl MediaResolver {
         target: Option<&MediaTarget>,
         credential: Option<&str>,
     ) -> Result<(ContentBlock, Option<String>), UploadError> {
-        let cache_key = format!(
-            "{file_id}\0{}",
-            target.map(|t| t.provider_key.as_str()).unwrap_or("")
-        );
+        let cache_key = Self::cache_key(file_id, kind, target, credential);
         if let Some(hit) = self
             .resolved
             .lock()
@@ -439,11 +556,18 @@ impl MediaResolver {
         {
             return Ok((hit.clone(), self.display_path(file_id)));
         }
+        let inline_key = Self::inline_key(file_id, kind, target);
+        if let Some(hit) = self
+            .inline_memo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&inline_key)
+        {
+            return Ok((hit, self.display_path(file_id)));
+        }
         // The persisted upload tier (v2 `image-upload-cache`): a provider
         // file id recorded by an earlier process answers without an upload.
-        // Only upload results live here — an inline block is bytes, not an
-        // identity, and re-reading the blob is cheaper than storing it.
-        if let Some(provider_file_id) = self.cached_upload(file_id, target) {
+        if let Some(provider_file_id) = self.cached_upload(&cache_key) {
             let block = reference_block(kind, &provider_file_id);
             self.resolved
                 .lock()
@@ -454,45 +578,58 @@ impl MediaResolver {
         let block = self
             .resolve_uncached(file_id, kind, target, credential)
             .await?;
-        self.resolved
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(cache_key, block.clone());
+        let bytes = inline_bytes(&block);
+        if bytes > 0 {
+            // Base64 bytes never enter the unbounded `resolved` map; the
+            // bounded memo caps them the way v2's `imageMemo` does.
+            self.inline_memo
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(inline_key, block.clone(), bytes);
+        } else {
+            self.resolved
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(cache_key, block.clone());
+        }
         Ok((block, self.display_path(file_id)))
     }
 
-    /// The provider file id an earlier process uploaded this file as, for
-    /// this provider (v2's cache scope read).
-    fn cached_upload(&self, file_id: &str, target: Option<&MediaTarget>) -> Option<String> {
+    /// The provider file id an earlier process uploaded this file as, for this
+    /// exact upload identity (v2's cache scope read).
+    fn cached_upload(&self, cache_key: &str) -> Option<String> {
         let store = self.upload_cache.as_ref()?;
-        let key = format!(
-            "{file_id}\0{}",
-            target.map(|t| t.provider_key.as_str()).unwrap_or("")
-        );
-        store
-            .get_state(UPLOAD_CACHE_DOMAIN, &key)
-            .ok()
-            .flatten()
-            .and_then(|value| value.as_str().map(str::to_string))
-            .filter(|id| !id.is_empty())
+        match store.get_state(UPLOAD_CACHE_DOMAIN, cache_key) {
+            Ok(value) => value
+                .and_then(|value| value.as_str().map(str::to_string))
+                .filter(|id| !id.is_empty()),
+            // A cache read failure costs one redundant upload; the request
+            // still goes out. It is not the same as "never uploaded", so it is
+            // logged instead of silently reading as a miss.
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to read the persisted media upload cache entry"
+                );
+                None
+            }
+        }
     }
 
     /// Record a successful upload for later processes (v2's cache scope
     /// write). A failed write costs the next process one re-upload, so it is
     /// logged, not propagated.
-    fn remember_upload(&self, file_id: &str, target: &MediaTarget, provider_file_id: &str) {
+    fn remember_upload(&self, file_id: &str, cache_key: &str, provider_file_id: &str) {
         let Some(store) = self.upload_cache.as_ref() else {
             return;
         };
-        let key = format!("{file_id}\0{}", target.provider_key);
         if let Err(error) = store.put_state(
             UPLOAD_CACHE_DOMAIN,
-            &key,
+            cache_key,
             &serde_json::json!(provider_file_id),
         ) {
             tracing::warn!(
                 file_id,
-                provider_key = %target.provider_key,
                 %error,
                 "failed to persist the media upload cache entry"
             );
@@ -506,11 +643,22 @@ impl MediaResolver {
         target: Option<&MediaTarget>,
         credential: Option<&str>,
     ) -> Result<ContentBlock, UploadError> {
-        let Ok((meta, path)) = self.store.get(file_id) else {
-            return Ok(ContentBlock::Text {
-                text: unavailable_text(kind).to_string(),
-                meta: None,
-            });
+        // Only a 404 says the file is gone (the store prunes entries whose
+        // blob vanished); every other error is a read failure and must not be
+        // told to the model as "no longer available".
+        let (meta, path) = match self.store.get(file_id) {
+            Ok(found) => found,
+            Err((404, _, _)) => {
+                return Ok(ContentBlock::Text {
+                    text: unavailable_text(kind).to_string(),
+                    meta: None,
+                });
+            }
+            Err((status, code, message)) => {
+                return Err(UploadError::Other(format!(
+                    "cannot read media file {file_id} (status {status}, code {code}): {message}"
+                )));
+            }
         };
         let path = path.to_string_lossy().into_owned();
         // A model that cannot take this media family still gets the path: the
@@ -521,23 +669,104 @@ impl MediaResolver {
                 meta: None,
             });
         }
-        let Ok(bytes) = std::fs::read(&path) else {
-            return Ok(ContentBlock::Text {
-                text: unavailable_text(kind).to_string(),
-                meta: None,
-            });
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            // v2 `degradedImage(path)` (mediaResolverService.ts:224,245 →
+            // media/pathTag.ts:29-31): a read failure is not evidence the
+            // blob is gone, so keep the path for a path-based tool instead of
+            // claiming it no longer exists.
+            Err(error) => {
+                tracing::warn!(
+                    file_id,
+                    %path,
+                    %error,
+                    "failed to read the media blob; degrading to a path tag"
+                );
+                return Ok(ContentBlock::Text {
+                    text: build_media_path_tag(kind, &path),
+                    meta: None,
+                });
+            }
         };
-        let media_type = if meta.media_type.is_empty() {
-            crate::server::infer_media_type(std::path::Path::new(&path))
+        let header = &bytes[..bytes.len().min(crate::native::file_type::MEDIA_SNIFF_BYTES)];
+        let sniff_name = if meta.name.is_empty() {
+            path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string()
         } else {
-            meta.media_type.clone()
+            meta.name.clone()
+        };
+        let media_type = match kind {
+            MediaKind::Image => {
+                let Some(sniffed) = crate::native::file_type::sniff_media_from_magic(header)
+                else {
+                    return Ok(ContentBlock::Text {
+                        text: build_media_path_tag(kind, &path),
+                        meta: None,
+                    });
+                };
+                if sniffed.kind != crate::native::file_type::MediaSniffKind::Image {
+                    return Ok(ContentBlock::Text {
+                        text: build_media_path_tag(kind, &path),
+                        meta: None,
+                    });
+                }
+                let effective =
+                    crate::llm::image_policy::normalize_image_mime(sniffed.mime_type);
+                let provider = target
+                    .map(|t| t.provider_type.as_str())
+                    .filter(|value| !value.is_empty());
+                if !crate::llm::image_policy::is_model_accepted_image_mime(&effective, provider) {
+                    return Ok(ContentBlock::Text {
+                        text: build_media_path_tag(kind, &path),
+                        meta: None,
+                    });
+                }
+                effective
+            }
+            MediaKind::Video => {
+                let Some(sniffed) =
+                    crate::native::file_type::detect_media_file_type(&sniff_name, header)
+                else {
+                    return Ok(ContentBlock::Text {
+                        text: build_media_path_tag(kind, &path),
+                        meta: None,
+                    });
+                };
+                if sniffed.kind != crate::native::file_type::MediaSniffKind::Video {
+                    return Ok(ContentBlock::Text {
+                        text: build_media_path_tag(kind, &path),
+                        meta: None,
+                    });
+                }
+                sniffed.mime_type.to_string()
+            }
+            MediaKind::Audio => {
+                if meta.media_type.is_empty() {
+                    crate::server::infer_media_type(std::path::Path::new(&path))
+                } else {
+                    meta.media_type.clone()
+                }
+            }
         };
         let name = (!meta.name.is_empty()).then(|| meta.name.clone());
         if let Some(uploaded) = self
-            .upload(file_id, kind, target, credential, &media_type, &bytes)
+            .upload(
+                file_id,
+                kind,
+                target,
+                credential,
+                &media_type,
+                &sniff_name,
+                &bytes,
+            )
             .await?
         {
             return Ok(uploaded);
+        }
+        if kind == MediaKind::Video && target.is_some_and(|t| !t.inline_video) {
+            return Ok(ContentBlock::Text {
+                text: build_media_path_tag(kind, &path),
+                meta: None,
+            });
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(match kind {
@@ -570,6 +799,7 @@ impl MediaResolver {
         target: Option<&MediaTarget>,
         credential: Option<&str>,
         media_type: &str,
+        filename: &str,
         bytes: &[u8],
     ) -> Result<Option<ContentBlock>, UploadError> {
         let Some(target) = target else {
@@ -595,7 +825,11 @@ impl MediaResolver {
             // The files API has no audio purpose; audio stays inline.
             MediaKind::Audio => return Ok(None),
         };
-        let filename = crate::llm::files_upload::upload_filename(media_type);
+        let filename = if filename.trim().is_empty() {
+            crate::llm::files_upload::upload_filename(media_type)
+        } else {
+            filename.to_string()
+        };
         match crate::llm::files_upload::upload_media(
             &target.base_url,
             &target.protocol,
@@ -608,7 +842,8 @@ impl MediaResolver {
         .await
         {
             Ok(id) => {
-                self.remember_upload(file_id, target, &id);
+                let cache_key = Self::cache_key(file_id, kind, Some(target), Some(credential));
+                self.remember_upload(file_id, &cache_key, &id);
                 Ok(Some(reference_block(kind, &id)))
             }
             Err(crate::llm::files_upload::UploadError::Unsupported(_)) => {
@@ -663,6 +898,8 @@ mod tests {
         (store, meta.id)
     }
 
+    const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nPNGDATA";
+
     fn ref_message(file_id: &str, kind: MediaKind) -> LLMMessage {
         LLMMessage {
             role: "user".into(),
@@ -683,13 +920,14 @@ mod tests {
             image_in: true,
             video_in: true,
             audio_in: true,
+            inline_video: true,
             ..Default::default()
         }
     }
 
     #[tokio::test]
     async fn test_a_reference_inlines_when_the_model_takes_the_media() {
-        let (store, file_id) = store_with("a.png", "image/png", b"PNGDATA");
+        let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);
         let resolver = MediaResolver::with_store(store);
 
         let messages = [ref_message(&file_id, MediaKind::Image)];
@@ -702,7 +940,7 @@ mod tests {
             out.messages[0].blocks[0],
             ContentBlock::Image {
                 media_type: "image/png".into(),
-                data: base64::engine::general_purpose::STANDARD.encode(b"PNGDATA"),
+                data: base64::engine::general_purpose::STANDARD.encode(PNG_BYTES),
                 name: Some("a.png".into()),
             }
         );
@@ -715,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_a_model_that_cannot_take_the_media_gets_the_saved_path() {
-        let (store, file_id) = store_with("a.png", "image/png", b"PNGDATA");
+        let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);
         let resolver = MediaResolver::with_store(store);
         let target = MediaTarget {
             image_in: false,
@@ -735,6 +973,263 @@ mod tests {
         assert!(text.ends_with("\"></image>"), "{text}");
         assert!(text.contains(&file_id), "{text}");
         assert_eq!(out.entries[0].bytes, 0, "a path tag costs no request bytes");
+    }
+
+    #[tokio::test]
+    async fn test_a_video_inlines_only_for_a_provider_that_declares_inline_video() {
+        let (store, file_id) = store_with("a.mp4", "video/mp4", b"MP4DATA");
+        let resolver = MediaResolver::with_store(store);
+        let messages = [ref_message(&file_id, MediaKind::Video)];
+
+        let google = MediaTarget {
+            provider_key: "google".into(),
+            inline_video: true,
+            ..accepting()
+        };
+        let out = resolver
+            .resolve(&messages, Some(&google), None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &out.messages[0].blocks[0],
+                ContentBlock::VideoUrl { url, .. }
+                    if url.starts_with("data:video/mp4;base64,")
+            ),
+            "{:?}",
+            out.messages[0].blocks[0]
+        );
+
+        let openai = MediaTarget {
+            provider_key: "openai".into(),
+            inline_video: false,
+            ..accepting()
+        };
+        let out = resolver
+            .resolve(&messages, Some(&openai), None)
+            .await
+            .unwrap();
+        let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
+            panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
+        };
+        assert!(text.starts_with("<video path=\""), "{text}");
+        assert!(text.ends_with("\"></video>"), "{text}");
+        assert_eq!(out.entries[0].bytes, 0, "a path tag costs no request bytes");
+    }
+
+    #[tokio::test]
+    async fn test_an_image_with_unrecognized_bytes_degrades_to_its_path() {
+        let (store, file_id) = store_with("a.png", "image/png", b"not an image");
+        let resolver = MediaResolver::with_store(store);
+
+        let messages = [ref_message(&file_id, MediaKind::Image)];
+
+        let out = resolver
+            .resolve(&messages, Some(&accepting()), None)
+            .await
+            .unwrap();
+
+        let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
+            panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
+        };
+        assert!(text.starts_with("<image path=\""), "{text}");
+        assert_eq!(out.entries[0].bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn test_an_image_format_the_provider_rejects_degrades_to_its_path() {
+        let heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1";
+        let (store, file_id) = store_with("a.heic", "image/heic", heic);
+        let resolver = MediaResolver::with_store(store);
+        let messages = [ref_message(&file_id, MediaKind::Image)];
+
+        let openai = MediaTarget {
+            provider_key: "openai".into(),
+            provider_type: "openai".into(),
+            ..accepting()
+        };
+        let out = resolver.resolve(&messages, Some(&openai), None).await.unwrap();
+        let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
+            panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
+        };
+        assert!(text.starts_with("<image path=\""), "{text}");
+
+        let kimi = MediaTarget {
+            provider_key: "kimi".into(),
+            provider_type: "kimi".into(),
+            ..accepting()
+        };
+        let out = resolver.resolve(&messages, Some(&kimi), None).await.unwrap();
+        assert_eq!(
+            out.messages[0].blocks[0],
+            ContentBlock::Image {
+                media_type: "image/heic".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(heic),
+                name: Some("a.heic".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_a_rotated_credential_keeps_the_account_cache_key() {
+        let header = |payload: &str| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes())
+        };
+        let token = |sub: &str, iat: u32| {
+            format!(
+                "{}.{}.{}",
+                header(r#"{"alg":"HS256"}"#),
+                header(&format!(r#"{{"sub":"{sub}","iat":{iat}}}"#)),
+                header("signature")
+            )
+        };
+        let first = token("user-1", 1);
+        let refreshed = token("user-1", 2);
+        let other = token("user-2", 2);
+        assert_eq!(
+            MediaResolver::cache_key(
+                "f_1",
+                MediaKind::Image,
+                Some(&accepting()),
+                Some(&first)
+            ),
+            MediaResolver::cache_key(
+                "f_1",
+                MediaKind::Image,
+                Some(&accepting()),
+                Some(&refreshed)
+            )
+        );
+        assert_ne!(
+            MediaResolver::cache_key("f_1", MediaKind::Image, Some(&accepting()), Some(&first)),
+            MediaResolver::cache_key("f_1", MediaKind::Image, Some(&accepting()), Some(&other))
+        );
+    }
+
+    /// v2 keys its memo and its persisted upload cache by
+    /// `fileId / providerKey / protocol / baseUrl / accountHash`
+    /// (`mediaResolverService.ts:257,396`). An account or endpoint switch must
+    /// not reuse another identity's provider-side upload, and the credential
+    /// itself must never be written into a key (these keys are persisted).
+    #[test]
+    fn test_the_media_cache_key_separates_protocol_endpoint_and_account() {
+        let target = MediaTarget {
+            protocol: "openai".into(),
+            base_url: "https://api.example".into(),
+            provider_key: "kimi".into(),
+            ..accepting()
+        };
+        let base =
+            MediaResolver::cache_key("f_1", MediaKind::Image, Some(&target), Some("token-a"));
+        assert_eq!(
+            base,
+            MediaResolver::cache_key("f_1", MediaKind::Image, Some(&target), Some("token-a"))
+        );
+        assert_ne!(
+            base,
+            MediaResolver::cache_key("f_1", MediaKind::Image, Some(&target), Some("token-b")),
+            "a different account must not share the upload"
+        );
+        assert_ne!(
+            base,
+            MediaResolver::cache_key(
+                "f_1",
+                MediaKind::Image,
+                Some(&MediaTarget {
+                    protocol: "anthropic".into(),
+                    ..target.clone()
+                }),
+                Some("token-a")
+            ),
+            "a different wire protocol must not share the upload"
+        );
+        assert_ne!(
+            base,
+            MediaResolver::cache_key(
+                "f_1",
+                MediaKind::Image,
+                Some(&MediaTarget {
+                    base_url: "https://other.example".into(),
+                    ..target.clone()
+                }),
+                Some("token-a")
+            ),
+            "a different endpoint must not share the upload"
+        );
+        assert_ne!(
+            base,
+            MediaResolver::cache_key("f_1", MediaKind::Video, Some(&target), Some("token-a")),
+            "a different media family must not share the entry"
+        );
+        assert!(
+            !base.contains("token-a"),
+            "the credential itself must never enter a key: {base:?}"
+        );
+    }
+
+    /// Inline base64 is bytes, not an identity: it goes to the bounded memo,
+    /// never to the unbounded `resolved` map.
+    #[tokio::test]
+    async fn test_an_inline_payload_stays_out_of_the_unbounded_map() {
+        let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);
+        let resolver = MediaResolver::with_store(store);
+        let messages = [ref_message(&file_id, MediaKind::Image)];
+
+        resolver
+            .resolve(&messages, Some(&accepting()), None)
+            .await
+            .unwrap();
+
+        assert!(
+            resolver
+                .resolved
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "an inline payload must not enter the unbounded map"
+        );
+        assert_eq!(
+            resolver
+                .inline_memo
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    /// v2 `IMAGE_MEMO_MAX_BYTES` / `IMAGE_MEMO_MAX_TOTAL_BYTES`: an entry above
+    /// the per-item cap is not memoized, and the total evicts oldest-first.
+    #[test]
+    fn test_the_inline_memo_is_bounded() {
+        let mut memo = InlineMemo::default();
+        let block = ContentBlock::Text {
+            text: "x".into(),
+            meta: None,
+        };
+        for index in 0..9 {
+            memo.insert(
+                format!("k{index}"),
+                block.clone(),
+                INLINE_MEMO_MAX_ENTRY_BYTES,
+            );
+        }
+        assert_eq!(
+            memo.entries.len(),
+            INLINE_MEMO_MAX_TOTAL_BYTES / INLINE_MEMO_MAX_ENTRY_BYTES
+        );
+        assert!(memo.bytes <= INLINE_MEMO_MAX_TOTAL_BYTES);
+        assert!(
+            !memo.entries.contains_key("k0"),
+            "the oldest entry is evicted"
+        );
+
+        memo.insert("huge".into(), block, INLINE_MEMO_MAX_ENTRY_BYTES + 1);
+        assert!(
+            !memo.entries.contains_key("huge"),
+            "an entry above the per-item cap is not memoized"
+        );
     }
 
     #[tokio::test]
@@ -831,7 +1326,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_the_resolved_block_is_memoized_per_file_and_provider() {
-        let (store, file_id) = store_with("a.png", "image/png", b"PNGDATA");
+        let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);
         let resolver = MediaResolver::with_store(store);
         let message = ref_message(&file_id, MediaKind::Image);
 
@@ -854,13 +1349,14 @@ mod tests {
     /// v2 keeps the upload result in the blob store's `image-upload-cache`
     /// scope, so a daemon restart reuses the provider-side file instead of
     /// uploading again (ROADMAP #17 ①). The fork's tier is a `state_entries`
-    /// domain keyed by `(file id, provider key)`; a fresh resolver over the
-    /// same store must answer from it without a second request.
+    /// domain keyed by the full upload identity (kind / file / provider /
+    /// protocol / endpoint / account); a fresh resolver over the same store
+    /// must answer from it without a second request.
     #[tokio::test]
     async fn an_upload_survives_a_resolver_restart_through_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let files = FileStore::with_root(dir.path().join("files"));
-        let png = files.save("a.png", "image/png", None, b"PNGDATA").unwrap();
+        let png = files.save("a.png", "image/png", None, PNG_BYTES).unwrap();
         let sqlite =
             Arc::new(crate::session::sqlite_store::SqliteSessionStore::in_memory().unwrap());
         let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -954,7 +1450,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_an_upload_capable_provider_gets_a_reference_instead_of_bytes() {
-        let (store, file_id) = store_with("a.png", "image/png", b"PNGDATA");
+        let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);
         let resolver = MediaResolver::with_store(store);
         let (base_url, server) = spawn_files_server(200, "{\"id\":\"file-abc\"}").await;
         let target = MediaTarget {
@@ -992,7 +1488,7 @@ mod tests {
     /// request report a different failure (ROADMAP #17 ③).
     #[tokio::test]
     async fn test_a_rejected_upload_credential_fails_the_resolve() {
-        let (store, file_id) = store_with("a.png", "image/png", b"PNGDATA");
+        let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);
         let resolver = MediaResolver::with_store(store);
         let (base_url, server) = spawn_files_server(401, "unauthorized").await;
         let target = MediaTarget {
@@ -1017,7 +1513,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_an_upload_capable_provider_without_a_credential_inlines() {
-        let (store, file_id) = store_with("a.png", "image/png", b"PNGDATA");
+        let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);
         let resolver = MediaResolver::with_store(store);
         let target = MediaTarget {
             protocol: "openai".into(),

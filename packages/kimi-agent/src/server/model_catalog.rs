@@ -32,6 +32,8 @@ fn protocol_for(provider_type: Option<&str>) -> Option<&'static str> {
         "kimi" | "openai" | "openai_responses" => Some("openai"),
         "anthropic" => Some("anthropic"),
         "google-genai" | "vertexai" => Some("google-genai"),
+        // Not an HTTP protocol: the engine bridges to the local `agy` CLI.
+        "antigravity" => Some("antigravity"),
         _ => None,
     }
 }

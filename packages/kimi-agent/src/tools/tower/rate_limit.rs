@@ -1,8 +1,3 @@
-//! Tower rate limit governor — native port of v2 `TowerRateLimitService`.
-//!
-//! Enforces adaptive concurrency budgeting and provider rate-limit backoff
-//! for detached tower worker and reviewer subagent runs.
-
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,7 +24,6 @@ pub struct TowerRateLimitSnapshot {
 
 #[derive(Debug)]
 struct TowerRateLimitInner {
-    /// `None` is the upstream governor's positive-infinity initial capacity.
     capacity: Option<usize>,
     inflight: usize,
     blocked_until: Option<u64>,
@@ -68,7 +62,6 @@ impl TowerRateLimit {
         }
     }
 
-    /// Process-wide global rate limiter (mirrors v2 LifecycleScope.App singleton).
     pub fn global() -> Arc<Self> {
         static GLOBAL: LazyLock<Arc<TowerRateLimit>> =
             LazyLock::new(|| Arc::new(TowerRateLimit::new()));

@@ -38,7 +38,7 @@ async fn server_e2e_http_rest_full_roundtrip() {
 
     // 1. Health check
     let res = client
-        .get(format!("{base_url}/api/v1/health"))
+        .get(format!("{base_url}/api/v1/healthz"))
         .send()
         .await
         .unwrap();

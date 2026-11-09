@@ -1,16 +1,9 @@
-//! Google GenAI / Gemini API adapter.
-//!
-//! Translates between kimi-agent's internal wire formats and Google's
-//! `models/{model}:generateContent` / `models/{model}:streamGenerateContent`
-//! JSON schema with streaming SSE accumulation.
-
 use serde_json::{Value, json};
 
 use crate::llm::wire::{StreamDelta, WireMessage};
 use crate::rpc::types::TokenUsage;
-use crate::turn_loop::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
+use kimi_core::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
 
-/// Build a Google GenAI request payload from the wire messages.
 pub fn build_request(
     messages: &[WireMessage],
     tools: &[ToolInfo],
@@ -20,13 +13,6 @@ pub fn build_request(
     build_request_full(messages, tools, thinking_budget, include_thoughts)
 }
 
-/// Whether this Gemini model family can return thought summaries at all.
-///
-/// `thinkingConfig` is rejected outright by pre-2.5 generations, so the request
-/// only carries it for the families that actually reason. The host has already
-/// decided thinking is enabled (the effort is set); this is the model-side half
-/// of that decision, and it is deliberately generous because model aliases
-/// differ across relays while the capability boundary does not.
 pub fn model_supports_thoughts(model_id: &str) -> bool {
     let id = model_id.to_ascii_lowercase();
     id.contains("gemini-2.5")
@@ -36,18 +22,11 @@ pub fn model_supports_thoughts(model_id: &str) -> bool {
         || id.contains("thinking")
 }
 
-/// Gemini 3 and 4 take a named `thinkingLevel`; earlier families take a numeric
-/// `thinkingBudget` (v2 `encodeThinking`, `google-genai/lower.ts:232-268`).
 fn takes_thinking_level(model_id: &str) -> bool {
     let id = model_id.to_ascii_lowercase();
     id.contains("gemini-3") || id.contains("gemini-4")
 }
 
-/// v2 rejects `effort = off` for Gemini 4: the family always reasons and its
-/// thinking levels are LOW/MEDIUM/HIGH only, so there is no "disabled" encoding
-/// (`ThinkingConfigError`, `thinking-cannot-disable`, v2 #4230). Returns the
-/// user-facing reason; the transport fails the request before building it
-/// (`http.rs`), matching v2's throw inside the lowerer.
 pub fn thinking_off_rejection(model_id: &str, effort: Option<&str>) -> Option<String> {
     let id = model_id.to_ascii_lowercase();
     if !id.contains("gemini-4") {
@@ -63,43 +42,21 @@ pub fn thinking_off_rejection(model_id: &str, effort: Option<&str>) -> Option<St
     ))
 }
 
-/// v2 `encodeGoogleGenAIThinking` (`google-genai/format.ts:148-182`): Gemini 3
-/// takes a named `thinkingLevel` instead of a numeric budget, so an effort
-/// that is only carried as `includeThoughts` loses the requested depth and
-/// the model falls back to its own default.
-///
-/// v2's `default:` arm returns `includeThoughts` alone, so an effort with no
-/// level — `"on"` (the boolean-model sentinel, `llm/effort.rs:9-12`), `None`,
-/// or a numeric budget token — resolves to no level at all. That is a
-/// deliberate degradation and is logged rather than dropped silently, because
-/// an unmapped effort is otherwise indistinguishable on the wire from one that
-/// was never configured.
 fn thinking_level_for(model_id: &str, effort: Option<&str>) -> Option<&'static str> {
     if !takes_thinking_level(model_id) {
         return None;
     }
-    // Gemini 4 has no disabled rung: `off` is rejected at the transport
-    // boundary (`thinking_off_rejection`, v2's `thinking-cannot-disable`).
-    // Returning None keeps a direct builder call from emitting Gemini 3's
-    // MINIMAL level, which Gemini 4 rejects with a 400.
     if model_id.to_ascii_lowercase().contains("gemini-4") && matches!(effort, Some("off" | "none"))
     {
         return None;
     }
     let level = match effort {
         Some("off" | "none") => "MINIMAL",
-        // `minimal` is a declared effort (`llm/effort.rs:48`) with no v2 arm of
-        // its own; it names the same rung as the off/disabled mapping.
         Some("minimal") => "MINIMAL",
         Some("low") => "LOW",
         Some("medium") => "MEDIUM",
         Some("high" | "xhigh" | "max") => "HIGH",
         other => {
-            // v2's `default:` arm: thoughts are asked for without a level and
-            // Gemini picks one. `on` (the boolean-model sentinel) and an unset
-            // effort are the expected arrivals; any other token is a host value
-            // this mapping does not know, and must not reach the wire looking
-            // as if it had been configured.
             let effort = other.unwrap_or("<unset>");
             if other == Some("on") {
                 tracing::debug!(
@@ -119,22 +76,8 @@ fn thinking_level_for(model_id: &str, effort: Option<&str>) -> Option<&'static s
     Some(level)
 }
 
-/// v2 `encodeGoogleGenAIThinking` (`google-genai/format.ts:168-181`), the
-/// non-gemini-3 half: a family that takes no `thinkingLevel` is bounded by a
-/// numeric `thinkingBudget` instead, so an effort carried only as
-/// `includeThoughts` loses the requested depth and the model falls back to its
-/// own dynamic budget.
-///
-/// `Some(0)` is the arm that matters most — it is the only one that actually
-/// turns thinking off, and a 2.5 model left to its own budget keeps thinking and
-/// keeps billing thinking tokens after the user asked it not to. `None` is v2's
-/// `default:` arm (thoughts, depth chosen by the model) and also an unset
-/// effort, which v2 renders as no `thinkingConfig` at all
-/// (`google-genai/requester.ts:52-55` gates the whole config on a resolved
-/// thinking state).
 fn thinking_budget_for(model_id: &str, effort: Option<&str>) -> Option<u32> {
     if takes_thinking_level(model_id) {
-        // A level IS the depth there; Gemini 3/4 reject a budget beside it.
         return None;
     }
     match effort {
@@ -146,13 +89,6 @@ fn thinking_budget_for(model_id: &str, effort: Option<&str>) -> Option<u32> {
     }
 }
 
-/// Build a full Google GenAI request body with optional thinking configuration.
-///
-/// `include_thoughts` must be set for the model to return its reasoning at all:
-/// `thinkingConfig.includeThoughts` defaults to **false**, so Gemini thinks
-/// silently and streams no `thought: true` part, which makes the accumulator's
-/// think branch below unreachable and shows an empty thinking block for every
-/// Gemini model no matter what the host's effort setting says.
 pub fn build_request_full(
     messages: &[WireMessage],
     tools: &[ToolInfo],
@@ -162,12 +98,6 @@ pub fn build_request_full(
     build_request_for_model(messages, tools, thinking_budget, include_thoughts, "", None)
 }
 
-/// [`build_request_full`] plus the model id and resolved effort, which is what
-/// carries the requested depth: a `thinkingLevel` on Gemini 3, a
-/// `thinkingBudget` everywhere else.
-///
-/// A resolved depth emits `thinkingConfig` on its own; `include_thoughts` only
-/// decides whether the request also asks for the thoughts back.
 pub fn build_request_for_model(
     messages: &[WireMessage],
     tools: &[ToolInfo],
@@ -201,9 +131,6 @@ pub fn build_request_for_model(
                             "args": tc.arguments,
                         }
                     });
-                    // Restore the Gemini attestation signature so the API
-                    // accepts the echoed function call (v2
-                    // google-genai.ts:274-276).
                     if let Some(extras) = &tc.extras
                         && let Some(sig) =
                             extras.get("thought_signature_b64").and_then(|s| s.as_str())
@@ -221,18 +148,25 @@ pub fn build_request_for_model(
                     .cloned()
                     .unwrap_or_else(|| fallback_tool_name_from_id(call_id));
 
-                // Gemini requires functionResponse.response to be a JSON Object
-                let response_obj = if let Ok(Value::Object(map)) = serde_json::from_str(&m.content)
-                {
-                    Value::Object(map)
+                let output_text = if m.blocks.is_empty() {
+                    m.content.clone()
                 } else {
-                    json!({ "output": m.content })
+                    m.blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("")
                 };
 
+                let media_parts: Vec<Value> = m.blocks.iter().filter_map(tool_media_part).collect();
                 let part = json!({
                     "functionResponse": {
                         "name": tool_name,
-                        "response": response_obj,
+                        "response": { "output": output_text },
+                        "parts": media_parts,
                     }
                 });
                 if let Some(last_msg) = contents.last_mut()
@@ -273,8 +207,6 @@ pub fn build_request_for_model(
                             parts.push(convert_media_url(url, "video/mp4"));
                         }
                         ContentBlock::Think { .. } => {}
-                        // A reference that reached the wire was never
-                        // resolved: the resolver runs before every request.
                         ContentBlock::MediaRef { kind, .. } => parts.push(json!({
                             "text": crate::llm::media_resolver::unavailable_text(*kind),
                         })),
@@ -320,48 +252,20 @@ pub fn build_request_for_model(
         req["tools"] = json!([{ "functionDeclarations": funcs }]);
     }
 
-    // v2 `encodeGoogleGenAIThinking` is called for EVERY resolved effort and
-    // always returns a `thinkingConfig` — including the `off` arm, which is
-    // `{ includeThoughts: false, thinkingLevel: 'MINIMAL' }` on gemini-3 and
-    // `{ includeThoughts: false, thinkingBudget: 0 }` everywhere else
-    // (`google-genai/format.ts:148-182`). Gating the whole block on
-    // `include_thoughts` therefore dropped the depth for exactly the efforts
-    // that exclude it: `http.rs:332-339` computes `include_thoughts` as false
-    // for `off` / `none`, and 2.5 then got no `thinkingConfig` at all and chose
-    // its own dynamic budget, so "off" kept thinking and `low`/`medium`/`high`
-    // lost their rung.
-    //
-    // So a resolved level, a resolved budget, or `include_thoughts` each emit
-    // the config on their own. `includeThoughts` stays implicit when false: the
-    // field defaults to false, so writing `false` says what omitting it says.
     let level = thinking_level_for(model_id, effort);
-    // The rung the effort names, and only where a `thinkingConfig` is safe to
-    // send: pre-2.5 generations reject the whole config, so a budget resolved
-    // for them would be a 400 rather than a depth. A budget the *host*
-    // configured is left alone — that request is unchanged by this mapping.
     let effort_budget = model_supports_thoughts(model_id)
         .then(|| thinking_budget_for(model_id, effort))
         .flatten();
     let budget = if level.is_some() {
-        // A level IS the depth on gemini-3, and the API rejects a budget beside
-        // it, so even a configured one is dropped.
         None
     } else if effort_budget == Some(0) {
-        // v2's `off` arm owns the depth: a budget the host configured cannot
-        // re-enable what the effort turned off.
         Some(0)
     } else {
-        // A budget the host configured wins over the rung the effort names — it
-        // is a token count, not a rung, and only a host that speaks the Google
-        // wire can set one. Zero is not a budget here: it is the `off` arm
-        // above, and v2's `default:` arm asks for thoughts with no bound.
         thinking_budget
             .filter(|budget| *budget > 0)
             .or(effort_budget)
     };
     if include_thoughts || level.is_some() || budget.is_some() {
-        // `includeThoughts` is what makes Gemini stream its reasoning back;
-        // the budget only bounds it.
         let mut thinking_config = serde_json::Map::new();
         if let Some(level) = level {
             thinking_config.insert("thinkingLevel".to_string(), json!(level));
@@ -378,9 +282,6 @@ pub fn build_request_for_model(
     req
 }
 
-/// [`build_request_for_model`] plus the per-request completion cap (v2
-/// `encodeGoogleGenAIMaxOutputTokens`: `generationConfig.maxOutputTokens`).
-/// Gemini has no prompt-cache key field for this purpose.
 pub fn build_request_for_model_with_budget(
     messages: &[WireMessage],
     tools: &[ToolInfo],
@@ -399,8 +300,6 @@ pub fn build_request_for_model_with_budget(
         effort,
     );
     if let Some(cap) = max_output_tokens {
-        // The thinking pass may already have created `generationConfig`; the
-        // completion cap joins it rather than replacing the thinkingConfig.
         let mut config = req
             .get("generationConfig")
             .cloned()
@@ -411,11 +310,6 @@ pub fn build_request_for_model_with_budget(
     req
 }
 
-/// Convert a data URL or HTTP URL to a Google GenAI inline/file data part
-/// (v2 `convertMediaUrl`, google-genai.ts:153-191):
-/// - `data:` URLs are parsed into `{ inlineData: { mimeType, data } }`
-/// - `http(s):` URLs use `{ fileData: { fileUri, mimeType } }`, with the
-///   mime type guessed from the path extension when possible.
 fn convert_media_url(url: &str, fallback_mime_type: &str) -> Value {
     if let Some(rest) = url.strip_prefix("data:") {
         let (meta, data) = match rest.find(',') {
@@ -429,8 +323,26 @@ fn convert_media_url(url: &str, fallback_mime_type: &str) -> Value {
     json!({ "fileData": { "fileUri": url, "mimeType": mime_type } })
 }
 
-/// Guess a media mime type from a URL's path extension (v2
-/// `convertMediaUrl` extension table, google-genai.ts:180-190).
+fn tool_media_part(block: &ContentBlock) -> Option<Value> {
+    match block {
+        ContentBlock::Image {
+            media_type, data, ..
+        } => Some(json!({
+            "inlineData": {
+                "mimeType": media_type,
+                "data": data,
+            }
+        })),
+        ContentBlock::ImageUrl { url, .. } => Some(convert_media_url(url, "image/jpeg")),
+        ContentBlock::AudioUrl { url, .. } => Some(convert_media_url(url, "audio/mpeg")),
+        ContentBlock::VideoUrl { url, .. } => Some(convert_media_url(url, "video/mp4")),
+        ContentBlock::MediaRef { kind, .. } => Some(json!({
+            "text": crate::llm::media_resolver::unavailable_text(*kind),
+        })),
+        _ => None,
+    }
+}
+
 fn guess_mime_from_url(url: &str) -> Option<&'static str> {
     let path = url::Url::parse(url).ok()?.path().to_ascii_lowercase();
     if path.ends_with(".png") {
@@ -456,7 +368,6 @@ fn guess_mime_from_url(url: &str) -> Option<&'static str> {
     }
 }
 
-/// Parse a Google GenAI `generateContent` JSON response.
 pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
     let candidate = v
         .get("candidates")
@@ -511,9 +422,6 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                     .and_then(|id| id.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("{}_{}", name, i));
-                // Carry the Gemini attestation signature so the echoed
-                // function call is accepted on the next request (v2
-                // google-genai.ts:540-546).
                 let extras = part
                     .get("thoughtSignature")
                     .or_else(|| part.get("thought_signature"))
@@ -555,9 +463,6 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
         .and_then(|u| u.get("cachedContentTokenCount"))
         .and_then(|x| x.as_u64())
         .unwrap_or(0) as u32;
-    // `promptTokenCount` includes the cached prompt, and the host's
-    // `inputOther` must not: v2 `parseGoogleGenAIUsage` subtracts the cached
-    // count. The total reconstruction then adds it back.
     let input_tokens = prompt_tokens.saturating_sub(input_cache_read);
     let total_tokens = usage
         .and_then(|u| u.get("totalTokenCount"))
@@ -578,10 +483,6 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
     }
 }
 
-// ── Streaming (SSE) accumulation ───────────────────────────────────────
-
-/// Accumulates Google GenAI `streamGenerateContent` stream chunks into a final
-/// [`LLMChatResponse`].
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     content: String,
@@ -596,14 +497,10 @@ impl StreamAccumulator {
         Self::default()
     }
 
-    /// No incremental tool-call arguments exist on this protocol: a
-    /// `functionCall` part carries its `args` whole, so there is never a
-    /// fragment to forward (the finalized call still reaches the host).
     pub fn take_tool_call_deltas(&mut self) -> Vec<StreamDelta> {
         Vec::new()
     }
 
-    /// Feed one stream chunk. Returns text or thinking delta if present.
     pub fn feed(&mut self, v: &Value) -> Option<StreamDelta> {
         if let Some(usage) = v.get("usageMetadata") {
             self.usage = parse_usage(Some(usage));
@@ -660,10 +557,6 @@ impl StreamAccumulator {
                     .and_then(|id| id.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("{}_{}", name, self.tool_calls.len() + i));
-                // Carry the Gemini attestation signature, exactly like the
-                // non-streaming path (`parse_response`). Without it the echoed
-                // function call is rejected on the next request, so multi-turn
-                // tool calling failed — and the engine only ever streams.
                 let extras = part
                     .get("thoughtSignature")
                     .or_else(|| part.get("thought_signature"))
@@ -682,7 +575,6 @@ impl StreamAccumulator {
         returned_delta
     }
 
-    /// Finalize the accumulated stream into a response.
     pub fn finish(self) -> LLMChatResponse {
         let mut thinking = Vec::new();
         if !self.thinking.is_empty() {
@@ -723,9 +615,6 @@ fn fallback_tool_name_from_id(call_id: &str) -> String {
 mod tests {
     use super::*;
 
-    /// v2 `encodeGoogleGenAIThinking`: Gemini 3 encodes the requested depth as
-    /// `thinkingLevel`, not a numeric budget. Sending only
-    /// `includeThoughts` makes the model fall back to its own default.
     #[test]
     fn gemini_3_carries_the_effort_as_a_thinking_level() {
         let messages = vec![WireMessage::text("user", "hi")];
@@ -754,8 +643,6 @@ mod tests {
                 req["generationConfig"]["thinkingConfig"]["includeThoughts"],
                 true
             );
-            // A level IS the depth on gemini-3: a budget beside it is rejected
-            // by the API, so even a configured one is dropped.
             assert!(
                 req["generationConfig"]["thinkingConfig"]
                     .get("thinkingBudget")
@@ -765,8 +652,6 @@ mod tests {
             );
         }
 
-        // Pre-gemini-3 keeps the numeric budget path, and a budget the host
-        // configured wins over the rung the effort names.
         let req = build_request_for_model(
             &messages,
             &[],
@@ -785,11 +670,6 @@ mod tests {
                 .is_none()
         );
 
-        // v2's `default:` arm: an effort with no level of its own still asks
-        // for thoughts and lets the model pick the depth. `on` is the
-        // boolean-model sentinel that lands here in production, an unset
-        // effort and an unknown token degrade the same way (the last one is
-        // logged, per `thinking_level_for`).
         for effort in [Some("on"), None, Some("4096")] {
             let req = build_request_for_model(&messages, &[], None, true, "gemini-3-pro", effort);
             let config = &req["generationConfig"]["thinkingConfig"];
@@ -804,12 +684,6 @@ mod tests {
         }
     }
 
-    /// The shape production actually reaches for a disabled effort:
-    /// `http.rs:332-339` computes `include_thoughts` as false for `off` /
-    /// `none`, so gating `thinkingConfig` on `include_thoughts` dropped it for
-    /// exactly these efforts. v2 still sends one —
-    /// `{ includeThoughts: false, thinkingLevel: 'MINIMAL' }`
-    /// (`google-genai/format.ts:153-156`).
     #[test]
     fn gemini_3_off_effort_sends_the_level_without_asking_for_thoughts() {
         let messages = vec![WireMessage::text("user", "hi")];
@@ -821,8 +695,6 @@ mod tests {
                 config["thinkingLevel"], "MINIMAL",
                 "effort {effort} must still reach gemini-3 as a level"
             );
-            // Absent rather than `false`: the field defaults to false, so the
-            // two spellings say the same thing.
             assert!(
                 config.get("includeThoughts").is_none(),
                 "a disabled effort must not ask for thoughts: {config}"
@@ -834,19 +706,10 @@ mod tests {
         }
     }
 
-    /// v2 `encodeGoogleGenAIThinking` (`google-genai/format.ts:168-181`): a
-    /// family that takes no `thinkingLevel` is bounded by a numeric
-    /// `thinkingBudget` instead. Carrying the effort only as `includeThoughts`
-    /// let 2.5 pick its own dynamic depth, so every rung below `high` was a
-    /// no-op and `off` did not turn thinking off at all.
     #[test]
     fn gemini_2_5_carries_the_effort_as_a_thinking_budget() {
         let messages = vec![WireMessage::text("user", "hi")];
 
-        // The arm that decides the whole bug: no `includeThoughts` (the field
-        // defaults to false, so omitting it is the same wire message v2 sends)
-        // and a zero budget, which is the only thing that stops a 2.5 model's
-        // dynamic thinking.
         for effort in ["off", "none"] {
             let req = build_request_for_model(
                 &messages,
@@ -871,8 +734,6 @@ mod tests {
             );
         }
 
-        // The rungs. A budget bounds what the model spends thinking, so these
-        // are the values v2 encodes for each effort.
         for (effort, budget) in [
             ("low", 1024),
             ("medium", 4096),
@@ -897,9 +758,6 @@ mod tests {
             );
         }
 
-        // v2's `default:` arm: `on` (the boolean-model sentinel that lands here
-        // in production) and an unknown token ask for thoughts and leave the
-        // depth to the model.
         for effort in [Some("on"), Some("4096")] {
             let req = build_request_for_model(&messages, &[], None, true, "gemini-2.5-pro", effort);
             let config = &req["generationConfig"]["thinkingConfig"];
@@ -913,17 +771,12 @@ mod tests {
             );
         }
 
-        // An unset effort is not a disabled one: v2 sends no `thinkingConfig`
-        // at all when the host has no thinking state
-        // (`google-genai/requester.ts:52-55`).
         let req = build_request_for_model(&messages, &[], None, false, "gemini-2.5-pro", None);
         assert!(
             req.get("generationConfig").is_none(),
             "no effort is no thinking state: {req}"
         );
 
-        // A family that rejects `thinkingConfig` outright still gets none, so
-        // the budget does not turn a 2.0 request into a 400.
         for effort in ["off", "high"] {
             let req = build_request_for_model(
                 &messages,
@@ -1048,7 +901,6 @@ mod tests {
         assert_eq!(parsed.tool_calls[0].id, "call_exact_123");
         assert_eq!(parsed.tool_calls[0].name, "Write");
 
-        // Fallback without id
         let resp_no_id = json!({
             "candidates": [{
                 "content": {
@@ -1095,20 +947,80 @@ mod tests {
         let contents = req["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 3);
 
-        // The key assertion: the 3rd message (the tool one) maps to the `user`
-        // role, and functionResponse.name must be the tool name `read_file` —
-        // not the call id `call_abc_123`!
         assert_eq!(contents[2]["role"], "user");
         let resp_part = &contents[2]["parts"][0]["functionResponse"];
         assert_eq!(resp_part["name"], "read_file");
-        // The key assertion: `response` must be a JSON Object
         assert!(resp_part["response"].is_object());
         assert_eq!(resp_part["response"]["output"], "file content here");
     }
 
-    /// URL media blocks project to `fileData` (http) / `inlineData` (data
-    /// URL), with the mime type guessed from the path extension (v2
-    /// `convertMediaUrl`, google-genai.ts:153-191).
+    #[test]
+    fn a_json_text_tool_result_stays_an_output_string() {
+        let msgs = vec![
+            WireMessage::text("user", "go"),
+            WireMessage::tool_result("call_1", "{\"path\":\"a.txt\"}"),
+        ];
+
+        let req = build_request(&msgs, &[], None, false);
+        let response = req["contents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|content| content["parts"].as_array().unwrap())
+            .find(|part| part.get("functionResponse").is_some())
+            .unwrap()["functionResponse"]["response"]
+            .clone();
+        assert_eq!(response["output"], "{\"path\":\"a.txt\"}");
+        assert!(response.get("path").is_none());
+    }
+
+    #[test]
+    fn a_tool_result_with_an_image_block_carries_it_in_function_response_parts() {
+        let msgs = vec![
+            WireMessage::text("user", "read this"),
+            WireMessage {
+                role: "assistant".into(),
+                content: "".into(),
+                blocks: vec![],
+                tool_calls: vec![ToolCall {
+                    id: "call_abc_123".into(),
+                    name: "readMedia".into(),
+                    arguments: json!({ "path": "a.png" }),
+                    extras: None,
+                    args_parse_error: None,
+                }],
+                tool_call_id: None,
+            },
+            WireMessage {
+                role: "tool".into(),
+                content: "<image path=\"a.png\">".into(),
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "<image path=\"a.png\">".into(),
+                        meta: None,
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".into(),
+                        data: "QUJD".into(),
+                        name: None,
+                    },
+                ],
+                tool_calls: vec![],
+                tool_call_id: Some("call_abc_123".into()),
+            },
+        ];
+
+        let req = build_request(&msgs, &[], None, false);
+        let resp_part = &req["contents"][2]["parts"][0]["functionResponse"];
+        assert_eq!(resp_part["name"], "readMedia");
+        let media = resp_part["parts"]
+            .as_array()
+            .expect("a tool result with media must carry functionResponse.parts");
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(media[0]["inlineData"]["data"], "QUJD");
+    }
+
     #[test]
     fn test_build_request_media_urls() {
         let messages = vec![WireMessage::with_blocks(
@@ -1141,23 +1053,17 @@ mod tests {
         let parts = req["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 4);
 
-        // http URL → fileData with extension-guessed mime.
         assert_eq!(
             parts[0]["fileData"]["fileUri"],
             "https://example.com/photo.png"
         );
         assert_eq!(parts[0]["fileData"]["mimeType"], "image/png");
         assert_eq!(parts[1]["fileData"]["mimeType"], "audio/mpeg");
-        // data URL → inlineData with the declared mime.
         assert_eq!(parts[2]["inlineData"]["mimeType"], "video/mp4");
         assert_eq!(parts[2]["inlineData"]["data"], "AAAA");
-        // Unknown extension falls back to the block's default mime.
         assert_eq!(parts[3]["fileData"]["mimeType"], "image/png");
     }
 
-    /// Gemini `thoughtSignature` round-trips: `parse_response` captures it
-    /// into `ToolCall.extras`, and `build_request` restores it on the echoed
-    /// function call (v2 google-genai.ts:274-276, 540-546).
     #[test]
     fn test_thought_signature_roundtrip() {
         let resp = json!({
@@ -1198,9 +1104,6 @@ mod tests {
         assert_eq!(fc["thought_signature"], "sig-b64");
     }
 
-    /// The engine only ever streams, so the attestation signature has to survive
-    /// the streaming accumulator too. Capturing it on the non-streaming path
-    /// alone left multi-turn Gemini tool calls rejected by the API.
     #[test]
     fn streaming_accumulator_captures_the_thought_signature() {
         let mut acc = StreamAccumulator::new();
@@ -1231,8 +1134,6 @@ mod tests {
             .expect("signature captured while streaming");
         assert_eq!(extras["thought_signature_b64"], "sig-stream");
 
-        // ... and it reaches the wire on the next request, exactly like the
-        // non-streaming round trip above.
         let messages = vec![WireMessage::assistant_tool_calls(
             "",
             finished.tool_calls.clone(),
@@ -1244,7 +1145,6 @@ mod tests {
         );
     }
 
-    /// The snake_case spelling some relays emit must be accepted too.
     #[test]
     fn streaming_accumulator_accepts_the_snake_case_signature() {
         let mut acc = StreamAccumulator::new();
@@ -1266,9 +1166,6 @@ mod tests {
         assert_eq!(extras["thought_signature_b64"], "sig-snake");
     }
 
-    /// Gemini returns no `thought` part unless the request asks for it, so the
-    /// thinking-enabled request must carry `includeThoughts: true` — without it
-    /// the whole think path below is dead and the TUI shows no reasoning.
     #[test]
     fn thinking_request_asks_for_thoughts() {
         let messages = vec![WireMessage::text("user", "Hello")];
@@ -1278,15 +1175,12 @@ mod tests {
             req["generationConfig"]["thinkingConfig"]["includeThoughts"].as_bool(),
             Some(true)
         );
-        // No host-resolved budget for this protocol: Gemini picks a dynamic one
-        // rather than being pinned to an anthropic-shaped number.
         assert!(
             req["generationConfig"]["thinkingConfig"]
                 .get("thinkingBudget")
                 .is_none()
         );
 
-        // A budget, when one is supplied, rides along with the flag.
         let req = build_request_full(&messages, &[], Some(2048), true);
         assert_eq!(
             req["generationConfig"]["thinkingConfig"]["thinkingBudget"],
@@ -1297,13 +1191,10 @@ mod tests {
             Some(true)
         );
 
-        // Thinking off: untouched generationConfig, exactly as before.
         let req = build_request_full(&messages, &[], None, false);
         assert!(req.get("generationConfig").is_none());
     }
 
-    /// `thinkingConfig` is rejected by pre-2.5 generations, so the model gate
-    /// must not enable it for them.
     #[test]
     fn model_gate_admits_reasoning_families_only() {
         assert!(model_supports_thoughts("gemini-2.5-pro"));
@@ -1315,10 +1206,6 @@ mod tests {
         assert!(!model_supports_thoughts("gemini-1.5-pro"));
     }
 
-    /// v2 #4208 / #4230: Gemini 4 takes `thinkingLevel` (`thinkingBudget` is
-    /// rejected with a 400), and `off` has no encoding on that family — the
-    /// transport fails with the `thinking-cannot-disable` reason instead of
-    /// sending Gemini 3's MINIMAL level.
     #[test]
     fn gemini_4_uses_thinking_level_and_rejects_off() {
         let messages = vec![WireMessage::text("user", "hi")];
@@ -1343,10 +1230,6 @@ mod tests {
             );
         }
 
-        // The production `off` path reaches the builder with
-        // `include_thoughts = false` (http.rs derives it from a reasoning-on
-        // effort); there is no level to emit, so the request carries no
-        // thinkingConfig — the rejection happens before this point.
         let req = build_request_for_model(&messages, &[], None, false, "gemini-4-pro", Some("off"));
         assert!(req.get("generationConfig").is_none());
 

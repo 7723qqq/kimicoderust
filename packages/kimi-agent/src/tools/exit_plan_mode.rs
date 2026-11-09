@@ -1,23 +1,3 @@
-//! Native execution of the ExitPlanMode tool (state bridge protocol, design
-//! doc milestone 7, batch 7).
-//!
-//! The engine reads the host's plan state and, when plan mode is active,
-//! deactivates it through `state_write {domain: "plan", value: {active:
-//! false}}`. In auto permission mode the exit is direct (v2 auto-approval
-//! semantics); in every other mode the engine asks the host an interactive
-//! question first (v2 plan-review approval semantics) and only exits on an
-//! explicit approval. The permission mode comes from the engine's own
-//! configuration (`KimiConfig::discover` → `PolicySnapshot.mode`), the same
-//! source the standalone CLI and REPL use; when no config is discoverable
-//! the engine defaults to asking (fail-safe: an unapproved plan must never
-//! silently deactivate).
-//!
-//! The host stays the plan authority: it owns the plan file, the exit
-//! semantics, and the undo event. The engine renders the v2 output wording;
-//! the plan body itself is not on the wire (the plan read returns
-//! `{active, id, path}` only), so the rendered output carries the plan file
-//! path instead of the plan text.
-
 use std::collections::HashSet;
 
 use serde_json::Value;
@@ -31,40 +11,26 @@ use crate::rpc::types::{
 };
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// v2 already-inactive error output (`ExitPlanModeTool.execution`).
-const PLAN_MODE_NOT_ACTIVE_MESSAGE: &str = "ExitPlanMode can only be called while plan mode is active. Use EnterPlanMode (or /plan) first.";
+const PLAN_MODE_NOT_ACTIVE_MESSAGE: &str = "ExitPlanMode can only be called while plan mode is active. Only the user can turn plan mode on.";
 
-/// v2 cancelled/dismissed approval output (`ExitPlanModeReview`).
 const PLAN_APPROVAL_DISMISSED_MESSAGE: &str = "Plan approval dismissed. Plan mode remains active.";
 
-/// v2 rejected approval output (`ExitPlanModeReview`).
 const PLAN_REJECTED_MESSAGE: &str = "Plan rejected by user. Plan mode remains active.";
 
-/// v2 revise approval output (`ExitPlanModeReview`).
 const PLAN_REVISE_MESSAGE: &str = "User requested revisions. Plan mode remains active.";
 
-/// v2 `RESERVED_OPTION_LABELS`, normalized to lowercase.
 const RESERVED_OPTION_LABELS: [&str; 4] = ["approve", "reject", "reject and exit", "revise"];
 
-/// Failure message when the connected host does not implement the state
-/// bridge. The model must not retry the tool — the host cannot deactivate
-/// plan mode for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot deactivate plan mode.";
 
-/// Failure message when the connected host does not implement the
-/// interactive-question seam. The model must not retry the tool.
 const QUESTION_UNSUPPORTED_FAILURE_MESSAGE: &str =
     "The connected client does not support interactive questions. Do NOT call this tool again.";
 
-/// One model-provided plan option (v2 `ExitPlanModeOption`).
-struct ExitPlanModeOption {
-    label: String,
-    description: String,
+pub(crate) struct ExitPlanModeOption {
+    pub(crate) label: String,
+    pub(crate) description: String,
 }
 
-/// Execute the ExitPlanMode tool natively: read the plan domain, then either
-/// exit directly (auto permission mode) or confirm with the user through
-/// `host/ask_question` first (every other mode).
 pub async fn execute_exit_plan_mode(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -72,31 +38,18 @@ pub async fn execute_exit_plan_mode(
     execute_exit_plan_mode_with_mode(callbacks, args, permission_mode()).await
 }
 
-/// The permission mode the engine acts on when the caller did not supply one:
-/// the mode from its own configuration (the standalone CLI and REPL build
-/// their permission engines from the same source). An undiscoverable config
-/// defaults to `Manual` — the fail-safe direction, since an unapproved plan
-/// must never deactivate silently.
 fn permission_mode() -> PermissionMode {
     crate::config::KimiConfig::discover()
         .map(|(config, _)| config.build_policy_snapshot(None).mode)
         .unwrap_or(PermissionMode::Manual)
 }
 
-/// Same as [`execute_exit_plan_mode`] with the permission mode supplied
-/// explicitly.
-///
-/// A session supplies its *live* mode here. Only `Auto` exits without asking,
-/// so the distinction matters: the on-disk `default_permission_mode` is the
-/// session's starting point, not its current state, and a user who switched
-/// the session to `manual` this turn must not have that overridden by a config
-/// value they changed in another window.
 pub async fn execute_exit_plan_mode_with_mode(
     callbacks: &dyn HostCallbacks,
     args: &Value,
     mode: PermissionMode,
 ) -> ExecutableToolResult {
-    let options = match parse_options(args) {
+    let options = match parse_options(args, "ExitPlanMode") {
         Ok(options) => options,
         Err(message) => return err_result(message),
     };
@@ -130,9 +83,6 @@ pub async fn execute_exit_plan_mode_with_mode(
     confirm_and_exit(callbacks, &turn_id, &tool_call_id, path, &options).await
 }
 
-/// Ask the user to approve the plan (v2 plan-review semantics) and exit on
-/// approval. Dismissed, cancelled, and rejected answers keep plan mode
-/// active with the v2 wording.
 async fn confirm_and_exit(
     callbacks: &dyn HostCallbacks,
     turn_id: &str,
@@ -160,9 +110,6 @@ async fn confirm_and_exit(
     let response = match callbacks.ask_question(request).await {
         Ok(response) => response,
         Err(error) => {
-            // The trait default and the documented JSON-RPC error both carry
-            // this phrase; anything else is a transient host failure, which
-            // keeps plan mode active like a dismissed approval.
             if error.contains("does not support interactive questions") {
                 return err_result(QUESTION_UNSUPPORTED_FAILURE_MESSAGE.into());
             }
@@ -181,21 +128,17 @@ async fn confirm_and_exit(
             )
             .await
         }
-        // Feedback-bearing reject: surface the user's free text so the
-        // model can read it, and do NOT end the turn (v2
-        // exitPlanModeReview.ts:122-140). Plan mode stays active.
+
         Answer::Rejected(Some(feedback)) => {
             ok_result(format!("User rejected the plan. Feedback:\n\n{feedback}"))
         }
-        // Plain Reject click: end the turn, plan mode stays active (v2
-        // exitPlanModeReview.ts:140-148).
+
         Answer::Rejected(None) => ExecutableToolResult {
             delivery: None,
             stop_turn: true,
             ..err_result(PLAN_REJECTED_MESSAGE.into())
         },
-        // "Reject and Exit": deactivate plan mode and end the turn (v2
-        // exitPlanModeReview.ts:100-110).
+
         Answer::RejectAndExit => {
             exit_plan(callbacks, turn_id, tool_call_id, path, None, true).await
         }
@@ -204,10 +147,7 @@ async fn confirm_and_exit(
     }
 }
 
-/// The question's selectable options: the model-provided approaches when
-/// present (v2: the user picks the approach to execute), otherwise the
-/// standard approval controls.
-fn question_options(options: &[ExitPlanModeOption]) -> Vec<AskQuestionOption> {
+pub(crate) fn question_options(options: &[ExitPlanModeOption]) -> Vec<AskQuestionOption> {
     if options.is_empty() {
         return vec![
             AskQuestionOption {
@@ -240,31 +180,17 @@ fn question_options(options: &[ExitPlanModeOption]) -> Vec<AskQuestionOption> {
         .collect()
 }
 
-/// The user's answer to the approval question.
-enum Answer {
-    /// Approved; carries the chosen approach label when the model provided
-    /// options and the user picked one.
+pub(crate) enum Answer {
     Approved(Option<String>),
-    /// Rejected. Carries the user's free-text feedback when the answer was
-    /// entered as an "Other" value; `None` for a plain Reject click.
-    /// v2 `exitPlanModeReview.ts:122-140`: feedback-bearing rejections do
-    /// NOT set `stopTurn` and surface the text in the result so the model
-    /// can read it.
+
     Rejected(Option<String>),
-    /// "Reject and Exit": exit plan mode and end the turn (v2
-    /// `exitPlanModeReview.ts:100-110`).
+
     RejectAndExit,
     Revise,
     Dismissed,
 }
 
-/// Interpret the host's question response against the v2 approval outcomes:
-/// an explicit approval exits, "Revise" asks for revisions, "Reject and
-/// Exit" exits plan mode and ends the turn, a plain Reject click keeps
-/// plan mode active, any other answer (including the "Other" free text)
-/// is a feedback-bearing reject, and an empty or cancelled response is
-/// a dismissal.
-fn interpret_answer(
+pub(crate) fn interpret_answer(
     response: &AskQuestionResponse,
     question: &str,
     options: &[ExitPlanModeOption],
@@ -280,16 +206,12 @@ fn interpret_answer(
             "Approve (Recommended)" => Answer::Approved(None),
             "Reject and Exit" => Answer::RejectAndExit,
             "Revise" => Answer::Revise,
-            // A plain "Reject" click OR free-text "Other" with content: v2
-            // distinguishes them but both keep plan mode active; the
-            // feedback-bearing case is detected below.
+
             "Reject" => Answer::Rejected(None),
             _ => Answer::Rejected(Some(answer.clone())),
         };
     }
-    // Model-provided options: the answer is the chosen option label, or
-    // free text when the user picked "Other". An answer that matches no
-    // option label is free-text feedback.
+
     if let Some(option) = options.iter().find(|option| option.label == *answer) {
         let _ = option;
         Answer::Approved(Some(answer.clone()))
@@ -298,7 +220,6 @@ fn interpret_answer(
     }
 }
 
-/// Deactivate plan mode through the state bridge and render the v2 output.
 async fn exit_plan(
     callbacks: &dyn HostCallbacks,
     turn_id: &str,
@@ -325,8 +246,6 @@ async fn exit_plan(
     }
 }
 
-/// v2 `formatAutoApprovedPlanForOutput` minus the plan body (the plan text
-/// is not on the wire; the plan file path stands in for it).
 fn auto_approved_output(path: Option<&str>) -> String {
     let mut out = "Exited plan mode. Plan mode deactivated. All tools are now available.\nNote: this plan was auto-approved without user review — the user has NOT explicitly approved it. Follow the user's original instructions on whether to proceed with execution; if they asked you to stop, wait, or only summarize after planning, do not start executing."
         .to_string();
@@ -336,9 +255,6 @@ fn auto_approved_output(path: Option<&str>) -> String {
     out
 }
 
-/// v2 `formatPlanForOutput` minus the plan body, with the v2
-/// selected-approach prefix when the user chose among model-provided
-/// options.
 fn approved_output(path: Option<&str>, selected: Option<&str>) -> String {
     let mut out =
         "Exited plan mode. Plan mode deactivated. All tools are now available.".to_string();
@@ -353,41 +269,45 @@ fn approved_output(path: Option<&str>, selected: Option<&str>) -> String {
     out
 }
 
-/// Parse and validate the v2 `options` argument (1-3 items, unique labels,
-/// no reserved approval labels). Empty when absent.
-fn parse_options(args: &Value) -> Result<Vec<ExitPlanModeOption>, String> {
+pub(crate) fn parse_options(args: &Value, tool: &str) -> Result<Vec<ExitPlanModeOption>, String> {
     let Some(options) = args.get("options") else {
         return Ok(Vec::new());
     };
     let Some(array) = options.as_array() else {
         return Err(arg_error_text(
-            "ExitPlanMode",
+            tool,
             "options",
             "engine.tools.argMustBeArray",
         ));
     };
     if array.is_empty() || array.len() > 3 {
-        return Err("Invalid ExitPlanMode arguments: `options` must contain 1-3 items.".into());
+        return Err(format!(
+            "Invalid {tool} arguments: `options` must contain 1-3 items."
+        ));
     }
     let mut parsed = Vec::with_capacity(array.len());
     let mut seen = HashSet::new();
     for item in array {
         let Some(label) = item.get("label").and_then(|l| l.as_str()) else {
-            return Err(
-                "Invalid ExitPlanMode arguments: each option needs a `label` string.".into(),
-            );
+            return Err(format!(
+                "Invalid {tool} arguments: each option needs a `label` string."
+            ));
         };
         if label.is_empty() || label.chars().count() > 80 {
-            return Err(
-                "Invalid ExitPlanMode arguments: option labels must be 1-80 characters.".into(),
-            );
+            return Err(format!(
+                "Invalid {tool} arguments: option labels must be 1-80 characters."
+            ));
         }
         let normalized = label.trim().to_lowercase();
         if RESERVED_OPTION_LABELS.iter().any(|r| *r == normalized) {
-            return Err("Invalid ExitPlanMode arguments: option labels must not use reserved approval labels (Approve, Reject, Reject and Exit, Revise).".into());
+            return Err(format!(
+                "Invalid {tool} arguments: option labels must not use reserved approval labels (Approve, Reject, Reject and Exit, Revise)."
+            ));
         }
         if !seen.insert(normalized) {
-            return Err("Invalid ExitPlanMode arguments: option labels must be unique.".into());
+            return Err(format!(
+                "Invalid {tool} arguments: option labels must be unique."
+            ));
         }
         parsed.push(ExitPlanModeOption {
             label: label.to_string(),
@@ -401,9 +321,6 @@ fn parse_options(args: &Value) -> Result<Vec<ExitPlanModeOption>, String> {
     Ok(parsed)
 }
 
-/// Map a state bridge error to a tool result: an unwired host (message
-/// carries the `does not support state bridge` phrase) gets the dedicated
-/// failure message; everything else is passed through verbatim.
 fn map_state_error(error: String) -> ExecutableToolResult {
     if error.contains("does not support state bridge") {
         err_result(STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE.into())
@@ -412,10 +329,6 @@ fn map_state_error(error: String) -> ExecutableToolResult {
     }
 }
 
-/// Engine tool definition for ExitPlanMode, so the model can discover and
-/// call it (used by the standalone REPL and native tool listing). The
-/// description mirrors v2 `exit-plan-mode.md`; the schema mirrors
-/// `ExitPlanModeInputSchema`.
 pub fn exit_plan_mode_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "ExitPlanMode".into(),
@@ -459,8 +372,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    /// Scripted callbacks: records the received state/question requests and
-    /// answers with canned responses.
     struct ScriptedCallbacks {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,
@@ -872,7 +783,6 @@ mod tests {
             "User rejected the plan. Feedback:\n\nSomething else entirely"
         );
         assert!(write_received.lock().unwrap().is_none());
-        // Free-text feedback keeps plan mode active (no state_write).
     }
 
     #[tokio::test]

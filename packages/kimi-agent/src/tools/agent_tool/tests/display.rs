@@ -1,8 +1,6 @@
 use super::super::agent_call_display;
 use serde_json::json;
 
-/// v2 labels a swarm by its size, which is what tells a reader the call
-/// fans out rather than spawning one child.
 #[test]
 fn a_swarm_display_names_its_size() {
     let display = agent_call_display(
@@ -19,7 +17,6 @@ fn a_swarm_display_names_its_size() {
     assert_eq!(display["prompt"], "three-way review");
 }
 
-/// Items and resumes add up — a mixed call is still one swarm.
 #[test]
 fn a_swarm_display_counts_items_and_resumes() {
     let display = agent_call_display(
@@ -45,8 +42,6 @@ fn a_single_agent_display_uses_the_profile_and_prompt() {
     assert_eq!(display["prompt"], "investigate this");
 }
 
-/// v2 counts the RAW argument lengths, so a malformed call still reports
-/// the size the model asked for.
 #[test]
 fn the_count_is_the_raw_argument_length() {
     let display = agent_call_display(
@@ -57,7 +52,6 @@ fn the_count_is_the_raw_argument_length() {
     assert_eq!(display["agent_name"], "swarm (3 subagents)");
 }
 
-/// Tools that declare no display must not grow one.
 #[test]
 fn other_tools_get_no_display() {
     assert!(agent_call_display("Bash", &json!({ "command": "ls" })).is_none());

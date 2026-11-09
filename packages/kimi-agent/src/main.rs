@@ -112,8 +112,9 @@ async fn main() -> anyhow::Result<()> {
         )?);
 
         let (config, _) = if let Some(ref path) = cli.config {
-            let cfg = kimi_agent::config::KimiConfig::from_file(path)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // v2 degrades to the default config on a bad file instead of
+            // aborting the process; the error is still surfaced as a warning.
+            let cfg = kimi_agent::config::KimiConfig::load_or_default(path);
             (cfg, path.clone())
         } else {
             kimi_agent::config::KimiConfig::discover().map_err(|e| anyhow::anyhow!("{e}"))?
@@ -129,39 +130,49 @@ async fn main() -> anyhow::Result<()> {
                     config.resolve_merge_all_available_skills(),
                 );
             let model_capabilities = native.capabilities.clone();
+            let model_alias = native.alias.clone();
+            let model_name = native.model.clone();
+            let bridge = native.subprocess_bridge();
+            let mut native_llm = NativeLlmConfig {
+                protocol: native.protocol,
+                alias: None,
+                provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
+                base_url: native.base_url,
+                api_key: native.api_key,
+                api_key_env: native.api_key_env,
+                model: native.model,
+                max_tokens: native.max_output_size.or(native.max_tokens),
+                custom_headers: native.custom_headers,
+                // `thinking.effort` is a global choice (schema); a model
+                // that encodes "thinking off" as an effort value gets
+                // that value instead of an omitted field.
+                reasoning_effort: config.resolve_effort(native.off_effort.as_deref()),
+                thinking_budget: None,
+                auth_provider: native.auth_provider.clone(),
+                thinking_keep: config.resolve_thinking_keep(),
+                beta_api: native.beta_api,
+                capabilities: native.capabilities.clone(),
+                system_prompt: native.system_prompt.clone(),
+                max_input_size: native.max_input_size,
+                adaptive_thinking: native.adaptive_thinking,
+                reasoning_key: native.reasoning_key.clone(),
+                // `resolve_effort` above already applied the declared
+                // off-effort, so the transport's gap-fill must not re-apply
+                // it when thinking is on with no explicit effort.
+                off_effort: None,
+                response_format: None,
+                sampling: None,
+                determinism: None,
+                extra_params: None,
+                binary_path: bridge.0,
+                antigravity: bridge.1,
+            };
+            config.apply_model_request_options(&mut native_llm, model_alias.as_deref());
             let spec = PipelineSpec {
                 system_prompt,
-                model_name: native.model.clone(),
+                model_name,
                 providers: Vec::new(),
-                native_llm: Some(NativeLlmConfig {
-                    protocol: native.protocol,
-                    alias: None,
-                    provider_type: Some(native.provider_type.clone())
-                        .filter(|value| !value.is_empty()),
-                    base_url: native.base_url,
-                    api_key: native.api_key,
-                    api_key_env: native.api_key_env,
-                    model: native.model,
-                    max_tokens: native.max_output_size.or(native.max_tokens),
-                    custom_headers: native.custom_headers,
-                    // `thinking.effort` is a global choice (schema); a model
-                    // that encodes "thinking off" as an effort value gets
-                    // that value instead of an omitted field.
-                    reasoning_effort: config.resolve_effort(native.off_effort.as_deref()),
-                    thinking_budget: None,
-                    auth_provider: native.auth_provider.clone(),
-                    thinking_keep: config.resolve_thinking_keep(),
-                    beta_api: native.beta_api,
-                    capabilities: native.capabilities.clone(),
-                    system_prompt: native.system_prompt.clone(),
-                    max_input_size: native.max_input_size,
-                    adaptive_thinking: native.adaptive_thinking,
-                    reasoning_key: native.reasoning_key.clone(),
-                    // `resolve_effort` above already applied the declared
-                    // off-effort, so the transport's gap-fill must not re-apply
-                    // it when thinking is on with no explicit effort.
-                    off_effort: None,
-                }),
+                native_llm: Some(native_llm),
                 workspace_root: Some(workspace.display().to_string()),
                 native_tools: true,
                 extra_roots: Vec::new(),
@@ -178,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
                 secondary_model: config
                     .extract_secondary_model_pool(cli.model.as_deref())
                     .map_err(|error| anyhow::anyhow!("{error}"))?,
-                sandbox_mode: None,
+                sandbox_mode: config.resolve_sandbox_mode(),
                 sandbox_policy: None,
                 todo_tool_veto: None,
                 tower_worktree_root: None,
@@ -244,8 +255,9 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.repl {
         let (config, _) = if let Some(ref path) = cli.config {
-            let cfg = kimi_agent::config::KimiConfig::from_file(path)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // v2 degrades to the default config on a bad file instead of
+            // aborting the process; the error is still surfaced as a warning.
+            let cfg = kimi_agent::config::KimiConfig::load_or_default(path);
             (cfg, path.clone())
         } else {
             kimi_agent::config::KimiConfig::discover().map_err(|e| anyhow::anyhow!("{e}"))?
@@ -670,7 +682,11 @@ async fn main() -> anyhow::Result<()> {
             let input: SessionIdParams = serde_json::from_value(params)
                 .map_err(|e| types::JsonRpcError::internal_error(format!("Invalid params: {e}")))?;
             let entry = session_entry(&input.session_id)?;
-            entry.session.settled().await;
+            // `session/settled` answers with null, so the drain bound is
+            // reported rather than turned into a JSON-RPC error.
+            if let Err(timeout) = entry.session.settled().await {
+                tracing::warn!(%timeout, "session settle did not finish before the drain bound");
+            }
             Ok(serde_json::Value::Null)
         })
     });
@@ -1000,11 +1016,12 @@ async fn main() -> anyhow::Result<()> {
                             "no background task runner is active for this session".to_string(),
                         )
                     })?;
-                let wire = runner
+                let outcome = runner
                     .stop(&input.task_id, input.reason.as_deref())
                     .await
                     .map_err(types::JsonRpcError::internal_error)?;
-                Ok(wire)
+                // The JSON-RPC answer stays the task entry (the host's shape).
+                Ok(outcome.wire)
             })
         },
     );
@@ -1306,8 +1323,7 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
 
     let (config, source) = match cli.config.as_ref() {
         Some(path) => {
-            let cfg = kimi_agent::config::KimiConfig::from_file(path)
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let cfg = kimi_agent::config::KimiConfig::load_or_default(path);
             (cfg, path.clone())
         }
         None => kimi_agent::config::KimiConfig::discover()
@@ -1346,33 +1362,44 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
         None => Vec::new(),
     };
     let model_capabilities = native.capabilities.clone();
+    let model_alias = native.alias.clone();
+    let model_name = native.model.clone();
+    let bridge = native.subprocess_bridge();
+    let mut native_llm = NativeLlmConfig {
+        protocol: native.protocol,
+        alias: None,
+        provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
+        base_url: native.base_url,
+        api_key: native.api_key,
+        api_key_env: native.api_key_env,
+        model: native.model,
+        max_tokens: native.max_output_size.or(native.max_tokens),
+        custom_headers: native.custom_headers,
+        reasoning_effort: config.resolve_effort(native.off_effort.as_deref()),
+        thinking_budget: None,
+        auth_provider: native.auth_provider.clone(),
+        thinking_keep: config.resolve_thinking_keep(),
+        beta_api: native.beta_api,
+        capabilities: native.capabilities.clone(),
+        system_prompt: native.system_prompt.clone(),
+        max_input_size: native.max_input_size,
+        adaptive_thinking: native.adaptive_thinking,
+        reasoning_key: native.reasoning_key.clone(),
+        // `resolve_effort` above already applied the declared off-effort.
+        off_effort: None,
+        response_format: None,
+        sampling: None,
+        determinism: None,
+        extra_params: None,
+        binary_path: bridge.0,
+        antigravity: bridge.1,
+    };
+    config.apply_model_request_options(&mut native_llm, model_alias.as_deref());
     let spec = PipelineSpec {
         system_prompt,
-        model_name: native.model.clone(),
+        model_name,
         providers,
-        native_llm: Some(NativeLlmConfig {
-            protocol: native.protocol,
-            alias: None,
-            provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
-            base_url: native.base_url,
-            api_key: native.api_key,
-            api_key_env: native.api_key_env,
-            model: native.model,
-            max_tokens: native.max_output_size.or(native.max_tokens),
-            custom_headers: native.custom_headers,
-            reasoning_effort: config.resolve_effort(native.off_effort.as_deref()),
-            thinking_budget: None,
-            auth_provider: native.auth_provider.clone(),
-            thinking_keep: config.resolve_thinking_keep(),
-            beta_api: native.beta_api,
-            capabilities: native.capabilities.clone(),
-            system_prompt: native.system_prompt.clone(),
-            max_input_size: native.max_input_size,
-            adaptive_thinking: native.adaptive_thinking,
-            reasoning_key: native.reasoning_key.clone(),
-            // `resolve_effort` above already applied the declared off-effort.
-            off_effort: None,
-        }),
+        native_llm: Some(native_llm),
         workspace_root: Some(workspace.display().to_string()),
         native_tools: true,
         extra_roots: Vec::new(),
@@ -1399,7 +1426,7 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
             kimi_agent::tools::tower::paths::tower_env_switch(),
             kimi_agent::tools::tower::paths::tower_config_flag(&config),
         ),
-        sandbox_mode: None,
+        sandbox_mode: config.resolve_sandbox_mode(),
         sandbox_policy: None,
         caller_agent_id: None,
         session_id: None,
@@ -1583,6 +1610,29 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
         });
     }
 
+    // Idle-session reclaim (v2 `sessionIdleReaper`): a session with no running
+    // turn, no parked interaction and no cron schedule is closed once its idle
+    // grace elapses, so its event lane and runtime state do not accumulate for
+    // the life of the daemon. The next resume reports `reclaimed`.
+    {
+        let reaper = server.idle_reaper();
+        if reaper.enabled() {
+            let closer = std::sync::Arc::clone(&reaper);
+            let shutdown_watch = shutdown.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = reaper.run() => {}
+                    () = shutdown_watch.cancelled() => closer.close(),
+                }
+            });
+        }
+    }
+
+    // Keep handles to the pieces the shutdown sequence still has to reach:
+    // `serve` consumes the server, but the drain and the cleanup below need the
+    // engine's live turns and the terminal manager's host processes.
+    let drain_engine = server.engine();
+    let drain_terminals = server.terminal_manager();
     let handle = kimi_agent::server::http::serve(&address, server).await?;
     let credential = match &token_path {
         Some(path) => format!("bearer token {path:?}"),
@@ -1595,9 +1645,37 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
     );
 
     // Serve until `POST /api/v1/shutdown` stops the accept loop, or Ctrl-C
-    // terminates the process directly (no signal handler on purpose). In-flight
-    // connections finish on their own; there is no graceful turn drain yet.
+    // terminates the process directly (no signal handler on purpose).
     shutdown.cancelled().await;
+
+    // Shutdown sequence. Every stage follows the reference's ordering:
+    //
+    // 1. Stop accepting. The accept loop already broke on the token, and new
+    //    prompts are refused from the moment it was cancelled (see
+    //    `HttpServer::is_shutting_down`), so the drain below cannot be extended
+    //    by work that arrived after the signal.
+    // 2. Drain in-flight turns. The reference's `settled()` has no upper bound
+    //    (`agent/loop/loopService.ts:970-993`), so this wait has none either.
+    // 3. Release host-side resources item by item. A terminal pty child is a
+    //    host process: it outlives this process unless killed here.
+    handle.shutdown();
+
+    let mut drained: Vec<(String, u32)> = Vec::new();
+    if let Some(engine) = drain_engine {
+        let started = engine.active_turns_snapshot();
+        engine.drain_active_turns().await;
+        drained = started;
+    }
+    for (session, turn) in &drained {
+        println!("kimi-agent shutdown: drained turn {session}#{turn}");
+    }
+
+    // Host-side resources. The reference ledger drains without an upper bound
+    // (`_base/lifecycle/ledger.ts:230-247`), so this cleanup has none either.
+    let closed = drain_terminals.close_all().await;
+    println!("kimi-agent shutdown: closed {closed} terminal process(es)");
+
+    println!("kimi-agent shutdown: {} turn(s) drained", drained.len());
     Ok(())
 }
 

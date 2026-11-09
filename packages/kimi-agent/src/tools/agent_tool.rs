@@ -1,20 +1,3 @@
-//! Native `Agent` tool — the foreground core of v2's `SubagentTool` (P46).
-//!
-//! Scope (deliberately narrow): a foreground `Agent` call with a known
-//! profile runs an inline subagent turn through the same native pipeline
-//! (permission gate, stale/plan/dedup guards, truncation) and reports the
-//! v2-shaped result. Everything the v2 tool supports beyond that stays
-//! host-owned by falling back (returning `None`):
-//! - profiles missing from the pushed snapshot (plugin sources, external
-//!   backends like claude-code/codex)
-//! - a turn without an injected subagent runtime
-//!
-//! `resume` (P55), `run_in_background` (P58), `fork` and the explicit
-//! `model` override started out on that list and are native now.
-//!
-//! The host keeps its `Agent` tool registered either way, so a fallback is
-//! a routing decision, never a capability loss.
-
 mod defs;
 mod events;
 mod execute;

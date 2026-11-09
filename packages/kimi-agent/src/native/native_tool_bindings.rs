@@ -1016,11 +1016,21 @@ pub fn native_read_engine_state(
     domain: String,
     session_id: Option<String>,
 ) -> Option<String> {
-    crate::storage::state_store::read_scoped_state(
+    // The napi export keeps its `Option<String>` shape (the host reads `null`
+    // as "no state"), so a failed read is folded here, explicitly and with a
+    // log — the alternative is an unreadable domain silently looking unset on
+    // the host side.
+    match crate::storage::state_store::read_scoped_state(
         std::path::Path::new(&workspace_root),
         session_id.as_deref(),
         &domain,
-    )
+    ) {
+        Ok(value) => value,
+        Err(cause) => {
+            tracing::warn!(%cause, "engine state read failed; the host sees null");
+            None
+        }
+    }
 }
 
 /// Pop the newest `count` state checkpoints of one session (native undo).

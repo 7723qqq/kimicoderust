@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::server::auth::ServerAuth;
-use crate::server::hub::{EventHub, HubClosed, SUBSCRIBER_QUEUE_DEPTH};
+use crate::server::hub::{EventHub, HubClosed};
 use crate::server::router::HttpRequest;
 use crate::server::transcript::grade::{TranscriptGrade, filter_ops_for_grade};
 use crate::server::transcript::project::TranscriptProjector;
@@ -80,8 +80,6 @@ pub enum WsError {
     Unsupported(u8),
     /// Message over the cap: code 1009.
     TooLarge,
-    /// The peer could not keep up with the event stream: code 1013.
-    SlowSubscriber,
     Io(io::Error),
     Serde(serde_json::Error),
 }
@@ -106,7 +104,6 @@ impl WsError {
             Self::Proto(_) => Some(1002),
             Self::Unsupported(_) => Some(1003),
             Self::TooLarge => Some(1009),
-            Self::SlowSubscriber => Some(1013),
             Self::Io(_) => None,
             Self::Serde(_) => None,
         }
@@ -281,7 +278,7 @@ pub async fn serve_ws(
     // that never sees this treats the socket as dead. It is written here rather
     // than in the loop below, so it cannot be overtaken by an event frame.
     let connection_id = format!("ws-{:016x}", fastrand::u64(..));
-    let hello = ws_protocol::server_hello(&connection_id, heartbeat, SUBSCRIBER_QUEUE_DEPTH)?;
+    let hello = ws_protocol::server_hello(&connection_id, heartbeat)?;
     write_frame(&mut writer, OP_TEXT, &hello).await?;
 
     // Active session subscriptions. `None` means nothing has been subscribed
@@ -487,13 +484,6 @@ pub async fn serve_ws(
                     }
                     // The hub released us (server teardown): a plain close.
                     Err(HubClosed::Detached) => break,
-                    // A connection that cannot keep up is closed rather than
-                    // silently truncated; see the policy note in server::hub.
-                    Err(HubClosed::Overflow) => {
-                        let _ = send_close(&mut writer, 1013).await;
-                        reader.abort();
-                        return Err(WsError::SlowSubscriber);
-                    }
                 }
             }
         }
@@ -1637,10 +1627,9 @@ mod tests {
             hello["payload"]["heartbeat_ms"], 10_000,
             "kap-server's default period is what a client is told"
         );
-        assert_eq!(
-            hello["payload"]["max_event_buffer_size"],
-            serde_json::json!(SUBSCRIBER_QUEUE_DEPTH),
-            "the advertised buffer must be the real one"
+        assert!(
+            hello["payload"].get("max_event_buffer_size").is_none(),
+            "v2's server_hello has no buffer-size field"
         );
 
         handle.shutdown();

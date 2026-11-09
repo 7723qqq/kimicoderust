@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::i18n::LocalizedText;
+use crate::primitives::read::ReadOutcome;
 use crate::rpc::types::{
     AskQuestionRequest, AskQuestionResponse, AuthTokenResponse, BoxFuture, CheckpointRequest,
     ListToolsResponse, LlmChatRequest, LlmChatResponse, ParseBashRequest, PermissionCheckRequest,
@@ -215,6 +216,12 @@ pub trait HostCallbacks: Send + Sync {
         _turn_id: usize,
     ) {
     }
+
+    /// Install the session store `session_query` reads. No-op by default: a
+    /// host-driven turn (stdio, napi) has no engine-side session store, so the
+    /// tool reports `session_query.index_unavailable` instead of an empty
+    /// history.
+    fn set_session_store(&self, _store: Arc<crate::session::sqlite_store::SqliteSessionStore>) {}
 
     /// Release the steering prompts injected during the active turn. The
     /// engine-local steer queue (see `SteerQueueCallbacks`) serves this at
@@ -533,10 +540,10 @@ impl HostCallbacks for RpcHostCallbacks {
 /// File write paths a native call targets (P53 checkpoint seam): the same
 /// inference the tool scheduler uses for conflict detection, filtered to
 /// file accesses that write.
-fn checkpoint_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec<String> {
+fn checkpoint_write_paths(accesses: &crate::turn_loop::types::ToolAccesses) -> Vec<String> {
     use crate::turn_loop::types::{FileOperation, ToolResourceAccess};
-    crate::turn_loop::tool_scheduler::infer_tool_accesses(tool_name, args)
-        .into_iter()
+    accesses
+        .iter()
         .filter_map(|access| match access {
             ToolResourceAccess::File(file)
                 if matches!(
@@ -544,7 +551,7 @@ fn checkpoint_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Stri
                     FileOperation::Write | FileOperation::ReadWrite
                 ) =>
             {
-                Some(file.path)
+                Some(file.path.clone())
             }
             _ => None,
         })
@@ -577,12 +584,17 @@ pub struct NativeToolCallbacks {
     /// Rust, bypassing the host `host/check_permission` seam for allow/deny
     /// verdicts.
     pub permission_engine: Option<Arc<crate::permission::PermissionEngine>>,
-    /// Optional plan-mode guard. When plan mode is active, write/edit tools
-    /// may only target the plan file and TaskStop / CronCreate / CronDelete
-    /// are denied; the closure returns the denial reason, or `None` to let
-    /// the call through. The REPL reads its local store; the napi/stdio
-    /// paths read the host's plan state through the state bridge per
-    /// guarded call.
+    /// Optional mode guard for plan **and** spec mode (v2
+    /// `AgentPlanService.guardToolExecution` / `AgentSpecService.
+    /// guardToolExecution`). When plan mode is active, write/edit tools may
+    /// only target the plan file and TaskStop / CronCreate / CronDelete are
+    /// denied; when spec mode is active, writes must stay inside
+    /// `<workspace>/specs/<id>` and the same TaskStop/cron veto plus non-file
+    /// accesses apply. The closure returns the denial reason, or `None` to let
+    /// the call through. Both modes are read through the state bridge on each
+    /// native call, under the mode-switch lock so a transition is observed
+    /// atomically. The REPL reads its local store; the napi/stdio paths read
+    /// the host's state.
     pub plan_guard: Option<Arc<PlanGuard>>,
     /// Optional stale-write gate (fork-original, G-6 #3 — no v2 counterpart
     /// exists; see `tools/stale_guard.rs` header).
@@ -602,6 +614,13 @@ pub struct NativeToolCallbacks {
     /// G-6 #6). User-configured hook commands run before native tool calls;
     /// exit 2 or a JSON deny blocks the call (fail-closed).
     pub hook_guard: Option<Arc<crate::tools::external_hooks::HookGuard>>,
+    /// Optional general `beforeExecute` listener gate (v2
+    /// `onBeforeExecuteTool`). Runs in registration order after the built-in
+    /// veto/sandbox gates and before the permission gate; the first veto wins,
+    /// `Allow` stops the remaining listeners, `Pass` forwards metadata. Unlike
+    /// the fixed `*_veto` strings above, listeners can inspect the parsed
+    /// arguments and await an asynchronous decision.
+    pub before_execute: Option<Arc<crate::tools::before_execute::BeforeExecuteGate>>,
     /// P52 native-path vetoes (the host `onBeforeExecuteTool` veto-chain
     /// listeners that have no engine-native counterpart). Non-empty reason:
     /// the affected native calls are rejected with the verbatim reason as
@@ -668,6 +687,7 @@ impl NativeToolCallbacks {
             stale_guard: None,
             goal_guard: None,
             hook_guard: None,
+            before_execute: None,
             agent_tool_veto: None,
             tools_veto: None,
             todo_tool_veto: None,
@@ -699,6 +719,10 @@ impl HostCallbacks for NativeToolCallbacks {
         self.toolset.set_file_history(store, session_id, turn_id);
     }
 
+    fn set_session_store(&self, store: Arc<crate::session::sqlite_store::SqliteSessionStore>) {
+        self.toolset.set_session_store(store);
+    }
+
     fn llm_chat(
         &self,
         request: LlmChatRequest,
@@ -720,6 +744,7 @@ impl HostCallbacks for NativeToolCallbacks {
             stale_guard: self.stale_guard.clone(),
             goal_guard: self.goal_guard.clone(),
             hook_guard: self.hook_guard.clone(),
+            before_execute: self.before_execute.clone(),
             agent_tool_veto: self.agent_tool_veto.clone(),
             tools_veto: self.tools_veto.clone(),
             todo_tool_veto: self.todo_tool_veto.clone(),
@@ -748,6 +773,31 @@ impl HostCallbacks for NativeToolCallbacks {
                 }
                 return Ok(response);
             }
+            let resolution = crate::tools::resolve::resolve_tool_execution(
+                &request.tool_name,
+                &request.arguments,
+                this.toolset.workspace_root().to_str(),
+            );
+            if let Some(reason) = &resolution.error {
+                this.inner.emit_event(serde_json::json!({
+                    "type": "tool.native",
+                    "agent_id": request.agent_id,
+                    "turn_id": request.turn_id,
+                    "tool_call_id": request.tool_call_id,
+                    "tool_name": request.tool_name,
+                    "arguments": request.arguments,
+                    "content": reason,
+                    "is_error": true,
+                    "note": null,
+                }));
+                return Ok(ToolExecuteResponse {
+                    delivery: None,
+                    stop_turn: false,
+                    content: reason.clone(),
+                    is_error: true,
+                    note: None,
+                });
+            }
             if let Some(guard) = &this.plan_guard
                 && let Some(reason) = guard(&request.tool_name, &request.arguments).await
             {
@@ -764,6 +814,9 @@ impl HostCallbacks for NativeToolCallbacks {
                     "content": reason,
                     "is_error": true,
                     "note": null,
+                    // v2 `ToolResultEvent.synthetic`: this result was produced
+                    // by a gate, not by running the tool.
+                    "synthetic": true,
                 }));
                 return Ok(ToolExecuteResponse {
                     delivery: None,
@@ -819,6 +872,9 @@ impl HostCallbacks for NativeToolCallbacks {
                     "content": reason,
                     "is_error": true,
                     "note": null,
+                    // v2 `ToolResultEvent.synthetic`: this result was produced
+                    // by a gate, not by running the tool.
+                    "synthetic": true,
                 }));
                 return Ok(ToolExecuteResponse {
                     delivery: None,
@@ -828,43 +884,13 @@ impl HostCallbacks for NativeToolCallbacks {
                     note: None,
                 });
             }
-            let sandbox_denial = if let Some(policy) = &this.sandbox_policy {
-                let tool_lower = request.tool_name.to_ascii_lowercase();
-                if tool_lower == "write" || tool_lower == "edit" {
-                    if let Some(target_path) =
-                        request.arguments.get("path").and_then(|v| v.as_str())
-                    {
-                        policy.sandbox_write_guard(target_path)
-                    } else if policy.mode == crate::tools::sandbox::SandboxMode::ReadOnly {
-                        policy.sandbox_write_guard("")
-                    } else {
-                        None
-                    }
-                // Bash is code execution *and* a filesystem writer. A ReadOnly
-                // sandbox must not let a shell bypass the write guard by
-                // running `echo x > file`, and a workspace-write sandbox must
-                // confine both the working directory and any absolute write
-                // target mentioned in the command (redirection, `tee`, `rm`,
-                // `cd …`, …). SandboxGuard's own contract (tools/sandbox.rs)
-                // scopes the execution guard to any tool that runs commands,
-                // not just the (dead) run_code entry.
-                } else if tool_lower == "bash" {
-                    let cwd = request.arguments.get("cwd").and_then(|v| v.as_str());
-                    policy.sandbox_code_execution_guard_for(cwd).or_else(|| {
-                        request
-                            .arguments
-                            .get("command")
-                            .and_then(|v| v.as_str())
-                            .and_then(|command| policy.sandbox_bash_write_guard(command))
-                    })
-                } else if tool_lower == "run_code" {
-                    policy.sandbox_code_execution_guard()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let sandbox_denial = this.sandbox_policy.as_ref().and_then(|policy| {
+                policy.sandbox_tool_veto(
+                    &request.tool_name,
+                    crate::tools::sandbox::tool_side_effect(&request.tool_name),
+                    &resolution.accesses,
+                )
+            });
             if let Some(reason) = sandbox_denial {
                 this.inner.emit_event(serde_json::json!({
                     "type": "tool.native",
@@ -876,6 +902,9 @@ impl HostCallbacks for NativeToolCallbacks {
                     "content": reason,
                     "is_error": true,
                     "note": null,
+                    // v2 `ToolResultEvent.synthetic`: this result was produced
+                    // by a gate, not by running the tool.
+                    "synthetic": true,
                 }));
                 return Ok(ToolExecuteResponse {
                     delivery: None,
@@ -885,8 +914,137 @@ impl HostCallbacks for NativeToolCallbacks {
                     note: None,
                 });
             }
+            // v2 `fireBeforeExecute`: registered listeners run after the fixed
+            // veto/sandbox gates and before the permission gate, so a hard
+            // refusal never triggers an approval prompt. The first veto wins;
+            // `Pass` metadata is carried on the outcome (no native tool reads
+            // execution metadata today — see `tools/before_execute.rs`).
+            if let Some(ref gate) = this.before_execute {
+                let outcome = gate
+                    .run(crate::tools::before_execute::BeforeExecuteContext {
+                        agent_id: request.agent_id.clone(),
+                        turn_id: request.turn_id.clone(),
+                        tool_call_id: request.tool_call_id.clone(),
+                        tool_name: request.tool_name.clone(),
+                        args: request.arguments.clone(),
+                    })
+                    .await;
+                if let Some(reason) = outcome.veto.or(outcome.failure) {
+                    this.inner.emit_event(serde_json::json!({
+                        "type": "tool.native",
+                        "agent_id": request.agent_id,
+                        "turn_id": request.turn_id,
+                        "tool_call_id": request.tool_call_id,
+                        "tool_name": request.tool_name,
+                        "arguments": request.arguments,
+                        "content": reason,
+                        "is_error": true,
+                        "note": null,
+                        // v2 `ToolResultEvent.synthetic`: this result was
+                        // produced by a gate, not by running the tool.
+                        "synthetic": true,
+                    }));
+                    return Ok(ToolExecuteResponse {
+                        delivery: None,
+                        stop_turn: false,
+                        content: reason,
+                        is_error: true,
+                        note: None,
+                    });
+                }
+            }
             let decision = if let Some(ref engine) = this.permission_engine {
-                let verdict = engine.evaluate(&request.tool_name, &request.arguments);
+                let mut verdict = engine.evaluate_for_agent(
+                    &request.agent_id,
+                    &request.tool_name,
+                    &request.arguments,
+                );
+                // v2 `GuardianReview` (`policies/guardian-review.ts`) runs in
+                // front of `YoloModeApprove`, so it only ever sees a call the
+                // chain would otherwise wave through under yolo. It is async
+                // and LLM-backed, hence here rather than in `evaluate`.
+                if verdict.decision == crate::permission::VerdictDecision::Allow
+                    && verdict.policy_name == "YoloModeApprove"
+                    && let Some(reviewer) = engine.guardian_reviewer()
+                    && crate::permission::guardian::enabled()
+                    && crate::permission::guardian::is_high_risk(&request.tool_name)
+                {
+                    let conversation = engine.conversation_snapshot();
+                    let assessment = reviewer
+                        .review(&request.tool_name, &request.arguments, &conversation)
+                        .await;
+                    let (outcome, risk_level, user_authorization, rationale) = match &assessment {
+                        crate::permission::guardian::GuardianVerdict::Allow {
+                            risk_level,
+                            user_authorization,
+                            rationale,
+                        } => (
+                            "allow",
+                            risk_level.as_str(),
+                            user_authorization.as_str(),
+                            rationale.as_str(),
+                        ),
+                        crate::permission::guardian::GuardianVerdict::Deny {
+                            risk_level,
+                            rationale,
+                        } => ("deny", risk_level.as_str(), "unknown", rationale.as_str()),
+                        crate::permission::guardian::GuardianVerdict::Bypass { reason } => {
+                            tracing::debug!(%reason, "guardian review bypassed");
+                            ("bypass", "unknown", "unknown", reason.as_str())
+                        }
+                    };
+                    // v2 `guardian.assessment` on the event bus.
+                    this.inner.telemetry(serde_json::json!({
+                        "type": "guardian.assessment",
+                        "turn_id": request.turn_id,
+                        "tool_call_id": request.tool_call_id,
+                        "tool_name": request.tool_name,
+                        "outcome": outcome,
+                        "risk_level": risk_level,
+                        "user_authorization": user_authorization,
+                        "rationale": rationale,
+                        "circuit_open": reviewer.circuit_open(),
+                    }));
+                    match assessment {
+                        // v2 `guardian-review.ts:23-32`: an allow only stands
+                        // for low risk or an explicit user authorization;
+                        // everything else becomes an approval prompt.
+                        crate::permission::guardian::GuardianVerdict::Allow {
+                            risk_level,
+                            user_authorization,
+                            ..
+                        } if risk_level == "low" || user_authorization == "explicit" => {}
+                        crate::permission::guardian::GuardianVerdict::Allow {
+                            risk_level,
+                            rationale,
+                            ..
+                        } => {
+                            verdict = crate::permission::LocalPermissionVerdict {
+                                decision: crate::permission::VerdictDecision::Ask,
+                                policy_name: "GuardianReview".into(),
+                                session_approval_rule: None,
+                                reason: Some(format!(
+                                    "Guardian review needs confirmation (risk: {risk_level}): {rationale}"
+                                )),
+                            };
+                        }
+                        crate::permission::guardian::GuardianVerdict::Deny {
+                            risk_level,
+                            rationale,
+                        } => {
+                            verdict = crate::permission::LocalPermissionVerdict {
+                                decision: crate::permission::VerdictDecision::Ask,
+                                policy_name: "GuardianReview".into(),
+                                session_approval_rule: None,
+                                reason: Some(format!(
+                                    "Guardian review denied this action (risk: {risk_level}): {rationale}"
+                                )),
+                            };
+                        }
+                        // A failed or circuit-broken review bypasses, as in v2.
+                        crate::permission::guardian::GuardianVerdict::Bypass { .. } => {}
+                    }
+                }
                 match verdict.decision {
                     crate::permission::VerdictDecision::Allow => PermissionDecision::allow(),
                     crate::permission::VerdictDecision::Deny => {
@@ -1014,6 +1172,9 @@ impl HostCallbacks for NativeToolCallbacks {
                     "content": reason,
                     "is_error": true,
                     "note": null,
+                    // v2 `ToolResultEvent.synthetic`: this result was produced
+                    // by a gate, not by running the tool.
+                    "synthetic": true,
                 }));
                 return Ok(ToolExecuteResponse {
                     delivery: None,
@@ -1040,6 +1201,9 @@ impl HostCallbacks for NativeToolCallbacks {
                     "content": reason,
                     "is_error": true,
                     "note": null,
+                    // v2 `ToolResultEvent.synthetic`: this result was produced
+                    // by a gate, not by running the tool.
+                    "synthetic": true,
                 }));
                 return Ok(ToolExecuteResponse {
                     delivery: None,
@@ -1068,6 +1232,9 @@ impl HostCallbacks for NativeToolCallbacks {
                     "content": reason,
                     "is_error": true,
                     "note": null,
+                    // v2 `ToolResultEvent.synthetic`: this result was produced
+                    // by a gate, not by running the tool.
+                    "synthetic": true,
                 }));
                 return Ok(ToolExecuteResponse {
                     delivery: None,
@@ -1096,6 +1263,9 @@ impl HostCallbacks for NativeToolCallbacks {
                     "content": reason,
                     "is_error": true,
                     "note": null,
+                    // v2 `ToolResultEvent.synthetic`: this result was produced
+                    // by a gate, not by running the tool.
+                    "synthetic": true,
                 }));
                 return Ok(ToolExecuteResponse {
                     delivery: None,
@@ -1133,7 +1303,7 @@ impl HostCallbacks for NativeToolCallbacks {
             // their pre-images before the write lands. Fail-open: a failure
             // or unwired host skips the snapshot. At this point every deny
             // gate (veto / plan / permission / hook / stale) has passed.
-            let checkpoint_paths = checkpoint_write_paths(&request.tool_name, &request.arguments);
+            let checkpoint_paths = checkpoint_write_paths(&resolution.accesses);
             if !checkpoint_paths.is_empty() {
                 let _ = this
                     .inner
@@ -1153,14 +1323,18 @@ impl HostCallbacks for NativeToolCallbacks {
             let progress_agent_id = request.agent_id.clone();
             let progress_turn_id = request.turn_id.clone();
             let progress_call_id = request.tool_call_id.clone();
-            let on_update = |kind: &str, text: &str| {
+            let on_update = |update: &crate::tools::ToolUpdate<'_>| {
                 progress_inner.emit_event(serde_json::json!({
                     "type": "tool.native.progress",
                     "agent_id": progress_agent_id,
                     "turn_id": progress_turn_id,
                     "tool_call_id": progress_call_id,
-                    "kind": kind,
-                    "text": text,
+                    "kind": update.kind,
+                    "text": update.text,
+                    "percent": update.percent,
+                    "customKind": update.custom_kind,
+                    "customData": update.custom_data,
+                    "replace": update.replace,
                 }));
             };
             let result = this
@@ -1230,6 +1404,7 @@ impl HostCallbacks for NativeToolCallbacks {
                             })
                             .await;
                     }
+                    let spill = result.spill;
                     let raw = ToolExecuteResponse {
                         delivery: result.delivery,
                         stop_turn: result.stop_turn,
@@ -1251,6 +1426,7 @@ impl HostCallbacks for NativeToolCallbacks {
                                     content: &raw.content,
                                     is_error: raw.is_error,
                                     note: raw.note.as_deref(),
+                                    spill: spill.as_ref(),
                                 },
                             );
                             ToolExecuteResponse {
@@ -1286,6 +1462,40 @@ impl HostCallbacks for NativeToolCallbacks {
                 // already allowed the call, so run it there. The completed
                 // host execution is observed like any other, so a later
                 // native Write to this file doesn't trip on it.
+                //
+                // An `mcp__*` name that native dispatch did not resolve is the
+                // exception: `is_native_tool_name` claims that namespace, and
+                // when the engine runs an MCP manager no host serves it either.
+                // Answer with v2's canned `unknown tool: <name>` instead of a
+                // host-specific transport error; the turn loop defers exactly
+                // that result and retries once discovery settles (B15,
+                // `loopService.ts:1798-1845`).
+                None if request.tool_name.starts_with("mcp__")
+                    && this.toolset.mcp_manager().is_some() =>
+                {
+                    let content = format!("unknown tool: {}", request.tool_name);
+                    this.inner.emit_event(serde_json::json!({
+                        "type": "tool.native",
+                        "agent_id": request.agent_id,
+                        "turn_id": request.turn_id,
+                        "tool_call_id": request.tool_call_id,
+                        "tool_name": request.tool_name,
+                        "arguments": request.arguments,
+                        "content": content,
+                        "is_error": true,
+                        "note": null,
+                        // v2 marks results the executor produced without
+                        // running the tool (`ToolResultEvent.synthetic`).
+                        "synthetic": true,
+                    }));
+                    Ok(ToolExecuteResponse {
+                        delivery: None,
+                        stop_turn: false,
+                        content,
+                        is_error: true,
+                        note: None,
+                    })
+                }
                 None => {
                     let response = this.inner.execute_tool(request.clone()).await?;
                     if let Some(gate) = &this.stale_guard {
@@ -1743,22 +1953,35 @@ impl HostCallbacks for StateStoreCallbacks {
             // it is the read/write authority and the host is the fallback.
             // Task *output* (a task-id key) is host-owned live data and skips
             // the local list.
-            if let Some(value) = (request.domain != "task" || request.key == "task")
-                .then(|| store.read_domain(&request.domain))
-                .flatten()
-            {
-                return Ok(StateReadResponse { value });
+            if request.domain != "task" || request.key == "task" {
+                match store.read_domain_state(&request.domain) {
+                    ReadOutcome::Found(value) => {
+                        return Ok(StateReadResponse { value });
+                    }
+                    ReadOutcome::Absent => {}
+                    // A live local domain that cannot be read must not fall
+                    // through to the legacy store: that value is stale by
+                    // definition, and returning it would present old state as
+                    // the current one.
+                    ReadOutcome::Unreadable(cause) => {
+                        return Err(format!("State read error: {cause}"));
+                    }
+                }
             }
             // Pre-scope installs kept every domain in the workspace store; a
             // session that has not written the domain yet still sees that
             // value (the next write moves it into the session store). Cron is
             // already the workspace store above.
-            if request.domain != "cron"
-                && let Some(value) = (request.domain != "task" || request.key == "task")
-                    .then(|| legacy_store.read_domain(&request.domain))
-                    .flatten()
-            {
-                return Ok(StateReadResponse { value });
+            if request.domain != "cron" && (request.domain != "task" || request.key == "task") {
+                match legacy_store.read_domain_state(&request.domain) {
+                    ReadOutcome::Found(value) => {
+                        return Ok(StateReadResponse { value });
+                    }
+                    ReadOutcome::Absent => {}
+                    ReadOutcome::Unreadable(cause) => {
+                        return Err(format!("State read error: {cause}"));
+                    }
+                }
             }
             match inner.state_read(request.clone()).await {
                 Ok(resp) => Ok(resp),
@@ -1828,12 +2051,11 @@ impl HostCallbacks for StateStoreCallbacks {
                         Err(_) => {}
                     }
                 }
-                return match store.apply_write(&request.domain, &request.value) {
+                // `apply_write_and_persist` holds the domain lock across the
+                // read-modify-write and the persist; as two calls, a concurrent
+                // writer could land between them and be overwritten.
+                return match store.apply_write_and_persist(&request.domain, &request.value) {
                     Ok(outcome) => {
-                        // A failed persist must fail the call: reporting
-                        // `ok: true` after dropping the write told the host the
-                        // state was durable when it was not.
-                        store.write_domain(&request.domain, &outcome.stored)?;
                         if request.domain == "goal"
                             && outcome
                                 .stored
@@ -1861,9 +2083,8 @@ impl HostCallbacks for StateStoreCallbacks {
                     Err(store_err) => Err(store_err),
                 };
             }
-            match store.apply_write(&request.domain, &request.value) {
+            match store.apply_write_and_persist(&request.domain, &request.value) {
                 Ok(outcome) => {
-                    store.write_domain(&request.domain, &outcome.stored)?;
                     // State-domain change notification (upstream: the
                     // `IAgentTodoService.onDidChange` / task-service events
                     // the v3 session projector subscribes to). The engine has

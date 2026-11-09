@@ -1,13 +1,3 @@
-//! FetchUrl — HTTP fetcher with SSRF protection and HTML content extraction.
-//!
-//! Ported for `kimi-agent` (P26 批 2). Executes in-process in Rust using
-//! `reqwest` and `scraper`. When the host resolves a
-//! `[services.moonshot_fetch]` backend (v2 `configSection.ts`), the fetch is
-//! tried through the Moonshot service first — `POST {base_url}` with
-//! `{"url": …}`, `Accept: text/markdown`, the response body being the
-//! extracted markdown (v2 `MoonshotFetchURLProvider`) — and the direct fetch
-//! below stays the fallback on any service failure.
-
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -22,22 +12,16 @@ use crate::turn_loop::types::ExecutableToolResult;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36";
-const DEFAULT_MAX_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+const DEFAULT_MAX_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
-/// Redirect hops followed before giving up — the cap `Policy::limited` used.
+
 const MAX_REDIRECT_HOPS: usize = 10;
 
-/// One host-resolved `[services.moonshot_fetch]` backend (v2
-/// `MoonshotFetchURLProvider`). Set per pipeline build from session params;
-/// the tool consults it at execution time.
 pub type WebFetchServiceConfig = MoonshotServiceConfig;
 
 static SERVICE_CONFIG: LazyLock<Mutex<Option<MoonshotServiceConfig>>> =
     LazyLock::new(|| Mutex::new(None));
 
-/// Install (or clear with `None`) the host-resolved Moonshot fetch backend.
-/// Always installed per pipeline build — including `None` — so a backend
-/// resolved for one session never leaks into the next.
 pub fn set_service_config(config: Option<MoonshotServiceConfig>) {
     moonshot_service::install(&SERVICE_CONFIG, config);
 }
@@ -46,8 +30,6 @@ fn service_config() -> Option<MoonshotServiceConfig> {
     moonshot_service::current(&SERVICE_CONFIG)
 }
 
-/// Build the Moonshot fetch request: body and headers (bearer, Accept,
-/// content-type, custom headers win).
 pub fn moonshot_fetch_request_parts(
     config: &MoonshotServiceConfig,
     url: &str,
@@ -64,18 +46,12 @@ pub fn moonshot_fetch_request_parts(
     (config.base_url.clone(), body, headers)
 }
 
-/// Try the Moonshot fetch service. `Ok(Some(result))` = the service answered
-/// (success or a tool-level error result); `Ok(None)` = the service failed
-/// and the caller should fall back to the direct fetch (v2 `localFallback`).
-/// Fallbacks log at debug: the outcome is routine, the reason aids diagnosis.
 async fn fetch_via_moonshot(
     config: &MoonshotServiceConfig,
     url_str: &str,
     tool_call_id: Option<&str>,
 ) -> Result<Option<ExecutableToolResult>, ()> {
     let Some(api_key) = moonshot_service::non_blank_key(&config.api_key) else {
-        // Unconfigured credential: a service error, but v2 treats any failure
-        // as fallback-worthy — the direct fetch still runs.
         tracing::debug!("moonshot fetch skipped (missing API key), falling back to direct fetch");
         return Err(());
     };
@@ -107,11 +83,12 @@ async fn fetch_via_moonshot(
         }
     };
     if status.as_u16() != 200 {
-        // Mirror v2: any non-200 falls back to the local fetcher.
         tracing::debug!("moonshot fetch failed (HTTP {status}), falling back to direct fetch");
         return Err(());
     }
     Ok(Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: text,
@@ -128,6 +105,8 @@ pub async fn execute_fetch_url(
     let url_str = args.get("url")?.as_str()?;
     if url_str.trim().is_empty() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "URL parameter cannot be empty".to_string(),
@@ -137,8 +116,6 @@ pub async fn execute_fetch_url(
         });
     }
 
-    // Host-resolved `[services.moonshot_fetch]` backend first; the direct
-    // fetch below is the fallback (v2 `MoonshotFetchURLProvider.localFallback`).
     if let Some(config) = service_config()
         && let Ok(Some(result)) = fetch_via_moonshot(&config, url_str, tool_call_id).await
     {
@@ -148,11 +125,13 @@ pub async fn execute_fetch_url(
     let mut current_url = url_str.to_string();
     let mut redirects: usize = 0;
 
-    let response = loop {
+    let mut response = loop {
         let parsed = match Url::parse(&current_url) {
             Ok(p) => p,
             Err(e) => {
                 return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: LocalizedText::with_params(
@@ -171,6 +150,8 @@ pub async fn execute_fetch_url(
             Ok(a) => a,
             Err(err) => {
                 return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: LocalizedText::with_params(
@@ -189,6 +170,8 @@ pub async fn execute_fetch_url(
             Some(h) => h,
             None => {
                 return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: LocalizedText::new("engine.tools.fetchUrl.noHost").render(),
@@ -199,8 +182,6 @@ pub async fn execute_fetch_url(
             }
         };
 
-        // Pin the resolved public addresses into reqwest to close the
-        // DNS-rebinding / TOCTOU window (mirroring kimi-native-tools).
         let mut builder = reqwest::Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
@@ -214,6 +195,8 @@ pub async fn execute_fetch_url(
             Ok(c) => c,
             Err(e) => {
                 return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: LocalizedText::with_params(
@@ -232,6 +215,8 @@ pub async fn execute_fetch_url(
             Ok(r) => r,
             Err(e) => {
                 return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: LocalizedText::with_params(
@@ -250,6 +235,8 @@ pub async fn execute_fetch_url(
         if status.is_redirection() {
             if redirects >= MAX_REDIRECT_HOPS {
                 return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: LocalizedText::with_params(
@@ -271,6 +258,8 @@ pub async fn execute_fetch_url(
                 Some(loc) => loc,
                 None => {
                     return Some(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: LocalizedText::new("engine.tools.fetchUrl.redirectNoLocation")
@@ -288,6 +277,8 @@ pub async fn execute_fetch_url(
                 }
                 Err(e) => {
                     return Some(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: LocalizedText::with_params(
@@ -309,6 +300,8 @@ pub async fn execute_fetch_url(
     let status = response.status();
     if !status.is_success() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: LocalizedText::with_params(
@@ -329,45 +322,65 @@ pub async fn execute_fetch_url(
         .map(|ct| ct.contains("text/html") || ct.contains("application/xhtml+xml"))
         .unwrap_or(false);
 
-    let bytes = match response.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.fetchUrl.readBodyFailed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
+    let body_too_large = || ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
+        delivery: None,
+        stop_turn: false,
+        content: LocalizedText::with_params(
+            "engine.tools.fetchUrl.bodyTooLarge",
+            i18n_params!["DEFAULT_MAX_BYTES" => DEFAULT_MAX_BYTES],
+        )
+        .render(),
+        is_error: true,
+        note: None,
+        display: None,
     };
+
+    if response
+        .content_length()
+        .is_some_and(|len| len > DEFAULT_MAX_BYTES as u64)
+    {
+        return Some(body_too_large());
+    }
+
+    let mut bytes = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > DEFAULT_MAX_BYTES {
+                    return Some(body_too_large());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
+                    delivery: None,
+                    stop_turn: false,
+                    content: LocalizedText::with_params(
+                        "engine.tools.fetchUrl.readBodyFailed",
+                        i18n_params!["e" => e],
+                    )
+                    .render(),
+                    is_error: true,
+                    note: None,
+                    display: None,
+                });
+            }
+        }
+    }
 
     if bytes.is_empty() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "The response body is empty.".to_string(),
             is_error: false,
-            note: None,
-            display: None,
-        });
-    }
-
-    if bytes.len() > DEFAULT_MAX_BYTES {
-        return Some(ExecutableToolResult {
-            delivery: None,
-            stop_turn: false,
-            content: LocalizedText::with_params(
-                "engine.tools.fetchUrl.bodyTooLarge",
-                i18n_params!["DEFAULT_MAX_BYTES" => DEFAULT_MAX_BYTES],
-            )
-            .render(),
-            is_error: true,
             note: None,
             display: None,
         });
@@ -400,6 +413,8 @@ pub async fn execute_fetch_url(
     let formatted = format!("{note} {cite_reminder}\n\n{content}");
 
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: formatted,
@@ -408,8 +423,6 @@ pub async fn execute_fetch_url(
         display: None,
     })
 }
-
-// ── SSRF Validation ──────────────────────────────────────────────────────────
 
 pub fn resolve_and_validate_url(
     parsed: &Url,
@@ -535,8 +548,6 @@ fn is_private_ipv6(ip: Ipv6Addr) -> bool {
     false
 }
 
-// ── HTML Extraction ──────────────────────────────────────────────────────────
-
 pub fn extract_html_content(html: &str) -> String {
     let document = Html::parse_document(html);
 
@@ -654,9 +665,7 @@ mod tests {
         );
 
         let relative_err = validate_url("/local/path", false).unwrap_err();
-        // The wording comes from `engine.tools.fetchUrl.invalidUrl` in the
-        // embedded catalog, not from Rust source, so assert the catalog's shape
-        // and not the url crate's own error text.
+
         assert!(
             relative_err.starts_with("Failed to fetch URL: Invalid URL:"),
             "the parse failure must name the URL, got: {relative_err}"
@@ -685,8 +694,7 @@ mod tests {
         assert!(headers.contains(&("Content-Type".to_string(), "application/json".to_string())));
         assert!(headers.contains(&("X-Msh-Tool-Call-Id".to_string(), "call-7".to_string())));
         assert!(headers.contains(&("X-Trace".to_string(), "t1".to_string())));
-        // The tool-call id rides after Content-Type and before custom
-        // headers, mirroring v2's header order.
+
         let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
         let id_pos = names
             .iter()

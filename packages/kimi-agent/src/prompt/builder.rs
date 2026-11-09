@@ -228,6 +228,18 @@ impl SystemPromptBuilder {
 
     /// Build the full system prompt string.
     pub fn build(self) -> String {
+        self.build_with_warnings().0
+    }
+
+    /// [`Self::build`] plus the user-facing warnings the load produced.
+    ///
+    /// Only the AGENTS.md loader reports one (v2 `agentsMdWarning`): the
+    /// aggregate instruction size crossed the recommended budget, or a
+    /// candidate exists but could not be read. v2's profile service publishes
+    /// it as a `warning` event with code `agents-md-oversized`
+    /// (`publishAgentsMdWarning`, `profileService.ts:874-884`); a caller with
+    /// an event lane forwards these, everyone else keeps using [`Self::build`].
+    pub fn build_with_warnings(self) -> (String, Vec<String>) {
         // 1. Environment
         let env = collect_environment(&self.workspace_root, self.override_shell.as_deref());
 
@@ -239,10 +251,14 @@ impl SystemPromptBuilder {
             .unwrap_or_default();
 
         // 3. AGENTS.md
+        let mut warnings: Vec<String> = Vec::new();
         let agents_md = if let Some(custom) = self.custom_agents_md {
             custom
         } else {
             let loaded = load_agents_md(&self.workspace_root, self.custom_brand_home.as_deref());
+            if let Some(warning) = loaded.warning {
+                warnings.push(warning);
+            }
             loaded.content
         };
 
@@ -365,6 +381,12 @@ impl SystemPromptBuilder {
             ("${agents_md}", agents_md.as_str()),
             ("${skills_section}", skills_section.as_str()),
             ("${plugin_sections}", plugin_sections.as_str()),
+            // v2 `model_adaptation_section` (`profile-shared.ts:182`): standing
+            // guidance for the model family. The fork's catalog supplies none,
+            // so the hook resolves empty — the same text v2 renders when
+            // `context.modelAdaptation` is absent. It stays a named variable so
+            // a profile can fill it without editing the template.
+            ("${model_adaptation_section}", ""),
             // The memory section is expanded before its own inner blocks, so
             // `${memory_listing}` and friends resolve in the same pass.
             ("${memory_section}", memory_section.as_str()),
@@ -377,7 +399,7 @@ impl SystemPromptBuilder {
             prompt = prompt.replace(var, val);
         }
 
-        prompt
+        (prompt, warnings)
     }
 }
 
@@ -446,6 +468,21 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_build_with_warnings_reports_oversized_agents_md() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("AGENTS.md"), "x".repeat(35 * 1024)).unwrap();
+        let (_prompt, warnings) = SystemPromptBuilder::new(temp.path())
+            .with_brand_home(temp.path())
+            .build_with_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("exceeds the recommended")),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn test_builder_role_additional_for_all_profiles() {
         let temp = tempdir().unwrap();
 
@@ -453,34 +490,34 @@ mod tests {
         let agent_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("agent")
             .build();
-        assert!(!agent_prompt.contains("You are now running as a subagent."));
+        assert!(!agent_prompt.contains("You are a subagent; the main agent is your caller"));
 
         // 2. Coder profile has subagent prefix + coder handoff suffix
         let coder_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("coder")
             .build();
-        assert!(coder_prompt.contains("You are now running as a subagent."));
+        assert!(coder_prompt.contains("You are a subagent; the main agent is your caller"));
         assert!(coder_prompt.contains("Your final message is the entire handoff"));
 
-        // 3. Explore profile has subagent prefix + explore suffix
+        // 3. Explore profile has subagent prefix + explore overlay
         let explore_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("explore")
             .build();
-        assert!(explore_prompt.contains("You are now running as a subagent."));
-        assert!(explore_prompt.contains("Fast agent specialized for exploring codebases."));
+        assert!(explore_prompt.contains("You are a subagent; the main agent is your caller"));
+        assert!(explore_prompt.contains("You are a codebase exploration specialist."));
 
         // 4. Plan profile has subagent prefix + plan suffix
         let plan_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("plan")
             .build();
-        assert!(plan_prompt.contains("You are now running as a subagent."));
-        assert!(plan_prompt.contains("Read-only implementation planning and architecture design."));
+        assert!(plan_prompt.contains("You are a subagent; the main agent is your caller"));
+        assert!(plan_prompt.contains("You are read-only: do not run commands or modify files"));
 
         // 5. Unknown profile defaults to empty role_additional without error
         let unknown_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("custom_unknown")
             .build();
-        assert!(!unknown_prompt.contains("You are now running as a subagent."));
+        assert!(!unknown_prompt.contains("You are a subagent; the main agent is your caller"));
         assert!(!unknown_prompt.contains("${role_additional}"));
     }
 
@@ -624,14 +661,14 @@ mod tests {
             .with_memory(false)
             .build();
         assert!(!prompt_disabled.contains("# Memory"));
-        assert!(!prompt_disabled.contains("memory_read"));
+        assert!(!prompt_disabled.contains("`Memory`"));
         assert!(!prompt_disabled.contains("${memory_section}"));
 
         let prompt_enabled = SystemPromptBuilder::new(temp.path())
             .with_memory(true)
             .build();
         assert!(prompt_enabled.contains("# Memory"));
-        assert!(prompt_enabled.contains("memory_read"));
+        assert!(prompt_enabled.contains("`Memory`"));
         assert!(!prompt_enabled.contains("${memory_section}"));
         assert!(!prompt_enabled.contains("${memory_listing}"));
     }

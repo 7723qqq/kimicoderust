@@ -1,7 +1,8 @@
 //! Workflow registry: built-in embedded scripts and user `.js` files under
 //! `<home>/workflows/`.
 //!
-//! Ported from the retired `agent-core-v2` `workflowRegistry.ts`; the meta
+//! Ported from `agent-core-v2` `workflowRegistry.ts` (reference HEAD
+//! `a0ccd487`); the meta
 //! extractor is regex-based (no `eval`), accepting only string-keyed string
 //! fields and a string-array `phases`.
 

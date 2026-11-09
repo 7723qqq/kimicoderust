@@ -51,9 +51,6 @@ impl From<TowerStatusGate> for TowerWakeGateDigest {
     }
 }
 
-/// Read fresh gate snapshots for the missions referenced by one wake batch.
-/// Individual observation failures stay renderable as `unavailable`; loading
-/// the state itself is the caller's fallible operation.
 pub async fn read_tower_wake_status_gates(
     store: &TowerStore,
     state: &TowerState,
@@ -114,7 +111,6 @@ pub async fn read_tower_wake_status_gates(
     .await
 }
 
-/// Compatibility view for the earlier data-only wake preparation tests.
 pub async fn read_tower_wake_gate_digests(
     store: &TowerStore,
     state: &TowerState,
@@ -142,8 +138,6 @@ pub struct TowerStatusSnapshot {
     pub recent_activity: Vec<String>,
 }
 
-/// Read the complete TowerStatus snapshot without constructing or calling an
-/// LLM. Gates are the same deterministic evaluation used by TowerMerge.
 pub async fn read_tower_status(
     store: &TowerStore,
     caller_agent_id: &str,
@@ -700,10 +694,6 @@ mod tests {
 
     #[test]
     fn upstream_cancellation_reason_is_a_user_stop_and_fork_reason_still_is() {
-        // ① v2 writes `userCancellationReason().message` — "Aborted by the
-        // user" — into `deathReason`, while the fork's own abort path writes
-        // "user cancelled". Both must render as a user stop; case and
-        // surrounding whitespace are tolerated on the v2 wording.
         for reason in [
             "Aborted by the user",
             "  aborted by the user  ",
@@ -728,8 +718,7 @@ mod tests {
             assert!(rendered.contains("dead by intent"), "{reason}: {rendered}");
             assert!(!rendered.contains("diagnose first"), "{reason}: {rendered}");
         }
-        // ② The fork's own wording keeps working, including its trim/case
-        // tolerance.
+
         for reason in [
             super::super::TOWER_USER_CANCELLATION_REASON,
             "  USER CANCELLED ",
@@ -756,8 +745,6 @@ mod tests {
 
     #[test]
     fn non_cancellation_death_reasons_stay_ordinary_deaths() {
-        // ③ Anything else — including near-misses of the cancellation
-        // wording — stays a plain death with the diagnose-first instruction.
         for reason in ["provider blew up", "user canceled", "aborted"] {
             let rendered = render_tower_status_summary(&snapshot(
                 state(
@@ -782,8 +769,6 @@ mod tests {
 
     #[test]
     fn upstream_user_stop_outranks_the_reviewer_one_shot_branch() {
-        // ④ The upstream wording goes through the same priority split: a
-        // reviewer stopped by the user is a user stop, not a one-shot death.
         let rendered = render_tower_status_summary(&snapshot(
             state(
                 vec![mission("M1", TowerMissionStatus::Active, Some("r1"))],

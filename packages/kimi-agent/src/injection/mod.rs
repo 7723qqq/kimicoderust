@@ -42,6 +42,18 @@ pub mod swarm_mode;
 pub mod notify_user_nudge;
 pub mod todo_reminder;
 
+/// The knowledge-base reminder and learner (v2 `KnowledgeInjection` /
+/// `KnowledgeLearner`, the `knowledge` variant; main agent only).
+pub mod knowledge;
+
+/// The catalog-change reminders (v2 `agent/changeNotifier`): the
+/// `skills_change`, `subagents_change` and `workspace_dirs_change` variants.
+pub mod change_notifier;
+
+/// The plugin session-start reminder (v2 `agent/plugin`): the
+/// `plugin_session_start` variant.
+pub mod plugin;
+
 /// What the injection providers read their domain values from.
 pub mod state;
 
@@ -142,6 +154,11 @@ pub struct InjectionContext<'a> {
     /// Whether this build pass runs at the first step of the turn (v2
     /// `isNewTurn`): turn-gated providers (goal) inject only on it.
     pub is_new_turn: bool,
+    /// Whether a compaction splice re-armed this pass (v2
+    /// `compactionRearmPending`). Turn-scoped providers re-derive their state
+    /// from `history` when it is set: the splice can drop the disclosure they
+    /// were tracking, and v2 reads the same state off the conversation.
+    pub rearmed: bool,
     /// Names of injections already appended this turn, in registration order.
     pub injected: &'a [String],
     /// What the previous step's tool calls did. Empty when the caller does not
@@ -191,21 +208,23 @@ impl InjectionRegistry {
     }
 
     /// Create a registry with the built-in injections: the date-change
-    /// reminder and the workspace-root AGENTS.md reminder. The workspace
-    /// root defaults to the process working directory. `date_baseline` seeds
-    /// the date-change tracker with a previously disclosed date (scanned
-    /// from history) so the baseline is not re-injected every turn;
+    /// reminder and the workspace-root AGENTS.md reminder. `workspace_root`
+    /// is the session workspace the user opened — not the engine process's
+    /// working directory, which can be anything. `date_baseline` seeds the
+    /// date-change tracker with a previously disclosed date (scanned from
+    /// history) so the baseline is not re-injected every turn;
     /// `agents_md_baseline` does the same for the AGENTS.md paths an earlier
     /// reminder already named.
-    pub fn with_defaults(date_baseline: Option<String>, agents_md_baseline: Vec<String>) -> Self {
+    pub fn with_defaults(
+        workspace_root: Option<PathBuf>,
+        date_baseline: Option<String>,
+        agents_md_baseline: Vec<String>,
+    ) -> Self {
         let mut registry = Self::new();
         registry.register("date_change", Box::new(date_change_provider(date_baseline)));
         registry.register(
             "agents_md",
-            Box::new(agents_md_provider(
-                std::env::current_dir().ok(),
-                agents_md_baseline,
-            )),
+            Box::new(agents_md_provider(workspace_root, agents_md_baseline)),
         );
         registry
     }
@@ -218,12 +237,22 @@ impl InjectionRegistry {
             .collect()
     }
 
+    /// Forget the names recorded by earlier passes of this turn. The turn loop
+    /// calls this when a compaction splice re-arms the reminders: v2 re-runs
+    /// the providers with `isNewTurn = true`, and its injected positions come
+    /// from the conversation, so the spliced history no longer shows an
+    /// earlier injection. Providers that consult `ctx.injected` (the
+    /// knowledge base) must therefore see an empty list again.
+    pub fn clear_injected(&mut self) {
+        self.injected.clear();
+    }
+
     /// Run every provider and return the wrapped injection texts for this
     /// step, in registration order. `is_new_turn` gates turn-scoped providers
-    /// (v2 `isNewTurn`): they inject only at the turn's first step.
-    /// Providers that return `None` or blank text contribute nothing;
-    /// successful injections are recorded in the context handed to later
-    /// providers.
+    /// (v2 `isNewTurn`): they inject at the turn's first step and again after
+    /// a mid-turn compaction rearm. Providers that return `None` or blank text
+    /// contribute nothing; successful injections are recorded in the context
+    /// handed to later providers.
     pub fn build_injections(&mut self, is_new_turn: bool) -> Vec<String> {
         self.build_injections_with_accesses(is_new_turn, &StepAccess::default())
     }
@@ -264,10 +293,25 @@ impl InjectionRegistry {
         access: &StepAccess,
         history: &[LLMMessage],
     ) -> Vec<(String, String)> {
+        self.build_injections_rearmed(is_new_turn, false, access, history)
+    }
+
+    /// [`Self::build_injections_with_history_named`] with the compaction rearm
+    /// flag: the turn loop sets it for the single pass that follows a splice,
+    /// so turn-scoped providers re-derive their state from the new history
+    /// instead of trusting a baseline the splice may have invalidated.
+    pub fn build_injections_rearmed(
+        &mut self,
+        is_new_turn: bool,
+        rearmed: bool,
+        access: &StepAccess,
+        history: &[LLMMessage],
+    ) -> Vec<(String, String)> {
         let mut texts = Vec::new();
         for entry in &mut self.entries {
             let ctx = InjectionContext {
                 is_new_turn,
+                rearmed,
                 injected: &self.injected,
                 access,
                 history,
@@ -313,26 +357,29 @@ impl DateChangeTracker {
         Self { last_date }
     }
 
-    /// Feed the current date; returns the reminder text to inject for this
-    /// step, or `None` when the date is unchanged since the last disclosure.
-    /// The first call injects the baseline date (v2's seed disclosure);
-    /// later calls inject only when the date changed.
-    pub fn step(&mut self, today: &str) -> Option<String> {
+    /// Feed the current date and timezone; returns the reminder text to inject
+    /// for this step, or `None` when the date is unchanged since the last
+    /// disclosure. The first call injects the baseline date (v2's seed
+    /// disclosure); later calls inject only when the date changed. Both texts
+    /// name the local timezone, as v2's do (`dateChangeService.ts:110,127`).
+    pub fn step(&mut self, today: &str, time_zone: &str) -> Option<String> {
         match &self.last_date {
             None => {
                 self.last_date = Some(today.to_string());
                 Some(format!(
-                    "Today's date is {today}. The current date is restated in a reminder \
-                     whenever it changes; rely on the latest such reminder for the current \
-                     date. DO NOT mention this to the user explicitly."
+                    "Today's date is {today}, in the local client machine's timezone \
+                     ({time_zone}). The current date is restated in a reminder whenever it \
+                     changes; rely on the latest such reminder for the current date. DO NOT \
+                     mention this to the user explicitly."
                 ))
             }
             Some(previous) if previous != today => {
                 self.last_date = Some(today.to_string());
                 Some(format!(
-                    "The date has changed. Today's date is now {today}. Rely on this \
-                     reminder over any earlier date statement for the current date. DO NOT \
-                     mention this to the user explicitly."
+                    "The date has changed. Today's date is now {today}, in the local client \
+                     machine's timezone ({time_zone}). Rely on this reminder over any earlier \
+                     date statement for the current date. DO NOT mention this to the user \
+                     explicitly."
                 ))
             }
             Some(_) => None,
@@ -349,11 +396,23 @@ impl Default for DateChangeTracker {
 /// Provider for the date-change reminder: injects the current date on the
 /// first pass of a turn unless a prior disclosure was already scanned from
 /// history, and re-injects whenever the date changes mid-turn.
+///
+/// A mid-turn compaction splice re-runs the providers with `is_new_turn` set
+/// (v2's `compactionRearmPending` rearm), and v2's provider derives the last
+/// disclosure from history — so a disclosure the splice dropped is injected
+/// again. Re-deriving here at every turn head, rearm included, is that same
+/// rule; the constructor baseline only matters for callers with no history.
 fn date_change_provider(
     baseline: Option<String>,
 ) -> impl FnMut(&InjectionContext) -> Option<String> {
     let mut tracker = DateChangeTracker::with_last_date(baseline);
-    move |_ctx: &InjectionContext| tracker.step(&today_local())
+    let time_zone = local_timezone_label();
+    move |ctx: &InjectionContext| {
+        if ctx.rearmed {
+            tracker = DateChangeTracker::with_last_date(scan_date_baseline(ctx.history));
+        }
+        tracker.step(&today_local(), &time_zone)
+    }
 }
 
 /// Current local date as `YYYY-MM-DD` (v2 discloses the host-clock local
@@ -361,6 +420,19 @@ fn date_change_provider(
 /// timezone).
 fn today_local() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// The local timezone label the reminder names (v2 `IHostClock.timeZone()`):
+/// the IANA name when the environment supplies one (`TZ`), otherwise the
+/// numeric UTC offset chrono resolves for the host clock.
+fn local_timezone_label() -> String {
+    if let Ok(zone) = std::env::var("TZ") {
+        let zone = zone.trim();
+        if !zone.is_empty() {
+            return zone.to_string();
+        }
+    }
+    format!("UTC{}", chrono::Local::now().offset())
 }
 
 /// Scan prior conversation messages for the last date-disclosure reminder and
@@ -371,6 +443,12 @@ pub fn scan_date_baseline(messages: &[LLMMessage]) -> Option<String> {
     const MARKER: &str = "Today's date is";
     for message in messages.iter().rev() {
         let content = message.content.as_str();
+        // Only an injected reminder is a disclosure; a user quoting the
+        // sentence must not move the baseline (v2 reads the value off the
+        // injection's origin, never off message text).
+        if !crate::injection::is_system_reminder(content) {
+            continue;
+        }
         let Some(at) = content.rfind(MARKER) else {
             continue;
         };
@@ -398,21 +476,28 @@ pub fn scan_date_baseline(messages: &[LLMMessage]) -> Option<String> {
 /// `isNonEmptyFile`) — the same rule the init-time loader applies — so a
 /// placeholder file never earns a reminder.
 pub fn find_agents_md(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
     // v2 probes the whole chain from the work-tree root down to the anchor
     // directory (`probeDir` → `dirsRootToLeaf`), so a session running in a
     // subdirectory is reminded about the repository root's files too.
-    for dir in crate::prompt::agents_md::instruction_dirs(root) {
-        let dot_kimi = dir.join(".kimi-code").join("AGENTS.md");
-        if is_non_empty_file(&dot_kimi) {
-            found.push(dot_kimi);
-        }
-        for name in ["AGENTS.md", "agents.md"] {
-            let candidate = dir.join(name);
-            if is_non_empty_file(&candidate) {
-                found.push(candidate);
-                break;
-            }
+    crate::prompt::agents_md::instruction_dirs(root)
+        .iter()
+        .flat_map(|dir| find_agents_md_in_dir(dir))
+        .collect()
+}
+
+/// The AGENTS.md files that live directly in `dir` (v2 `agentsMdCandidatePaths`
+/// order: `.kimi-code/AGENTS.md` first, then the plain names).
+pub(crate) fn find_agents_md_in_dir(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let dot_kimi = dir.join(".kimi-code").join("AGENTS.md");
+    if is_non_empty_file(&dot_kimi) {
+        found.push(dot_kimi);
+    }
+    for name in ["AGENTS.md", "agents.md"] {
+        let candidate = dir.join(name);
+        if is_non_empty_file(&candidate) {
+            found.push(candidate);
+            break;
         }
     }
     found
@@ -438,8 +523,22 @@ fn agents_md_provider(
     root: Option<PathBuf>,
     disclosed: Vec<String>,
 ) -> impl FnMut(&InjectionContext) -> Option<String> {
-    let mut reminder = AgentsMdReminder::new(root, disclosed);
+    // The prompt-derived paths stay known across a rearm; only the
+    // history-derived half is re-read, because a compaction splice can drop
+    // the reminder that disclosed a path while it cannot change what the
+    // system prompt already listed.
+    let seed = disclosed;
+    let mut reminder = AgentsMdReminder::new(root.clone(), seed.clone());
     move |ctx: &InjectionContext| {
+        if ctx.rearmed {
+            let mut known = seed.clone();
+            for path in scan_agents_md_baseline(ctx.history) {
+                if !known.contains(&path) {
+                    known.push(path);
+                }
+            }
+            reminder = AgentsMdReminder::new(root.clone(), known);
+        }
         reminder.observe(ctx.access);
         let fresh = reminder.take_pending();
         if fresh.is_empty() {
@@ -508,6 +607,18 @@ impl AgentsMdReminder {
 
     /// Record one step's tool activity and probe what it reached.
     pub fn observe(&mut self, access: &StepAccess) {
+        // v2 `trackChanges` (`agentsMdReminderService.ts:212-240`): a watched
+        // file that disappeared drops out of `known`, so recreating it earns a
+        // fresh reminder; a modification leaves it known. Drop only what is
+        // provably gone: an unreadable directory (EACCES) is not evidence that
+        // the file no longer exists, and removing it would earn a duplicate
+        // reminder the moment the permission comes back.
+        self.known.retain(|path| {
+            !matches!(
+                std::fs::metadata(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        });
         for path in &access.self_read {
             self.read_recently.insert(normalize_agents_md(path));
         }
@@ -528,48 +639,58 @@ impl AgentsMdReminder {
     /// wrong in; guessing a wrong one would point the model at a file it has no
     /// reason to read.
     fn observe_declared_cwds(&mut self, cwds: &[String]) {
-        let Some(root) = self.root.clone() else {
-            return;
-        };
         for cwd in cwds {
             if cwd.is_empty() {
                 continue;
             }
             let candidate = Path::new(cwd);
+            // Only a relative `cwd` needs the workspace root; an absolute one
+            // is already resolved, and dropping it because the root is
+            // unavailable would lose a directory this call really touched.
             let resolved = if candidate.is_absolute() {
                 candidate.to_path_buf()
-            } else {
+            } else if let Some(root) = &self.root {
                 root.join(candidate)
+            } else {
+                continue;
             };
             self.probe_chain(&resolved);
         }
     }
 
-    /// Walk from the workspace root down to `dir`, queueing every AGENTS.md
-    /// found on the way. A directory outside the root has no chain here, so it
-    /// contributes nothing — the same outcome v2 gets when `findProjectRoot`
-    /// does not contain the anchor.
+    /// Probe the chain from the work-tree root down to `dir`, queueing every
+    /// AGENTS.md found on the way.
+    ///
+    /// v2 resolves the anchor's own project root (`findProjectRoot`) rather
+    /// than the session's: a tool that reads a path outside the workspace still
+    /// gets that path's AGENTS.md. A directory with no work tree is its own
+    /// root, so the chain is just itself.
     fn probe_chain(&mut self, dir: &Path) {
-        let Some(root) = self.root.clone() else {
-            return;
+        let resolved = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else if let Some(root) = &self.root {
+            root.join(dir)
+        } else {
+            dir.to_path_buf()
         };
-        let Ok(relative) = dir.strip_prefix(&root) else {
-            return;
+        // Inside the workspace the chain starts at the workspace root, so a
+        // session rooted at a subdirectory still sees the root's file; outside
+        // it starts at the anchor's own work-tree root.
+        let chain = match self.root.as_ref().filter(|root| resolved.starts_with(root)) {
+            Some(root) => crate::prompt::agents_md::dirs_root_to_leaf(root, &resolved),
+            None => crate::prompt::agents_md::instruction_dirs(&resolved),
         };
-        let mut current = root.clone();
-        self.queue_here(&current);
-        for component in relative.components() {
-            current = current.join(component);
-            self.queue_here(&current);
+        for dir in chain {
+            for found in find_agents_md_in_dir(&dir) {
+                self.queue_path(&found);
+            }
         }
     }
 
-    fn queue_here(&mut self, dir: &Path) {
-        for found in find_agents_md(dir) {
-            let key = normalize_agents_md(&found);
-            if !self.known.contains(&key) && !self.queue.contains(&key) {
-                self.queue.push(key);
-            }
+    fn queue_path(&mut self, found: &Path) {
+        let key = normalize_agents_md(found);
+        if !self.known.contains(&key) && !self.queue.contains(&key) {
+            self.queue.push(key);
         }
     }
 
@@ -626,6 +747,12 @@ pub fn scan_agents_md_baseline(messages: &[LLMMessage]) -> Vec<String> {
     let mut disclosed: Vec<String> = Vec::new();
     for message in messages {
         let content = message.content.as_str();
+        // Only an injected reminder discloses paths; a user or tool message
+        // quoting the listing must not seed the known set (v2 reads the set
+        // off the injection's origin, not off arbitrary message text).
+        if !crate::injection::is_system_reminder(content) {
+            continue;
+        }
         if !content.contains(MARKER) {
             continue;
         }
@@ -896,7 +1023,7 @@ mod tests {
 
     #[test]
     fn test_with_defaults_registers_builtins_and_builds() {
-        let mut registry = InjectionRegistry::with_defaults(None, Vec::new());
+        let mut registry = InjectionRegistry::with_defaults(None, None, Vec::new());
         assert_eq!(registry.names(), vec!["date_change", "agents_md"]);
 
         let texts = registry.build_injections(true);
@@ -911,32 +1038,87 @@ mod tests {
         assert!(empty_reg.names().is_empty());
     }
 
+    /// v2 `compactionRearmPending`: a splice mid-turn drops the injection
+    /// messages the compacted prefix held, so the providers run again with
+    /// `isNewTurn = true` and re-derive their state from the new history. A
+    /// reminder the splice dropped must therefore come back exactly once.
+    #[test]
+    fn test_rearm_reinjects_a_reminder_the_compaction_splice_dropped() {
+        let disclosure = wrap_system_reminder(&format!(
+            "Today's date is {}, in the local client machine's timezone (Asia/Shanghai).",
+            today_local()
+        ));
+        let history = vec![LLMMessage {
+            role: "user".into(),
+            content: disclosure,
+            ..Default::default()
+        }];
+        let mut registry =
+            InjectionRegistry::with_defaults(None, scan_date_baseline(&history), Vec::new());
+
+        // Turn head: history already discloses today, so the baseline is
+        // suppressed.
+        assert!(
+            registry
+                .build_injections_rearmed(true, false, &StepAccess::default(), &history)
+                .is_empty(),
+            "the disclosure in history suppresses the turn-head baseline"
+        );
+
+        // The compaction spliced the disclosure away.
+        let spliced = vec![LLMMessage {
+            role: "user".into(),
+            content: "<summary>earlier conversation</summary>".into(),
+            ..Default::default()
+        }];
+        let rearmed =
+            registry.build_injections_rearmed(true, true, &StepAccess::default(), &spliced);
+        assert_eq!(
+            rearmed.len(),
+            1,
+            "the rearm re-injects a reminder the splice dropped: {rearmed:?}"
+        );
+        assert!(rearmed[0].1.contains("Today's date is"));
+
+        // Once the re-injected reminder is in the new history, further passes
+        // stay silent.
+        let mut after = spliced;
+        after.push(injection_message(rearmed[0].1.clone()));
+        assert!(
+            registry
+                .build_injections_rearmed(true, true, &StepAccess::default(), &after)
+                .is_empty(),
+            "a reminder that is back in history is not injected twice"
+        );
+    }
+
     #[test]
     fn test_date_change_tracker_baseline() {
         let mut tracker = DateChangeTracker::new();
         let text = tracker
-            .step("2026-09-02")
+            .step("2026-09-02", "Asia/Shanghai")
             .expect("first pass injects the baseline");
         assert_eq!(
             text,
-            "Today's date is 2026-09-02. The current date is restated in a reminder whenever it \
-             changes; rely on the latest such reminder for the current date. DO NOT mention this \
-             to the user explicitly."
+            "Today's date is 2026-09-02, in the local client machine's timezone \
+             (Asia/Shanghai). The current date is restated in a reminder whenever it changes; \
+             rely on the latest such reminder for the current date. DO NOT mention this to the \
+             user explicitly."
         );
     }
 
     #[test]
     fn test_date_change_tracker_unchanged_is_silent() {
         let mut tracker = DateChangeTracker::default();
-        let first = tracker.step("2026-09-02");
+        let first = tracker.step("2026-09-02", "Asia/Shanghai");
         assert!(first.is_some());
         assert_eq!(
-            tracker.step("2026-09-02"),
+            tracker.step("2026-09-02", "Asia/Shanghai"),
             None,
             "same date must not re-inject"
         );
         assert_eq!(
-            tracker.step("2026-09-02"),
+            tracker.step("2026-09-02", "Asia/Shanghai"),
             None,
             "repeated calls with same date must remain silent"
         );
@@ -945,28 +1127,32 @@ mod tests {
     #[test]
     fn test_date_change_tracker_crosses_day() {
         let mut tracker = DateChangeTracker::new();
-        tracker.step("2026-09-02");
+        tracker.step("2026-09-02", "Asia/Shanghai");
 
-        let text = tracker.step("2026-09-03").expect("day change injects");
+        let text = tracker
+            .step("2026-09-03", "Asia/Shanghai")
+            .expect("day change injects");
         assert_eq!(
             text,
-            "The date has changed. Today's date is now 2026-09-03. Rely on this reminder over \
-             any earlier date statement for the current date. DO NOT mention this to the user \
-             explicitly."
+            "The date has changed. Today's date is now 2026-09-03, in the local client \
+             machine's timezone (Asia/Shanghai). Rely on this reminder over any earlier date \
+             statement for the current date. DO NOT mention this to the user explicitly."
         );
 
         assert_eq!(
-            tracker.step("2026-09-03"),
+            tracker.step("2026-09-03", "Asia/Shanghai"),
             None,
             "no repeat after the change"
         );
 
-        let text2 = tracker.step("2026-09-04").expect("next day change injects");
+        let text2 = tracker
+            .step("2026-09-04", "Asia/Shanghai")
+            .expect("next day change injects");
         assert_eq!(
             text2,
-            "The date has changed. Today's date is now 2026-09-04. Rely on this reminder over \
-             any earlier date statement for the current date. DO NOT mention this to the user \
-             explicitly."
+            "The date has changed. Today's date is now 2026-09-04, in the local client \
+             machine's timezone (Asia/Shanghai). Rely on this reminder over any earlier date \
+             statement for the current date. DO NOT mention this to the user explicitly."
         );
     }
 
@@ -994,7 +1180,7 @@ mod tests {
                       NOT mention this to the user explicitly.";
         let msg = |text: &str| LLMMessage {
             role: "user".into(),
-            content: text.to_string(),
+            content: wrap_system_reminder(text),
             ..Default::default()
         };
         assert_eq!(scan_date_baseline(&[]), None);
@@ -1002,7 +1188,7 @@ mod tests {
             scan_date_baseline(&[msg(baseline)]),
             Some("2026-09-08".into())
         );
-        // The latest disclosure wins, regardless of kind.
+        // The latest disclosure wins.
         assert_eq!(
             scan_date_baseline(&[msg(baseline), msg("unrelated"), msg(change)]),
             Some("2026-09-09".into())
@@ -1010,6 +1196,17 @@ mod tests {
         // Non-date text with a coincidental prefix must not parse.
         assert_eq!(
             scan_date_baseline(&[msg("Today's date is somewhere")]),
+            None
+        );
+        // A plain user message that happens to contain the sentence is not a
+        // disclosure: v2 reads the value off the injection's origin, so text
+        // alone must not move the baseline.
+        assert_eq!(
+            scan_date_baseline(&[LLMMessage {
+                role: "user".into(),
+                content: change.to_string(),
+                ..Default::default()
+            }]),
             None
         );
     }
@@ -1110,6 +1307,7 @@ mod tests {
     fn step(access: &StepAccess) -> InjectionContext<'_> {
         InjectionContext {
             is_new_turn: false,
+            rearmed: false,
             injected: &[],
             access,
             history: &[],
@@ -1206,26 +1404,32 @@ mod tests {
         );
     }
 
-    /// No workspace root, or a directory outside it, has no chain to walk.
+    /// Each touched directory is probed against its own project root; an empty
+    /// access or a chain with no AGENTS.md contributes nothing.
     #[test]
-    fn agents_md_provider_without_a_chain_injects_nothing() {
+    fn agents_md_provider_probes_the_touched_dirs_own_root() {
         let nothing = StepAccess::default();
         let empty = step(&nothing);
         let mut no_root = agents_md_provider(None, Vec::new());
         assert_eq!(no_root(&empty), None);
 
+        // v2 resolves each touched directory's own project root
+        // (`findProjectRoot`), so a path outside the workspace still gets its
+        // own AGENTS.md.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("AGENTS.md"), "# Instructions").unwrap();
         let outside = tempfile::tempdir().unwrap();
+        let outside_agents = outside.path().join("AGENTS.md");
+        std::fs::write(&outside_agents, "# Elsewhere").unwrap();
         let mut provider = agents_md_provider(Some(dir.path().to_path_buf()), Vec::new());
         let outside_access = StepAccess {
             dirs: vec![outside.path().to_path_buf()],
             ..Default::default()
         };
-        assert_eq!(
-            provider(&step(&outside_access)),
-            None,
-            "outside the workspace root"
+        let text = provider(&step(&outside_access)).expect("the outside file is discovered");
+        assert!(
+            text.contains(&normalize_agents_md(&outside_agents)),
+            "content: {text}"
         );
 
         let bare = tempfile::tempdir().unwrap();
@@ -1267,8 +1471,8 @@ mod tests {
             "content: {text}"
         );
 
-        // A cwd outside the workspace contributes no chain, as with any other
-        // out-of-root path.
+        // A cwd outside the workspace is probed against its own project root;
+        // this directory has no AGENTS.md, so it contributes nothing.
         let outside = tempfile::tempdir().unwrap();
         let mut outside_provider = agents_md_provider(Some(root.path().to_path_buf()), Vec::new());
         let escaping = StepAccess {

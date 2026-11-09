@@ -7,7 +7,8 @@ use tokio::fs;
 use tokio::time::sleep;
 
 use super::{INBOX_DIR, STATE_FILE, TowerStore};
-use crate::tools::tower::git::{git, git_with_input, try_git};
+use crate::primitives::read::ReadOutcome;
+use crate::tools::tower::git::{git, git_probe, git_with_input};
 
 pub(crate) struct ProtocolLockGuard {
     path: PathBuf,
@@ -192,12 +193,17 @@ impl TowerStore {
         Ok(format!("refs/tower/state-lock-reaper-{digest:x}"))
     }
 
-    async fn read_state_lock_reaper(&self, ref_name: &str) -> Option<String> {
-        try_git(
+    async fn read_state_lock_reaper(&self, ref_name: &str) -> Result<Option<String>, String> {
+        match git_probe(
             &self.repo_root,
             &["rev-parse", "--verify", "--quiet", ref_name],
         )
         .await
+        {
+            ReadOutcome::Found(token) => Ok(Some(token)),
+            ReadOutcome::Absent => Ok(None),
+            ReadOutcome::Unreadable(cause) => Err(cause.to_string()),
+        }
     }
 
     async fn acquire_state_lock_reaper(
@@ -205,7 +211,7 @@ impl TowerStore {
         lock_path: &Path,
     ) -> Result<Option<StateLockReaperGuard>, String> {
         let ref_name = self.state_lock_reaper_ref(lock_path).await?;
-        let current = self.read_state_lock_reaper(&ref_name).await;
+        let current = self.read_state_lock_reaper(&ref_name).await?;
         if let Some(ref current_token) = current {
             let holder = git(&self.repo_root, &["cat-file", "-p", current_token]).await?;
             if lock_pid(&holder).is_some_and(pid_alive) {
@@ -232,7 +238,7 @@ impl TowerStore {
         {
             Ok(_) => Ok(Some(StateLockReaperGuard { ref_name, token })),
             Err(error) => {
-                let after = self.read_state_lock_reaper(&ref_name).await;
+                let after = self.read_state_lock_reaper(&ref_name).await?;
                 if after.as_deref() == Some(token.as_str()) {
                     return Ok(Some(StateLockReaperGuard { ref_name, token }));
                 }
@@ -256,7 +262,7 @@ impl TowerStore {
         {
             Ok(_) => Ok(()),
             Err(error) => {
-                let current = self.read_state_lock_reaper(&guard.ref_name).await;
+                let current = self.read_state_lock_reaper(&guard.ref_name).await?;
                 if current.as_deref() != Some(guard.token.as_str()) {
                     return Ok(());
                 }

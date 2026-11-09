@@ -46,7 +46,7 @@ impl HttpServer {
                 // the archive's own manifest, never from a hardcoded literal.
                 match self.plugin_manager.install_plugin_from(id) {
                     Ok(Some((id, info))) => {
-                        self.publish_plugin_changed();
+                        self.publish_plugin_changed("install", &id);
                         HttpResponse::ok(&json!({
                             "id": id,
                             "enabled": info.enabled,
@@ -124,7 +124,7 @@ impl HttpServer {
                     // the catalog. Answer 404 rather than recording a fake entry.
                     "enable" => match self.plugin_manager.set_plugin_enabled(id, true) {
                         Ok(true) => {
-                            self.publish_plugin_changed();
+                            self.publish_plugin_changed("enable", id);
                             // v2 #3963: the toggle reports the resulting
                             // enabled set, so telemetry can attribute later
                             // turns to the plugins that were loaded.
@@ -145,7 +145,7 @@ impl HttpServer {
                     },
                     "disable" => match self.plugin_manager.set_plugin_enabled(id, false) {
                         Ok(true) => {
-                            self.publish_plugin_changed();
+                            self.publish_plugin_changed("disable", id);
                             self.emit_session_telemetry(
                                 "plugin_toggle",
                                 json!({
@@ -163,7 +163,7 @@ impl HttpServer {
                     },
                     "remove" => match self.plugin_manager.remove_plugin(id) {
                         Ok(true) => {
-                            self.publish_plugin_changed();
+                            self.publish_plugin_changed("remove", id);
                             HttpResponse::ok(
                                 &json!({ "ok": true, "pluginId": id, "removed": true }),
                             )

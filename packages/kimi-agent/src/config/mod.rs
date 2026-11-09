@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::env::env_switch_default_off;
+use crate::environment::EnvironmentsConfig;
 use crate::permission::{HookDef, PermissionMode, PolicySnapshot};
 use crate::rpc::types::{
     NativeLlmConfig, ResolvedMultiLlmProvider, SecondaryModelEntry, SecondaryModelPool,
@@ -48,6 +49,22 @@ pub struct ProviderConfig {
     /// auth/routing headers here; without it those deployments 401.
     #[serde(rename = "custom_headers", alias = "customHeaders", default)]
     pub custom_headers: Option<HashMap<String, String>>,
+    /// The antigravity bridge's `agy` binary (v2 `AntigravityChatProvider`
+    /// binary override). Absent probes the reference paths and then `PATH`.
+    #[serde(rename = "binary_path", alias = "binaryPath", default)]
+    pub binary_path: Option<String>,
+    /// Bounded waits for the antigravity subprocess bridge.
+    #[serde(default)]
+    pub antigravity: Option<crate::rpc::types::AntigravityLimits>,
+    /// Where the provider's model list comes from (v2 `modelSource`:
+    /// `static` | `discover` | `oauth-catalog`). The host model refresh reads
+    /// it; the engine carries it so the field is not dropped on read.
+    #[serde(rename = "model_source", alias = "modelSource", default)]
+    pub model_source: Option<String>,
+    /// Extra environment variables applied to this provider's transport
+    /// (v2 `ProviderConfig.env`).
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
 }
 
 /// v2 `ModelUpgrade`: the model-migration metadata attached to a retiring
@@ -128,6 +145,27 @@ pub struct ModelAliasConfig {
     /// instead of omitting the effort field.
     #[serde(rename = "off_effort", alias = "offEffort", default)]
     pub off_effort: Option<String>,
+    /// Request-body knobs (v2 `responseFormat` / `sampling` / `determinism` /
+    /// `extraParams`): carried to the native transport, which keeps them inert
+    /// until declared.
+    #[serde(
+        rename = "response_format",
+        alias = "responseFormat",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub response_format: Option<crate::rpc::types::NativeResponseFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<crate::rpc::types::NativeSampling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub determinism: Option<crate::rpc::types::NativeDeterminism>,
+    #[serde(
+        rename = "extra_params",
+        alias = "extraParams",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extra_params: Option<crate::rpc::types::NativeExtraParams>,
     /// Model-retirement metadata (v2 `ModelRecord.upgrade`): the suggested
     /// replacement alias, the migration note, and the retirement date.
     #[serde(default)]
@@ -266,6 +304,13 @@ pub struct PermissionRuleConfig {
     /// engine only carries the value through.
     #[serde(default)]
     pub scope: Option<String>,
+    /// Legacy shorthand `{ tool = "Write", match = "src/**" }` (v2
+    /// `transformPermissionRule`): the tool plus an optional argument pattern.
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// The argument pattern of the legacy `{ tool, match }` shorthand.
+    #[serde(default, rename = "match")]
+    pub arg_match: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -285,6 +330,17 @@ pub struct PermissionConfig {
         default
     )]
     pub dangerous_command_guard: Option<bool>,
+    /// Legacy `[permission] deny = [...]` / `allow` / `ask` lists (v2
+    /// `permissionFromToml`). They are folded into `rules` with the matching
+    /// decision, so an old file keeps enforcing its rules instead of having
+    /// them silently dropped. An entry is either a bare pattern string or a
+    /// `{ tool, match }` table.
+    #[serde(default)]
+    pub deny: Option<toml::Value>,
+    #[serde(default)]
+    pub allow: Option<toml::Value>,
+    #[serde(default)]
+    pub ask: Option<toml::Value>,
 }
 
 /// `[workspace]` workspace settings (v2 `workspaceTrust/configSection.ts`,
@@ -357,6 +413,18 @@ pub struct McpServerConfig {
     /// Single tool-call timeout in milliseconds (v2 per-server `toolTimeoutMs`).
     #[serde(default, alias = "toolTimeoutMs")]
     pub tool_timeout_ms: Option<u64>,
+    /// How the server is executed: `local` (default) or `kaos` (v2
+    /// `McpServerStdioConfig.executor`). The engine only runs local processes;
+    /// a non-local executor is reported at load time instead of silently
+    /// running the server on the wrong host.
+    #[serde(default)]
+    pub executor: Option<String>,
+    /// The declared environment a stdio server belongs to (v2
+    /// `McpServerStdioConfig.environment_id`). Declaring a non-local
+    /// environment is reported at load time: this engine cannot route a
+    /// process into another environment.
+    #[serde(default, alias = "environmentId")]
+    pub environment_id: Option<String>,
     /// Keep this server's tools out of the model's top-level tool list and let
     /// it load them on demand through `select_tools` (v2 per-server
     /// `deferred`). Takes effect only when the `tool_select` experimental flag
@@ -395,6 +463,16 @@ pub struct McpConfig {
     /// 300 000).
     #[serde(default, alias = "reconnectMaxDelayMs")]
     pub reconnect_max_delay_ms: Option<u64>,
+    /// Defer a server's tools once it advertises at least this many of them
+    /// (v2 `autoDeferToolThreshold`, default 24; `0` disables). An explicit
+    /// per-server `deferred` still wins, and
+    /// `KIMI_MCP_AUTO_DEFER_TOOL_THRESHOLD` overrides this value.
+    #[serde(default, alias = "autoDeferToolThreshold")]
+    pub auto_defer_tool_threshold: Option<u64>,
+    /// Whether discovered MCP input schemas are compacted before the model
+    /// sees them (v2 `compactToolSchemas`, default `false`).
+    #[serde(default, alias = "compactToolSchemas")]
+    pub compact_tool_schemas: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -416,6 +494,12 @@ pub struct MoonshotServiceConfig {
     pub api_key: Option<String>,
     #[serde(rename = "custom_headers", alias = "customHeaders", default)]
     pub custom_headers: Option<HashMap<String, String>>,
+    /// Managed-login binding (v2 `MoonshotServiceConfig.oauth`): its presence
+    /// marks the service OAuth-authenticated instead of key-authenticated.
+    /// Carried so the field survives a read; the engine has no managed-login
+    /// store yet, so resolution still requires a base URL.
+    #[serde(default)]
+    pub oauth: Option<serde_json::Value>,
 }
 
 /// The `[services]` section (v2 `configSection.ts`): optional Moonshot
@@ -448,6 +532,74 @@ pub struct ImageConfig {
     pub read_byte_budget: Option<u64>,
     #[serde(rename = "max_edge_px", alias = "maxEdgePx", default)]
     pub max_edge_px: Option<u32>,
+}
+
+/// The `[read]` section (v2 `agent/tools/os/read/configSection.ts`): the
+/// character budget the native Read tool applies. Both keys are
+/// positive-only; a non-positive value is a load-time warning and is ignored,
+/// so the built-in limits stand instead of the tool silently reading nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReadConfig {
+    /// Characters returned when the call does not name a budget.
+    #[serde(rename = "default_max_chars", alias = "defaultMaxChars", default)]
+    pub default_max_chars: Option<u64>,
+    /// Hard ceiling a call may request.
+    #[serde(rename = "max_chars", alias = "maxChars", default)]
+    pub max_chars: Option<u64>,
+}
+
+/// The `[llm_requester]` section (v2 `agent/llmRequester/configSection.ts`):
+/// the serialized request-size budget. v2 snake-cases the domain, so
+/// `[llm_requester]` is the file spelling and `[llmRequester]` the alias.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LlmRequesterConfig {
+    /// Request byte budget (v2 `requestByteBudget`, default 32 MiB).
+    #[serde(rename = "request_byte_budget", alias = "requestByteBudget", default)]
+    pub request_byte_budget: Option<u64>,
+}
+
+/// The `[sandbox]` section (v2 `workspace/sandbox/sandbox.ts`): the file
+/// effect mode the pipeline confines mutating tools to.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SandboxConfig {
+    /// `off` (default) | `read-only` | `workspace-write`. An unknown spelling
+    /// is a load-time warning and resolves to `None` (no sandbox), matching
+    /// v2's section-level schema rejection; it never silently downgrades to a
+    /// weaker mode the user did not write.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// The `[model_overrides]` section (v2 `ModelOverridesSchema`): request
+/// parameters that apply to every model unless the model entry overrides them.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelOverridesConfig {
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(rename = "top_p", alias = "topP", default)]
+    pub top_p: Option<f64>,
+    /// Preserved-thinking passthrough override (v2 `thinkingKeep`); ahead of
+    /// `[thinking].keep`.
+    #[serde(rename = "thinking_keep", alias = "thinkingKeep", default)]
+    pub thinking_keep: Option<String>,
+    /// Output-token cap override (v2 `maxCompletionTokens`).
+    #[serde(
+        rename = "max_completion_tokens",
+        alias = "maxCompletionTokens",
+        default
+    )]
+    pub max_completion_tokens: Option<u32>,
+}
+
+/// The effective `[model_overrides]` values after the environment overlay
+/// (v2 `resolveModelOverrides`): what the request builder should apply to a
+/// model that does not declare its own.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResolvedModelOverrides {
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub thinking_keep: Option<String>,
+    pub max_completion_tokens: Option<u32>,
 }
 /// v2 `CronConfig` (`features/cron/configSection.ts:5-20`). `debug` and
 /// `manualTick` are test-only upstream switches with no engine consumer
@@ -540,6 +692,11 @@ pub struct LoopControlConfig {
         default
     )]
     pub reserved_context_size: Option<u32>,
+    /// Ralph-loop iteration cap (v2 `loopControl.maxRalphIterations`, min
+    /// -1; `-1` means unbounded). The engine has no Ralph loop, so this is
+    /// accepted for config parity and not consumed.
+    #[serde(rename = "max_ralph_iterations", alias = "maxRalphIterations", default)]
+    pub max_ralph_iterations: Option<i64>,
     /// Fraction of the window that triggers compaction (v2
     /// `loopControl.compactionTriggerRatio`, 0.5..=0.99). Same gap as
     /// [`LoopControlConfig::reserved_context_size`]: parsed and validated, but
@@ -564,6 +721,13 @@ pub struct ThinkingConfig {
     /// `reasoning_effort` on providers that support it.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Env-forced reasoning effort (schema `thinking.forcedEffort`, bound to
+    /// `KIMI_MODEL_THINKING_EFFORT`): wins over `effort` while thinking is on.
+    /// v2 only lets a trait-driven provider take it; the engine has no
+    /// trait gate here, so an explicit value is honored for every provider
+    /// and surfaced by [`KimiConfig::resolve_effort`].
+    #[serde(rename = "forced_effort", alias = "forcedEffort", default)]
+    pub forced_effort: Option<String>,
 }
 
 /// One `[experimental]` flag value (schema `experimental`): flags are free
@@ -606,14 +770,61 @@ pub struct BackgroundConfig {
     /// closes (v2). Defaults to false.
     #[serde(rename = "keep_alive_on_exit", alias = "keepAliveOnExit", default)]
     pub keep_alive_on_exit: Option<bool>,
+    /// Settled tasks retained for inspection (v2 `maxSettledTasks`, default
+    /// 10). The engine keeps settled records in memory without a cap, so this
+    /// is accepted for config parity and not consumed yet.
+    #[serde(rename = "max_settled_tasks", alias = "maxSettledTasks", default)]
+    pub max_settled_tasks: Option<u32>,
+    /// `--print` mode's wait ceiling in seconds (v2 `printWaitCeilingS`,
+    /// default 3600). `--print` is an app-level path here, so the engine
+    /// carries the value without consuming it.
+    #[serde(rename = "print_wait_ceiling_s", alias = "printWaitCeilingS", default)]
+    pub print_wait_ceiling_s: Option<u64>,
+    /// `--print` background dispatch mode (v2 `printBackgroundMode`:
+    /// `exit` | `drain` | `steer`). App-level, carried without being consumed.
+    #[serde(
+        rename = "print_background_mode",
+        alias = "printBackgroundMode",
+        default
+    )]
+    pub print_background_mode: Option<String>,
+    /// `--print` turn cap (v2 `printMaxTurns`, min 1). App-level, carried
+    /// without being consumed.
+    #[serde(rename = "print_max_turns", alias = "printMaxTurns", default)]
+    pub print_max_turns: Option<u32>,
 }
 
-/// The `[task]` section (v2 `agent/task/configSection.ts`). Its values override
-/// the legacy `[background]` keys while task configuration is being renamed.
+/// The `[task]` section (v2 `agent/task/configSection.ts`). It carries the
+/// same schema as `[background]` and its values override the legacy keys
+/// while task configuration is being renamed.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TaskConfig {
     #[serde(rename = "max_running_tasks", alias = "maxRunningTasks", default)]
     pub max_running_tasks: Option<u32>,
+    #[serde(rename = "max_settled_tasks", alias = "maxSettledTasks", default)]
+    pub max_settled_tasks: Option<u32>,
+    #[serde(
+        rename = "bash_auto_background_on_timeout",
+        alias = "bashAutoBackgroundOnTimeout",
+        default
+    )]
+    pub bash_auto_background_on_timeout: Option<bool>,
+    #[serde(rename = "bash_task_timeout_s", alias = "bashTaskTimeoutS", default)]
+    pub bash_task_timeout_s: Option<u64>,
+    #[serde(rename = "kill_grace_period_ms", alias = "killGracePeriodMs", default)]
+    pub kill_grace_period_ms: Option<u64>,
+    #[serde(rename = "keep_alive_on_exit", alias = "keepAliveOnExit", default)]
+    pub keep_alive_on_exit: Option<bool>,
+    #[serde(rename = "print_wait_ceiling_s", alias = "printWaitCeilingS", default)]
+    pub print_wait_ceiling_s: Option<u64>,
+    #[serde(
+        rename = "print_background_mode",
+        alias = "printBackgroundMode",
+        default
+    )]
+    pub print_background_mode: Option<String>,
+    #[serde(rename = "print_max_turns", alias = "printMaxTurns", default)]
+    pub print_max_turns: Option<u32>,
 }
 
 /// The global `[tools]` switch (schema `tools.enabled` / `tools.disabled`):
@@ -625,6 +836,18 @@ pub struct ToolsConfig {
     pub enabled: Vec<String>,
     #[serde(default)]
     pub disabled: Vec<String>,
+}
+
+/// The `[tokenCounting]` section (v2
+/// `agent/tokenCounting/configSection.ts`): how the context gauge is derived.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenCountingConfig {
+    /// `measured+estimated` (default), `measured` or `estimated`. Kept as the
+    /// raw string here so an invalid value can be reported by name instead of
+    /// failing the whole section; [`KimiConfig::resolve_token_counting_strategy`]
+    /// parses it.
+    #[serde(default)]
+    pub strategy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -652,6 +875,10 @@ pub struct KimiConfig {
     /// [`KimiConfig::resolve_thinking_keep`].
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    /// Context-gauge strategy (v2 `[tokenCounting]` section); see
+    /// [`KimiConfig::resolve_token_counting_strategy`].
+    #[serde(rename = "tokenCounting", alias = "token_counting", default)]
+    pub token_counting: TokenCountingConfig,
     #[serde(default)]
     pub permission: Option<PermissionConfig>,
     /// `[workspace]` settings (v2 `workspaceTrust/configSection.ts`); see
@@ -663,6 +890,12 @@ pub struct KimiConfig {
     /// [`crate::default_workspace`].
     #[serde(rename = "default_workspace", alias = "defaultWorkspace", default)]
     pub default_workspace: DefaultWorkspaceConfig,
+    /// `[environments]` declarations (v2 `remote/declaration/configSection.ts`):
+    /// the default id plus every declared remote transport. See
+    /// [`crate::environment::EnvironmentDeclaration`]; this engine serves the
+    /// built-in local environment and refuses a declared transport explicitly.
+    #[serde(default)]
+    pub environments: EnvironmentsConfig,
     #[serde(rename = "mcp_servers", default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// Global MCP defaults (v2 `[mcp]` section).
@@ -686,6 +919,31 @@ pub struct KimiConfig {
     /// [`KimiConfig::resolve_image_read_byte_budget`].
     #[serde(default)]
     pub image: ImageConfig,
+    /// Native Read tool character budget (v2 `[read]` section); see
+    /// [`KimiConfig::resolve_read_limits`].
+    #[serde(default)]
+    pub read: ReadConfig,
+    /// Serialized request-size budget (v2 `[llm_requester]` section); see
+    /// [`KimiConfig::resolve_llm_request_byte_budget`].
+    #[serde(rename = "llm_requester", alias = "llmRequester", default)]
+    pub llm_requester: LlmRequesterConfig,
+    /// File-effect sandbox mode (v2 `[sandbox]` section); see
+    /// [`KimiConfig::resolve_sandbox_mode`].
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+    /// Global request-parameter overrides (v2 `[model_overrides]` section);
+    /// see [`KimiConfig::resolve_model_overrides`].
+    #[serde(rename = "model_overrides", alias = "modelOverrides", default)]
+    pub model_overrides: ModelOverridesConfig,
+    /// Whether the built-in product skills are installed (v2
+    /// `[builtinProductSkills]`, bound to `KIMI_CODE_BUILTIN_PRODUCT_SKILLS`);
+    /// see [`KimiConfig::resolve_builtin_product_skills`].
+    #[serde(
+        rename = "builtin_product_skills",
+        alias = "builtinProductSkills",
+        default
+    )]
+    pub builtin_product_skills: Option<bool>,
     /// Cron scheduler switches (v2 `[cron]` section, `features/cron/configSection.ts`);
     /// see [`KimiConfig::cron_disabled`] and [`KimiConfig::cron_no_jitter`].
     #[serde(default)]
@@ -766,6 +1024,18 @@ pub struct KimiConfig {
     /// an entry's shape lives in).
     #[serde(skip)]
     pub config_warnings: Vec<String>,
+    /// Top-level keys serde did not recognize (v2 `Ignored invalid config
+    /// section`). Kept only so [`KimiConfig::from_file`] can report them; they
+    /// are never written back.
+    #[serde(flatten, skip_serializing, default)]
+    pub(crate) unknown_sections: HashMap<String, toml::Value>,
+    /// The known sections [`KimiConfig::from_file`] had to drop because they
+    /// failed their schema (v2 `buildValidated`). Typed rather than parsed back
+    /// out of [`Self::config_warnings`]: a caller deciding whether a reload may
+    /// keep its previous `[hooks]` must be able to ask "was `hooks` dropped?"
+    /// without matching human-readable diagnostic text.
+    #[serde(skip)]
+    pub(crate) dropped_sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -830,6 +1100,34 @@ pub struct ResolvedNativeLlm {
     /// (`[models.<alias>].off_effort`).
     #[serde(default)]
     pub off_effort: Option<String>,
+    /// The antigravity bridge's `agy` binary (`[providers.*].binaryPath`).
+    ///
+    /// `pub(crate)`, unlike the fields above: the host's `JsNativeLlmConfig`
+    /// never carries subprocess knobs (the engine reads them from the config
+    /// file only), so they sit outside the host-facing transport contract that
+    /// `check:parity` compares field-for-field.
+    #[serde(default)]
+    pub(crate) binary_path: Option<String>,
+    /// Bounded waits for the antigravity subprocess bridge
+    /// (`[providers.*.antigravity]`). Same visibility rationale as
+    /// [`Self::binary_path`].
+    #[serde(default)]
+    pub(crate) antigravity: Option<crate::rpc::types::AntigravityLimits>,
+}
+
+impl ResolvedNativeLlm {
+    /// The subprocess-bridge knobs (`binaryPath` and
+    /// `[providers.*.antigravity]`) of a resolved provider.
+    ///
+    /// Read through a method rather than a public field so the host-facing
+    /// transport contract (`check:parity` against `JsNativeLlmConfig`) keeps
+    /// describing exactly the HTTP fields both sides share, while entry points
+    /// in the binary crate can still hand these to `NativeLlmConfig`.
+    pub fn subprocess_bridge(
+        &self,
+    ) -> (Option<String>, Option<crate::rpc::types::AntigravityLimits>) {
+        (self.binary_path.clone(), self.antigravity.clone())
+    }
 }
 
 impl std::str::FromStr for KimiConfig {
@@ -841,6 +1139,197 @@ impl std::str::FromStr for KimiConfig {
 }
 
 impl KimiConfig {
+    /// The context-gauge strategy (v2
+    /// `SessionTokenCountingService.strategy`): the env binding wins, then
+    /// `[tokenCounting].strategy`, then the historical `measured+estimated`.
+    ///
+    /// An invalid value is never silently swapped: the env spelling is warned
+    /// about once and the resolver falls through to the file value; an invalid
+    /// file value is warned about once and, at load time, also staged in
+    /// [`Self::config_warnings`] so the server broadcasts
+    /// `event.config.warning`.
+    pub fn resolve_token_counting_strategy(
+        &self,
+    ) -> crate::session::token_counting::TokenCountingStrategy {
+        use crate::session::token_counting::TokenCountingStrategy;
+        if let Some(raw) = std::env::var(TokenCountingStrategy::ENV)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            match TokenCountingStrategy::parse(&raw) {
+                Some(strategy) => return strategy,
+                None => warn_invalid_token_counting_strategy(TokenCountingStrategy::ENV, &raw),
+            }
+        }
+        let Some(raw) = self
+            .token_counting
+            .strategy
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return TokenCountingStrategy::default();
+        };
+        match TokenCountingStrategy::parse(raw) {
+            Some(strategy) => strategy,
+            None => {
+                warn_invalid_token_counting_strategy("[tokenCounting].strategy", raw);
+                TokenCountingStrategy::default()
+            }
+        }
+    }
+
+    /// The load-time diagnostic for an invalid `[tokenCounting].strategy`
+    /// (staged on [`Self::config_warnings`] by [`Self::from_file`]).
+    fn token_counting_warnings(&self) -> Vec<String> {
+        use crate::session::token_counting::TokenCountingStrategy;
+        let Some(raw) = self
+            .token_counting
+            .strategy
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Vec::new();
+        };
+        if TokenCountingStrategy::parse(raw).is_some() {
+            return Vec::new();
+        }
+        vec![format!(
+            "[tokenCounting].strategy '{raw}' is invalid; expected one of {}. Using 'measured+estimated'.",
+            TokenCountingStrategy::VALUES.join(", ")
+        )]
+    }
+
+    /// Load-time diagnostics for sections whose values parse but fall outside
+    /// their schema (v2 rejects the whole section and falls back to defaults).
+    /// Reporting them keeps an ignored value from looking applied.
+    fn section_value_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for (key, value) in [
+            ("default_max_chars", self.read.default_max_chars),
+            ("max_chars", self.read.max_chars),
+        ] {
+            if value == Some(0) {
+                warnings.push(format!(
+                    "[read].{key} must be a positive integer; the value is ignored and the built-in limit applies."
+                ));
+            }
+        }
+        if self.llm_requester.request_byte_budget == Some(0) {
+            warnings.push(
+                "[llmRequester].requestByteBudget must be a positive integer; the value is ignored and the 32 MiB default applies."
+                    .to_string(),
+            );
+        }
+        if let Some(mode) = self.sandbox.mode.as_deref() {
+            if let Err(error) = crate::tools::sandbox::SandboxMode::validate(mode) {
+                warnings.push(format!(
+                    "[sandbox].mode is invalid: {error}. The sandbox stays off."
+                ));
+            }
+        }
+        if let Some(iterations) = self.loop_control.max_ralph_iterations {
+            if iterations < -1 {
+                warnings.push(format!(
+                    "[loopControl].maxRalphIterations {iterations} is below -1; the value is ignored."
+                ));
+            }
+        }
+        if let Some(ratio) = self.loop_control.compaction_trigger_ratio {
+            if !ratio.is_finite() || !(0.5..=0.99).contains(&ratio) {
+                warnings.push(format!(
+                    "[loopControl].compactionTriggerRatio {ratio} is outside 0.5..=0.99; the value is ignored."
+                ));
+            }
+        }
+        if self.loop_control.compaction_max_attempts == Some(0) {
+            warnings.push(
+                "[loopControl].compactionMaxAttempts must be a positive integer; the value is ignored."
+                    .to_string(),
+            );
+        }
+        for (section, key, value) in [
+            ("task", "max_running_tasks", self.task.max_running_tasks),
+            (
+                "background",
+                "max_running_tasks",
+                self.background.max_running_tasks,
+            ),
+            ("task", "max_settled_tasks", self.task.max_settled_tasks),
+            (
+                "background",
+                "max_settled_tasks",
+                self.background.max_settled_tasks,
+            ),
+        ] {
+            if value == Some(0) {
+                warnings.push(format!(
+                    "[{section}].{key} must be a positive integer; the value is ignored."
+                ));
+            }
+        }
+        for (section, value) in [
+            ("subagent", self.subagent.timeout_ms),
+            ("swarm", self.swarm.timeout_ms),
+        ] {
+            if value == Some(0) {
+                warnings.push(format!(
+                    "[{section}].timeoutMs must be a positive integer; the value is ignored."
+                ));
+            }
+        }
+        for (key, value) in [
+            ("startup_timeout_ms", self.mcp.startup_timeout_ms),
+            ("tool_timeout_ms", self.mcp.tool_timeout_ms),
+        ] {
+            if let Some(value) = value {
+                if !(1..=MAX_MCP_TIMEOUT_MS).contains(&value) {
+                    warnings.push(format!(
+                        "[mcp].{key} {value} is outside 1..={MAX_MCP_TIMEOUT_MS}; the value is ignored."
+                    ));
+                }
+            }
+        }
+        if self.model_overrides.max_completion_tokens == Some(0) {
+            warnings.push(
+                "[modelOverrides].maxCompletionTokens must be a positive integer; the value is ignored."
+                    .to_string(),
+            );
+        }
+        for (id, server) in &self.mcp_servers {
+            if let Some(environment) = server.environment_id.as_deref() {
+                if environment != crate::environment::LOCAL_ENVIRONMENT_ID {
+                    warnings.push(format!(
+                        "[mcp_servers.{id}].environment_id '{environment}' cannot be reached by this engine; the server will not be started."
+                    ));
+                }
+            }
+        }
+        warnings
+    }
+
+    /// The load-time diagnostic for an invalid `[environments]` declaration set
+    /// (staged on [`Self::config_warnings`] by [`Self::from_file`]).
+    ///
+    /// v2 validates the section while the config is read (`configSection.ts`
+    /// through `buildValidated`): a bad declaration set yields a warning
+    /// diagnostic at startup, and only a consumer that needs the section throws
+    /// `config.invalid`. The same split is kept here — the warning names the
+    /// problem now, and the declaration stays parsed so
+    /// `freeze_session_environment` still reports
+    /// `environment.declaration_invalid` with a typed code, which is the
+    /// backstop for a file edited while the server runs.
+    fn environment_warnings(&self) -> Vec<String> {
+        match self.environments.validate() {
+            Ok(_) => Vec::new(),
+            Err(error) => vec![format!(
+                "Invalid config section 'environments': {}; new sessions will fail until it is fixed",
+                error.detail()
+            )],
+        }
+    }
+
     /// Load configuration from a specific file path.
     ///
     /// The malformed-`[models]`-entry warnings are both logged and staged on
@@ -852,12 +1341,173 @@ impl KimiConfig {
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read config at {}: {e}", path.display()))?;
-        let mut config: Self = content.parse()?;
-        config.config_warnings = Self::malformed_model_entries(&content);
+        let (validated, mut warnings, dropped) = Self::validated_toml(&content)?;
+        let mut config: Self = validated.parse()?;
+        config.dropped_sections = dropped;
+        // v2 `buildValidated`: a section with no schema is reported and
+        // dropped instead of disappearing silently.
+        warnings.extend(
+            config
+                .unknown_sections
+                .keys()
+                .map(|key| format!("Ignored invalid config section '{key}': unknown section")),
+        );
+        warnings.extend(Self::malformed_model_entries(&content));
+        warnings.extend(config.token_counting_warnings());
+        warnings.extend(config.section_value_warnings());
+        warnings.extend(config.environment_warnings());
+        config.config_warnings = warnings;
         for warning in &config.config_warnings {
             tracing::warn!(path = %path.display(), "{warning}");
         }
         Ok(config)
+    }
+
+    /// v2 `kimiModelEnvOverlay` (`app/kosongConfig/envOverlay.ts`): deployment
+    /// by environment. `KIMI_MODEL_API_KEY` / `KIMI_MODEL_PROVIDER_TYPE` /
+    /// `KIMI_MODEL_BASE_URL` bind the reserved `__kimi_env__` provider, and
+    /// `KIMI_MODEL_NAME` adds the reserved `__kimi_env_model__` alias, points
+    /// `default_model` at it and fills the catalog fields. A malformed numeric
+    /// or boolean variable fails the load (v2 raises `CONFIG_INVALID`), so an
+    /// env-only deployment never runs with half its settings applied.
+    fn apply_model_env_overlay(&mut self) -> Result<(), String> {
+        let provider_type = env_non_empty("KIMI_MODEL_PROVIDER_TYPE");
+        let api_key = env_non_empty("KIMI_MODEL_API_KEY");
+        let base_url = env_non_empty("KIMI_MODEL_BASE_URL");
+        let model = env_non_empty("KIMI_MODEL_NAME");
+
+        if provider_type.is_some() || api_key.is_some() || base_url.is_some() {
+            let provider = self
+                .providers
+                .entry(ENV_MODEL_PROVIDER_KEY.to_string())
+                .or_default();
+            if let Some(value) = provider_type {
+                provider.provider_type = Some(value);
+            }
+            if let Some(value) = base_url {
+                provider.base_url = Some(value);
+            }
+            if let Some(value) = api_key {
+                provider.api_key = Some(value);
+                provider.api_key_env = None;
+            }
+        }
+
+        let Some(model) = model else {
+            return Ok(());
+        };
+        let max_context_size = match env_non_empty("KIMI_MODEL_MAX_CONTEXT_SIZE") {
+            Some(raw) => parse_positive_u32(&raw, "KIMI_MODEL_MAX_CONTEXT_SIZE")?,
+            None => ENV_MODEL_DEFAULT_MAX_CONTEXT_SIZE,
+        };
+        let max_output_size = env_non_empty("KIMI_MODEL_MAX_OUTPUT_SIZE")
+            .map(|raw| parse_positive_u32(&raw, "KIMI_MODEL_MAX_OUTPUT_SIZE"))
+            .transpose()?;
+        let capabilities = match env_non_empty("KIMI_MODEL_CAPABILITIES") {
+            Some(raw) => {
+                let parsed: Vec<String> = raw
+                    .split(',')
+                    .map(|capability| capability.trim().to_ascii_lowercase())
+                    .filter(|capability| !capability.is_empty())
+                    .collect();
+                if parsed.is_empty() {
+                    ENV_MODEL_DEFAULT_CAPABILITIES
+                        .iter()
+                        .map(|capability| capability.to_string())
+                        .collect()
+                } else {
+                    parsed
+                }
+            }
+            None => ENV_MODEL_DEFAULT_CAPABILITIES
+                .iter()
+                .map(|capability| capability.to_string())
+                .collect(),
+        };
+        let adaptive_thinking = match env_non_empty("KIMI_MODEL_ADAPTIVE_THINKING") {
+            Some(raw) => Some(crate::env::parse_bool_env(Some(&raw)).ok_or_else(|| {
+                format!(
+                    "KIMI_MODEL_ADAPTIVE_THINKING must be a boolean (true/false/1/0/yes/no/on/off), got \"{raw}\"."
+                )
+            })?),
+            None => None,
+        };
+
+        // A file that already declares the reserved provider keeps its own
+        // type; the overlay only fills a missing one (v2 defaults to `kimi`).
+        self.providers
+            .entry(ENV_MODEL_PROVIDER_KEY.to_string())
+            .or_default()
+            .provider_type
+            .get_or_insert_with(|| "kimi".to_string());
+
+        self.models.insert(
+            ENV_MODEL_ALIAS_KEY.to_string(),
+            ModelAliasConfig {
+                provider: Some(ENV_MODEL_PROVIDER_KEY.to_string()),
+                model: Some(model),
+                max_context_size: Some(max_context_size),
+                max_output_size,
+                capabilities: Some(capabilities),
+                display_name: env_non_empty("KIMI_MODEL_DISPLAY_NAME"),
+                reasoning_key: env_non_empty("KIMI_MODEL_REASONING_KEY"),
+                adaptive_thinking,
+                ..Default::default()
+            },
+        );
+        self.default_model = Some(ENV_MODEL_ALIAS_KEY.to_string());
+        Ok(())
+    }
+
+    /// v2 `buildValidated` (`configService.ts:753-771`): each section is
+    /// validated on its own; a section that fails its schema produces a
+    /// diagnostic and falls back to the section default without taking the
+    /// rest of the file down. serde is all-or-nothing, so the check runs one
+    /// top-level key at a time and removes the keys that do not parse.
+    fn validated_toml(raw_toml: &str) -> Result<(String, Vec<String>, Vec<String>), String> {
+        let mut table: toml::Table = raw_toml
+            .parse()
+            .map_err(|e| format!("Invalid TOML configuration: {e}"))?;
+        let mut warnings = Vec::new();
+        let mut dropped = Vec::new();
+        for key in table.keys().cloned().collect::<Vec<_>>() {
+            let mut probe = toml::Table::new();
+            if let Some(value) = table.get(&key) {
+                probe.insert(key.clone(), value.clone());
+            }
+            let probe_text =
+                toml::to_string(&probe).map_err(|e| format!("Invalid TOML configuration: {e}"))?;
+            if let Err(error) = toml::from_str::<Self>(&probe_text) {
+                table.remove(&key);
+                warnings.push(format!("Ignored invalid config section '{key}': {error}"));
+                dropped.push(key);
+            }
+        }
+        warnings.extend(Self::deprecated_key_warnings(&table));
+        let text =
+            toml::to_string(&table).map_err(|e| format!("Invalid TOML configuration: {e}"))?;
+        Ok((text, warnings, dropped))
+    }
+
+    /// v2 `collectKeyDeprecations` (`deprecations.ts:5-31`): the renamed
+    /// `[loop_control]` keys still resolve, but the diagnostic asks the user to
+    /// rename them instead of dropping them silently.
+    fn deprecated_key_warnings(table: &toml::Table) -> Vec<String> {
+        let Some(section) = table.get("loop_control").and_then(toml::Value::as_table) else {
+            return Vec::new();
+        };
+        [
+            ("max_retries_per_step", "max_attempts_per_step"),
+            ("max_steps_per_run", "max_steps_per_turn"),
+        ]
+        .into_iter()
+        .filter(|(old, _)| section.contains_key(*old))
+        .map(|(old, new)| {
+            format!(
+                "[loop_control] '{old}' is deprecated and no longer used; rename it to '{new}'. Run /update-config to fix it."
+            )
+        })
+        .collect()
     }
 
     /// `[models]` entries that declare no `model` field (v2 #3681
@@ -911,7 +1561,7 @@ impl KimiConfig {
         if let Some(explicit) = std::env::var_os("KIMI_CONFIG_PATH") {
             let path = PathBuf::from(explicit);
             if path.is_file() {
-                let config = Self::from_file(&path)?;
+                let config = Self::load_or_default(&path);
                 return Ok((config, path));
             }
         }
@@ -920,7 +1570,7 @@ impl KimiConfig {
         if let Some(code_home) = std::env::var_os("KIMI_CODE_HOME") {
             let path = PathBuf::from(code_home).join("config.toml");
             if path.is_file() {
-                let config = Self::from_file(&path)?;
+                let config = Self::load_or_default(&path);
                 return Ok((config, path));
             }
         }
@@ -929,13 +1579,13 @@ impl KimiConfig {
         if let Some(home) = dirs_home() {
             let kimi_code_config = home.join(".kimi-code").join("config.toml");
             if kimi_code_config.is_file() {
-                let config = Self::from_file(&kimi_code_config)?;
+                let config = Self::load_or_default(&kimi_code_config);
                 return Ok((config, kimi_code_config));
             }
 
             let legacy_config = home.join(".kimi").join("config.toml");
             if legacy_config.is_file() {
-                let config = Self::from_file(&legacy_config)?;
+                let config = Self::load_or_default(&legacy_config);
                 return Ok((config, legacy_config));
             }
         }
@@ -944,6 +1594,34 @@ impl KimiConfig {
             "No config.toml discovered in KIMI_CONFIG_PATH, KIMI_CODE_HOME, ~/.kimi-code/config.toml, or ~/.kimi/config.toml"
                 .into(),
         )
+    }
+
+    /// v2 `configService.ts:668-687`: a file that fails to load is reported and
+    /// replaced by the built-in defaults instead of aborting startup. The error
+    /// travels in `config_warnings`, which the server publishes, so the failure
+    /// stays observable.
+    pub fn load_or_default(path: &Path) -> Self {
+        match Self::from_file(path) {
+            Ok(mut config) => {
+                // v2 `kimiModelEnvOverlay` runs on the effective config, after
+                // the file is parsed. A malformed value fails the load (v2
+                // raises `CONFIG_INVALID`) instead of silently running the
+                // file as if the env were unset.
+                if let Err(error) = config.apply_model_env_overlay() {
+                    tracing::error!(path = %path.display(), "{error}");
+                    let mut fallback = Self::default();
+                    fallback.config_warnings.push(error);
+                    return fallback;
+                }
+                config
+            }
+            Err(error) => {
+                tracing::error!(path = %path.display(), "{error}");
+                let mut config = Self::default();
+                config.config_warnings.push(error);
+                config
+            }
+        }
     }
 
     /// Extract the active Native LLM configuration for the given or default model.
@@ -1008,11 +1686,22 @@ impl KimiConfig {
         // it assembles the request URL. Google's default is the host root, so
         // a base-URL-less Gemini provider still resolves natively instead of
         // silently falling back to the host LLM proxy.
+        // antigravity is a subprocess bridge, not an HTTP endpoint: there is
+        // no base URL to resolve and no credential for the engine to hold
+        // (the `agy` CLI authenticates itself). Every other provider still
+        // needs both, so the antigravity branch only widens resolution.
+        let is_antigravity = p_type == "antigravity"
+            || alias.and_then(|alias| alias.protocol.as_deref()) == Some("antigravity");
         let raw_base_url = alias
             .and_then(|alias| alias.base_url.as_deref())
             .or(provider.base_url.as_deref())
             .map(str::to_string)
-            .or_else(|| endpoint_fallback_base_url(&p_type))?;
+            .or_else(|| endpoint_fallback_base_url(&p_type));
+        let raw_base_url = if is_antigravity {
+            raw_base_url.unwrap_or_default()
+        } else {
+            raw_base_url?
+        };
         // v2 `resolveModelAuthMaterial`: a model-level credential wins over the
         // provider's, and a static key wins over an OAuth binding at the same
         // level. An OAuth-bound model authenticates through the host token
@@ -1032,6 +1721,9 @@ impl KimiConfig {
             (provider_api_key, None, provider.api_key_env.clone())
         } else if provider.oauth.is_some() {
             (String::new(), Some(provider_name.to_string()), None)
+        } else if is_antigravity {
+            // The CLI owns its credentials; no key and no env var is needed.
+            (String::new(), None, None)
         } else {
             // An env-bound provider without a static key still resolves: the
             // transport reads the credential from the named variable at
@@ -1074,7 +1766,12 @@ impl KimiConfig {
             Some("google") | Some("google-genai") | Some("gemini") | Some("vertexai") => {
                 "google-genai"
             }
+            // antigravity keeps its own protocol name: it is not an HTTP wire
+            // format, it is the `agy` subprocess bridge
+            // (`llm/antigravity.rs`).
+            Some("antigravity") => "antigravity",
             _ if p_type == "anthropic" => "anthropic",
+            _ if p_type == "antigravity" => "antigravity",
             _ if p_type == "google" || p_type == "google-genai" || p_type == "gemini" => {
                 "google-genai"
             }
@@ -1083,7 +1780,13 @@ impl KimiConfig {
             _ => "openai",
         };
 
-        let base_url = normalize_base_url(&raw_base_url, protocol);
+        let base_url = if raw_base_url.is_empty() {
+            // antigravity has no endpoint; normalizing "" would fabricate
+            // `/v1`.
+            String::new()
+        } else {
+            normalize_base_url(&raw_base_url, protocol)
+        };
         let capabilities = alias
             .and_then(|alias| alias.capabilities.clone())
             .filter(|caps| !caps.is_empty());
@@ -1107,6 +1810,8 @@ impl KimiConfig {
             adaptive_thinking: alias.and_then(|alias| alias.adaptive_thinking),
             reasoning_key: alias.and_then(|alias| alias.reasoning_key.clone()),
             off_effort: alias.and_then(|alias| alias.off_effort.clone()),
+            binary_path: provider.binary_path.clone(),
+            antigravity: provider.antigravity.clone(),
         })
     }
 
@@ -1236,10 +1941,16 @@ impl KimiConfig {
                     .default_effort
                     .clone()
                     .or(declared_effort.flatten());
+                let request_model = self.effective_model_for(&alias);
                 Ok(SecondaryModelEntry {
                     alias,
                     hint,
-                    llm: native_llm_config(resolved, effort.as_deref(), thinking_keep.as_deref()),
+                    llm: native_llm_config(
+                        resolved,
+                        effort.as_deref(),
+                        thinking_keep.as_deref(),
+                        request_model.as_ref(),
+                    ),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1320,9 +2031,15 @@ impl KimiConfig {
                 })
             });
             let effort = entry.and_then(|entry| entry.default_effort.clone());
+            let model = entry.map(ModelAliasConfig::effective);
             resolved.push(ResolvedMultiLlmProvider {
                 name: alias.clone(),
-                llm: native_llm_config(native, effort.as_deref(), thinking_keep.as_deref()),
+                llm: native_llm_config(
+                    native,
+                    effort.as_deref(),
+                    thinking_keep.as_deref(),
+                    model.as_ref(),
+                ),
             });
         }
         Ok(Some(resolved))
@@ -1571,11 +2288,108 @@ impl KimiConfig {
             .or_else(|| self.configured_max_running_tasks())
     }
 
-    /// Resolve the default timeout for background Bash tasks (schema
-    /// `[background].bash_task_timeout_s`). `None` keeps the tool's built-in
-    /// ceiling; `Some(0)` means "no timeout".
+    /// Resolve the default timeout for background Bash tasks (v2
+    /// `taskEnvBindings.bashTaskTimeoutS`): env
+    /// `KIMI_CODE_BACKGROUND_BASH_TASK_TIMEOUT_S` over `[task]` over the
+    /// legacy `[background]`. `None` keeps the tool's built-in ceiling;
+    /// `Some(0)` means "no timeout".
     pub fn resolve_bash_task_timeout_s(&self) -> Option<u64> {
-        self.background.bash_task_timeout_s
+        env_non_negative_u64("KIMI_CODE_BACKGROUND_BASH_TASK_TIMEOUT_S")
+            .or(self.task.bash_task_timeout_s)
+            .or(self.background.bash_task_timeout_s)
+    }
+
+    /// Whether background tasks survive the session closing (v2
+    /// `taskEnvBindings.keepAliveOnExit`): env
+    /// `KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT` over `[task]` over the
+    /// legacy `[background]`.
+    pub fn resolve_keep_alive_on_exit(&self) -> Option<bool> {
+        env_bool("KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT")
+            .or(self.task.keep_alive_on_exit)
+            .or(self.background.keep_alive_on_exit)
+    }
+
+    /// Whether a timed-out foreground Bash command is moved to the background
+    /// (v2 `bashAutoBackgroundOnTimeout`): `[task]` over the legacy
+    /// `[background]`. No env binding in v2.
+    pub fn resolve_bash_auto_background_on_timeout(&self) -> Option<bool> {
+        self.task
+            .bash_auto_background_on_timeout
+            .or(self.background.bash_auto_background_on_timeout)
+    }
+
+    /// How long `stop` waits for a cooperative exit (v2 `killGracePeriodMs`):
+    /// `[task]` over the legacy `[background]`. No env binding in v2.
+    pub fn resolve_kill_grace_period_ms(&self) -> Option<u64> {
+        self.task
+            .kill_grace_period_ms
+            .or(self.background.kill_grace_period_ms)
+    }
+
+    /// Settled tasks retained for inspection (v2 `maxSettledTasks`, min 1).
+    /// Accepted for config parity; the engine's task store has no consumer.
+    pub fn resolve_max_settled_tasks(&self) -> Option<u32> {
+        self.task
+            .max_settled_tasks
+            .filter(|value| *value > 0)
+            .or(self.background.max_settled_tasks.filter(|value| *value > 0))
+    }
+
+    /// `--print` wait ceiling in seconds (v2 `printWaitCeilingS`,
+    /// `KIMI_CODE_BACKGROUND_PRINT_WAIT_CEILING_S` over the file, min 1).
+    pub fn resolve_print_wait_ceiling_s(&self) -> Option<u64> {
+        env_positive_u64("KIMI_CODE_BACKGROUND_PRINT_WAIT_CEILING_S")
+            .or(self.task.print_wait_ceiling_s.filter(|value| *value > 0))
+            .or(self
+                .background
+                .print_wait_ceiling_s
+                .filter(|value| *value > 0))
+    }
+
+    /// `--print` background mode (v2 `resolvePrintBackgroundMode`): env
+    /// `KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE`, then the file, then
+    /// `drain` when `keepAliveOnExit` is on and `steer` otherwise. An
+    /// unrecognized value is ignored so the default applies.
+    pub fn resolve_print_background_mode(&self) -> &'static str {
+        let configured = std::env::var("KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| matches!(value.as_str(), "exit" | "drain" | "steer"))
+            .or_else(|| {
+                self.task
+                    .print_background_mode
+                    .as_deref()
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .filter(|value| matches!(value.as_str(), "exit" | "drain" | "steer"))
+            })
+            .or_else(|| {
+                self.background
+                    .print_background_mode
+                    .as_deref()
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .filter(|value| matches!(value.as_str(), "exit" | "drain" | "steer"))
+            });
+        match configured.as_deref() {
+            Some("exit") => "exit",
+            Some("drain") => "drain",
+            Some("steer") => "steer",
+            _ => {
+                if self.resolve_keep_alive_on_exit() == Some(true) {
+                    "drain"
+                } else {
+                    "steer"
+                }
+            }
+        }
+    }
+
+    /// `--print` turn cap (v2 `printMaxTurns`, min 1): env
+    /// `KIMI_CODE_BACKGROUND_PRINT_MAX_TURNS` over the file.
+    pub fn resolve_print_max_turns(&self) -> Option<u32> {
+        env_positive_u64("KIMI_CODE_BACKGROUND_PRINT_MAX_TURNS")
+            .and_then(|value| u32::try_from(value).ok())
+            .or(self.task.print_max_turns.filter(|value| *value > 0))
+            .or(self.background.print_max_turns.filter(|value| *value > 0))
     }
 
     /// The whole `[background]` section, normalized, for the entries that read
@@ -1583,18 +2397,94 @@ impl KimiConfig {
     /// (`PipelineSpec`): host-driven entries pass their resolved values as
     /// session params.
     ///
-    /// Each field is resolved as documented: `kill_grace_period_ms` and
-    /// `bash_auto_background_on_timeout` pass through (unset = built-in),
-    /// `max_running_tasks` honors the environment overlay and prefers `[task]`
-    /// over `[background]`, and `bash_task_timeout_s` keeps `Some(0)` as "no
-    /// timeout".
+    /// Every key follows v2's `resolveAgentTaskConfig` merge: `[task]` wins
+    /// over the legacy `[background]`, and the env bindings win over both.
     pub fn background_limits(&self) -> crate::storage::BackgroundLimits {
         crate::storage::BackgroundLimits {
-            kill_grace_period_ms: self.background.kill_grace_period_ms,
+            kill_grace_period_ms: self.resolve_kill_grace_period_ms(),
             max_running_tasks: self.resolve_background_max_running_tasks(),
-            bash_auto_background_on_timeout: self.background.bash_auto_background_on_timeout,
+            bash_auto_background_on_timeout: self.resolve_bash_auto_background_on_timeout(),
             bash_task_timeout_s: self.resolve_bash_task_timeout_s(),
-            keep_alive_on_exit: self.background.keep_alive_on_exit,
+            keep_alive_on_exit: self.resolve_keep_alive_on_exit(),
+        }
+    }
+
+    /// Resolve the Native Read tool's character budget (v2
+    /// `[read].defaultMaxChars` / `maxChars`). A non-positive file value is
+    /// ignored, so the tool's built-in limits stand. No env binding in v2.
+    pub fn resolve_read_limits(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.read.default_max_chars.filter(|value| *value > 0),
+            self.read.max_chars.filter(|value| *value > 0),
+        )
+    }
+
+    /// Resolve the serialized request byte budget (v2
+    /// `llmRequester.requestByteBudget`, env `KIMI_LLM_REQUEST_BYTE_BUDGET`
+    /// over the file, positive only). The engine default is 32 MiB
+    /// (`DEFAULT_LLM_REQUEST_BYTE_BUDGET`).
+    pub fn resolve_llm_request_byte_budget(&self) -> u64 {
+        env_positive_u64("KIMI_LLM_REQUEST_BYTE_BUDGET")
+            .or(self
+                .llm_requester
+                .request_byte_budget
+                .filter(|value| *value > 0))
+            .unwrap_or(DEFAULT_LLM_REQUEST_BYTE_BUDGET)
+    }
+
+    /// Resolve the `[sandbox].mode` (v2 `SandboxModeSchema` enum: `off` |
+    /// `read-only` | `workspace-write`). An invalid spelling resolves to
+    /// `None` — the sandbox stays off, matching v2's section rejection — and
+    /// is already reported by [`Self::section_value_warnings`] on load.
+    pub fn resolve_sandbox_mode(&self) -> Option<crate::tools::sandbox::SandboxMode> {
+        self.sandbox
+            .mode
+            .as_deref()
+            .and_then(|mode| crate::tools::sandbox::SandboxMode::validate(mode).ok())
+    }
+
+    /// Resolve the global request-parameter overrides (v2
+    /// `[model_overrides]`): env `KIMI_MODEL_TEMPERATURE`, `KIMI_MODEL_TOP_P`,
+    /// `KIMI_MODEL_THINKING_KEEP`, `KIMI_MODEL_MAX_COMPLETION_TOKENS` (then
+    /// the legacy `KIMI_MODEL_MAX_TOKENS`) over the file. v2's schema does not
+    /// bound temperature/topP, so they are passed through as written;
+    /// `maxCompletionTokens` is positive-only and a zero is dropped.
+    pub fn resolve_model_overrides(&self) -> ResolvedModelOverrides {
+        ResolvedModelOverrides {
+            temperature: env_f64("KIMI_MODEL_TEMPERATURE").or(self.model_overrides.temperature),
+            top_p: env_f64("KIMI_MODEL_TOP_P").or(self.model_overrides.top_p),
+            thinking_keep: env_non_empty("KIMI_MODEL_THINKING_KEEP")
+                .or_else(|| self.model_overrides.thinking_keep.clone()),
+            max_completion_tokens: env_positive_u64("KIMI_MODEL_MAX_COMPLETION_TOKENS")
+                .or_else(|| env_positive_u64("KIMI_MODEL_MAX_TOKENS"))
+                .and_then(|value| u32::try_from(value).ok())
+                .or(self
+                    .model_overrides
+                    .max_completion_tokens
+                    .filter(|value| *value > 0)),
+        }
+    }
+
+    /// Whether the built-in product skills are installed (v2
+    /// `builtinProductSkills`, env `KIMI_CODE_BUILTIN_PRODUCT_SKILLS` over the
+    /// file, default on).
+    pub fn resolve_builtin_product_skills(&self) -> bool {
+        env_bool("KIMI_CODE_BUILTIN_PRODUCT_SKILLS")
+            .or(self.builtin_product_skills)
+            .unwrap_or(true)
+    }
+
+    /// [`KimiConfig::resolve_builtin_product_skills`] on the discovered config
+    /// file, for call sites that do not already hold a config. The env switch
+    /// is checked first (no file read); an unreadable file falls back to the
+    /// documented default.
+    pub fn resolved_builtin_product_skills() -> bool {
+        if let Some(on) = env_bool("KIMI_CODE_BUILTIN_PRODUCT_SKILLS") {
+            return on;
+        }
+        match Self::discover() {
+            Ok((config, _)) => config.builtin_product_skills.unwrap_or(true),
+            Err(_) => true,
         }
     }
 
@@ -1634,12 +2524,25 @@ impl KimiConfig {
         if !enabled {
             return Some(model_off_effort.unwrap_or("off").to_string());
         }
-        self.thinking
-            .effort
+        // v2 `resolveForcedThinkingEffort`: the env-forced effort outranks the
+        // chosen one while thinking is on. v2 only offers `forcedEffort` to a
+        // trait-driven provider; this engine has no trait gate, so an explicit
+        // value applies to every provider (documented in the parity report).
+        let forced = env_non_empty("KIMI_MODEL_THINKING_EFFORT")
+            .or_else(|| self.thinking.forced_effort.clone());
+        forced
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
+            .or_else(|| {
+                self.thinking
+                    .effort
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
     }
 
     /// Build a [`PolicySnapshot`] from the configuration.
@@ -1671,8 +2574,8 @@ impl KimiConfig {
             && let Some(ref rules) = p.rules
         {
             for r in rules {
-                let pattern = match r.pattern.as_deref() {
-                    Some(p) => p.to_string(),
+                let pattern = match rule_pattern(r) {
+                    Some(p) => p,
                     None => continue,
                 };
                 if let Some(why) = r
@@ -1688,6 +2591,19 @@ impl KimiConfig {
                     Some("ask") => ask_rules.push(pattern),
                     Some("allow") => allow_rules.push(pattern),
                     _ => {}
+                }
+            }
+        }
+        // Legacy `[permission] deny/allow/ask` lists (v2 `permissionFromToml`):
+        // appended after `rules` with their implied decision.
+        if let Some(ref p) = self.permission {
+            for (value, target) in [
+                (p.deny.as_ref(), &mut deny_rules),
+                (p.ask.as_ref(), &mut ask_rules),
+                (p.allow.as_ref(), &mut allow_rules),
+            ] {
+                if let Some(value) = value {
+                    target.extend(legacy_permission_patterns(value));
                 }
             }
         }
@@ -1950,6 +2866,7 @@ fn native_llm_config(
     resolved: ResolvedNativeLlm,
     effort: Option<&str>,
     thinking_keep: Option<&str>,
+    model: Option<&ModelAliasConfig>,
 ) -> NativeLlmConfig {
     let mut llm = NativeLlmConfig {
         protocol: resolved.protocol,
@@ -1972,7 +2889,19 @@ fn native_llm_config(
         adaptive_thinking: resolved.adaptive_thinking,
         reasoning_key: resolved.reasoning_key,
         off_effort: resolved.off_effort,
+        response_format: None,
+        sampling: None,
+        determinism: None,
+        extra_params: None,
+        binary_path: resolved.binary_path,
+        antigravity: resolved.antigravity,
     };
+    if let Some(model) = model {
+        llm.response_format = model.response_format.clone();
+        llm.sampling = model.sampling.clone();
+        llm.determinism = model.determinism.clone();
+        llm.extra_params = model.extra_params.clone();
+    }
     if let Some(effort) = effort
         && effort != "off"
         && effort != "none"
@@ -2020,10 +2949,132 @@ fn env_non_negative_u64(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.trim().parse::<u64>().ok()
 }
 
+/// The pattern of one `[permission].rules[]` entry (v2
+/// `transformPermissionRule`): `pattern` wins, then the legacy
+/// `{ tool, match }` shorthand renders `tool(match)` (or the bare tool).
+fn rule_pattern(rule: &PermissionRuleConfig) -> Option<String> {
+    if let Some(pattern) = rule.pattern.as_deref() {
+        return Some(pattern.to_string());
+    }
+    let tool = rule.tool.as_deref()?;
+    let arg = rule.arg_match.as_deref();
+    Some(match arg {
+        Some(arg) => format!("{tool}({arg})"),
+        None => tool.to_string(),
+    })
+}
+
+/// Fold one legacy `deny` / `allow` / `ask` value into patterns (v2
+/// `appendPermissionRules` + `transformPermissionRule`): a bare string is a
+/// pattern, a `{ tool, match }` table becomes `tool(match)`, and anything
+/// else is skipped.
+fn legacy_permission_patterns(value: &toml::Value) -> Vec<String> {
+    let entries: Vec<&toml::Value> = match value {
+        toml::Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            toml::Value::String(pattern) => Some(pattern.clone()),
+            toml::Value::Table(table) => {
+                if let Some(pattern) = table.get("pattern").and_then(toml::Value::as_str) {
+                    return Some(pattern.to_string());
+                }
+                let tool = table.get("tool").and_then(toml::Value::as_str)?;
+                let arg = table
+                    .get("match")
+                    .and_then(toml::Value::as_str)
+                    .or_else(|| table.get("pattern").and_then(toml::Value::as_str));
+                Some(match arg {
+                    Some(arg) => format!("{tool}({arg})"),
+                    None => tool.to_string(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A boolean environment variable (v2 `parseBooleanEnv`): unset, empty, or
+/// unrecognized yields `None` so the next source applies.
+fn env_bool(name: &str) -> Option<bool> {
+    crate::env::parse_bool_env(std::env::var(name).ok().as_deref())
+}
+
+/// A trimmed, non-empty environment variable (v2 `readEnvString`): a blank
+/// value counts as unset so the next source applies.
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// A finite floating-point environment variable; a non-finite or malformed
+/// value is ignored.
+fn env_f64(name: &str) -> Option<f64> {
+    std::env::var(name)
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+/// v2 `llmRequester` default (`DEFAULT_REQUEST_BYTE_BUDGET`): 32 MiB.
+pub const DEFAULT_LLM_REQUEST_BYTE_BUDGET: u64 = 32 * 1024 * 1024;
+
+/// The reserved provider id the env-only model overlay writes
+/// (`ENV_MODEL_PROVIDER_KEY`).
+pub const ENV_MODEL_PROVIDER_KEY: &str = "__kimi_env__";
+/// The reserved model alias the env-only model overlay writes
+/// (`ENV_MODEL_ALIAS_KEY`).
+pub const ENV_MODEL_ALIAS_KEY: &str = "__kimi_env_model__";
+/// v2 `MAX_MCP_TIMEOUT_MS`: the largest accepted MCP timeout.
+const MAX_MCP_TIMEOUT_MS: u64 = 2_147_483_647;
+/// v2 `envOverlay` default context window for the env model.
+const ENV_MODEL_DEFAULT_MAX_CONTEXT_SIZE: u32 = 262_144;
+/// v2 `envOverlay` default capabilities for the env model.
+const ENV_MODEL_DEFAULT_CAPABILITIES: [&str; 2] = ["image_in", "thinking"];
+
+/// A positive `u32` environment value; anything else fails with the variable
+/// named so the deployment log points at the offending key.
+fn parse_positive_u32(raw: &str, name: &str) -> Result<u32, String> {
+    let value = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("{name} must be a positive integer, got \"{raw}\"."))?;
+    if value == 0 {
+        return Err(format!("{name} must be a positive integer, got \"{raw}\"."));
+    }
+    Ok(value)
+}
+
 /// A positive integer environment variable (v2 `positiveInt`): zero and
 /// invalid values are ignored so the next source applies.
 fn env_positive_u64(name: &str) -> Option<u64> {
     env_non_negative_u64(name).filter(|value| *value > 0)
+}
+
+/// Warn once per distinct invalid strategy spelling. The resolver runs on
+/// every status publish, so an unconditional `warn!` would flood the log; the
+/// value cannot change without a process restart (env) or config reload
+/// (file), and both are rare.
+fn warn_invalid_token_counting_strategy(origin: &str, raw: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.insert(format!("{origin}\u{0}{raw}")) {
+        tracing::warn!(
+            origin,
+            value = raw,
+            accepted = ?crate::session::token_counting::TokenCountingStrategy::VALUES,
+            "invalid token-counting strategy; using measured+estimated"
+        );
+    }
 }
 
 impl KimiConfig {
@@ -2037,7 +3088,7 @@ impl KimiConfig {
     /// disagree; picking the right `auth_provider` behaviour is a separate
     /// decision.
     pub fn native_llm_config(&self, def: &ResolvedNativeLlm) -> crate::rpc::types::NativeLlmConfig {
-        crate::rpc::types::NativeLlmConfig {
+        let mut llm = crate::rpc::types::NativeLlmConfig {
             protocol: def.protocol.clone(),
             alias: def.alias.clone(),
             provider_type: Some(def.provider_type.clone()).filter(|value| !value.is_empty()),
@@ -2058,7 +3109,35 @@ impl KimiConfig {
             adaptive_thinking: def.adaptive_thinking,
             reasoning_key: def.reasoning_key.clone(),
             off_effort: None,
-        }
+            response_format: None,
+            sampling: None,
+            determinism: None,
+            extra_params: None,
+            binary_path: def.binary_path.clone(),
+            antigravity: def.antigravity.clone(),
+        };
+        self.apply_model_request_options(&mut llm, def.alias.as_deref());
+        llm
+    }
+
+    /// Copy the `[models.<alias>]` request-body knobs onto a transport config.
+    ///
+    /// The transport is built in several places (`main.rs`, `server/engine.rs`,
+    /// the REPL and the secondary/multi pools); this is the one place that
+    /// reads the knobs, so all of them agree and an absent entry leaves the
+    /// request body untouched.
+    pub fn apply_model_request_options(
+        &self,
+        llm: &mut crate::rpc::types::NativeLlmConfig,
+        alias: Option<&str>,
+    ) {
+        let Some(model) = alias.and_then(|alias| self.effective_model_for(alias)) else {
+            return;
+        };
+        llm.response_format = model.response_format;
+        llm.sampling = model.sampling;
+        llm.determinism = model.determinism;
+        llm.extra_params = model.extra_params;
     }
 }
 

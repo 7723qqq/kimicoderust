@@ -1,12 +1,3 @@
-//! The `read` action wired to the memory store (v2
-//! `app/memory/tools/memoryTool.ts:215-234`).
-//!
-//! This is the first handler with a real I/O path. It reads through
-//! [`memory_store::read`], which owns path resolution and the store boundary,
-//! then renders v2's seven-line result. The fork has no indexed `MemoryEntry`
-//! with `scopeId` / `updatedAt`, so those come from the parsed relative path
-//! and the file's mtime.
-
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -18,10 +9,10 @@ use crate::tools::memory_store;
 use crate::tools::memory_tool::MemoryContext;
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// An error-shaped result with no output, kept local so this module does not
-/// reach into another tool's helper visibility.
 fn error_result(text: String) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: text,
@@ -33,6 +24,8 @@ fn error_result(text: String) -> ExecutableToolResult {
 
 fn ok_result(text: String) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: text,
@@ -42,8 +35,6 @@ fn ok_result(text: String) -> ExecutableToolResult {
     }
 }
 
-/// Run `Memory({ action: "read", path })`. An unknown or missing `path` is a
-/// model-visible result, exactly as v2's handler returns.
 pub fn read_action(context: &MemoryContext, args: &Value) -> ExecutableToolResult {
     let Some(raw_path) = args.get("path").and_then(Value::as_str) else {
         return error_result(read_path_required());
@@ -90,7 +81,6 @@ pub fn read_action(context: &MemoryContext, args: &Value) -> ExecutableToolResul
     ))
 }
 
-/// Convenience entry matching the six existing tool functions' signature.
 pub fn execute_read(workspace_root: &Path, args: &Value) -> ExecutableToolResult {
     match MemoryContext::resolve(workspace_root) {
         Ok(context) => read_action(&context, args),

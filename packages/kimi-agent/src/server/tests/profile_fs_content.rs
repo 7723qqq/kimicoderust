@@ -166,7 +166,7 @@ async fn test_http_tools_endpoint() {
 }
 
 #[tokio::test]
-/// `fs::content` serves raw bytes by absolute path, honours a single
+/// `fs:content` serves raw bytes by absolute path, honours a single
 /// `Range` slice, and revalidates with `If-None-Match` → 304. This route
 /// used to be missing entirely, so the web UI had no way to read a file
 /// it had browsed to.
@@ -185,7 +185,7 @@ async fn test_http_fs_content_raw_range_and_revalidate() {
         }
         HttpRequest {
             method: "GET".into(),
-            path: "/api/v1/fs::content".into(),
+            path: "/api/v1/fs:content".into(),
             query,
             headers,
             body: Vec::new(),

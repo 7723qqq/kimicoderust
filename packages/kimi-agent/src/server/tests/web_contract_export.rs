@@ -330,15 +330,16 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
     assert_ne!(res.status, 404, "single-colon fs:suggest is routed");
 }
 
-/// v2 `POST /workspace/fs::list` (from #4457): the session-less fs:list with
-/// the workspace reference in the body.
+/// v2 `POST /workspace/fs::list` (from #4457) — the literal
+/// `/workspace/fs:list`: the session-less fs:list with the workspace
+/// reference in the body.
 #[tokio::test]
 async fn workspace_fs_list_lists_without_a_session() {
     let server = HttpServer::in_memory().unwrap();
     let ws_root = tempfile::tempdir().unwrap();
     std::fs::write(ws_root.path().join("marker.txt"), "m").unwrap();
 
-    for path in ["/api/v1/workspace/fs::list", "/api/v1/workspace/fs:list"] {
+    for path in ["/api/v1/workspace/fs:list"] {
         let res = server
             .handle_request(&HttpRequest {
                 method: "POST".into(),
@@ -369,7 +370,7 @@ async fn workspace_fs_list_lists_without_a_session() {
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
-            path: "/api/v1/workspace/fs::list".into(),
+            path: "/api/v1/workspace/fs:list".into(),
             query: None,
             headers: HashMap::new(),
             body: serde_json::to_vec(&json!({})).unwrap(),
@@ -394,10 +395,24 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
             workspace_id: None,
             archived: false,
             parent_session_id: None,
+            title_kind: None,
+            last_prompt: None,
+            archived_at: None,
+            forked_from: None,
+            version: None,
+            cwd: None,
+            environment_id: None,
+            environment_cwd: None,
+            agents: None,
+            custom: None,
+            last_turn_reason: None,
         },
         messages: Vec::new(),
         turns_count: 0,
         exported_at: "2026-10-03T00:00:00Z".into(),
+        first_activity_at: Some("2026-10-01T00:00:00Z".into()),
+        last_activity_at: Some("2026-10-02T00:00:00Z".into()),
+        wire_jsonl: Vec::new(),
     };
 
     let names_of = |bytes: Vec<u8>| -> (Vec<String>, Value) {
@@ -418,22 +433,40 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
     // Default: the manifest rides along, no logs, and the key that names the
     // primary log is absent rather than null — the host's e2e pins that
     // absence, so a null here would be a different document.
-    let (names, manifest) = names_of(build_session_export_zip_with(&export, Vec::new()).unwrap());
+    let (names, manifest) =
+        names_of(build_session_export_zip_with(&export, Vec::new(), Vec::new()).unwrap());
     assert_eq!(
         names,
-        vec!["export-manifest.json", "session.json", "transcript.md"]
+        vec![
+            "export-manifest.json",
+            "session.json",
+            "transcript.md",
+            "agents/main/wire.jsonl"
+        ]
     );
     assert_eq!(manifest["sessionId"], "sess-manifest");
     assert_eq!(manifest["exportedAt"], "2026-10-03T00:00:00Z");
     assert_eq!(manifest["kimiCodeVersion"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(manifest["os"], std::env::consts::OS);
+    assert_eq!(
+        manifest["os"],
+        format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+    );
+    // v2 `buildExportManifest` names the session's activity span from the
+    // wire scan; the engine carries the same two keys when it has them.
+    assert_eq!(manifest["sessionFirstActivity"], "2026-10-01T00:00:00Z");
+    assert_eq!(manifest["sessionLastActivity"], "2026-10-02T00:00:00Z");
     assert!(
         manifest.get("globalLogPath").is_none(),
         "omitted, not written as null"
     );
+    assert!(
+        manifest.get("sessionLogPath").is_none(),
+        "the session log is named only when it is bundled"
+    );
 
-    // With logs resolved they ride along after the session members, and the
-    // manifest names the un-suffixed one as the primary entry.
+    // v2 bundles the session log under `logs/kimi-code.log` (rotations beside
+    // it) and names it in the manifest; the global log is namespaced under
+    // `logs/global/` so the two never collide.
     let (names, manifest) = names_of(
         build_session_export_zip_with(
             &export,
@@ -441,6 +474,7 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
                 ("logs/kimi-code.log".into(), b"new".to_vec()),
                 ("logs/kimi-code.log.1".into(), b"old".to_vec()),
             ],
+            vec![("logs/global/kimi-code.log".into(), b"global".to_vec())],
         )
         .unwrap(),
     );
@@ -450,11 +484,78 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
             "export-manifest.json",
             "session.json",
             "transcript.md",
+            "agents/main/wire.jsonl",
             "logs/kimi-code.log",
-            "logs/kimi-code.log.1"
+            "logs/kimi-code.log.1",
+            "logs/global/kimi-code.log"
         ]
     );
-    assert_eq!(manifest["globalLogPath"], "logs/kimi-code.log");
+    assert_eq!(manifest["sessionLogPath"], "logs/kimi-code.log");
+    assert_eq!(manifest["globalLogPath"], "logs/global/kimi-code.log");
+}
+
+/// A session log is bundled even without the global-log request, exactly like
+/// v2's exporter.
+#[test]
+fn a_bundled_session_log_does_not_require_the_global_one() {
+    let (names, manifest) = export_names_and_manifest(
+        vec![("logs/kimi-code.log".into(), b"session".to_vec())],
+        Vec::new(),
+    );
+    assert!(names.contains(&"logs/kimi-code.log".to_string()));
+    assert_eq!(manifest["sessionLogPath"], "logs/kimi-code.log");
+    assert!(manifest.get("globalLogPath").is_none());
+}
+
+fn export_names_and_manifest(
+    session_logs: Vec<(String, Vec<u8>)>,
+    global_logs: Vec<(String, Vec<u8>)>,
+) -> (Vec<String>, serde_json::Value) {
+    let export = crate::session::sqlite_store::SessionExport {
+        session: crate::session::sqlite_store::SessionSummary {
+            session_id: "sess-manifest".into(),
+            title: Some("T".into()),
+            created_at: 1,
+            updated_at: 2,
+            workspace_id: None,
+            archived: false,
+            parent_session_id: None,
+            title_kind: None,
+            last_prompt: None,
+            archived_at: None,
+            forked_from: None,
+            version: None,
+            cwd: None,
+            environment_id: None,
+            environment_cwd: None,
+            agents: None,
+            custom: None,
+            last_turn_reason: None,
+        },
+        messages: Vec::new(),
+        turns_count: 0,
+        exported_at: "2026-10-03T00:00:00Z".into(),
+        first_activity_at: Some("2026-10-01T00:00:00Z".into()),
+        last_activity_at: Some("2026-10-02T00:00:00Z".into()),
+        wire_jsonl: Vec::new(),
+    };
+    names_of(build_session_export_zip_with(&export, session_logs, global_logs).unwrap())
+}
+
+fn names_of(bytes: Vec<u8>) -> (Vec<String>, serde_json::Value) {
+    use std::io::Read as _;
+
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("archive readable");
+    let names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect();
+    let mut manifest = Vec::new();
+    archive
+        .by_name("export-manifest.json")
+        .expect("manifest present")
+        .read_to_end(&mut manifest)
+        .unwrap();
+    (names, serde_json::from_slice(&manifest).unwrap())
 }
 
 /// The log selection and member naming have to match the host exporter and
@@ -481,13 +582,31 @@ fn global_log_members_take_the_rotations_and_nothing_else() {
     assert_eq!(
         names,
         vec![
-            "logs/kimi-code.log",
-            "logs/kimi-code.log.1",
-            "logs/kimi-code.log.2"
+            "logs/global/kimi-code.log",
+            "logs/global/kimi-code.log.1",
+            "logs/global/kimi-code.log.2"
         ],
-        "sorted, logs/-prefixed, and neither the desktop log nor a directory"
+        "sorted, logs/global/-prefixed, and neither the desktop log nor a directory"
     );
     assert_eq!(members[0].1, b"newest".to_vec());
+
+    // A session log is named relative to its own session directory: the active
+    // file plus its rotations, never the global prefix.
+    let session_dir = dir.join("session");
+    std::fs::create_dir_all(session_dir.join("logs")).unwrap();
+    std::fs::write(session_dir.join("logs").join("kimi-code.log"), b"live").unwrap();
+    std::fs::write(
+        session_dir.join("logs").join("kimi-code.log.1"),
+        b"previous",
+    )
+    .unwrap();
+    let session_members =
+        collect_session_log_members(&session_dir.join("logs").join("kimi-code.log"));
+    let session_names: Vec<&str> = session_members.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        session_names,
+        vec!["logs/kimi-code.log", "logs/kimi-code.log.1"]
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

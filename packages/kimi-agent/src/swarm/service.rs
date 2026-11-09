@@ -118,9 +118,13 @@ impl<T: Clone + Send + Sync + 'static> SwarmRun<T> {
 
     pub async fn run(self) -> Result<Vec<AgentRunResult<T>>, String> {
         let env_map: HashMap<String, String> = std::env::vars().collect();
-        let max_concurrency = self
-            .max_concurrency
-            .or_else(|| resolve_swarm_max_concurrency(&env_map).unwrap_or(None));
+        // v2 `agentRunBatch.ts:684-697`: an invalid
+        // `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` is a validation failure, not
+        // a silent "unlimited" — the user must learn the cap they set is off.
+        let max_concurrency = match self.max_concurrency {
+            Some(value) => Some(value),
+            None => resolve_swarm_max_concurrency(&env_map)?,
+        };
         AgentRunBatch::new(
             self.launcher,
             self.tasks,
@@ -372,7 +376,20 @@ pub async fn require_owned_subagent(
     agent_id: &str,
 ) -> Result<crate::subagent::manager::SubagentParent, String> {
     let Some(parent) = manager.parent_of(agent_id).await else {
-        return Err(format!("Agent instance \"{agent_id}\" is not a subagent"));
+        // v2 `agentTool.ts:438-465`: an unknown id is `AGENT_NOT_FOUND`, an
+        // existing but non-subagent id (the main agent) is
+        // `AGENT_NOT_A_SUBAGENT`. Collapsing both into one message sent callers
+        // hunting for a typo when they had aimed the tool at the main agent.
+        if agent_id == crate::callbacks::MAIN_AGENT_ID
+            || manager.get_instance(agent_id).await.is_some()
+        {
+            return Err(format!(
+                "agent.not_a_subagent: Agent instance \"{agent_id}\" is not a subagent"
+            ));
+        }
+        return Err(format!(
+            "agent.not_found: Agent instance \"{agent_id}\" does not exist — check the id with TaskList (or TowerStatus for tower workers); a subagent that was removed cannot be resumed"
+        ));
     };
     if parent.agent_id != caller_agent_id {
         return Err(format!(
@@ -827,15 +844,20 @@ mod tests {
 
     /// The main agent and unknown ids are not subagents at all — a different
     /// refusal from "not yours", because there is no parent to compare against.
+    /// v2 splits them further: an existing non-subagent is `AGENT_NOT_A_SUBAGENT`,
+    /// an id that never existed is `AGENT_NOT_FOUND`.
     #[tokio::test]
     async fn the_resume_gate_refuses_ids_that_are_not_subagents() {
         let mgr = manager();
-        for id in [crate::callbacks::MAIN_AGENT_ID, "subagent-does-not-exist"] {
-            let error = require_owned_subagent(&mgr, "main", id)
-                .await
-                .expect_err("only a spawned subagent can be resumed");
-            assert!(error.contains("is not a subagent"), "{error}");
-        }
+        let error = require_owned_subagent(&mgr, "main", crate::callbacks::MAIN_AGENT_ID)
+            .await
+            .expect_err("the main agent is not a subagent");
+        assert!(error.contains("is not a subagent"), "{error}");
+
+        let error = require_owned_subagent(&mgr, "main", "subagent-does-not-exist")
+            .await
+            .expect_err("an unknown id cannot be resumed");
+        assert!(error.contains("agent.not_found"), "{error}");
     }
 
     /// A member the batch spawned itself is owned by the caller by

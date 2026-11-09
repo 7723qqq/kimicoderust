@@ -87,6 +87,21 @@ impl HttpServer {
                                 .unwrap();
                             let _ = self.store.set_session_workspace(&session_id, &ws.id);
                         }
+                        // v2 `createSession`: the environment binding is fixed
+                        // while the session is created, so a later config edit
+                        // cannot move it. A failure here is reported with its
+                        // code instead of leaving an unfrozen session behind.
+                        if let Some(engine) = self.engine.as_deref()
+                            && let Err(error) = engine.freeze_session_environment(&session_id).await
+                        {
+                            return HttpResponse::json(
+                                500,
+                                &json!({
+                                    "code": error.code(),
+                                    "error": error.detail(),
+                                }),
+                            );
+                        }
                         let created_session = self.store.get_session(&session_id).ok().flatten();
                         let session_val = if let Some(ref s) = created_session {
                             format_wire_session(
@@ -117,7 +132,7 @@ impl HttpServer {
                             .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
                             .map(|w| w.root);
                         let guard = crate::tools::external_hooks::HookGuard::new(
-                            self.config().await.hooks.clone(),
+                            self.current_hooks().await,
                         )
                         .with_session_cwd(session_cwd);
                         guard
@@ -477,6 +492,12 @@ impl HttpServer {
                 if segments.len() != 6 {
                     return HttpResponse::not_found();
                 }
+                if self.is_shutting_down() {
+                    return HttpResponse::json(
+                        503,
+                        &json!({ "error": "server is shutting down; new turns are not accepted" }),
+                    );
+                }
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(value) => value,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
@@ -489,6 +510,15 @@ impl HttpServer {
                     return HttpResponse::not_found();
                 }
                 let session_id = segments[4];
+
+                // Same gate as the protocol route: a turn must not start after
+                // the shutdown drain has begun.
+                if self.is_shutting_down() {
+                    return HttpResponse::json(
+                        503,
+                        &json!({ "error": "server is shutting down; new turns are not accepted" }),
+                    );
+                }
 
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(v) => v,
@@ -587,6 +617,13 @@ impl HttpServer {
                                 }),
                             )
                         }
+                        crate::server::engine::EngineError::Stale(message) => HttpResponse::json(
+                            409,
+                            &json!({
+                                "code": crate::server::envelope::error_codes::SESSION_STALE,
+                                "msg": message,
+                            }),
+                        ),
                         other => HttpResponse::internal_error(other.to_string()),
                     },
                 }

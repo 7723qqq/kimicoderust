@@ -64,8 +64,7 @@ async fn fork_inherits_conversation_history_and_runs_natively() {
     let messages_sent = llm.messages_sent.lock().unwrap();
     assert_eq!(messages_sent.len(), 1);
     let sent_messages = &messages_sent[0];
-    // sent_messages has: system message (from run_turn), then the 5 forked
-    // messages (inherited history + the fork-context system reminder)
+
     let user_idx = sent_messages
         .iter()
         .position(|m| m.content == "parent prompt")
@@ -82,8 +81,7 @@ async fn fork_inherits_conversation_history_and_runs_natively() {
         sent_messages[user_idx + 2].content,
         crate::subagent::INHERITED_IN_FLIGHT_TOOL_OUTPUT
     );
-    // The fork-context notice rides as a <system-reminder> injection
-    // between the inherited history and the task prompt (v2 #3412).
+
     assert_eq!(sent_messages[user_idx + 3].role, "user");
     assert!(crate::injection::is_system_reminder(
         &sent_messages[user_idx + 3].content
@@ -94,19 +92,13 @@ async fn fork_inherits_conversation_history_and_runs_natively() {
             .contains(crate::subagent::fork::FORK_CONTEXT_NOTICE.trim())
     );
     assert_eq!(sent_messages[user_idx + 4].role, "user");
-    // v2 `runAgentTurn` submits `{ role: 'user', content: [{ text: prompt }] }`
-    // — the task prompt alone. A `"{systemPrompt}\n\nTask: …"` wrapper would
-    // change the request bytes for every spawn.
+
     assert_eq!(sent_messages[user_idx + 4].content, "continue from fork");
-    // And a fork inherits the caller's scope, system prompt included: the
-    // child's first request carries the session transport's own prompt.
+
     assert_eq!(sent_messages[0].role, "system");
     assert_eq!(sent_messages[0].content, "test");
 }
 
-/// v2 `agentLifecycle.create({ binding: { profile } })`: a spawned subagent's
-/// first request carries its profile's `systemPrompt`, not the session's, and
-/// its user message is the bare prompt.
 #[tokio::test]
 async fn a_spawn_sends_the_profile_system_prompt_and_the_bare_prompt() {
     let llm = Arc::new(RecordingPromptLlm::new(vec!["child answer".into()]));
@@ -142,11 +134,6 @@ async fn a_spawn_sends_the_profile_system_prompt_and_the_bare_prompt() {
     assert_eq!(user.content, "do the task");
 }
 
-/// v2 `checkBackendArgs` (`agentTool.ts:328-349`): with the
-/// `subagent_backends` flag off, a non-empty `backend` is refused with the
-/// exact v2 message instead of being silently ignored — otherwise a model that
-/// asked for an external backend would believe the in-process spawn honoured
-/// it. An empty or whitespace value is the in-process default and launches.
 #[tokio::test]
 async fn a_backend_argument_is_refused_before_spawn() {
     let recorder = Arc::new(EventRecorder::new());
@@ -179,7 +166,6 @@ async fn a_backend_argument_is_refused_before_spawn() {
         "the refusal happens before any subagent is spawned"
     );
 
-    // An empty value is the in-process default, which launches normally.
     let launched = execute_agent(
         &manager,
         None,
@@ -198,8 +184,6 @@ async fn a_backend_argument_is_refused_before_spawn() {
     assert!(!launched.is_error, "{}", launched.content);
 }
 
-/// v2 refuses a background launch before `spawn` when the live table lacks
-/// any of TaskList / TaskOutput / TaskStop.
 #[tokio::test]
 async fn run_in_background_is_refused_before_spawn_without_task_output() {
     let manager =
@@ -228,8 +212,6 @@ async fn run_in_background_is_refused_before_spawn_without_task_output() {
     );
 }
 
-/// Availability is caller-relative: a complete live table does not override
-/// the current profile's own tool policy.
 #[tokio::test]
 async fn run_in_background_is_refused_when_caller_profile_disables_task_stop() {
     let recorder = Arc::new(EventRecorder::new());
@@ -392,15 +374,12 @@ async fn run_in_background_cooperative_stop_via_task_runner() {
     let stop_res = runner
         .stop(task_id, None)
         .await
-        .expect("stop should succeed");
+        .expect("stop should succeed")
+        .wire;
     assert_eq!(stop_res["status"], "killed");
     assert_eq!(stop_res["stopReason"], "Stopped by TaskStop");
 }
 
-/// v2 `forkIncompatibility` compares an explicit `model` against the caller's
-/// own alias: naming it is a no-op inherit, anything else is an override. The
-/// fork passed `None` as the caller model, so even the caller's own alias was
-/// rejected.
 #[tokio::test]
 async fn a_fork_may_name_the_callers_own_model_alias() {
     let recorder = Arc::new(EventRecorder::new());

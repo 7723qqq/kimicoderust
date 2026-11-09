@@ -14,13 +14,13 @@
 //!   answer arrives as `notify_user_enabled` (`PipelineSpec`), and the gate
 //!   the nudge flows through is the advertised-table gate in
 //!   `tools/tool_policy.rs`: when NotifyUser is unavailable the tool is not
-//!   advertised, the streak can never start, and the provider below is not
-//!   even registered. Registering an unreachable nudge would be the dead
-//!   branch the ledger warned about.
+//!   advertised and [`register_notify_user_nudge`] is a no-op. Registering an
+//!   unreachable nudge would be the dead branch the ledger warned about.
 //! - **The telemetry event** (`NotifyUserNudgeShownEvent`): the fork's nudge
 //!   rides the injection pipeline, which the turn telemetry already counts;
 //!   a separate event would double-report.
 
+use crate::injection::{InjectionContext, InjectionRegistry};
 use crate::turn_loop::types::LLMMessage;
 #[cfg(test)]
 use crate::turn_loop::types::ToolCall;
@@ -146,6 +146,53 @@ fn is_nudge(message: &LLMMessage) -> bool {
 
 fn is_tool_call_round(message: &LLMMessage) -> bool {
     message.role == "assistant" && !message.tool_calls.is_empty()
+}
+
+/// Register the nudge provider (upstream `notifyUserNudgeService`), gated on
+/// `NotifyUser` being advertised this turn: without the tool the model cannot
+/// answer the nudge, so the reminder would only burn context.
+pub fn register_notify_user_nudge(registry: &mut InjectionRegistry, notify_user_advertised: bool) {
+    if !notify_user_advertised {
+        return;
+    }
+    registry.register(
+        NOTIFY_USER_NUDGE_VARIANT,
+        Box::new(|ctx: &InjectionContext| {
+            let streak = notify_streak(ctx.history);
+            if !should_nudge_notify_user(streak.rounds, rounds_since_last_nudge(ctx.history)) {
+                return None;
+            }
+            Some(render_notify_user_nudge(streak.rounds))
+        }),
+    );
+}
+
+/// Tool-call rounds between the most recent nudge and the live head of the
+/// window (upstream `toolCallRoundsSince(lastInjectedIndex)`), or `None` when
+/// no nudge is inside the current turn/window. The walk stops where
+/// [`notify_streak`] stops, so both counters describe the same window.
+fn rounds_since_last_nudge(history: &[LLMMessage]) -> Option<u64> {
+    let mut rounds = 0u64;
+    for message in history.iter().rev() {
+        if starts_new_turn(message) {
+            break;
+        }
+        if is_nudge(message) {
+            return Some(rounds);
+        }
+        if !is_tool_call_round(message) {
+            continue;
+        }
+        if message
+            .tool_calls
+            .iter()
+            .any(|call| call.name == crate::tools::core_tool_defs::NOTIFY_USER_TOOL_NAME)
+        {
+            break;
+        }
+        rounds += 1;
+    }
+    None
 }
 
 #[cfg(test)]

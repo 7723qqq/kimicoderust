@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use super::client_shared;
 use super::client_shared::{Budget, WeakEvidenceListener, fire_or_buffer_weak_evidence};
 use super::errors::McpError;
+use crate::primitives::teardown::{Disposer, Ledger, TeardownReason};
 
 /// Protocol version that introduced the Streamable HTTP transport.
 pub const STREAMABLE_HTTP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -46,9 +47,13 @@ pub struct McpHttpTransport {
     pending_weak_evidence: Arc<Mutex<Option<String>>>,
     /// The standalone GET SSE stream (v2 `_startOrAuthSse`). Spawned only when
     /// the server answers `notifications/initialized` with 202.
-    stream: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    stream: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Stops the stream task when the transport shuts down.
     stream_stop: tokio::sync::watch::Sender<()>,
+    /// Owns the close steps in reverse execution order (v2 `client-http.ts:86-90`:
+    /// mark closed, stop the stream, abort it). A ledger makes the close
+    /// idempotent and guarantees every step runs even if an earlier one fails.
+    dispose: Mutex<Ledger>,
 }
 
 impl McpHttpTransport {
@@ -58,6 +63,56 @@ impl McpHttpTransport {
         client_shared::validate_http_url(url).map_err(McpError::transport)?;
         let client = client_shared::build_http_client(false).map_err(McpError::transport)?;
         let (stream_stop, _) = tokio::sync::watch::channel(());
+        let closed = Arc::new(AtomicBool::new(false));
+        let stream: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+        // Registered in reverse execution order: the ledger drains backwards,
+        // so the transport is marked closed first, then the stream is
+        // signalled, then its task is aborted.
+        let mut dispose = Ledger::new("mcp-http-transport");
+        {
+            let stream = Arc::clone(&stream);
+            dispose
+                .register_labeled(
+                    "abort-stream",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            if let Some(handle) = stream.lock().await.take() {
+                                handle.abort();
+                            }
+                            Ok(())
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
+        {
+            let stop = stream_stop.clone();
+            dispose
+                .register_labeled(
+                    "stop-stream",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            let _ = stop.send(());
+                            Ok(())
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
+        {
+            let closed = Arc::clone(&closed);
+            dispose
+                .register_labeled(
+                    "mark-closed",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            closed.store(true, Ordering::SeqCst);
+                            Ok(())
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
         Ok(Self {
             url: url.to_string(),
             headers,
@@ -65,11 +120,12 @@ impl McpHttpTransport {
             session_id: Arc::new(Mutex::new(None)),
             next_id: AtomicU64::new(1),
             request_timeout: None,
-            closed: Arc::new(AtomicBool::new(false)),
+            closed,
             weak_evidence: Arc::new(Mutex::new(None)),
             pending_weak_evidence: Arc::new(Mutex::new(None)),
-            stream: Mutex::new(None),
+            stream,
             stream_stop,
+            dispose: Mutex::new(dispose),
         })
     }
 
@@ -92,11 +148,11 @@ impl McpHttpTransport {
     /// Mark the transport closed. In-flight POSTs finish their own round trip;
     /// the standalone GET stream is aborted and no new request may start.
     pub async fn shutdown(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        let _ = self.stream_stop.send(());
-        if let Some(handle) = self.stream.lock().await.take() {
-            handle.abort();
-        }
+        self.dispose
+            .lock()
+            .await
+            .teardown(TeardownReason::ScopeClose)
+            .await;
     }
 
     /// Open the standalone GET SSE stream (v2 `_startOrAuthSse`,
@@ -713,6 +769,25 @@ mod tests {
     use super::*;
     use crate::mcp::client::McpClient;
     use serde_json::json;
+
+    /// The close path owns every step exactly once: a second shutdown must not
+    /// re-run the stream abort / stop signal and must stay closed.
+    #[tokio::test]
+    async fn shutdown_is_idempotent_and_marks_closed() {
+        let transport = McpHttpTransport::connect("http://127.0.0.1:1/mcp", HashMap::new())
+            .await
+            .ok()
+            .expect("transport");
+        assert!(!transport.closed.load(Ordering::SeqCst));
+        transport.shutdown().await;
+        assert!(transport.closed.load(Ordering::SeqCst));
+        transport.shutdown().await;
+        assert!(transport.closed.load(Ordering::SeqCst));
+        assert_eq!(
+            transport.dispose.lock().await.state(),
+            crate::primitives::teardown::LedgerState::Disposed
+        );
+    }
 
     /// A JSON-framed reply is unwrapped and the session id is echoed.
     #[tokio::test]

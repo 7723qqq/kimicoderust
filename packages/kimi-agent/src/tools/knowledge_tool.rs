@@ -1,15 +1,3 @@
-//! Native execution of the Knowledge tool — the SQLite + FTS5 local coding
-//! standards database (storage in `crate::knowledge`, ported from
-//! `kimi-native-tools/src/knowledge.rs`, merged in 9ba414429d).
-//!
-//! The tool is a fork-original feature: the `knowledge-tool.ts` /
-//! `AgentKnowledgeService` names cited in earlier revisions of this header
-//! exist in neither upstream nor the fork's retired v2. The `action`
-//! discriminator (search/add/confirm/reject/remove/stats/import) dispatches
-//! to the storage layer. The database path resolves
-//! `<workspace>/.kimi-code/knowledge.db`, falling back to
-//! `~/.kimi-code/knowledge.db` when the project DB cannot be opened.
-
 use std::path::Path;
 
 use serde_json::Value;
@@ -19,14 +7,9 @@ use crate::i18n::{LocalizedText, i18n_params};
 use crate::knowledge;
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// Default search limit and minimum confidence (fork defaults, kept from the
-/// kimi-native-tools implementation).
 const SEARCH_LIMIT: u32 = 5;
 const SEARCH_MIN_CONFIDENCE: f64 = 0.5;
 
-/// Execute the Knowledge tool natively: resolve the DB path for the
-/// workspace, open it (project DB first, user DB as fallback), then
-/// dispatch on `action` and render the v2-aligned output.
 pub fn execute_knowledge(workspace_root: &Path, args: &Value) -> ExecutableToolResult {
     let Some(action) = args.get("action").and_then(|a| a.as_str()) else {
         return err_result("Error: `action` is required for the Knowledge tool.".into());
@@ -52,7 +35,6 @@ pub fn execute_knowledge(workspace_root: &Path, args: &Value) -> ExecutableToolR
     }
 }
 
-/// The project DB path under a workspace root (v2 `${cwd}/.kimi-code/knowledge.db`).
 fn project_db_path(workspace_root: &Path) -> String {
     workspace_root
         .join(".kimi-code")
@@ -61,8 +43,6 @@ fn project_db_path(workspace_root: &Path) -> String {
         .into_owned()
 }
 
-/// The user-level fallback DB path (v2 `${homeDir}/knowledge.db`, where
-/// homeDir is the kimi-code home directory).
 fn user_db_path() -> Option<String> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     Some(
@@ -74,9 +54,6 @@ fn user_db_path() -> Option<String> {
     )
 }
 
-/// Open the knowledge DB for a workspace: the project DB first, the user
-/// DB as fallback. `open` replaces any previously-open connection, so
-/// repeated calls are idempotent.
 fn ensure_open(workspace_root: &Path) -> Result<(), String> {
     let project = project_db_path(workspace_root);
     match knowledge::open(project.clone()) {
@@ -132,7 +109,7 @@ fn execute_search(args: &Value) -> ExecutableToolResult {
     if results.is_empty() {
         return ok_result("No matching knowledge entries found.".into());
     }
-    // v2 rendering: `${i+1}. [${category}] ${title} (confidence: ${c})\n   ${first line}`.
+
     let mut lines = Vec::new();
     for (i, result) in results.iter().enumerate() {
         let entry = &result["entry"];
@@ -175,7 +152,7 @@ fn execute_add(args: &Value) -> ExecutableToolResult {
         .get("scope")
         .and_then(|s| s.as_str())
         .map(str::to_string);
-    // v2 tool adds with source 'ai-learned' and confidence 0.7.
+
     let json = match knowledge::add(
         title.to_string(),
         category.to_string(),
@@ -310,8 +287,6 @@ fn execute_stats() -> ExecutableToolResult {
     ))
 }
 
-/// Render a `{name: count}` map as a sorted `name=count, ...` list (sorted
-/// so the output is deterministic — HashMap iteration order is not).
 fn render_counts(map: &Value) -> String {
     let mut pairs: Vec<(String, u64)> = map
         .as_object()
@@ -352,11 +327,6 @@ fn execute_import(args: &Value) -> ExecutableToolResult {
     }
 }
 
-/// Engine tool definition for Knowledge, so the model can discover and call
-/// it (used by the standalone REPL and native tool listing). The description
-/// mirrors v2 `knowledge-tool.md`; the schema mirrors
-/// `KnowledgeInputSchema` plus the engine-only `remove`/`stats`/`import`
-/// actions.
 pub fn knowledge_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "Knowledge".into(),
@@ -412,11 +382,9 @@ pub fn knowledge_tool_def() -> crate::turn_loop::types::ToolInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::knowledge::{TEST_LOCK, close_db_for_tests};
+    use crate::knowledge::{close_db_for_tests, test_lock};
     use serde_json::json;
 
-    /// A tempdir workspace; the global DB connection is closed on drop so
-    /// the directory can be removed on Windows.
     struct TestWorkspace {
         dir: tempfile::TempDir,
     }
@@ -439,8 +407,6 @@ mod tests {
         }
     }
 
-    /// Extract the entry id from an add result
-    /// (`Learned: [cat] title (id: <id>, confidence: 0.7)`).
     fn extract_id(output: &str) -> String {
         let start = output.find("id: ").expect("add output has id") + 4;
         let end = output[start..]
@@ -452,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_search_renders_v2_format() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let added = execute_knowledge(
             ws.path(),
@@ -478,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_search_empty_renders_v2_message() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let result = execute_knowledge(
             ws.path(),
@@ -491,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_add_requires_title_content_category() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         for bad in [
             json!({ "action": "add", "title": "T", "category": "pitfall" }),
@@ -513,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_add_renders_learned() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let result = execute_knowledge(
             ws.path(),
@@ -540,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_confirm_and_reject_flow() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let added = execute_knowledge(
             ws.path(),
@@ -561,7 +527,7 @@ mod tests {
         let rejected = execute_knowledge(ws.path(), &json!({ "action": "reject", "id": id }));
         assert!(!rejected.is_error, "content: {}", rejected.content);
         assert_eq!(rejected.content, format!("Rejected and removed entry {id}"));
-        // Second reject of the same id is a not-found error.
+
         let missing = execute_knowledge(ws.path(), &json!({ "action": "reject", "id": id }));
         assert!(missing.is_error);
         assert_eq!(missing.content, format!("Entry {id} not found."));
@@ -570,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_remove_action_renders() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let added = execute_knowledge(
             ws.path(),
@@ -590,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_confirm_requires_id() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let result = execute_knowledge(ws.path(), &json!({ "action": "confirm" }));
         assert!(result.is_error);
@@ -600,7 +566,7 @@ mod tests {
 
     #[test]
     fn test_stats_renders_counts() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         execute_knowledge(
             ws.path(),
@@ -639,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_import_renders_count_and_is_searchable() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let md = "# coding-style:Imported Rule\ntags: rust\n\nBody here.\n---\n# pitfall:Second\nContent only.\n";
         let result = execute_knowledge(ws.path(), &json!({ "action": "import", "markdown": md }));
@@ -660,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_import_requires_markdown() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let result = execute_knowledge(ws.path(), &json!({ "action": "import" }));
         assert!(result.is_error);
@@ -670,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_unknown_action_errors() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let result = execute_knowledge(ws.path(), &json!({ "action": "frobnicate" }));
         assert!(result.is_error);
@@ -680,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_missing_action_errors() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let result = execute_knowledge(ws.path(), &json!({}));
         assert!(result.is_error);
@@ -694,7 +660,7 @@ mod tests {
 
     #[test]
     fn test_db_created_under_workspace_dot_kimi_code() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = test_lock();
         let ws = TestWorkspace::new();
         let result = execute_knowledge(ws.path(), &json!({ "action": "stats" }));
         assert!(!result.is_error, "content: {}", result.content);
@@ -704,8 +670,6 @@ mod tests {
 
     #[test]
     fn test_db_path_resolution() {
-        // Uses a plain tempdir (not TestWorkspace) so the Drop path never
-        // touches the shared DB outside the TEST_LOCK.
         let dir = tempfile::tempdir().unwrap();
         let project = project_db_path(dir.path());
         assert!(

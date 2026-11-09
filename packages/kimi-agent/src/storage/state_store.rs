@@ -28,10 +28,28 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use crate::goal::{GoalBudgetLimits, GoalState, GoalStatus, to_snapshot};
+use crate::primitives::read::{ReadOutcome, UnreadableCause, read_text};
 use crate::turn_events::{TurnCancelTarget, TurnEvent};
 
-/// The six state domains the REPL persists locally.
-pub const STATE_DOMAINS: [&str; 6] = ["todo", "plan", "goal", "cron", "task", "turn"];
+/// The seven state domains the REPL persists locally.
+pub const STATE_DOMAINS: [&str; 7] = ["todo", "plan", "goal", "cron", "task", "turn", "spec"];
+
+/// The domains an undo does **not** rewind. v2 registers goal and cron
+/// `undoable: false` (`goalService.ts`, `cronService.ts`): those participants
+/// restore from the full journal, so cutting a turn must leave goal progress
+/// and cron schedules at their latest value. Everything else is undoable.
+pub const NON_UNDOABLE_STATE_DOMAINS: [&str; 2] = ["goal", "cron"];
+
+/// Whether a domain takes part in undo checkpoints (v2 `undoable`).
+pub fn is_undoable_state_domain(domain: &str) -> bool {
+    !NON_UNDOABLE_STATE_DOMAINS.contains(&domain)
+}
+
+/// How many undo snapshots the checkpoint stack keeps, matching v2
+/// `CHECKPOINT_MAX_TURNS` (`agent/checkpoint/checkpointService.ts:20`): undo
+/// reaches at most this many turns back. Without the cap the stack grew one
+/// file per turn for the life of the session.
+pub const STATE_CHECKPOINT_MAX_ENTRIES: usize = 20;
 
 /// The task output preview cap, matching the v2 `TASK_OUTPUT_PREVIEW_BYTES`.
 pub const TASK_OUTPUT_PREVIEW_BYTES: usize = 32 * 1024;
@@ -68,6 +86,19 @@ fn cap_output_tail(output: &str) -> &str {
     &output[start..]
 }
 
+/// The JSON shape name for an error that must say what it found instead of
+/// the list it expected.
+pub(crate) fn json_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "a list",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// The result of applying a domain write: the value to persist and the
 /// value to return to the caller (the v2 host response value). They differ
 /// for the action-shaped domains — cron create returns the created entry
@@ -79,47 +110,17 @@ pub struct StateWriteOutcome {
     pub response: Value,
 }
 
-/// What a domain file on disk actually holds. `Absent` and `Corrupt` must stay
-/// distinguishable: collapsing both into "no value" is what let a truncated
-/// `todo.json` read as "no todos", get frozen into a checkpoint as `None`, and
-/// then be deleted by the next undo. v2 refuses the ambiguity outright — its
-/// atomic document store raises `STORAGE_DECODE_FAILED` instead of returning
-/// `undefined` (v2 `persistence/backends/node-fs/atomicDocumentStore.ts`).
-#[derive(Debug)]
-pub enum DomainRead {
-    /// No file on disk (or an unknown domain): the domain was never set.
-    Absent,
-    /// The file exists but could not be read or parsed. The bytes on disk are
-    /// the only copy of the user's state — never clear them, and never freeze
-    /// this state into a checkpoint.
-    Corrupt { reason: String },
-    /// The file parsed; this is its value.
-    Value(Value),
-}
-
-impl DomainRead {
-    /// The stored value, or `None` for both an absent and a corrupt domain —
-    /// which is exactly why the two states need a separate accessor.
-    pub fn value(&self) -> Option<&Value> {
-        match self {
-            DomainRead::Value(value) => Some(value),
-            _ => None,
-        }
-    }
-
-    /// Whether the file exists but is unreadable/unparseable.
-    pub fn is_corrupt(&self) -> bool {
-        matches!(self, DomainRead::Corrupt { .. })
-    }
-
-    /// Why the file could not be read, for the error/diagnostic text.
-    pub fn reason(&self) -> Option<&str> {
-        match self {
-            DomainRead::Corrupt { reason } => Some(reason),
-            _ => None,
-        }
-    }
-}
+/// What a domain file on disk actually holds: present, genuinely absent, or
+/// unreadable. `Absent` and `Unreadable` must stay distinguishable — collapsing
+/// both into "no value" is what let a truncated `todo.json` read as "no todos",
+/// get frozen into a checkpoint as `None`, and then be deleted by the next undo.
+/// v2 refuses the ambiguity outright: its atomic document store raises
+/// `STORAGE_DECODE_FAILED` instead of returning `undefined` (v2
+/// `persistence/backends/node-fs/atomicDocumentStore.ts`).
+///
+/// This is [`ReadOutcome<Value>`] rather than a storage-local enum so the same
+/// three states mean the same thing at every read site in the engine.
+pub type DomainRead = ReadOutcome<Value>;
 
 /// Local per-domain JSON state store.
 /// A full snapshot of every state domain, taken at a turn checkpoint.
@@ -178,25 +179,28 @@ impl StateStore {
         Self::for_dir(super::paths::engine_session_dir(workspace_root, session_id)?.join("state"))
     }
 
-    /// Snapshot every domain (v2 undo-anchor checkpoint). The snapshot is
-    /// persisted to a numbered file under `checkpoints/`, so undo survives
-    /// a restart. A file that exists but fails to read/parse is an error,
-    /// not an absent domain — rolling back must never silently wipe data, so
-    /// a corrupt domain makes the whole checkpoint fail instead of freezing
-    /// `None` for a domain whose bytes still exist.
+    /// Snapshot every undoable domain (v2 undo-anchor checkpoint). The
+    /// snapshot is persisted to a numbered file under `checkpoints/`, so undo
+    /// survives a restart. A file that exists but fails to read/parse is an
+    /// error, not an absent domain — rolling back must never silently wipe
+    /// data, so a corrupt domain makes the whole checkpoint fail instead of
+    /// freezing `None` for a domain whose bytes still exist.
     pub fn checkpoint(&self) -> Result<(), String> {
         let _guard = self
             .checkpoint_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut snapshot = Vec::with_capacity(STATE_DOMAINS.len());
-        for domain in STATE_DOMAINS {
+        for domain in STATE_DOMAINS
+            .into_iter()
+            .filter(|domain| is_undoable_state_domain(domain))
+        {
             let entry = match self.read_domain_state(domain) {
-                DomainRead::Value(value) => Some(value),
-                DomainRead::Absent => None,
-                DomainRead::Corrupt { reason } => {
+                ReadOutcome::Found(value) => Some(value),
+                ReadOutcome::Absent => None,
+                ReadOutcome::Unreadable(cause) => {
                     return Err(format!(
-                        "state domain '{domain}' is unreadable ({reason}); \
+                        "state domain '{domain}' is unreadable ({cause}); \
                          refusing to checkpoint it as absent — repair or move \
                          {} first",
                         self.domain_file(domain)
@@ -209,6 +213,18 @@ impl StateStore {
         }
         let next = next_checkpoint_seq(&self.checkpoints_dir)?;
         write_checkpoint_file(&self.checkpoints_dir, next, &snapshot)?;
+        // Keep the stack inside the v2 window. The new snapshot is already
+        // durable, so a failure here does not fail the checkpoint — but it is
+        // never silent: a leftover snapshot file is disk the caller believes
+        // was reclaimed.
+        match prune_checkpoint_files(&self.checkpoints_dir, STATE_CHECKPOINT_MAX_ENTRIES) {
+            Ok(0) => {}
+            Ok(removed) => tracing::debug!(removed, "pruned old state checkpoints"),
+            Err(error) => tracing::warn!(
+                %error,
+                "the checkpoint was written but older snapshots could not be pruned; they remain on disk"
+            ),
+        }
         Ok(())
     }
 
@@ -233,13 +249,19 @@ impl StateStore {
         let snapshot: StateSnapshot = serde_json::from_str(&content)
             .map_err(|e| format!("checkpoint parse seq {seq}: {e}"))?;
         for (domain, value) in snapshot {
+            // Snapshots written before goal/cron were excluded still carry
+            // them; restoring those entries would rewind progress undo must
+            // keep, so non-undoable domains are skipped on the way out too.
+            if !is_undoable_state_domain(&domain) {
+                continue;
+            }
             match value {
                 Some(v) => self.write_domain(&domain, &v)?,
                 None => {
-                    if let DomainRead::Corrupt { reason } = self.read_domain_state(&domain) {
+                    if let ReadOutcome::Unreadable(cause) = self.read_domain_state(&domain) {
                         tracing::warn!(
                             domain = %domain,
-                            %reason,
+                            %cause,
                             "rollback left an unreadable state domain in place instead of deleting it"
                         );
                         continue;
@@ -253,8 +275,22 @@ impl StateStore {
     }
 
     /// How many checkpoints are pending (v2 `checkpointDepth`).
+    ///
+    /// A stack directory that cannot be listed reports zero — the callers (a
+    /// host badge, the napi export) have no error channel — but the failure is
+    /// logged: "0" and "could not count" are different answers, and only one of
+    /// them means the user has nothing to undo.
     pub fn checkpoint_depth(&self) -> usize {
-        count_checkpoint_files(&self.checkpoints_dir).unwrap_or(0)
+        match count_checkpoint_files(&self.checkpoints_dir) {
+            Ok(depth) => depth,
+            Err(error) => {
+                tracing::warn!(
+                    dir = %self.checkpoints_dir.display(),
+                    "could not count the undo checkpoints; reporting zero depth: {error}"
+                );
+                0
+            }
+        }
     }
 
     /// The state directory (`<workspace>/.kimi/state`).
@@ -281,46 +317,22 @@ impl StateStore {
     }
 
     /// Read a domain's stored value, distinguishing the three on-disk states.
-    /// `Absent` covers both "no file yet" and an unknown domain name, matching
-    /// the lenient [`StateStore::read_domain`].
+    /// `Absent` covers both "no file yet" and an unknown domain name.
     pub fn read_domain_state(&self, domain: &str) -> DomainRead {
         let Some(path) = self.domain_file(domain) else {
-            return DomainRead::Absent;
+            return ReadOutcome::Absent;
         };
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DomainRead::Absent,
-            Err(e) => {
-                return DomainRead::Corrupt {
-                    reason: format!("read {}: {e}", path.display()),
-                };
-            }
+        let content = match read_text(&path) {
+            ReadOutcome::Found(content) => content,
+            ReadOutcome::Absent => return ReadOutcome::Absent,
+            ReadOutcome::Unreadable(cause) => return ReadOutcome::Unreadable(cause),
         };
         match serde_json::from_str(&content) {
-            Ok(value) => DomainRead::Value(value),
-            Err(e) => DomainRead::Corrupt {
-                reason: format!("parse {}: {e}", path.display()),
-            },
-        }
-    }
-
-    /// Read a domain's stored value; `None` when the domain is unknown or
-    /// has no stored state yet. A domain whose file exists but fails to
-    /// read/parse also reads as `None` here, and logs it — the callers that
-    /// must not confuse it with an absent domain use
-    /// [`StateStore::read_domain_state`].
-    pub fn read_domain(&self, domain: &str) -> Option<Value> {
-        match self.read_domain_state(domain) {
-            DomainRead::Value(value) => Some(value),
-            DomainRead::Absent => None,
-            DomainRead::Corrupt { reason } => {
-                tracing::warn!(
-                    domain,
-                    %reason,
-                    "state domain file is unreadable; reporting it as unset"
-                );
-                None
-            }
+            Ok(value) => ReadOutcome::Found(value),
+            Err(error) => ReadOutcome::Unreadable(UnreadableCause::new(
+                format!("parse {}", path.display()),
+                error,
+            )),
         }
     }
 
@@ -328,13 +340,23 @@ impl StateStore {
     /// mid-write never leaves a truncated domain file behind). Serialized
     /// against other writers of the same domain.
     pub fn write_domain(&self, domain: &str, value: &Value) -> Result<(), String> {
+        let lock = self.domain_lock(domain);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.write_domain_locked(domain, value)
+    }
+
+    /// [`Self::write_domain`] without taking the domain lock.
+    ///
+    /// The caller already holds the lock for a whole read-modify-write. Taking
+    /// it again would deadlock (the lock is not reentrant), and taking it late
+    /// would reopen the lost-update window the locked read-modify-write exists
+    /// to close.
+    fn write_domain_locked(&self, domain: &str, value: &Value) -> Result<(), String> {
         let path = self
             .domain_file(domain)
             .ok_or_else(|| format!("unknown state domain: {domain}"))?;
         let json = serde_json::to_string_pretty(value)
             .map_err(|e| format!("serialize {domain} state: {e}"))?;
-        let lock = self.domain_lock(domain);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         atomic_replace(&path, json.as_bytes())
     }
 
@@ -359,27 +381,47 @@ impl StateStore {
         domain: &str,
         patch: &crate::session::patch::JsonPatchSet,
     ) -> Result<(Value, crate::session::patch::JsonPatchSet), String> {
-        let mut val = self
-            .read_domain(domain)
-            .or_else(|| Self::default_value(domain))
-            .unwrap_or(Value::Null);
+        // The read and the write must be one transaction: a patch is computed
+        // from the value that was read, so a writer landing between the two
+        // would be silently overwritten.
+        let lock = self.domain_lock(domain);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut val = match self.read_domain_state(domain) {
+            ReadOutcome::Found(value) => value,
+            ReadOutcome::Absent => Self::default_value(domain).unwrap_or(Value::Null),
+            ReadOutcome::Unreadable(cause) => {
+                return Err(format!(
+                    "cannot patch state domain '{domain}': it is unreadable ({cause}); \
+                     patching would overwrite the only copy of the file"
+                ));
+            }
+        };
         let inverse = crate::session::patch::apply_patch(&mut val, patch)
             .map_err(|e| format!("failed to apply patch to domain '{domain}': {e}"))?;
-        self.write_domain(domain, &val)?;
+        self.write_domain_locked(domain, &val)?;
         Ok((val, inverse))
     }
 
     /// Compute RFC 6902 JSON diff between current domain state and a new value.
+    ///
+    /// An unreadable domain is an error, not an empty one: the diff computed
+    /// from "nothing" would tell the caller to add every field, hiding the
+    /// state that is still on disk.
     pub fn diff_domain(
         &self,
         domain: &str,
         new_value: &Value,
-    ) -> crate::session::patch::JsonPatchSet {
-        let current = self
-            .read_domain(domain)
-            .or_else(|| Self::default_value(domain))
-            .unwrap_or(Value::Null);
-        crate::session::patch::diff_values(&current, new_value)
+    ) -> Result<crate::session::patch::JsonPatchSet, String> {
+        let current = match self.read_domain_state(domain) {
+            ReadOutcome::Found(value) => value,
+            ReadOutcome::Absent => Self::default_value(domain).unwrap_or(Value::Null),
+            ReadOutcome::Unreadable(cause) => {
+                return Err(format!(
+                    "cannot diff state domain '{domain}': it is unreadable ({cause})"
+                ));
+            }
+        };
+        Ok(crate::session::patch::diff_values(&current, new_value))
     }
 
     /// The v2-aligned default wire value for a domain with no stored state.
@@ -395,6 +437,9 @@ impl StateStore {
                 "cancelledTurnIds": [],
                 "anchorTurnIds": [],
             })),
+            // v2 `specKey` default (`specOps.ts:84`): every session starts
+            // with spec mode off, exactly like plan.
+            "spec" => Some(json!({ "active": false })),
             _ => None,
         }
     }
@@ -406,10 +451,22 @@ impl StateStore {
     /// "task"` (TaskList); an unknown task id is a `-32002` error.
     pub fn read_state(&self, domain: &str, key: &str) -> Result<Value, String> {
         if domain == "task" && key != "task" {
-            let tasks = self
-                .read_domain("task")
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default();
+            let tasks = match self.read_domain_state("task") {
+                ReadOutcome::Found(Value::Array(tasks)) => tasks,
+                // A file that parses but is not a list is malformed, not
+                // empty: reading it as empty would answer "-32002 Task not
+                // found" for a task whose bytes are still on disk.
+                ReadOutcome::Found(other) => {
+                    return Err(format!(
+                        "State read error: task state is malformed: expected a list of entries, found {}",
+                        json_shape(&other)
+                    ));
+                }
+                ReadOutcome::Absent => Vec::new(),
+                ReadOutcome::Unreadable(cause) => {
+                    return Err(format!("State read error: {cause}"));
+                }
+            };
             let mut entry = tasks
                 .iter()
                 .find(|t| t.get("taskId").and_then(|i| i.as_str()) == Some(key))
@@ -425,11 +482,12 @@ impl StateStore {
             }
             return Ok(entry);
         }
-        match self.read_domain(domain) {
-            Some(value) => Ok(value),
-            None => Self::default_value(domain).ok_or_else(|| {
+        match self.read_domain_state(domain) {
+            ReadOutcome::Found(value) => Ok(value),
+            ReadOutcome::Absent => Self::default_value(domain).ok_or_else(|| {
                 format!("State read error: [-32001] unknown state domain: {domain}")
             }),
+            ReadOutcome::Unreadable(cause) => Err(format!("State read error: {cause}")),
         }
     }
 
@@ -456,8 +514,51 @@ impl StateStore {
             "cron" => self.apply_cron_write(value),
             "task" => self.apply_task_write(value),
             "turn" => self.apply_turn_write(value),
+            "spec" => self.apply_spec_write(value),
             _ => Err(format!(
                 "State write error: [-32001] unknown state domain: {domain}"
+            )),
+        }
+    }
+
+    /// Apply a domain write and persist it **inside one domain lock**.
+    ///
+    /// [`Self::apply_write`] returns a value for the caller to persist, which
+    /// leaves a window between the read-modify-write it performed and the
+    /// caller's [`Self::write_domain`]. The task runner and the turn pipeline
+    /// share the goal / task / cron domains, so a writer can land in that
+    /// window and be overwritten. Production write paths use this method so the
+    /// whole transaction is serialized; `apply_write` stays public for callers
+    /// that only need the computed value.
+    pub fn apply_write_and_persist(
+        &self,
+        domain: &str,
+        value: &Value,
+    ) -> Result<StateWriteOutcome, String> {
+        let lock = self.domain_lock(domain);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let outcome = self.apply_write(domain, value)?;
+        self.write_domain_locked(domain, &outcome.stored)?;
+        Ok(outcome)
+    }
+
+    /// Read a domain whose wire shape is a list.
+    ///
+    /// A file that parses but holds another shape is an error, not an empty
+    /// list: `as_array().cloned().unwrap_or_default()` read a wrong-shaped
+    /// `cron.json` / `task.json` as "no entries", and the next write replaced
+    /// it — destroying every entry the file still held.
+    fn read_domain_list(&self, domain: &str) -> Result<Vec<Value>, String> {
+        match self.read_domain_state(domain) {
+            ReadOutcome::Found(Value::Array(entries)) => Ok(entries),
+            ReadOutcome::Found(other) => Err(format!(
+                "State write error: {domain} state is malformed: expected a list of entries, found {}",
+                json_shape(&other)
+            )),
+            ReadOutcome::Absent => Ok(Vec::new()),
+            ReadOutcome::Unreadable(cause) => Err(format!(
+                "State write error: {domain} state is unreadable ({cause}); \
+                 writing it would overwrite the existing file"
             )),
         }
     }
@@ -470,9 +571,15 @@ impl StateStore {
                 "State write error: [-32003] invalid turn state value: missing nextTurnId"
                     .to_string()
             })?;
-        let mut state = match self.read_domain("turn") {
-            Some(Value::Object(map)) => map,
-            _ => serde_json::Map::new(),
+        let mut state = match self.read_domain_state("turn") {
+            ReadOutcome::Found(Value::Object(map)) => map,
+            ReadOutcome::Found(_) | ReadOutcome::Absent => serde_json::Map::new(),
+            ReadOutcome::Unreadable(cause) => {
+                return Err(format!(
+                    "State write error: turn state is unreadable ({cause}); \
+                     writing it would overwrite the turn clock"
+                ));
+            }
         };
         // The clock never rewinds: a lower value would hand out an id that
         // durable turn events have already been recorded against.
@@ -499,21 +606,86 @@ impl StateStore {
     }
 
     /// Fold one engine turn lifecycle event into the persisted turn clock —
-    /// the REPL host's stand-in for v2's `turnKey` fold. `turn.started` is
-    /// observable-only and changes nothing; `anchorTurnIds` is not modelled
-    /// here because the REPL has no undo protocol.
+    /// the REPL host's stand-in for v2's `turnKey` fold (`turnOps.ts:66-160`).
+    /// `turn.started` is observable-only and changes nothing.
+    ///
+    /// `anchorTurnIds` follows v2's `isUndoAnchorOrigin`: a user turn records
+    /// its id so an undo can cut back to it, while a continuation (goal, cron,
+    /// task wake) does not. `lastEnded` is cleared as soon as a newer turn
+    /// appends to the context or is claimed, exactly like v2's
+    /// `ContextAppendLoopEvent` / `TurnPrompt` branches.
     pub fn fold_turn_event(&self, event: &TurnEvent) {
-        let mut state = match self.read_domain("turn") {
-            Some(Value::Object(map)) => map,
-            _ => serde_json::Map::new(),
+        // The fold is a read-modify-write of one file: the clock advance, the
+        // new anchor and the cleared `lastEnded` are all computed from what was
+        // read. Taking the domain lock only for the write would let another
+        // writer land between the two and be overwritten — the turn clock would
+        // then reissue an id the transcript already records.
+        let lock = self.domain_lock("turn");
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = match self.read_domain_state("turn") {
+            ReadOutcome::Found(Value::Object(map)) => map,
+            ReadOutcome::Found(_) | ReadOutcome::Absent => serde_json::Map::new(),
+            // This fold runs from the synchronous turn-event hook, which has no
+            // error channel. Folding an unreadable clock into an empty one
+            // would then be written back over the only copy, so the fold is
+            // skipped and the failure is logged instead.
+            ReadOutcome::Unreadable(cause) => {
+                tracing::warn!(
+                    %cause,
+                    "turn state is unreadable; skipping this turn-event fold to keep the file intact"
+                );
+                return;
+            }
         };
         let next_turn_id = state
             .get("nextTurnId")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let last_ended_id = state
+            .get("lastEnded")
+            .and_then(|v| v.get("turnId"))
+            .and_then(|v| v.as_u64());
+        // v2 clears `lastEnded` once a turn newer than it touches the context:
+        // the summary would otherwise claim the session ended where it did not.
+        let clear_stale_last_ended = |state: &mut serde_json::Map<String, Value>, turn_id: u64| {
+            if last_ended_id.is_some_and(|ended| turn_id > ended) {
+                state.remove("lastEnded");
+            }
+        };
+        // v2 `advanceTurnClock` (`turnOps.ts:203-215`): the clock consumes the
+        // cancellations it steps over, so `cancelledTurnIds` only ever names
+        // ids still ahead of it. Without this the list grows forever and the
+        // persisted state drifts from the reference.
+        let advance_turn_clock = |state: &mut serde_json::Map<String, Value>, mut next: u64| {
+            let mut cancelled: Vec<u64> = state
+                .get("cancelledTurnIds")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+                .unwrap_or_default();
+            cancelled.retain(|id| *id >= next);
+            while let Some(index) = cancelled.iter().position(|id| *id == next) {
+                cancelled.remove(index);
+                next += 1;
+            }
+            cancelled.sort_unstable();
+            state.insert("cancelledTurnIds".into(), json!(cancelled));
+            state.insert("nextTurnId".into(), json!(next));
+        };
         match event {
-            TurnEvent::Prompt { turn_id, .. } => {
-                state.insert("nextTurnId".into(), json!(next_turn_id.max(turn_id + 1)));
+            TurnEvent::Prompt {
+                turn_id, origin, ..
+            } => {
+                clear_stale_last_ended(&mut state, *turn_id);
+                if crate::session::origin_is_undo_anchor(origin) {
+                    let mut anchors = state
+                        .get("anchorTurnIds")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect::<Vec<u64>>())
+                        .unwrap_or_default();
+                    anchors.push(*turn_id);
+                    state.insert("anchorTurnIds".into(), json!(anchors));
+                }
+                advance_turn_clock(&mut state, next_turn_id.max(turn_id + 1));
             }
             TurnEvent::Cancel {
                 turn_id, target, ..
@@ -523,20 +695,22 @@ impl StateStore {
                 if target.is_some_and(|t| t != TurnCancelTarget::Queued) {
                     return;
                 }
-                let Some(turn_id) = (*turn_id).filter(|id| *id >= next_turn_id) else {
+                let Some(turn_id) = *turn_id else {
                     return;
                 };
+                if turn_id < next_turn_id {
+                    return;
+                }
                 let mut cancelled = state
                     .get("cancelledTurnIds")
                     .and_then(|v| v.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect::<Vec<u64>>())
                     .unwrap_or_default();
-                if cancelled.contains(&turn_id) {
-                    return;
+                if !cancelled.contains(&turn_id) {
+                    cancelled.push(turn_id);
                 }
-                cancelled.push(turn_id);
-                cancelled.sort_unstable();
                 state.insert("cancelledTurnIds".into(), json!(cancelled));
+                advance_turn_clock(&mut state, next_turn_id);
             }
             TurnEvent::Ended {
                 turn_id,
@@ -550,10 +724,36 @@ impl StateStore {
                 );
             }
             TurnEvent::Started { .. } => return,
-            // A steer changes no clock: it joins an already-counted turn.
-            TurnEvent::Steer { .. } => return,
+            // A steer joins an already-counted turn, but it proves that turn
+            // appended to the context after the last ended one.
+            TurnEvent::Steer { turn_id, .. } => match turn_id {
+                Some(turn_id) => clear_stale_last_ended(&mut state, *turn_id),
+                None => return,
+            },
         }
-        let _ = self.write_domain("turn", &Value::Object(state));
+        if let Err(error) = self.write_domain_locked("turn", &Value::Object(state)) {
+            tracing::warn!(%error, "could not persist the folded turn event");
+        }
+    }
+
+    /// Forget the undo anchors and the last-ended summary, as v2's
+    /// `ContextClear` / `ContextApplyCompaction` branches do: after the
+    /// context was rewritten, an anchor from before the rewrite no longer
+    /// names a cut point. The turn clock and cancelled ids stay.
+    pub fn clear_turn_anchors(&self) {
+        let lock = self.domain_lock("turn");
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let state = match self.read_domain_state("turn") {
+            ReadOutcome::Found(Value::Object(mut map)) => {
+                map.remove("anchorTurnIds");
+                map.remove("lastEnded");
+                Value::Object(map)
+            }
+            _ => return,
+        };
+        if let Err(error) = self.write_domain_locked("turn", &state) {
+            tracing::warn!(%error, "could not clear the turn anchors");
+        }
     }
 
     fn apply_plan_write(&self, value: &Value) -> Result<StateWriteOutcome, String> {
@@ -572,10 +772,16 @@ impl StateStore {
         }
         // Enter: the host generates the plan id and file path (v2
         // `PlanModeEnter`); an already-active plan rejects the write.
-        let already_active = self
-            .read_domain("plan")
-            .and_then(|p| p.get("active").and_then(|v| v.as_bool()))
-            == Some(true);
+        let already_active = match self.read_domain_state("plan") {
+            ReadOutcome::Found(plan) => plan.get("active").and_then(|v| v.as_bool()) == Some(true),
+            ReadOutcome::Absent => false,
+            ReadOutcome::Unreadable(cause) => {
+                return Err(format!(
+                    "State write error: plan state is unreadable ({cause}); \
+                     entering plan mode would overwrite it"
+                ));
+            }
+        };
         if already_active {
             return Err("State write error: [-32004] plan mode is already active".into());
         }
@@ -596,6 +802,47 @@ impl StateStore {
             "id": id,
             "path": path.to_string_lossy(),
         });
+        Ok(StateWriteOutcome {
+            stored: stored.clone(),
+            response: stored,
+        })
+    }
+
+    /// v2 `specKey` writes (`specOps.ts:87-102`). The state shape is
+    /// `{active, id?, lastTransition?}`. `id` is generated by the engine's
+    /// `EnterSpecMode`, not the store: the transition needs the id *before* the
+    /// write so it can create `<workspace>/specs/<id>` first (v2
+    /// `AgentSpecService.enter`). An already-active state is accepted here on
+    /// purpose: the tool enforces "already in spec mode", while the mode mutex
+    /// needs an exact restore after a failed switch (v2 `switchTo` re-enters
+    /// the previous mode on failure).
+    fn apply_spec_write(&self, value: &Value) -> Result<StateWriteOutcome, String> {
+        let active = value
+            .get("active")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                "State write error: [-32003] invalid spec state value: expected { active: boolean }"
+                    .to_string()
+            })?;
+        if !active {
+            let mut stored = json!({ "active": false });
+            if let Some(transition) = value.get("lastTransition").and_then(Value::as_str) {
+                stored["lastTransition"] = json!(transition);
+            }
+            return Ok(StateWriteOutcome {
+                stored: stored.clone(),
+                response: stored,
+            });
+        }
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                "State write error: [-32003] invalid spec state value: entering spec mode needs a non-empty id"
+                    .to_string()
+            })?;
+        let stored = json!({ "active": true, "id": id });
         Ok(StateWriteOutcome {
             stored: stored.clone(),
             response: stored,
@@ -635,7 +882,7 @@ impl StateStore {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let now = now_ms();
-        let Some(mut state) = self.read_goal_state() else {
+        let Some(mut state) = self.read_goal_state()? else {
             // Every finished turn submits this fold; a session without a goal
             // is the common case, not an error.
             return Ok(StateWriteOutcome {
@@ -672,7 +919,7 @@ impl StateStore {
         };
         let reason = value.get("reason").and_then(|r| r.as_str());
         let now = now_ms();
-        let Some(mut state) = self.read_goal_state() else {
+        let Some(mut state) = self.read_goal_state()? else {
             return Ok(StateWriteOutcome {
                 stored: json!({ "goal": Value::Null }),
                 response: json!({ "goal": Value::Null }),
@@ -748,7 +995,7 @@ impl StateStore {
                 "State write error: [-32003] invalid goal create value: expected { action: \"create\", objective: string, completion_criterion?: string }".into(),
             );
         };
-        if self.read_goal_state().is_some() {
+        if self.read_goal_state()?.is_some() {
             return Err(
                 "State write error: [-32004] A goal already exists; use replace to start a new one"
                     .into(),
@@ -788,7 +1035,7 @@ impl StateStore {
             );
         };
         let now = now_ms();
-        let Some(mut state) = self.read_goal_state() else {
+        let Some(mut state) = self.read_goal_state()? else {
             return Ok(StateWriteOutcome {
                 stored: json!({ "goal": Value::Null }),
                 response: json!({ "goal": Value::Null }),
@@ -811,7 +1058,7 @@ impl StateStore {
             );
         }
         let reason = value.get("reason").and_then(|r| r.as_str());
-        let Some(mut state) = self.read_goal_state() else {
+        let Some(mut state) = self.read_goal_state()? else {
             let message = match status {
                 "active" => "No current goal",
                 "paused" => "No current goal",
@@ -907,7 +1154,7 @@ impl StateStore {
                 crate::goal::format_budget(budget_value, unit)
             ));
         };
-        let Some(mut state) = self.read_goal_state() else {
+        let Some(mut state) = self.read_goal_state()? else {
             return Err("State write error: [-32004] No current goal".into());
         };
         // v2 merges the new limit into the existing limits.
@@ -960,10 +1207,7 @@ impl StateStore {
             .get("recurring")
             .and_then(|r| r.as_bool())
             .unwrap_or(true);
-        let mut entries = self
-            .read_domain("cron")
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
+        let mut entries = self.read_domain_list("cron")?;
         // No scheduler in the REPL yet, so `nextFireAt` stays null (the
         // renderers show "null") and `stale` is always false.
         let entry = json!({
@@ -988,10 +1232,7 @@ impl StateStore {
                 "State write error: [-32003] invalid cron delete value: expected { action: \"delete\", id: string }".into(),
             );
         };
-        let mut entries = self
-            .read_domain("cron")
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
+        let mut entries = self.read_domain_list("cron")?;
         let before = entries.len();
         entries.retain(|entry| entry.get("id").and_then(|i| i.as_str()) != Some(id));
         if entries.len() == before {
@@ -1027,10 +1268,7 @@ impl StateStore {
                 "State write error: [-32003] invalid task stop value: expected { action: \"stop\", id: string }".into(),
             );
         };
-        let mut tasks = self
-            .read_domain("task")
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
+        let mut tasks = self.read_domain_list("task")?;
         let Some(index) = tasks
             .iter()
             .position(|t| t.get("taskId").and_then(|i| i.as_str()) == Some(id))
@@ -1056,10 +1294,7 @@ impl StateStore {
                 "State write error: [-32003] invalid task wait value: expected { action: \"wait\", id: string, timeout_ms?: number }".into(),
             );
         };
-        let tasks = self
-            .read_domain("task")
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
+        let tasks = self.read_domain_list("task")?;
         let Some(entry) = tasks
             .iter()
             .find(|t| t.get("taskId").and_then(|i| i.as_str()) == Some(id))
@@ -1091,13 +1326,19 @@ impl StateStore {
         &self,
         goal: &crate::rpc::types::GoalContext,
     ) -> Result<bool, String> {
+        // Adopting a host snapshot is a read-modify-write of the goal: the
+        // decision to adopt (and what to adopt) comes from the stored state.
+        // The lock spans both so a concurrent fold or model write cannot be
+        // rolled back by a snapshot computed from the older value.
+        let lock = self.domain_lock("goal");
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let now = now_ms();
         let Some(mut state) = self
-            .read_goal_state()
+            .read_goal_state()?
             .filter(|state| state.goal_id == goal.goal_id)
         else {
             let state = goal_state_from_context(goal, now);
-            self.write_domain("goal", &goal_outcome(&state, now).stored)?;
+            self.write_domain_locked("goal", &goal_outcome(&state, now).stored)?;
             return Ok(true);
         };
         // The host knows this goal now (it created it, or adopted the engine's
@@ -1106,14 +1347,14 @@ impl StateStore {
         state.host_owned = true;
         if goal.updated_at <= state.updated_at as i64 {
             if adopted {
-                self.write_domain("goal", &goal_outcome(&state, now).stored)?;
+                self.write_domain_locked("goal", &goal_outcome(&state, now).stored)?;
             }
             return Ok(adopted);
         }
         let status = host_goal_status(goal.status);
         if status == state.status {
             if adopted {
-                self.write_domain("goal", &goal_outcome(&state, now).stored)?;
+                self.write_domain_locked("goal", &goal_outcome(&state, now).stored)?;
             }
             return Ok(adopted);
         }
@@ -1132,7 +1373,7 @@ impl StateStore {
             None
         };
         state.updated_at = now;
-        self.write_domain("goal", &goal_outcome(&state, now).stored)?;
+        self.write_domain_locked("goal", &goal_outcome(&state, now).stored)?;
         Ok(true)
     }
 
@@ -1142,29 +1383,58 @@ impl StateStore {
     /// has not adopted yet would otherwise be lost to a stale "no goal".
     /// `false` when there was nothing to clear.
     pub fn clear_host_goal(&self) -> Result<bool, String> {
-        let Some(state) = self.read_goal_state() else {
+        let lock = self.domain_lock("goal");
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = self.read_goal_state()? else {
             return Ok(false);
         };
         if !state.host_owned {
             return Ok(false);
         }
-        self.write_domain("goal", &json!({ "goal": Value::Null }))?;
+        self.write_domain_locked("goal", &json!({ "goal": Value::Null }))?;
         Ok(true)
     }
 
     /// The stored goal projected as the model/host-facing snapshot, with the
     /// live wall-clock figure folded in. `None` when no goal is stored.
     pub fn goal_snapshot(&self) -> Option<Value> {
-        let state = self.read_goal_state()?;
+        // The host status read has no error channel yet (the goal path gets one
+        // together with the turn-loop hook); a failed read is logged and
+        // reported as "no goal" rather than invented from an empty file.
+        let state = match self.read_goal_state() {
+            Ok(Some(state)) => state,
+            Ok(None) => return None,
+            Err(cause) => {
+                tracing::warn!(%cause, "goal state is unreadable; reporting no goal");
+                return None;
+            }
+        };
         serde_json::to_value(state.snapshot_now()).ok()
     }
 
-    fn read_goal_state(&self) -> Option<GoalState> {
-        let goal = self.read_domain("goal")?.get("goal")?.clone();
+    /// The stored goal, `Ok(None)` when no goal is stored.
+    ///
+    /// A goal file that cannot be read or decoded is an error: every caller
+    /// here decides whether to create, update or clear the goal, and "no goal"
+    /// is a destructive answer (it would authorise a create that overwrites the
+    /// stored one).
+    fn read_goal_state(&self) -> Result<Option<GoalState>, String> {
+        let stored = match self.read_domain_state("goal") {
+            ReadOutcome::Found(value) => value,
+            ReadOutcome::Absent => return Ok(None),
+            ReadOutcome::Unreadable(cause) => {
+                return Err(format!("goal state is unreadable: {cause}"));
+            }
+        };
+        let Some(goal) = stored.get("goal").cloned() else {
+            return Ok(None);
+        };
         if goal.is_null() {
-            return None;
+            return Ok(None);
         }
-        serde_json::from_value(goal).ok()
+        serde_json::from_value(goal)
+            .map(Some)
+            .map_err(|error| format!("goal state is malformed: {error}"))
     }
 
     /// The task output log path (`<state_dir>/tasks/<task_id>/output.log`),
@@ -1193,12 +1463,18 @@ impl StateStore {
         if let Some(parent) = path.parent()
             && let Err(e) = fs::create_dir_all(parent)
         {
-            eprintln!("[Task output write error]: {e}");
+            tracing::warn!(
+                task_id,
+                dir = %parent.display(),
+                "task output was not persisted: could not create the output directory: {e}"
+            );
             return;
         }
-        let capped = cap_output_tail(output);
-        if let Err(e) = fs::write(&path, capped) {
-            eprintln!("[Task output write error]: {e}");
+        // Atomic, like every other state write: a reader must never see a
+        // half-written log, and a crash mid-write must not truncate the
+        // previous one (the old `fs::write` could do both).
+        if let Err(error) = atomic_replace(&path, cap_output_tail(output).as_bytes()) {
+            tracing::warn!(task_id, "task output was not persisted: {error}");
         }
     }
 
@@ -1208,7 +1484,21 @@ impl StateStore {
     /// exists.
     pub fn read_task_output(&self, task_id: &str, max_preview_bytes: usize) -> Option<Value> {
         let path = self.task_output_path(task_id);
-        let data = fs::read(&path).ok()?;
+        let data = match fs::read(&path) {
+            Ok(data) => data,
+            // No log yet is the ordinary case for a task that never wrote one.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            // Any other failure is not "no output": reporting it as absent
+            // would tell the model the task produced nothing.
+            Err(error) => {
+                tracing::warn!(
+                    task_id,
+                    path = %path.display(),
+                    "task output exists but could not be read: {error}"
+                );
+                return None;
+            }
+        };
         let preview_limit = max_preview_bytes.min(data.len());
         let preview_offset = data.len() - preview_limit;
         let preview = String::from_utf8_lossy(&data[preview_offset..]).into_owned();
@@ -1236,7 +1526,20 @@ impl StateStore {
     ///
     /// Returns the paused snapshot when it had something to do.
     pub fn pause_goal_on_resume(&self) -> Option<crate::goal::GoalSnapshot> {
-        let mut state = self.read_goal_state()?;
+        // Resume-time housekeeping runs before the first turn, where the
+        // caller has no error channel yet; a failed read is logged and treated
+        // as "nothing to pause" rather than pausing over a file it could not
+        // read.
+        let lock = self.domain_lock("goal");
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = match self.read_goal_state() {
+            Ok(Some(state)) => state,
+            Ok(None) => return None,
+            Err(cause) => {
+                tracing::warn!(%cause, "goal state is unreadable; not pausing on resume");
+                return None;
+            }
+        };
         if state.status != GoalStatus::Active {
             return None;
         }
@@ -1247,7 +1550,7 @@ impl StateStore {
         state.status = GoalStatus::Paused;
         state.updated_at = now;
         let outcome = goal_outcome(&state, now);
-        if let Err(error) = self.write_domain("goal", &outcome.stored) {
+        if let Err(error) = self.write_domain_locked("goal", &outcome.stored) {
             tracing::warn!(%error, "could not persist the goal paused on resume");
             return None;
         }
@@ -1258,7 +1561,16 @@ impl StateStore {
     /// live wall-clock figure folded in for active goals. `None` when no
     /// goal is stored.
     pub fn goal_context(&self) -> Option<crate::turn_loop::types::GoalContext> {
-        let state = self.read_goal_state()?;
+        // The turn-loop hook has no error channel yet; a failed read is logged
+        // and the hook sees "no goal this turn" instead of an invented one.
+        let state = match self.read_goal_state() {
+            Ok(Some(state)) => state,
+            Ok(None) => return None,
+            Err(cause) => {
+                tracing::warn!(%cause, "goal state is unreadable; the turn sees no goal");
+                return None;
+            }
+        };
         let now = now_ms();
         let status = match state.status {
             GoalStatus::Active => crate::turn_loop::types::GoalStatus::Active,
@@ -1385,8 +1697,8 @@ fn ulid() -> String {
 }
 
 impl crate::injection::DomainValueSource for StateStore {
-    fn read_domain(&self, domain: &str) -> Option<serde_json::Value> {
-        StateStore::read_domain(self, domain)
+    fn read_domain_state(&self, domain: &str) -> ReadOutcome<serde_json::Value> {
+        StateStore::read_domain_state(self, domain)
     }
 }
 
@@ -1423,21 +1735,42 @@ pub fn read_scoped_state(
     workspace_root: &Path,
     session_id: Option<&str>,
     domain: &str,
-) -> Option<String> {
-    let workspace = || {
-        let store = StateStore::for_workspace(workspace_root).ok()?;
-        store.read_domain(domain)
+) -> Result<Option<String>, String> {
+    let encode = |value: Option<Value>| -> Result<Option<String>, String> {
+        match value {
+            None => Ok(None),
+            Some(value) => serde_json::to_string(&value)
+                .map(Some)
+                .map_err(|error| format!("cannot encode {domain} state: {error}")),
+        }
+    };
+    let workspace = || -> Result<Option<Value>, String> {
+        let store = StateStore::for_workspace(workspace_root)
+            .map_err(|error| format!("cannot locate the workspace state store: {error}"))?;
+        store
+            .read_domain_state(domain)
+            .into_result()
+            .map_err(|cause| cause.to_string())
     };
     let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
-        return serde_json::to_string(&workspace()?).ok();
+        return encode(workspace()?);
     };
     if domain == "cron" {
-        return serde_json::to_string(&workspace()?).ok();
+        return encode(workspace()?);
     }
-    let session = StateStore::for_session(workspace_root, session_id)
-        .ok()
-        .and_then(|store| store.read_domain(domain));
-    serde_json::to_string(&session.or_else(workspace)?).ok()
+    // A session with no store yet falls through to the workspace store; a
+    // session store that exists but cannot be read is an error.
+    let session = match StateStore::for_session(workspace_root, session_id) {
+        Ok(store) => store
+            .read_domain_state(domain)
+            .into_result()
+            .map_err(|cause| cause.to_string())?,
+        Err(_) => None,
+    };
+    encode(match session {
+        Some(value) => Some(value),
+        None => workspace()?,
+    })
 }
 
 /// Pop the newest `count` session-state checkpoints (native undo).
@@ -1468,10 +1801,19 @@ pub fn rollback_scoped_state(workspace_root: &Path, session_id: &str, count: usi
     rolled_back
 }
 
-pub fn read_workspace_state(workspace_root: &Path, domain: &str) -> Option<String> {
-    let store = StateStore::for_workspace(workspace_root).ok()?;
-    let value = store.read_domain(domain)?;
-    serde_json::to_string(&value).ok()
+pub fn read_workspace_state(workspace_root: &Path, domain: &str) -> Result<Option<String>, String> {
+    let store = StateStore::for_workspace(workspace_root)
+        .map_err(|error| format!("cannot locate the workspace state store: {error}"))?;
+    let Some(value) = store
+        .read_domain_state(domain)
+        .into_result()
+        .map_err(|cause| cause.to_string())?
+    else {
+        return Ok(None);
+    };
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|error| format!("cannot encode {domain} state: {error}"))
 }
 
 fn latest_checkpoint_seq(dir: &Path) -> Result<Option<u64>, String> {
@@ -1494,6 +1836,34 @@ fn count_checkpoint_files(dir: &Path) -> Result<usize, String> {
         }
     }
     Ok(n)
+}
+
+/// Delete all but the newest `max` snapshots, returning how many were removed.
+///
+/// The oldest entries are the ones undo can no longer reach, so they are the
+/// ones dropped. A file that cannot be removed is an error the caller reports:
+/// silently leaving it behind is how the stack looks bounded while the disk
+/// keeps growing.
+fn prune_checkpoint_files(dir: &Path, max: usize) -> Result<usize, String> {
+    let mut seqs: Vec<u64> = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("read checkpoints dir: {e}"))? {
+        let entry = entry.map_err(|e| format!("checkpoint dir entry: {e}"))?;
+        if let Some(seq) = parse_seq(&entry.file_name().to_string_lossy()) {
+            seqs.push(seq);
+        }
+    }
+    if seqs.len() <= max {
+        return Ok(0);
+    }
+    seqs.sort_unstable();
+    let remove_upto = seqs.len() - max;
+    let mut removed = 0usize;
+    for seq in &seqs[..remove_upto] {
+        fs::remove_file(checkpoint_path(dir, *seq))
+            .map_err(|e| format!("checkpoint remove seq {seq}: {e}"))?;
+        removed += 1;
+    }
+    Ok(removed)
 }
 
 fn parse_seq(name: &str) -> Option<u64> {
@@ -1578,11 +1948,21 @@ mod tests {
             .write_domain("todo", &todos)
             .unwrap();
 
-        let raw = read_workspace_state(workspace.path(), "todo").expect("the todo domain is set");
+        let raw = read_workspace_state(workspace.path(), "todo")
+            .expect("the state store must be readable")
+            .expect("the todo domain is set");
         assert_eq!(serde_json::from_str::<Value>(&raw).unwrap(), todos);
 
-        assert!(read_workspace_state(workspace.path(), "plan").is_none());
-        assert!(read_workspace_state(workspace.path(), "not-a-domain").is_none());
+        assert!(
+            read_workspace_state(workspace.path(), "plan")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            read_workspace_state(workspace.path(), "not-a-domain")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1614,7 +1994,11 @@ mod tests {
         ];
         for (domain, value) in cases {
             store.write_domain(domain, &value).unwrap();
-            assert_eq!(store.read_domain(domain), Some(value), "domain: {domain}");
+            assert_eq!(
+                store.read_domain_state(domain).into_result().unwrap(),
+                Some(value),
+                "domain: {domain}"
+            );
         }
     }
 
@@ -1633,7 +2017,11 @@ mod tests {
                 &json!([{ "id": "T2", "title": "Second", "status": "done" }]),
             )
             .unwrap();
-        let value = store.read_domain("todo").unwrap();
+        let value = store
+            .read_domain_state("todo")
+            .into_result()
+            .unwrap()
+            .unwrap();
         assert_eq!(value[0]["id"], "T2");
         assert_eq!(value[0]["title"], "Second");
         let leftovers: Vec<_> = fs::read_dir(store.state_dir())
@@ -1679,31 +2067,35 @@ mod tests {
             store.read_domain_state("not-a-domain"),
             DomainRead::Absent
         ));
-        assert_eq!(store.read_domain("todo"), None);
+        assert_eq!(store.read_domain_state("todo").into_result().unwrap(), None);
 
         // Corrupt: a truncated file (a crash or a shared volume cutting a
         // write short) must not read as "no todos".
         let todo_path = store.state_dir.join("todo.json");
         fs::write(&todo_path, "[{\"id\":\"T1\"").unwrap();
         let read = store.read_domain_state("todo");
-        assert!(read.is_corrupt(), "a truncated file must read as corrupt");
         assert!(
-            read.reason().is_some_and(|r| r.contains("todo.json")),
-            "the reason names the file: {:?}",
-            read.reason()
+            read.is_unreadable(),
+            "a truncated file must read as unreadable"
         );
-        // The lenient read still answers `None` for its existing callers, but
-        // the two states are now separable through the strict read.
-        assert_eq!(store.read_domain("todo"), None);
+        assert!(
+            read.cause()
+                .is_some_and(|cause| cause.subject.contains("todo.json")),
+            "the cause names the file: {:?}",
+            read.cause()
+        );
+        // The three states stay separable: an unreadable domain must not be
+        // reported as "no todos".
+        assert!(store.read_domain_state("todo").into_result().is_err());
 
         // Valid: the value round-trips and the file is no longer corrupt.
         let todos = json!([{ "id": "T1", "title": "Read" }]);
         store.write_domain("todo", &todos).unwrap();
         match store.read_domain_state("todo") {
-            DomainRead::Value(value) => assert_eq!(value, todos),
+            ReadOutcome::Found(value) => assert_eq!(value, todos),
             other => panic!("a reparsed file must read as a value, got {other:?}"),
         }
-        assert!(!store.read_domain_state("todo").is_corrupt());
+        assert!(!store.read_domain_state("todo").is_unreadable());
     }
 
     /// A corrupt domain must never enter a snapshot as `None`, because
@@ -1766,7 +2158,7 @@ mod tests {
             "[{\"id\":\"T1\",\"title\":",
             "the corrupt bytes must survive untouched"
         );
-        assert!(store.read_domain_state("todo").is_corrupt());
+        assert!(store.read_domain_state("todo").is_unreadable());
         assert_eq!(store.checkpoint_depth(), 0, "the snapshot is consumed");
 
         // A genuinely absent domain is still cleared by a snapshot recorded
@@ -1784,6 +2176,46 @@ mod tests {
             DomainRead::Absent
         ));
         assert!(!fresh_dir.join("plan.json").exists());
+    }
+
+    /// v2 registers goal and cron `undoable: false`: undoing a turn must not
+    /// rewind goal progress or cron schedules, while todo/task/turn/plan do
+    /// rewind. The checkpoint stack is the carrier of that distinction here.
+    #[test]
+    fn test_rollback_preserves_non_undoable_domains() {
+        let (_tmp, store) = store();
+
+        let todo_before = json!([{ "id": "T1", "title": "Read" }]);
+        let goal_before = json!({ "goal": { "goalId": "g1", "turnsUsed": 1 } });
+        let cron_before = json!([{ "id": "c1", "schedule": "@daily" }]);
+        store.write_domain("todo", &todo_before).unwrap();
+        store.write_domain("goal", &goal_before).unwrap();
+        store.write_domain("cron", &cron_before).unwrap();
+        store.checkpoint().unwrap();
+
+        let goal_after = json!({ "goal": { "goalId": "g1", "turnsUsed": 2 } });
+        let cron_after = json!([{ "id": "c2", "schedule": "@hourly" }]);
+        store.write_domain("todo", &json!([])).unwrap();
+        store.write_domain("goal", &goal_after).unwrap();
+        store.write_domain("cron", &cron_after).unwrap();
+
+        assert!(store.rollback().unwrap());
+
+        assert_eq!(
+            store.read_domain_state("todo").into_result().unwrap(),
+            Some(todo_before),
+            "undoable domains are restored to the checkpoint"
+        );
+        assert_eq!(
+            store.read_domain_state("goal").into_result().unwrap(),
+            Some(goal_after),
+            "goal progress is undoable:false in v2 and must survive undo"
+        );
+        assert_eq!(
+            store.read_domain_state("cron").into_result().unwrap(),
+            Some(cron_after),
+            "cron schedules are undoable:false in v2 and must survive undo"
+        );
     }
 
     /// Two in-process writers of one domain must not share a staging file:
@@ -1820,8 +2252,9 @@ mod tests {
         // Whatever won the last rename, the file is one complete value.
         let read = store.read_domain_state("todo");
         let value = read
-            .value()
-            .expect("the file parses after concurrent writes");
+            .into_result()
+            .expect("the file parses after concurrent writes")
+            .expect("the file is present after concurrent writes");
         let id = value[0]["id"].as_str().expect("a complete todo entry");
         assert!(id == "T1" || id == "T2", "torn write: {value}");
         let leftovers: Vec<_> = fs::read_dir(store.state_dir())
@@ -1857,10 +2290,13 @@ mod tests {
             );
             let new = json!([{ "id": "T2", "status": "completed" }]);
             store.write_domain("todo", &new).unwrap();
-            assert_eq!(store.read_domain("todo"), Some(new.clone()));
+            assert_eq!(
+                store.read_domain_state("todo").into_result().unwrap(),
+                Some(new.clone())
+            );
             assert!(store.rollback().unwrap());
             assert_eq!(
-                store.read_domain("todo"),
+                store.read_domain_state("todo").into_result().unwrap(),
                 Some(todo.clone()),
                 "rollback restores the pre-checkpoint value"
             );
@@ -1902,6 +2338,30 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_stack_is_capped_at_the_v2_window() {
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        let store = StateStore::for_dir(state_dir.clone()).unwrap();
+        for _ in 0..(STATE_CHECKPOINT_MAX_ENTRIES + 5) {
+            store.checkpoint().unwrap();
+        }
+        assert_eq!(
+            store.checkpoint_depth(),
+            STATE_CHECKPOINT_MAX_ENTRIES,
+            "the stack must not grow past the v2 window"
+        );
+        // The newest snapshots are the ones kept: the oldest five are gone.
+        let dir = state_dir.join("checkpoints");
+        assert!(!checkpoint_path(&dir, 1).exists());
+        assert!(!checkpoint_path(&dir, 5).exists());
+        assert!(checkpoint_path(&dir, 6).exists());
+        assert!(checkpoint_path(&dir, 25).exists());
+        // Undo still works against the retained window.
+        assert!(store.rollback().unwrap());
+        assert_eq!(store.checkpoint_depth(), STATE_CHECKPOINT_MAX_ENTRIES - 1);
+    }
+
+    #[test]
     fn test_clear_domain_restores_default() {
         let (_tmp, store) = store();
         store
@@ -1911,7 +2371,7 @@ mod tests {
             )
             .unwrap();
         store.clear_domain("todo").unwrap();
-        assert_eq!(store.read_domain("todo"), None);
+        assert_eq!(store.read_domain_state("todo").into_result().unwrap(), None);
         assert_eq!(store.read_state("todo", "todo").unwrap(), json!([]));
         // Clearing an already-empty domain is a no-op, not an error.
         store.clear_domain("cron").unwrap();
@@ -2414,7 +2874,10 @@ mod tests {
             )
             .unwrap();
         store.write_domain("goal", &outcome.stored).unwrap();
-        let after = store.read_goal_state().expect("still stored");
+        let after = store
+            .read_goal_state()
+            .expect("the goal domain must be readable")
+            .expect("still stored");
         assert!(after.wall_clock_resumed_at.is_some());
     }
 
@@ -2455,7 +2918,10 @@ mod tests {
         assert_eq!(paused.wall_clock_ms, 2500, "offline time is not charged");
         assert!(!paused.budget.wall_clock_budget_reached);
 
-        let state = store.read_goal_state().expect("still stored");
+        let state = store
+            .read_goal_state()
+            .expect("the goal domain must be readable")
+            .expect("still stored");
         assert_eq!(state.status, GoalStatus::Paused);
         assert_eq!(state.wall_clock_ms, 2500);
         assert!(
@@ -2629,12 +3095,17 @@ mod tests {
                 turn_id,
                 prompt_id: None,
                 origin: json!({ "kind": "user" }),
+                prompt: None,
+                prompt_attachments: None,
             });
             store.fold_turn_event(&TurnEvent::Ended {
                 turn_id,
                 reason: TurnEndReason::Completed,
                 error: None,
                 duration_ms: Some(5),
+                interrupt_reason: None,
+                trace_id: None,
+                stop_reason: None,
             });
         }
         let state = store.read_state("turn", "").unwrap();
@@ -2705,10 +3176,12 @@ mod tests {
             )
             .unwrap();
 
-        let diff = store.diff_domain(
-            "plan",
-            &json!({ "active": false, "id": "p-1", "path": "/path/p-1.md" }),
-        );
+        let diff = store
+            .diff_domain(
+                "plan",
+                &json!({ "active": false, "id": "p-1", "path": "/path/p-1.md" }),
+            )
+            .unwrap();
         assert!(!diff.is_empty());
 
         let (patched, inverse) = store.patch_domain("plan", &diff).unwrap();
@@ -2737,13 +3210,79 @@ mod tests {
 
         // One undone turn restores the second snapshot, not the first.
         assert_eq!(rollback_scoped_state(workspace.path(), "session-a", 1), 1);
-        assert_eq!(store.read_domain("todo"), Some(second.clone()));
+        assert_eq!(
+            store.read_domain_state("todo").into_result().unwrap(),
+            Some(second.clone())
+        );
         assert_eq!(rollback_scoped_state(workspace.path(), "session-a", 1), 1);
-        assert_eq!(store.read_domain("todo"), Some(first));
+        assert_eq!(
+            store.read_domain_state("todo").into_result().unwrap(),
+            Some(first)
+        );
         // The stack is exhausted now: an over-deep undo stops quietly.
         assert_eq!(rollback_scoped_state(workspace.path(), "session-a", 5), 0);
         // Another session of the same workspace has its own stack.
         assert_eq!(rollback_scoped_state(workspace.path(), "session-b", 1), 0);
+    }
+
+    /// A `task.json` that parses but is not a list is malformed, not empty.
+    /// Reading it as "no tasks" made every task look absent and let the next
+    /// write replace the file, so both the read and the write must fail and
+    /// leave the bytes alone.
+    #[test]
+    fn a_malformed_task_list_is_refused_instead_of_read_as_empty() {
+        let (_tmp, store) = store();
+        let path = store.domain_file("task").unwrap();
+        let original = json!({ "taskId": "task-1", "status": "running" });
+        fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let read = store.read_state("task", "task-1").unwrap_err();
+        assert!(read.contains("malformed"), "{read}");
+
+        let write = store
+            .apply_write_and_persist("task", &json!({ "action": "stop", "id": "task-1" }))
+            .unwrap_err();
+        assert!(write.contains("malformed"), "{write}");
+
+        // The refused write must not have replaced the only copy.
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after, original);
+    }
+
+    /// Same rule for `cron.json`: a wrong-shaped file is an error, not an
+    /// empty schedule that the next create/delete overwrites.
+    #[test]
+    fn a_malformed_cron_list_is_refused_instead_of_replaced() {
+        let (_tmp, store) = store();
+        let path = store.domain_file("cron").unwrap();
+        let original = json!({ "entries": [] });
+        fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let create = store
+            .apply_write_and_persist(
+                "cron",
+                &json!({ "action": "create", "cron": "*/5 * * * *", "prompt": "tick" }),
+            )
+            .unwrap_err();
+        assert!(create.contains("malformed"), "{create}");
+        let delete = store
+            .apply_write_and_persist("cron", &json!({ "action": "delete", "id": "cron-1" }))
+            .unwrap_err();
+        assert!(delete.contains("malformed"), "{delete}");
+
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after, original);
+    }
+
+    /// An unlistable checkpoint stack reports zero (the host has no error
+    /// channel) but must not take the process down.
+    #[test]
+    fn checkpoint_depth_reports_zero_when_the_stack_cannot_be_listed() {
+        let (_tmp, store) = store();
+        store.checkpoint().unwrap();
+        assert_eq!(store.checkpoint_depth(), 1);
+        fs::remove_dir_all(&store.checkpoints_dir).unwrap();
+        assert_eq!(store.checkpoint_depth(), 0);
     }
 }
 
@@ -2916,5 +3455,45 @@ mod goal_usage_tests {
                 .is_err(),
             "empty is refused"
         );
+    }
+
+    /// The turn pipeline and the task runner write the same goal domain from
+    /// separate tasks. Two writers folding usage must not lose an update: the
+    /// read-modify-write and the persist are one locked transaction via
+    /// `apply_write_and_persist`, which is what the production callers use.
+    #[test]
+    fn concurrent_usage_folds_do_not_lose_a_write() {
+        let (_tmp, store) = store();
+        let store = std::sync::Arc::new(store);
+        store
+            .apply_write_and_persist("goal", &json!({ "action": "create", "objective": "Count" }))
+            .unwrap();
+
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let store = std::sync::Arc::clone(&store);
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        store
+                            .apply_write_and_persist(
+                                "goal",
+                                &json!({ "action": "record_usage", "turns": 1, "output_tokens": 1 }),
+                            )
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let stored = store
+            .read_domain_state("goal")
+            .into_result()
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored["goal"]["tokensUsed"], json!(100));
+        assert_eq!(stored["goal"]["turnsUsed"], json!(100));
     }
 }

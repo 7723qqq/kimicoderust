@@ -1,19 +1,15 @@
-//! Declarative specs for the 34 GitHub tools (table split out of `github.rs`).
-
-/// Argument kind used for validation and JSON-schema generation.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FieldKind {
-    /// String, min length 1.
     Str,
-    /// String, any length.
+
     StrAny,
-    /// Integer.
+
     Int,
-    /// Boolean.
+
     Bool,
-    /// Array of strings.
+
     StrArray,
-    /// Array of tree-entry objects (GitHubCreateTree).
+
     TreeArray,
 }
 
@@ -31,21 +27,20 @@ pub(super) struct GitHubToolSpec {
     pub(super) name: &'static str,
     pub(super) description: &'static str,
     pub(super) method: &'static str,
-    /// Path template with `{arg}` placeholders (v2 path fn).
+
     pub(super) path: &'static str,
-    /// `(arg key, query key)` pairs (v2 query fn).
+
     pub(super) query: &'static [(&'static str, &'static str)],
-    /// `(arg key, body key)` pairs (v2 body fn).
+
     pub(super) body: &'static [(&'static str, &'static str)],
-    /// `(body key, arg name)` pairs whose value is base64-encoded (v2 Buffer.from).
+
     pub(super) body_base64: &'static [(&'static str, &'static str)],
-    /// `(body key, arg name, prefix)` — body value is `prefix + arg` (v2 template).
+
     pub(super) body_prefix: &'static [(&'static str, &'static str, &'static str)],
     pub(super) accept: Option<&'static str>,
     pub(super) fields: &'static [Field],
 }
 
-/// Tree-entry fields for GitHubCreateTree (v2 nested zod object).
 pub(super) static TREE_ENTRY_FIELDS: &[Field] = &[
     Field {
         name: "path",
@@ -94,8 +89,6 @@ pub(super) static TREE_ENTRY_FIELDS: &[Field] = &[
     },
 ];
 
-/// The 34 GitHub tool specs, carried over verbatim from the fork's retired v1
-/// `packages/agent-core` `github-tools.ts`.
 pub(super) static SPECS: &[GitHubToolSpec] = &[
     GitHubToolSpec {
         name: "GitHubGetRepo",

@@ -9,7 +9,9 @@
 use super::{Message, MessageRole};
 use std::collections::HashSet;
 
-pub const TOOL_INTERRUPTED_ON_RESUME_OUTPUT: &str = "Tool execution was interrupted before its result was recorded. Do not assume the tool completed successfully.";
+/// v2 `TOOL_INTERRUPTED_TEXT` (`contextProjector/projection.ts:394-395`).
+/// Re-exported so a replay and a live request synthesize the same sentence.
+pub const TOOL_INTERRUPTED_ON_RESUME_OUTPUT: &str = crate::llm::wire::TOOL_INTERRUPTED_TEXT;
 
 /// The low-level events a recorded single-step loop emits (aligned with TS
 /// `LoopRecordedEvent`)
@@ -303,9 +305,13 @@ impl<S: LoopEventFoldSink> LoopEventFold<S> {
         }
     }
 
-    /// Wrap up at session settle time (aligned with TS `settle`)
+    /// Wrap up at session settle time (aligned with TS `settle` =
+    /// `settleOpen(); flushDeferred()`): inputs parked while a tool was pending
+    /// must still land after the self-healed result, or a resumed session loses
+    /// everything the user said during the last interrupted step.
     pub fn settle(&mut self) {
         self.settle_open();
+        self.flush_deferred();
     }
 
     /// Reset the state machine (aligned with TS `reset`)
@@ -396,6 +402,39 @@ mod tests {
     }
 
     #[test]
+    fn test_settle_flushes_messages_deferred_behind_an_interrupted_tool() {
+        let mut fold = LoopEventFold::new(VectorFoldSink::new());
+        fold.loop_event(LoopRecordedEvent::StepBegin {
+            uuid: "step_1".into(),
+            turn_id: None,
+            step: None,
+        });
+        fold.loop_event(LoopRecordedEvent::ToolCall {
+            step_uuid: "step_1".into(),
+            tool_call_id: "call_1".into(),
+            name: "calc".into(),
+            arguments: None,
+        });
+        fold.append_message(MessageRole::User, "never mind".into());
+        // The turn is interrupted: the step stays open and the input stays
+        // deferred until settle.
+        fold.loop_event(LoopRecordedEvent::StepEnd {
+            uuid: "step_1".into(),
+            finish_reason: Some("interrupted".into()),
+        });
+        fold.settle();
+
+        let msgs = fold.into_sink().messages;
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, MessageRole::Assistant);
+        assert_eq!(msgs[1].role, MessageRole::Tool);
+        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(msgs[1].content, TOOL_INTERRUPTED_ON_RESUME_OUTPUT);
+        assert_eq!(msgs[2].role, MessageRole::User);
+        assert_eq!(msgs[2].content, "never mind");
+    }
+
+    #[test]
     fn test_loop_fold_drop_vacuous_assistant() {
         let sink = VectorFoldSink::new();
         let mut fold = LoopEventFold::new(sink);
@@ -455,6 +494,6 @@ mod tests {
         // synthesizing an interrupted result
         assert_eq!(msgs[1].role, MessageRole::Tool);
         assert_eq!(msgs[1].tool_call_id.as_deref(), Some("hang_call_1"));
-        assert!(msgs[1].content.contains("Tool execution was interrupted"));
+        assert_eq!(msgs[1].content, TOOL_INTERRUPTED_ON_RESUME_OUTPUT);
     }
 }

@@ -1,18 +1,5 @@
-//! The `read` action's result shape, from v2
-//! `app/memory/tools/memoryTool.ts:215-234`.
-//!
-//! v2 renders seven lines — a title header, four metadata lines, a blank line,
-//! then the body. This module owns only that rendering and the two refusal
-//! sentences; `memory_read_handler` wires it to the store.
-//!
-//! The fork has no `MemoryEntry` with `scopeId` / `updatedAt`, so the caller
-//! passes the pieces it can supply. `scope_id` renders the v2 parenthesised
-//! suffix only when non-empty, and `updated` is an ISO-8601 timestamp the
-//! caller formats from file metadata.
-
 use crate::i18n::{LocalizedText, i18n_params};
 
-/// v2 `normalizePath`: a `.md` suffix is optional in the model's `path`.
 pub fn normalize_path(path: &str) -> String {
     if path.ends_with(".md") {
         path.to_string()
@@ -21,19 +8,15 @@ pub fn normalize_path(path: &str) -> String {
     }
 }
 
-/// v2 `toolsV2.memory.readPathRequired`. Engine-owned catalog namespace.
 pub fn read_path_required() -> String {
     LocalizedText::new("engine.tools.memory.readPathRequired").render()
 }
 
-/// v2 `toolsV2.memory.notFound`, with the normalized path interpolated.
 pub fn not_found(path: &str) -> String {
     LocalizedText::with_params("engine.tools.memory.notFound", i18n_params!["path" => path])
         .render()
 }
 
-/// The seven-line result v2's `handleRead` returns. `body` is appended after
-/// a blank line and is never trimmed — the model gets the file verbatim.
 pub fn render_read(
     path: &str,
     scope: &str,

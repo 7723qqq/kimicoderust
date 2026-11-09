@@ -1,15 +1,3 @@
-//! WebSearch — Bing HTML scraping without API keys, with a Bing Web Search
-//! API backup.
-//!
-//! Ported for `kimi-agent` (P26 批 2). GETs a search query to Bing, parses
-//! HTML results with `scraper`, and formats them for the LLM.
-//! When the host resolves a `[services.moonshot_search]` backend (v2
-//! `configSection.ts`), the Moonshot service is called instead: `POST
-//! {base_url}` with `{"text_query": …}` and a bearer credential, response
-//! `{ "search_results": […] }` (v2 `MoonshotWebSearchProvider`).
-//! When the Bing HTML scrape fails and a `[services.bing_api]` backend is
-//! configured, the Bing Web Search API is the fallback.
-
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -32,8 +20,6 @@ const SOGOU_HTML_URL: &str = "https://www.sogou.com/web";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_RESULTS: usize = 10;
 
-/// A key-free search engine. The active engine is process-global and can be
-/// switched at runtime (AI tool or host napi call) without a restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchEngine {
     Bing,
@@ -63,14 +49,9 @@ impl SearchEngine {
 static ACTIVE_ENGINE: LazyLock<Mutex<SearchEngine>> =
     LazyLock::new(|| Mutex::new(SearchEngine::Bing));
 
-/// Shared Bing cookie store. Bing personalizes results based on cookies; a
-/// persistent store lets the tool behave like a returning browser rather than
-/// a first-time visitor (which gets generic, less relevant results).
 static BING_COOKIES: LazyLock<std::sync::Arc<reqwest::cookie::Jar>> =
     LazyLock::new(|| std::sync::Arc::new(reqwest::cookie::Jar::default()));
 
-/// Switch the active search engine at runtime. Returns `false` if the name is
-/// not a known engine.
 pub fn set_active_engine(engine: SearchEngine) {
     *ACTIVE_ENGINE.lock().unwrap() = engine;
 }
@@ -100,17 +81,11 @@ impl From<SearchResult> for WebSearchResultEntry {
     }
 }
 
-/// One host-resolved `[services.moonshot_search]` backend (v2
-/// `MoonshotWebSearchProvider`). Set per pipeline build from session params;
-/// the tool consults it at execution time.
 pub type WebSearchServiceConfig = MoonshotServiceConfig;
 
 static SERVICE_CONFIG: LazyLock<Mutex<Option<MoonshotServiceConfig>>> =
     LazyLock::new(|| Mutex::new(None));
 
-/// Install (or clear with `None`) the host-resolved Moonshot search backend.
-/// Always installed per pipeline build — including `None` — so a backend
-/// resolved for one session never leaks into the next.
 pub fn set_service_config(config: Option<MoonshotServiceConfig>) {
     moonshot_service::install(&SERVICE_CONFIG, config);
 }
@@ -119,9 +94,6 @@ fn service_config() -> Option<MoonshotServiceConfig> {
     moonshot_service::current(&SERVICE_CONFIG)
 }
 
-/// One host-resolved `[services.bing_api]` backend — the Bing Web Search API
-/// fallback when the HTML scrape fails. Distinct from the Moonshot backend:
-/// Bing authenticates with `Ocp-Apim-Subscription-Key`, not a bearer token.
 #[derive(Debug, Clone)]
 pub struct BingApiConfig {
     pub base_url: String,
@@ -139,9 +111,6 @@ impl Default for BingApiConfig {
 
 static BING_API_CONFIG: LazyLock<Mutex<Option<BingApiConfig>>> = LazyLock::new(|| Mutex::new(None));
 
-/// Install (or clear with `None`) the Bing API backend. Always installed per
-/// pipeline build — including `None` — so a backend resolved for one session
-/// never leaks into the next.
 pub fn set_bing_api_config(config: Option<BingApiConfig>) {
     let mut guard = BING_API_CONFIG.lock().unwrap();
     *guard = config;
@@ -151,8 +120,6 @@ fn bing_api_config() -> Option<BingApiConfig> {
     BING_API_CONFIG.lock().unwrap().clone()
 }
 
-/// Build the Moonshot search request: body, URL, and headers (bearer,
-/// content-type, optional tool-call id, custom headers win).
 pub fn moonshot_search_request_parts(
     config: &MoonshotServiceConfig,
     query: &str,
@@ -165,8 +132,6 @@ pub fn moonshot_search_request_parts(
     (config.base_url.clone(), body, headers)
 }
 
-/// Parse a Moonshot search response (`{"search_results": […]}`) into the
-/// tool's result entries, mirroring v2's field mapping and defaults.
 pub fn parse_moonshot_search_response(body: &str) -> Result<Vec<WebSearchResultEntry>, String> {
     let json: Value = serde_json::from_str(body).map_err(|e| {
         LocalizedText::with_params("engine.tools.webSearch.invalidJson", i18n_params!["e" => e])
@@ -253,10 +218,6 @@ async fn search_via_moonshot(
     query: &str,
     tool_call_id: Option<&str>,
 ) -> Option<ExecutableToolResult> {
-    // A missing credential is a tool error here, not a fallback: when a
-    // search backend is configured it *replaces* the DDG scrape, so there
-    // is nothing to fall back to. FetchURL differs — its service is tried
-    // first with the direct fetch as fallback.
     let Some(api_key) = moonshot_service::non_blank_key(&config.api_key) else {
         return Some(err_result(
             LocalizedText::new("engine.tools.webSearch.missingApiKey").render(),
@@ -310,9 +271,6 @@ async fn search_via_moonshot(
         }
     };
     if status.as_u16() != 200 {
-        // v2 errors on any non-200 (401 gets the auth qualifier); the
-        // service replaces the scrape, so this is a tool error, not a
-        // fallback.
         let qualifier = if status.as_u16() == 401 {
             " (auth/unauthorized)"
         } else {
@@ -337,6 +295,8 @@ async fn search_via_moonshot(
     };
     if results.is_empty() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "No search results found.".to_string(),
@@ -346,6 +306,8 @@ async fn search_via_moonshot(
         });
     }
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: format_search_results(results),
@@ -355,9 +317,6 @@ async fn search_via_moonshot(
     })
 }
 
-/// Bing Web Search API fallback. Runs only when the HTML scrape failed and
-/// a `[services.bing_api]` backend is configured. Bing authenticates with
-/// `Ocp-Apim-Subscription-Key`, not a bearer token.
 async fn search_via_bing_api(
     query: &str,
     tool_call_id: Option<&str>,
@@ -444,6 +403,8 @@ async fn search_via_bing_api(
     };
     if results.is_empty() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "No search results found.".to_string(),
@@ -453,6 +414,8 @@ async fn search_via_bing_api(
         });
     }
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: format_search_results(results),
@@ -462,7 +425,6 @@ async fn search_via_bing_api(
     })
 }
 
-/// Parse a Bing Web Search API response (`{"webPages":{"value":[…]}}`).
 pub fn parse_bing_api_response(body: &str) -> Result<Vec<WebSearchResultEntry>, String> {
     let json: Value = serde_json::from_str(body).map_err(|e| {
         LocalizedText::with_params("engine.tools.webSearch.invalidJson", i18n_params!["e" => e])
@@ -502,6 +464,8 @@ pub async fn execute_web_search(
     let query = args.get("query")?.as_str()?;
     if query.trim().is_empty() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: LocalizedText::new("engine.tools.webSearch.emptyQuery").render(),
@@ -511,14 +475,10 @@ pub async fn execute_web_search(
         });
     }
 
-    // A host-resolved `[services.moonshot_search]` backend replaces the Bing
-    // scrape (v2 `WebSearchProviderService.fromServicesConfig`).
     if let Some(config) = service_config() {
         return search_via_moonshot(&config, query, tool_call_id).await;
     }
 
-    // Primary: key-free HTML scrape via the active engine. Call once; on
-    // failure fall back to the Bing API, then return the HTML error.
     let html_result = match active_engine() {
         SearchEngine::Bing => search_via_bing_html(query).await,
         SearchEngine::Ddg => search_via_ddg_html(query).await,
@@ -533,7 +493,6 @@ pub async fn execute_web_search(
     html_result
 }
 
-/// Bing HTML scrape: GET the search page and parse `li.b_algo` results.
 async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
     let client = match reqwest::Client::builder()
         .user_agent(BING_USER_AGENT)
@@ -545,6 +504,8 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(c) => c,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -584,6 +545,8 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
                 .render()
             };
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: msg,
@@ -597,6 +560,8 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
     let status = response.status();
     if !status.is_success() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: LocalizedText::with_params(
@@ -614,6 +579,8 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(t) => t,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -636,6 +603,8 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(res) => res,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -650,14 +619,13 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
         }
     };
 
-    // Detect Bing's "hot feed" fallback: for an English technical query that
-    // Bing cannot match, it returns Chinese Q&A/encyclopedia content that
-    // looks like real results. Report failure instead of feeding it to the model.
     if crate::native::web_search::is_hot_feed_fallback(
         query,
         &results.iter().map(|r| r.url.clone()).collect::<Vec<_>>(),
     ) {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: LocalizedText::new("engine.tools.webSearch.hotFeedFallback").render(),
@@ -669,6 +637,8 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
 
     if results.is_empty() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "No search results found.".to_string(),
@@ -678,9 +648,9 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
         });
     }
 
-    // One renderer for both paths (v2 formats in `webSearchTool`); Bing
-    // entries carry no date, so no `Date:` line is emitted for them.
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: format_search_results(results),
@@ -690,7 +660,6 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
     })
 }
 
-/// DuckDuckGo HTML scrape: POST form-encoded query, parse `div.result`.
 async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
     let client = match reqwest::Client::builder()
         .user_agent(DDG_USER_AGENT)
@@ -700,6 +669,8 @@ async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(c) => c,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -739,6 +710,8 @@ async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
                 .render()
             };
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: msg,
@@ -752,6 +725,8 @@ async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
     let status = response.status();
     if !status.is_success() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: LocalizedText::with_params(
@@ -769,6 +744,8 @@ async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(t) => t,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -791,6 +768,8 @@ async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(res) => res,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -807,6 +786,8 @@ async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
 
     if results.is_empty() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "No search results found.".to_string(),
@@ -817,6 +798,8 @@ async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
     }
 
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: format_search_results(results),
@@ -826,7 +809,6 @@ async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
     })
 }
 
-/// Sogou HTML scrape: GET the search page and parse `div.vrwrap` results.
 async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
     let client = match reqwest::Client::builder()
         .user_agent(BING_USER_AGENT)
@@ -838,6 +820,8 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(c) => c,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -876,6 +860,8 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
                 .render()
             };
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: msg,
@@ -889,6 +875,8 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
     let status = response.status();
     if !status.is_success() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: LocalizedText::with_params(
@@ -906,6 +894,8 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(t) => t,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -928,6 +918,8 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
         Ok(res) => res,
         Err(e) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -944,6 +936,8 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
 
     if results.is_empty() {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "No search results found.".to_string(),
@@ -954,6 +948,8 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
     }
 
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: format_search_results(results),
@@ -962,12 +958,6 @@ async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
         display: None,
     })
 }
-
-// ── HTML Parsing ─────────────────────────────────────────────────────────────
-//
-// The Bing scrape (selectors, URL encoding) lives in `native::web_search` so
-// the workflow `SearchProvider` and this tool share one implementation. This
-// module only maps `SearchResult` into its own entry type via `From` above.
 
 #[cfg(test)]
 mod tests {
@@ -998,7 +988,7 @@ mod tests {
         assert!(headers.contains(&("Content-Type".to_string(), "application/json".to_string())));
         assert!(headers.contains(&("X-Msh-Tool-Call-Id".to_string(), "call-1".to_string())));
         assert!(headers.contains(&("X-Trace".to_string(), "t1".to_string())));
-        // No call id (or a blank one) → no header, mirroring v2.
+
         let (_, _, headers) = moonshot_search_request_parts(&config, "rust tokio", "sk-test", None);
         assert!(!headers.iter().any(|(k, _)| k == "X-Msh-Tool-Call-Id"));
         let (_, _, headers) =
@@ -1020,7 +1010,7 @@ mod tests {
         assert_eq!(results[1].site_name, None);
         assert_eq!(results[1].date, None);
         assert_eq!(results[1].url, "");
-        // v2 renders `Date:` between Site and URL.
+
         let rendered = format_search_results(results);
         assert!(rendered.contains("Date: 2026-01-01\n"));
     }

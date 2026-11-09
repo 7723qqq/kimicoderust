@@ -1,8 +1,6 @@
 use super::super::*;
 use super::*;
 
-/// LLM that answers with one assistant text on the first call, then
-/// stops (a subagent that "summarizes" immediately).
 pub(super) struct SummaryLlm;
 impl LLM for SummaryLlm {
     fn system_prompt(&self) -> &str {
@@ -31,8 +29,6 @@ impl LLM for SummaryLlm {
     }
 }
 
-/// LLM whose every answer is one tool call, forcing a long loop for
-/// timeout tests.
 pub(super) struct ToolForeverLlm;
 impl LLM for ToolForeverLlm {
     fn system_prompt(&self) -> &str {
@@ -99,8 +95,6 @@ impl HostCallbacks for NoopCallbacks {
         Box::pin(async { Err("not used".into()) })
     }
     fn list_tools(&self) -> BoxFuture<'static, Result<ListToolsResponse, String>> {
-        // A real table so tool-looping LLMs actually schedule calls
-        // (the default error seam empties the table and ends the turn).
         Box::pin(async {
             Ok(ListToolsResponse {
                 tools: ["echo", "TaskList", "TaskOutput", "TaskStop"]
@@ -116,9 +110,6 @@ impl HostCallbacks for NoopCallbacks {
     }
 }
 
-/// A live table with only two of the three tools v2 requires for background
-/// agents. The caller profile still declares all three, so this isolates the
-/// runtime-availability half of the gate.
 pub(super) struct MissingTaskOutputCallbacks;
 impl HostCallbacks for MissingTaskOutputCallbacks {
     fn llm_chat(
@@ -169,8 +160,6 @@ pub(super) async fn manager_with(llm: Arc<dyn LLM>) -> Arc<SubagentManager> {
     manager
 }
 
-/// Register a profile without an allowlist so the looping LLM's `echo`
-/// tool survives the profile filter.
 pub(super) async fn register_looper(manager: &SubagentManager) {
     manager
         .register_discovered_definition(crate::subagent::types::SubagentDefinition {
@@ -188,28 +177,19 @@ pub(super) async fn register_looper(manager: &SubagentManager) {
         .await;
 }
 
-/// Runs a block as the main agent, so any subagent it spawns records main
-/// as its parent.
-///
-/// v2 refuses to resume an agent with no owner (`AGENT_NOT_A_SUBAGENT` /
-/// `AGENT_NOT_OWNED`), so a resume test has to own what it resumes — in
-/// production the spawner always runs inside some agent's turn.
 pub(super) async fn as_main_agent<F: std::future::Future>(fut: F) -> F::Output {
     crate::tools::CALLER_AGENT_ID
         .scope(crate::callbacks::MAIN_AGENT_ID.to_string(), fut)
         .await
 }
 
-/// LLM that records the user content of every chat call, so tests can
-/// assert the prompt prefix and the continuation turn reached the model.
 pub(super) struct RecordingPromptLlm {
     pub(super) prompts: Mutex<Vec<String>>,
     pub(super) messages_sent: Mutex<Vec<Vec<crate::turn_loop::types::LLMMessage>>>,
-    /// Content returned per call (cycled on the last entry).
+
     pub(super) responses: Vec<String>,
     pub(super) calls: Mutex<usize>,
-    /// `[models.<alias>]` name the transport would report (`LLM::model_alias`).
-    /// `None` mirrors a transport that only knows the wire model name.
+
     pub(super) alias: Option<String>,
 }
 
@@ -287,7 +267,6 @@ impl LLM for RecordingPromptLlm {
     }
 }
 
-/// [`NoopCallbacks`] that records the `emit_event` payloads.
 pub(super) struct EventRecorder {
     pub(super) inner: NoopCallbacks,
     pub(super) events: Mutex<Vec<serde_json::Value>>,
@@ -360,7 +339,6 @@ pub(super) async fn manager_with_callbacks(
     manager
 }
 
-/// Build a pool runtime whose `strong` alias binds `alias_llm`.
 pub(super) fn pool_runtime(alias_llm: Arc<RecordingPromptLlm>) -> SecondaryModelRuntime {
     let config = SecondaryModelPool {
         default_model: "strong".into(),

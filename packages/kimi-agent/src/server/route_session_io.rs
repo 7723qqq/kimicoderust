@@ -17,16 +17,28 @@ impl HttpServer {
                         .is_some_and(|v| v == "true" || v == "1"),
                 };
                 match self.store.export_session(session_id) {
-                    Ok(Some(export)) => match build_session_export_zip(&export, &options) {
-                        Ok(archive) => HttpResponse::bytes(200, "application/zip", archive)
-                            .with_header(
-                                "Content-Disposition",
-                                format!("attachment; filename=\"{session_id}.zip\""),
-                            ),
-                        Err(e) => HttpResponse::internal_error(format!(
-                            "Failed to build the export archive: {e}"
-                        )),
-                    },
+                    Ok(Some(export)) => {
+                        let session_log = self
+                            .engine
+                            .as_ref()
+                            .and_then(|engine| engine.session_log_path(session_id));
+                        match build_session_export_zip(&export, &options, session_log.as_deref()) {
+                            Ok(archive) => HttpResponse::bytes(200, "application/zip", archive)
+                                .with_header(
+                                    "Content-Disposition",
+                                    // v2 `defaultExportZipName`:
+                                    // `kimi-debug-<id8>-<YYYYMMDD-HHMMSS>.zip`.
+                                    format!(
+                                        "attachment; filename=\"kimi-debug-{}-{}.zip\"",
+                                        session_id.chars().take(8).collect::<String>(),
+                                        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+                                    ),
+                                ),
+                            Err(e) => HttpResponse::internal_error(format!(
+                                "Failed to build the export archive: {e}"
+                            )),
+                        }
+                    }
                     Ok(None) => HttpResponse::not_found(),
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
                 }
@@ -141,11 +153,33 @@ impl HttpServer {
                     .flatten()
                     .unwrap_or(session);
 
+                // v2 `SessionMetaUpdated` carries the main agent id, the
+                // (possibly updated) title, and the host patch. Derive
+                // `isCustomTitle` from the stored kind rather than trusting the
+                // patch, so a client that omits it still folds the right state.
+                let mut meta_patch = body.clone();
+                if let Some(patch_object) = meta_patch.as_object_mut() {
+                    patch_object.insert(
+                        "isCustomTitle".to_string(),
+                        json!(updated_session.is_custom_title()),
+                    );
+                    if let Some(prompt) = &updated_session.last_prompt {
+                        patch_object
+                            .entry("lastPrompt".to_string())
+                            .or_insert_with(|| json!(prompt));
+                    }
+                    if let Some(kind) = updated_session.normalized_title_kind() {
+                        patch_object
+                            .entry("titleKind".to_string())
+                            .or_insert_with(|| json!(kind));
+                    }
+                }
                 let meta_event = json!({
                     "type": "session.meta.updated",
+                    "agentId": crate::callbacks::MAIN_AGENT_ID,
                     "sessionId": session_id,
                     "title": updated_session.title,
-                    "patch": body,
+                    "patch": meta_patch,
                 });
                 self.hub
                     .bus_for(session_id)

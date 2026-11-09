@@ -1,42 +1,7 @@
-//! Tool-call dedup guard — native mirror of v2 `toolDedupeService` (G-6 #2).
-//!
-//! Two responsibilities, both driven from `run_turn`'s step flow:
-//! - **same-step dedup**: a call whose key (tool name + canonical args) was
-//!   already issued in the same step never executes — it shares the
-//!   original's result, which the caller copies over after the step.
-//! - **cross-step repeat protection**: consecutive identical calls across
-//!   steps accumulate a streak; at 3 / 5 / 8 repeats escalating reminders
-//!   are appended to the original's result, and at 12 the turn is
-//!   force-stopped (v2 `stopTurn` → the turn ends as `completed`).
-//!
-//! State is per-turn: v2 resets its consecutive streak whenever the turn id
-//! changes (`beginStep`), and the engine runs one turn per `run_turn` call,
-//! so the guard is constructed locally and never persists across turns.
-//!
-//! Known boundary (recorded in the ROADMAP): v2's dedup telemetry
-//! (`tool_call_repeat` / `tool_call_dedup_detected` / `tool_call_turn_repeat`)
-//! is not emitted here — the `host/telemetry` seam is deliberately not
-//! activated in the product yet (double reporting until the M1d ownership
-//! flip), and its wire schema only carries the three turn-lifecycle events.
-//!
-//! `KIMI_CODE_REPEAT_BREAKER` (upstream #3995, v2 `REPEAT_BREAKER_ENV`): the
-//! ladder is opt-in. v2 shipped it default-on in #3995 and then turned it off
-//! by default (`.changeset/repeat-breaker-off-by-default.md`, v2 commit
-//! `dadd6e4a43`: "Stop interrupting a turn after repeated identical tool calls
-//! by default"): an explicit truthy value arms the streak reminders and the
-//! force-stop, and while it is off the turn is never interrupted — same-step
-//! dedup stays active either way (v2 tests `stays off by default when
-//! KIMI_CODE_REPEAT_BREAKER is unset` and `keeps same-step dedupe active when
-//! KIMI_CODE_REPEAT_BREAKER is 0`).
-
 use crate::turn_loop::types::{ExecutableToolResult, ToolCall};
 
-/// The env switch for the repeat ladder (v2 `REPEAT_BREAKER_ENV`).
 pub const REPEAT_BREAKER_ENV: &str = "KIMI_CODE_REPEAT_BREAKER";
 
-/// Whether the repeat ladder (reminders + force-stop) is on: defaults off,
-/// only an explicit truthy env value enables it (v2 `parseBooleanEnv(...)
-/// === true`).
 pub fn repeat_breaker_enabled() -> bool {
     crate::env::env_switch_default_off(REPEAT_BREAKER_ENV)
 }
@@ -46,9 +11,6 @@ const REPEAT_REMINDER_2_START: u32 = 5;
 const REPEAT_REMINDER_3_START: u32 = 8;
 const REPEAT_FORCE_STOP_STREAK: u32 = 12;
 
-/// v2 `HANDOFF_VETO_TEXT`: the result a tool call gets in the post-force-stop
-/// handoff step. The call is refused, not executed — the step accepts text
-/// only, and the refusal is what ends the turn.
 pub fn handoff_veto_text() -> String {
     format!(
         "This turn was ended by the repeat breaker after the same tool call was issued \
@@ -84,28 +46,14 @@ Choose exactly one of the following and state your choice before acting:\n\
     )
 }
 
-/// Canonical serialization of tool-call arguments for identity comparison.
-///
-/// Mirrors v2 `canonicalTelemetryArgs` (sorted-key compact JSON): serde_json
-/// maps are B-Tree ordered by default, so `to_string` already sorts object
-/// keys recursively. Scalar formatting can differ from `JSON.stringify`
-/// (e.g. float rendering), which only affects identity, never correctness.
 pub fn canonical_args(arguments: &serde_json::Value) -> String {
     serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string())
 }
 
-/// The dedup identity of a call (v2 `makeKey`: `"<tool> <canonical args>"`).
 pub fn make_key(tool_name: &str, arguments: &serde_json::Value) -> String {
     format!("{tool_name} {}", canonical_args(arguments))
 }
 
-/// The identity a step plans a call under — v2 `registerSkipped`'s argument
-/// choice (`toolDedupeService.ts:475-482`).
-///
-/// A payload that did not decode keys on the text the provider sent, not on the
-/// decoded `{}`: decoding collapses every broken payload to the same value, so
-/// keying on it would make two *different* broken calls look like one repeated
-/// call and force-stop a turn that is not stuck at all.
 pub fn dedupe_key(call: &ToolCall) -> String {
     match call.args_parse_error.as_ref() {
         Some(failure) => make_key(&call.name, &serde_json::Value::String(failure.raw.clone())),
@@ -113,28 +61,20 @@ pub fn dedupe_key(call: &ToolCall) -> String {
     }
 }
 
-/// One step's dedup plan, computed before execution.
 #[derive(Debug, Clone)]
 pub struct StepPlan {
-    /// The dedup key of each call, in call order.
     pub keys: Vec<String>,
-    /// For each call, the index of the first same-key occurrence within the
-    /// step. `original_of[i] == i` means the call is the step's original;
-    /// anything else is a same-step duplicate that must not execute.
+
     pub original_of: Vec<usize>,
 }
 
-/// The per-turn dedup guard. See the module docs for the v2 mapping.
 #[derive(Default)]
 pub struct DedupeGuard {
     consecutive_key: Option<String>,
     consecutive_count: u32,
-    /// Monotonic source of exempt sentinel ids: an exempt call must never
-    /// streak against another call (including an exempt call in a later
-    /// step at the same in-step position), so every one gets a fresh key.
+
     exempt_seq: u64,
-    /// The repeat ladder switch (#3995): when off, no reminders and no
-    /// force-stop, while same-step dedup and streak tracking stay active.
+
     repeat_breaker: bool,
 }
 
@@ -143,8 +83,6 @@ impl DedupeGuard {
         Self::with_repeat_breaker(repeat_breaker_enabled())
     }
 
-    /// Constructor with the breaker switch made explicit — tests must not
-    /// depend on process-global env state.
     pub fn with_repeat_breaker(repeat_breaker: bool) -> Self {
         Self {
             repeat_breaker,
@@ -152,18 +90,10 @@ impl DedupeGuard {
         }
     }
 
-    /// Plan a step: key every call and mark same-step duplicates (the
-    /// same-step half of v2 `checkToolCall`). The guard's exempt-id source
-    /// advances, so planning is `&mut`.
     pub fn plan_step(&mut self, calls: &[ToolCall]) -> StepPlan {
         self.plan_step_by(calls, |call| Some(dedupe_key(call)))
     }
 
-    /// Like [`Self::plan_step`], with a per-call keying function. Calls
-    /// keyed `None` are exempt from dedup (each gets a fresh unique
-    /// sentinel key — never matching anything, across steps included):
-    /// the engine uses this to keep host-forwarded calls under the host's
-    /// own dedup service, so no call is ever deduped twice.
     pub fn plan_step_by<F>(&mut self, calls: &[ToolCall], mut key_of: F) -> StepPlan
     where
         F: FnMut(&ToolCall) -> Option<String>,
@@ -183,14 +113,6 @@ impl DedupeGuard {
         StepPlan { keys, original_of }
     }
 
-    /// Finalize a step's results after execution.
-    ///
-    /// Mirrors v2 `finalizeResult` + `endStep`: each original's result gets
-    /// the reminder its streak earns (computed against the streak state as
-    /// of the step's start), same-step duplicates receive the original's
-    /// final result verbatim, and the consecutive streak advances over the
-    /// step's keys. Returns `true` when any streak reached the force-stop
-    /// threshold — the caller must end the turn after appending results.
     pub fn finalize_step(&mut self, plan: &StepPlan, results: &mut [ExecutableToolResult]) -> bool {
         let pre_key = self.consecutive_key.clone();
         let pre_count = self.consecutive_count;
@@ -200,8 +122,7 @@ impl DedupeGuard {
             if plan.original_of[i] != i {
                 continue;
             }
-            // The ladder is gated by the breaker switch (#3995); the streak
-            // itself advances either way, like v2's `endStep`.
+
             if !self.repeat_breaker {
                 continue;
             }
@@ -217,15 +138,13 @@ impl DedupeGuard {
                 result.content.push_str(REMINDER_TEXT_1);
             }
         }
-        // Same-step duplicates share the original's final result (v2's
-        // deferred resolves to the reminder-appended result, not the raw).
+
         for (i, original) in plan.original_of.iter().enumerate() {
             if *original != i {
                 results[i] = results[*original].clone();
             }
         }
 
-        // v2 `endStep`: advance the cross-step streak over this step's keys.
         for key in &plan.keys {
             if self.consecutive_key.as_deref() == Some(key.as_str()) {
                 self.consecutive_count += 1;
@@ -238,9 +157,6 @@ impl DedupeGuard {
     }
 }
 
-/// The streak a call at `index` completes, extending the pre-step streak
-/// when the key chain continues (v2 `finalizeResult`'s walk over
-/// `stepCalls[0..=index]` starting from the step-head consecutive state).
 fn streak_at(keys: &[String], index: usize, pre_key: Option<&str>, pre_count: u32) -> u32 {
     let mut last_key = pre_key;
     let mut streak = pre_count;
@@ -275,6 +191,8 @@ mod tests {
 
     fn result(content: &str) -> ExecutableToolResult {
         ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: content.into(),
@@ -286,8 +204,6 @@ mod tests {
 
     #[test]
     fn breaker_defaults_off_when_the_env_is_unset() {
-        // `repeat-breaker-off-by-default` (v2 commit `dadd6e4a43`): with the
-        // switch unset the turn is never interrupted, however long the streak.
         let _scope = crate::test_support::EnvScope::unset(&[REPEAT_BREAKER_ENV]);
         assert!(!repeat_breaker_enabled());
         let mut guard = DedupeGuard::new();
@@ -335,9 +251,6 @@ mod tests {
 
     #[test]
     fn identical_broken_payloads_streak() {
-        // v2 `counts identical malformed argument texts as repeats`: the raw
-        // text is the identity, so the same broken payload still earns the
-        // ladder.
         let mut guard = DedupeGuard::with_repeat_breaker(true);
         let mut last = String::new();
         for i in 0..3 {
@@ -351,10 +264,6 @@ mod tests {
 
     #[test]
     fn different_broken_payloads_never_streak() {
-        // v2 `does not treat different malformed argument texts as the same
-        // call`. Every broken payload decodes to the same `{}`, so keying on
-        // the decoded value made twelve *different* calls look like one stuck
-        // call and force-stopped the turn.
         let mut guard = DedupeGuard::with_repeat_breaker(true);
         for i in 0..12 {
             let raw = format!(r#"{{"command":"ls {i}"#);
@@ -383,8 +292,7 @@ mod tests {
     #[test]
     fn plan_step_by_exempts_none_keyed_calls() {
         let mut guard = DedupeGuard::with_repeat_breaker(true);
-        // Both calls share arguments, but the keyer exempts the second
-        // family — no dedup between them.
+
         let plan = guard.plan_step_by(
             &[read_call("c1", "a.rs"), read_call("c2", "a.rs")],
             |call| (call.id == "c1").then(|| make_key(&call.name, &call.arguments)),
@@ -395,9 +303,7 @@ mod tests {
     #[test]
     fn exempt_calls_never_streak_across_steps() {
         let mut guard = DedupeGuard::with_repeat_breaker(true);
-        // The same exempt call repeated once per step for well past the
-        // force-stop threshold must never earn a reminder or a stop:
-        // exempt sentinels are unique per call, not per in-step position.
+
         for _ in 0..15 {
             let plan = guard.plan_step_by(&[read_call("c1", "a.rs")], |_| None);
             let mut results = vec![result("ok")];
@@ -468,11 +374,11 @@ mod tests {
             let mut results = vec![result("ok")];
             guard.finalize_step(&plan, &mut results);
         }
-        // A different key breaks the streak.
+
         let plan = guard.plan_step(&[read_call("c1", "b.rs")]);
         let mut results = vec![result("ok")];
         guard.finalize_step(&plan, &mut results);
-        // Two more of the original key: streak restarts at 2 — no reminder.
+
         for _ in 0..2 {
             let plan = guard.plan_step(&[read_call("c1", "a.rs")]);
             let mut results = vec![result("ok")];
@@ -484,20 +390,17 @@ mod tests {
     #[test]
     fn streak_extends_within_a_multi_call_step() {
         let mut guard = DedupeGuard::with_repeat_breaker(true);
-        // One call in step 1 starts the streak.
+
         let plan = guard.plan_step(&[read_call("c1", "a.rs")]);
         let mut results = vec![result("ok")];
         guard.finalize_step(&plan, &mut results);
-        // Step 2 issues the same key twice: the second call is a same-step
-        // duplicate (vetoed in v2), so the original's earned streak stays 2
-        // — no reminder — and the duplicate shares the bare result. endStep
-        // still counts both keys, extending the streak to 3.
+
         let plan = guard.plan_step(&[read_call("c2", "a.rs"), read_call("c3", "a.rs")]);
         let mut results = vec![result("raw-1"), result("raw-2")];
         assert!(!guard.finalize_step(&plan, &mut results));
         assert_eq!(results[0].content, "raw-1");
         assert_eq!(results[0].content, results[1].content);
-        // Step 3's first call completes streak 4 and earns reminder 1.
+
         let plan = guard.plan_step(&[read_call("c4", "a.rs")]);
         let mut results = vec![result("raw-3")];
         assert!(!guard.finalize_step(&plan, &mut results));
@@ -510,8 +413,6 @@ mod tests {
 
     #[test]
     fn breaker_disabled_skips_ladder_but_keeps_same_step_dedupe() {
-        // v2 #3995: with KIMI_CODE_REPEAT_BREAKER=0 no reminders are injected
-        // and the turn never force-stops, while same-step dedupe stays on.
         let mut guard = DedupeGuard::with_repeat_breaker(false);
         for _ in 0..12 {
             let plan = guard.plan_step(&[read_call("c1", "a.rs")]);
@@ -531,7 +432,7 @@ mod tests {
     #[test]
     fn duplicate_gets_original_final_result() {
         let mut guard = DedupeGuard::with_repeat_breaker(true);
-        // Streak 2 pre-step so the original earns a reminder-less result.
+
         for _ in 0..2 {
             let plan = guard.plan_step(&[read_call("c1", "a.rs")]);
             let mut results = vec![result("ok")];
@@ -554,6 +455,8 @@ mod tests {
         }
         let plan = guard.plan_step(&[read_call("c1", "a.rs")]);
         let mut results = vec![ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "boom".into(),

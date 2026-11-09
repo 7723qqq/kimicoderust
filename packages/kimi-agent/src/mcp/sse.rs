@@ -14,6 +14,7 @@ use super::client::UnexpectedCloseListener;
 use super::client_shared;
 use super::client_shared::Budget;
 use super::errors::McpError;
+use crate::primitives::teardown::{Disposer, Ledger, TeardownReason};
 
 pub struct McpSseTransport {
     post_url: Arc<RwLock<Option<String>>>,
@@ -37,14 +38,15 @@ pub struct McpSseTransport {
     /// Close reason buffered when the stream dies before a listener is
     /// installed; replayed on registration (v2 `pendingUnexpectedClose`).
     pending_close_reason: Arc<Mutex<Option<String>>>,
-    /// Intentional-close signal: the reader task exits quietly (no
-    /// unexpected-close event) and fails every pending caller.
-    close_tx: watch::Sender<()>,
     /// Set by `shutdown` before the reader is signalled. The reader stops
     /// clearing `pending` once it exits, so a request registered afterwards
     /// would never be answered and would sit out its full timeout; every entry
     /// point checks this flag instead.
     closed: Arc<AtomicBool>,
+    /// Owns the close steps in reverse execution order (v2 `client-sse.ts:86-90`:
+    /// mark closed, then close the started client). A ledger makes the close
+    /// idempotent and guarantees every step runs even if an earlier one fails.
+    dispose: Mutex<Ledger>,
 }
 
 impl McpSseTransport {
@@ -95,6 +97,39 @@ impl McpSseTransport {
         let (close_tx, mut close_rx) = watch::channel(());
         let (ended_tx, ended_rx) = watch::channel(());
         let closed = Arc::new(AtomicBool::new(false));
+
+        // Registered in reverse execution order: the ledger drains backwards,
+        // so the transport is marked closed first, then the reader is
+        // signalled to stop (v2 `client-sse.ts:86-90`).
+        let mut dispose = Ledger::new("mcp-sse-transport");
+        {
+            let stop = close_tx.clone();
+            dispose
+                .register_labeled(
+                    "stop-reader",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            let _ = stop.send(());
+                            Ok(())
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
+        {
+            let closed = Arc::clone(&closed);
+            dispose
+                .register_labeled(
+                    "mark-closed",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            closed.store(true, Ordering::SeqCst);
+                            Ok(())
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
 
         let stream_post_url = post_url.clone();
         let stream_pending = pending.clone();
@@ -210,8 +245,8 @@ impl McpSseTransport {
             request_timeout: None,
             unexpected_close,
             pending_close_reason,
-            close_tx,
             closed,
+            dispose: Mutex::new(dispose),
         })
     }
 
@@ -237,10 +272,14 @@ impl McpSseTransport {
     /// Signal the reader task to stop without firing the unexpected-close
     /// listener. In-flight callers fail immediately.
     pub async fn shutdown(&self) {
-        // Mark before signalling so a caller that races the reader's exit
-        // cannot register against the table the reader is about to drain.
-        self.closed.store(true, Ordering::SeqCst);
-        let _ = self.close_tx.send(());
+        // The ledger marks the transport closed before signalling the reader,
+        // so a caller that races the reader's exit cannot register against the
+        // table the reader is about to drain.
+        self.dispose
+            .lock()
+            .await
+            .teardown(TeardownReason::ScopeClose)
+            .await;
     }
 
     fn ensure_open(&self) -> Result<(), McpError> {
@@ -949,6 +988,25 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "refusal must be immediate, took {elapsed:?}"
+        );
+    }
+
+    /// A second shutdown must be a no-op: the reader is signalled once and the
+    /// ledger ends disposed instead of re-running its steps.
+    #[tokio::test]
+    async fn test_sse_transport_shutdown_is_idempotent() {
+        let (sse_url, _shutdown) = spawn_mock_mcp_sse_server(None, None, None).await;
+        let transport = McpSseTransport::connect(&sse_url, HashMap::new())
+            .await
+            .expect("SSE connect failed");
+
+        transport.shutdown().await;
+        transport.shutdown().await;
+
+        assert!(transport.closed.load(Ordering::SeqCst));
+        assert_eq!(
+            transport.dispose.lock().await.state(),
+            crate::primitives::teardown::LedgerState::Disposed
         );
     }
 

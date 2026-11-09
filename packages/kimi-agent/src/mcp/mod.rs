@@ -12,6 +12,7 @@ pub mod oauth;
 pub mod output;
 pub mod schema_compaction;
 pub mod sse;
+pub mod status;
 pub mod types;
 
 pub use client::McpClient;

@@ -5,14 +5,15 @@
 //! `phase`, `log`, file IO, `fetch`, `search`, `exec`). The App-scoped
 //! [`WorkflowService`] owns the run registry so runs survive across turns.
 //!
-//! Provenance: **fork-original**, not a port. An earlier version of this header
-//! claimed the engine was ported from a retired `agent-core-v2` workflow domain
-//! (`src/app/workflow/`). No such domain exists: at `21406fb4c8` (upstream/main
-//! HEAD) a tree-wide search for `*workflow*` under `agent-core-v2/src` returns
-//! nothing, and `app/` has no `workflow/` directory. ROADMAP §6.39 records the
-//! correction and treats the engine as fork behavior carried over from the
-//! retired `kimi-native-tools` crate.
+//! Provenance: ported from `agent-core-v2` `src/app/workflow/` at reference
+//! HEAD `a0ccd487` — [`registry`] mirrors `workflowRegistry.ts`, [`runtime`]
+//! mirrors `workflowRuntime.ts` (node:vm there, QuickJS here), and [`host`] +
+//! the service in this module mirror `workflowService.ts` / `workflowTypes.ts`.
+//! The nine `builtin/*.js` scripts are byte-identical copies of
+//! `app/workflow/builtin/` at that HEAD; re-sync them whenever the reference
+//! scripts change.
 
+pub mod code_runtime;
 pub mod host;
 pub mod registry;
 pub mod runtime;

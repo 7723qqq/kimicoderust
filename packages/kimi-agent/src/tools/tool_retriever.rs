@@ -1,16 +1,3 @@
-//! BM25 ranking behind `select_tools`' capability search.
-//!
-//! Mirrors `packages/agent-core-v2/src/agent/toolSelect/toolRetriever.ts`
-//! (`rankToolsByQuery`): the same `k1`/`b` constants, stopword list, token
-//! caps and score-ratio cutoff, so the same query returns the same candidates
-//! v2 would.
-//!
-//! One deliberate difference: v2 normalizes text with Unicode NFKC before
-//! tokenizing, and the engine carries no normalization crate. Every character
-//! class the tokenizer keeps (`\p{L}`, `\p{N}`) survives the absence, so only
-//! a query that mixes widths (full-width Latin against half-width text) can
-//! miss a match v2 would make.
-
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -21,14 +8,12 @@ const MAX_DOCUMENT_TOKENS: usize = 512;
 const MAX_PARAMETER_NAMES: usize = 32;
 const MIN_SCORE_RATIO: f64 = 0.15;
 
-/// v2 `STOPWORDS`: words too common to say anything about a tool.
 const STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "for", "from", "in", "is", "it", "its",
     "of", "on", "or", "that", "the", "these", "this", "those", "to", "tool", "tools", "use",
     "using", "with", "you", "your",
 ];
 
-/// One searchable tool: the fields v2's `documentTokens` indexes.
 #[derive(Debug, Clone, Default)]
 pub struct ToolSearchEntry {
     pub name: String,
@@ -37,7 +22,6 @@ pub struct ToolSearchEntry {
     pub parameter_names: Vec<String>,
 }
 
-/// One ranked candidate (v2 `ToolSearchHit`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSearchHit {
     pub name: String,
@@ -45,12 +29,6 @@ pub struct ToolSearchHit {
     pub score: f64,
 }
 
-/// Rank `entries` against `query` (v2 `rankToolsByQuery`).
-///
-/// A blank or stopword-only query returns the catalogue's own order — the
-/// "list what is loadable" case — and a real query drops anything scoring
-/// below [`MIN_SCORE_RATIO`] of the best hit, which is what keeps a loose
-/// keyword match from burying the obvious one.
 pub fn rank_tools_by_query(
     entries: &[ToolSearchEntry],
     query: &str,
@@ -155,8 +133,6 @@ pub fn rank_tools_by_query(
         .collect()
 }
 
-/// v2 `documentTokens`: the name (twice, as a title weight), the description,
-/// the source and each parameter name, all tokenized and stopword-filtered.
 fn document_tokens(entry: &ToolSearchEntry) -> Vec<String> {
     let mut tokens = Vec::new();
     for part in [
@@ -176,9 +152,6 @@ fn document_tokens(entry: &ToolSearchEntry) -> Vec<String> {
         .collect()
 }
 
-/// v2 `tokenize`: lowercase word tokens, plus every two-character window of a
-/// token that contains a CJK ideograph (the unigram/bigram pair Chinese
-/// retrieval needs).
 fn tokenize(text: &str) -> Vec<String> {
     let lowered: String = text.chars().flat_map(char::to_lowercase).collect();
     let mut tokens = Vec::new();
@@ -208,7 +181,6 @@ fn push_word(word: &mut String, tokens: &mut Vec<String>) {
     word.clear();
 }
 
-/// v2's `[\u3400-\u9FFF]` test: CJK Unified Ideographs plus Extension A.
 fn is_cjk_ideograph(ch: char) -> bool {
     ('\u{3400}'..='\u{9FFF}').contains(&ch)
 }
@@ -305,10 +277,6 @@ mod tests {
 
     #[test]
     fn a_weak_match_is_dropped_below_the_score_ratio() {
-        // One document carries a rare term; nine share only a common one. The
-        // rare term's IDF dominates, and the nine common-only documents fall
-        // under `MIN_SCORE_RATIO` of the best score — the cutoff that keeps a
-        // loose keyword match from burying the obvious hit.
         let mut tools: Vec<ToolSearchEntry> = (0..9)
             .map(|index| entry(&format!("mcp__common__tool{index}"), "common helper", &[]))
             .collect();

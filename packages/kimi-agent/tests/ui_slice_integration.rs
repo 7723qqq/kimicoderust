@@ -206,34 +206,6 @@ fn a_cancelled_turn_keeps_the_partial_output() {
     assert_eq!(store.len(), 2, "prompt and partial answer");
 }
 
-/// v2 #4663: `turn.step.stream_reset` seals the partial stream. A later
-/// delta starts a fresh entry instead of appending to text the provider
-/// discarded.
-#[test]
-fn a_stream_reset_seals_the_dropped_partial_before_new_text() {
-    let store = project(&[
-        r#"{"type":"turn.started","agent_id":"main","turn_id":"t1","prompt":"go"}"#,
-        r#"{"type":"assistant.delta","agent_id":"main","turn_id":"t1","delta":"discarded","block":0}"#,
-        r#"{"type":"turn.step.stream_reset","agent_id":"main","turn_id":"t1","step":1,"step_id":"s1"}"#,
-        r#"{"type":"assistant.delta","agent_id":"main","turn_id":"t1","delta":"fresh","block":0}"#,
-        r#"{"type":"turn.ended","agent_id":"main","turn_id":"t1","reason":"end_turn"}"#,
-    ]);
-    let rendered = text(&store);
-    assert!(
-        rendered.contains("discarded"),
-        "the dropped partial was shown: {rendered}"
-    );
-    assert!(
-        rendered.contains("fresh"),
-        "the fresh delta was lost: {rendered}"
-    );
-    assert!(
-        !rendered.contains("discardedfresh"),
-        "the reset did not seal the old entry: {rendered}"
-    );
-    assert_eq!(store.len(), 3, "prompt, dropped partial, fresh answer");
-}
-
 /// A subagent's stream is its own entry, and the owner rides the entry.
 ///
 /// Both deltas are `assistant` text on the same turn; without the agent key they

@@ -13,7 +13,7 @@
 
 use serde_json::Value;
 
-use crate::turn_loop::types::ArgsParseError;
+use kimi_core::types::ArgsParseError;
 
 /// Decode a provider's JSON-string argument payload.
 ///

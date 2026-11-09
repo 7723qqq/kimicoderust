@@ -1009,21 +1009,22 @@ describe.skipIf(!nativeEntry)('napi runTurnRust — stale-write guard (G-6 #3)',
 describe.skipIf(!nativeEntry)(
   'napi runTurnRust — permission mode decides the approval prompt',
   () => {
-    const memoryListDef = {
-      name: 'memory_list',
-      description: 'List memory entries',
-      inputSchema: '{"type":"object","properties":{}}',
+    const readDef = {
+      name: 'Read',
+      description: 'Read a file',
+      inputSchema:
+        '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}',
     };
-    const memoryWriteDef = {
-      name: 'memory_write',
-      description: 'Write a memory entry',
+    const writeDef = {
+      name: 'Write',
+      description: 'Write a file',
       inputSchema:
         '{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}',
     };
 
-    async function runMemoryTool(
+    async function runTool(
       policySnapshotJson: string,
-      toolDef: typeof memoryListDef,
+      toolDef: typeof readDef,
       call: { id: string; name: string; arguments: Record<string, unknown> },
       decision: 'allow' | 'deny',
     ): Promise<{ nativeToolCalls: number; permissionChecks: number }> {
@@ -1067,10 +1068,10 @@ describe.skipIf(!nativeEntry)(
     }
 
     it('auto-approves a read-only tool in yolo without asking the host', async () => {
-      const { nativeToolCalls, permissionChecks } = await runMemoryTool(
+      const { nativeToolCalls, permissionChecks } = await runTool(
         JSON.stringify({ mode: 'yolo' }),
-        memoryListDef,
-        { id: 'call-yolo-read', name: 'memory_list', arguments: {} },
+        readDef,
+        { id: 'call-yolo-read', name: 'Read', arguments: { path: 'note.md' } },
         'allow',
       );
       expect(nativeToolCalls).toBe(1);
@@ -1078,10 +1079,10 @@ describe.skipIf(!nativeEntry)(
     });
 
     it('auto-approves a read-only tool in manual without asking the host', async () => {
-      const { nativeToolCalls, permissionChecks } = await runMemoryTool(
+      const { nativeToolCalls, permissionChecks } = await runTool(
         JSON.stringify({ mode: 'manual' }),
-        memoryListDef,
-        { id: 'call-manual-read', name: 'memory_list', arguments: {} },
+        readDef,
+        { id: 'call-manual-read', name: 'Read', arguments: { path: 'note.md' } },
         'allow',
       );
       expect(nativeToolCalls).toBe(1);
@@ -1089,12 +1090,12 @@ describe.skipIf(!nativeEntry)(
     });
 
     it('asks the host before a mutating tool in manual', async () => {
-      const { nativeToolCalls, permissionChecks } = await runMemoryTool(
+      const { nativeToolCalls, permissionChecks } = await runTool(
         JSON.stringify({ mode: 'manual' }),
-        memoryWriteDef,
+        writeDef,
         {
           id: 'call-manual-write',
-          name: 'memory_write',
+          name: 'Write',
           arguments: { path: 'note.md', content: 'x' },
         },
         'deny',

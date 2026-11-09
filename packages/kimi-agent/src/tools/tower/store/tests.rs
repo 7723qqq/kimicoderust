@@ -35,8 +35,6 @@ fn state_with(agents: Vec<TowerRosterEntry>) -> TowerState {
     }
 }
 
-/// A store rooted at a fresh temp dir, with the state directory in place
-/// so `save` can write.
 async fn store_in(dir: &Path) -> TowerStore {
     let store = TowerStore::new(dir);
     let state_dir = store.abs(STATE_FILE).parent().unwrap().to_path_buf();
@@ -44,8 +42,6 @@ async fn store_in(dir: &Path) -> TowerStore {
     store
 }
 
-/// Like [`store_in`], with the record directories the writers target in
-/// place (production gets them from `TowerInit`).
 async fn store_with_record_dirs(dir: &Path) -> TowerStore {
     let store = store_in(dir).await;
     tokio::fs::create_dir_all(store.abs(MISSIONS_DIR))
@@ -66,12 +62,6 @@ async fn store_with_record_dirs(dir: &Path) -> TowerStore {
     store
 }
 
-/// Agent ids restart per session, so a freshly spawned worker can share an
-/// id with a dead one still sitting in the roster. Resolving to the first
-/// match handed the new worker the old agent's name — wrong inbox, wrong
-/// sender, denied writes.
-/// Upstream #3847: the filer's cumulative token total rides the finding
-/// record (v2 `callerTokens`); an unknown total omits the line.
 #[tokio::test]
 async fn file_finding_omits_legacy_caller_tokens() {
     let dir = tempfile::tempdir().unwrap();
@@ -97,14 +87,11 @@ async fn file_finding_omits_legacy_caller_tokens() {
     let text = tokio::fs::read_to_string(store.abs(&rel)).await.unwrap();
     assert!(!text.contains("**Tokens**"), "{text}");
 
-    // Without a known total the line is omitted rather than zero.
     let rel = store.file_finding("worker-a", finding).await.unwrap();
     let text = tokio::fs::read_to_string(store.abs(&rel)).await.unwrap();
     assert!(!text.contains("**Tokens**"), "{text}");
 }
 
-/// Upstream #3847: the sender's tokens ride the inbox frontmatter and
-/// round-trip through `read_inbox`.
 #[tokio::test]
 async fn send_omits_legacy_tokens_from_the_inbox_record() {
     let dir = tempfile::tempdir().unwrap();
@@ -192,7 +179,7 @@ async fn register_agent_still_rejects_a_duplicate_name() {
         .await
         .unwrap_err();
     assert!(error.contains("already registered"), "got: {error}");
-    // The rejected registration must not have retired the live entry.
+
     let state = store.load().await.unwrap();
     assert_eq!(state.roster.agents.len(), 1);
     assert_eq!(state.roster.agents[0].agent_id, "agent-0");
@@ -276,10 +263,6 @@ async fn agent_death_records_cause_and_revive_clears_it() {
     assert_eq!(agent.death_reason, None);
 }
 
-/// [`state_with`] takes a roster; this variant takes missions (the tower
-/// invariants under test are all mission-level). `base` is explicit
-/// because `git init` names the first branch `master` or `main`
-/// depending on the host's config, and the diff check resolves it.
 fn state_with_missions(base: &str, missions: Vec<TowerMission>) -> TowerState {
     TowerState {
         base: base.into(),
@@ -288,8 +271,6 @@ fn state_with_missions(base: &str, missions: Vec<TowerMission>) -> TowerState {
     }
 }
 
-/// A reviewer roster entry for the given branch (the review cap counts
-/// rounds per assigned reviewer).
 fn review_entry(name: &str, target: &str) -> TowerRosterEntry {
     TowerRosterEntry {
         kind: crate::tools::tower::types::TowerAgentKind::Reviewer,
@@ -299,8 +280,6 @@ fn review_entry(name: &str, target: &str) -> TowerRosterEntry {
     }
 }
 
-/// A git repo with one commit, plus its actual first-branch name (the
-/// completion diff check resolves `state.base` against the repo).
 async fn repo_with_commit(root: &Path) -> String {
     git::git(root, &["init", "-q"]).await.unwrap();
     let _ = git::git(root, &["config", "user.email", "t@e.test"]).await;
@@ -349,9 +328,6 @@ fn mission(id: &str, branch: &str, status: TowerMissionStatus) -> TowerMission {
     }
 }
 
-/// Merging a branch whose only mission record is closed (merged or
-/// abandoned) is refused — a merge never flips a historical mission's
-/// state (v2 #3648).
 #[tokio::test]
 async fn merge_refuses_a_branch_whose_only_mission_record_is_closed() {
     let dir = tempfile::tempdir().unwrap();
@@ -363,9 +339,7 @@ async fn merge_refuses_a_branch_whose_only_mission_record_is_closed() {
     git::git(root, &["add", "."]).await.unwrap();
     git::git(root, &["commit", "-qm", "init"]).await.unwrap();
     let store = store_in(root).await;
-    // `init` normally creates the comms tree; the test saves state
-    // directly, so the log directory must exist for merge's blocking
-    // append_log calls.
+
     tokio::fs::create_dir_all(store.abs(crate::tools::tower::paths::LOG_DIR))
         .await
         .unwrap();
@@ -385,14 +359,10 @@ async fn merge_refuses_a_branch_whose_only_mission_record_is_closed() {
     let err = store.merge("feat/gone").await.unwrap_err();
     assert!(err.contains("closed"), "got: {err}");
 
-    // No mission for the branch at all still errors distinctly.
     let err = store.merge("feat/unknown").await.unwrap_err();
     assert!(err.contains("no tower mission owns branch"), "got: {err}");
 }
 
-/// v2 #3976: the completion invariants. A real git repo with a build
-/// mission whose branch has a commit passes; the refusals name the open
-/// tasks, the missing branch, and the zero-diff case.
 #[tokio::test]
 async fn completion_refuses_open_tasks_missing_branch_and_zero_diff() {
     let dir = tempfile::tempdir().unwrap();
@@ -401,14 +371,13 @@ async fn completion_refuses_open_tasks_missing_branch_and_zero_diff() {
     let head = git::git(root, &["rev-parse", "HEAD"]).await.unwrap();
     let store = store_with_record_dirs(root).await;
 
-    // (a) open task blocks completion even on a branch that exists.
     let mut with_task = mission("M1", "feat/open", TowerMissionStatus::Active);
     with_task.tasks = vec![TowerMissionTask {
         text: "write the thing".into(),
         done: false,
         dropped: false,
     }];
-    // The branch is created so the refusal is about the task, not the branch.
+
     git::git(root, &["branch", "feat/open"]).await.unwrap();
     store
         .save(&state_with_missions(&base_branch, vec![with_task.clone()]))
@@ -430,13 +399,12 @@ async fn completion_refuses_open_tasks_missing_branch_and_zero_diff() {
         err.contains("task_done") && err.contains("task_drop"),
         "got: {err}"
     );
-    // The refused transition left the state untouched.
+
     assert_eq!(
         store.load().await.unwrap().missions[0].status,
         TowerMissionStatus::Active
     );
 
-    // (b) a missing branch is refused once the tasks are clear.
     let mut no_branch = with_task.clone();
     no_branch.tasks = Vec::new();
     no_branch.status = TowerMissionStatus::Active;
@@ -459,7 +427,6 @@ async fn completion_refuses_open_tasks_missing_branch_and_zero_diff() {
     assert!(err.contains("is not available"), "got: {err}");
     assert!(err.contains("abandoned"), "got: {err}");
 
-    // (c) a branch that exists but has no diff against the base is refused.
     let mut zero_diff = no_branch.clone();
     zero_diff.branch = "feat/no-diff".into();
     git::git(root, &["branch", "feat/no-diff"]).await.unwrap();
@@ -480,8 +447,6 @@ async fn completion_refuses_open_tasks_missing_branch_and_zero_diff() {
         .unwrap_err();
     assert!(err.contains("no changes"), "got: {err}");
 
-    // (d) a branch with a real diff completes, and a survey mission with
-    // no diff is exempt.
     let mut landed = no_branch.clone();
     landed.branch = "feat/landed".into();
     git::git(root, &["branch", "feat/landed"]).await.unwrap();
@@ -530,8 +495,6 @@ async fn completion_refuses_open_tasks_missing_branch_and_zero_diff() {
     assert_eq!(completed.status, TowerMissionStatus::Completed);
 }
 
-/// v2 #3976: `task_drop` requires a reason, records the drop in the
-/// mission notes and the activity log, and unblocks completion.
 #[tokio::test]
 async fn task_drop_requires_a_reason_and_records_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -557,7 +520,6 @@ async fn task_drop_requires_a_reason_and_records_it() {
         .await
         .unwrap();
 
-    // A reasonless drop is refused and changes nothing.
     let err = store
         .update_mission(
             TOWER_NAME,
@@ -577,7 +539,6 @@ async fn task_drop_requires_a_reason_and_records_it() {
     assert!(!reloaded.missions[0].tasks[1].dropped);
     assert!(reloaded.missions[0].notes.is_empty());
 
-    // With a reason the task is marked and audited in notes + activity log.
     let updated = store
         .update_mission(
             TOWER_NAME,
@@ -608,7 +569,6 @@ async fn task_drop_requires_a_reason_and_records_it() {
         .unwrap();
     assert!(log.contains("task_drop"), "{log}");
 
-    // A dropped task no longer blocks completion (`keep this` still does).
     let err = store
         .update_mission(
             TOWER_NAME,
@@ -624,21 +584,11 @@ async fn task_drop_requires_a_reason_and_records_it() {
     assert!(!err.contains("drop that"), "got: {err}");
 }
 
-/// v2 #3976: after `MAX_REVIEW_ROUNDS` rounds the same reviewer is
-/// refused, with the redirect guidance in the error.
-///
-/// The loop below reads the constant, so a test that only counted rounds
-/// would still pass if the value changed. The literal pins the contract
-/// v2 fixes: five rounds per reviewer, then a redirect.
 #[test]
 fn the_review_round_cap_is_five() {
     assert_eq!(MAX_REVIEW_ROUNDS, 5);
 }
 
-/// The review file name is a lossy key — `feat/x` and `feat-x` slug to the
-/// same prefix — so a review of one branch must never be read as a review of
-/// the other. The merge gate reads `latest_review`, which is where a
-/// collision is dangerous: it could wave an unreviewed branch through.
 #[tokio::test]
 async fn a_colliding_branch_slug_does_not_stand_in_for_another_branch() {
     let dir = tempfile::tempdir().unwrap();
@@ -688,8 +638,7 @@ async fn review_rounds_cap_after_the_max() {
     repo_with_commit(root).await;
     git::git(root, &["branch", "feat/r"]).await.unwrap();
     let store = store_with_record_dirs(root).await;
-    // Two assigned reviewers: the cap counts rounds per reviewer, so the
-    // second one starts fresh on the same branch.
+
     store
         .save(&state_with(vec![
             review_entry("reviewer-1", "feat/r"),
@@ -722,12 +671,61 @@ async fn review_rounds_cap_after_the_max() {
         err.contains("reassign") && err.contains("split"),
         "got: {err}"
     );
-    // A different reviewer on the same branch is still welcome.
+
     store.submit_review("reviewer-2", review()).await.unwrap();
 }
 
-/// v2 #3976: a non-clean review flips a completed mission back to active
-/// so the rework loop can resume, and the flip is logged.
+#[tokio::test]
+async fn a_retried_review_recovers_the_written_file_instead_of_burning_a_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    repo_with_commit(root).await;
+    git::git(root, &["branch", "feat/retry"]).await.unwrap();
+    let store = store_with_record_dirs(root).await;
+    store
+        .save(&state_with(vec![review_entry("reviewer-1", "feat/retry")]))
+        .await
+        .unwrap();
+    let review = || TowerReviewInput {
+        target: "feat/retry".into(),
+        status: "clean".into(),
+        merge: "merge".into(),
+        findings: "f".into(),
+        checks: Some(vec!["cargo test".into()]),
+        decision: "d".into(),
+    };
+
+    let first = store.submit_review("reviewer-1", review()).await.unwrap();
+
+    let log = fs::read_to_string(store.abs(ACTIVITY_LOG)).await.unwrap();
+    let without_write: String = log
+        .lines()
+        .filter(|line| !line.contains("review.write"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    fs::write(store.abs(ACTIVITY_LOG), without_write)
+        .await
+        .unwrap();
+
+    let retried = store.submit_review("reviewer-1", review()).await.unwrap();
+
+    assert_eq!(retried, first, "the retried submission must reuse the file");
+    let reviews = store.reviews_for("feat/retry").await.unwrap();
+    assert_eq!(reviews.len(), 1, "no second round may be created");
+    assert_eq!(reviews[0].round, 1);
+
+    assert!(store.activity_log_has_ref("review.write", &first).await);
+    let inbox = store.read_inbox("tower", 50).await.unwrap();
+    assert_eq!(
+        inbox
+            .iter()
+            .filter(|item| item.action.as_deref() == Some("review-result"))
+            .count(),
+        1,
+        "the clean review notifies the tower exactly once"
+    );
+}
+
 #[tokio::test]
 async fn a_non_clean_review_reopens_a_completed_mission() {
     let dir = tempfile::tempdir().unwrap();
@@ -735,8 +733,7 @@ async fn a_non_clean_review_reopens_a_completed_mission() {
     repo_with_commit(root).await;
     git::git(root, &["branch", "feat/rework"]).await.unwrap();
     let store = store_with_record_dirs(root).await;
-    // A reviewer assigned to the mission's branch: the non-clean verdict
-    // resolves the mission by the caller's recorded target.
+
     let mut state = state_with(vec![review_entry("reviewer-1", "feat/rework")]);
     state
         .missions
@@ -769,9 +766,6 @@ async fn a_non_clean_review_reopens_a_completed_mission() {
     assert!(log.contains("mission.rework"), "{log}");
 }
 
-/// Only a missing state file means "uninitialized". An existing but
-/// unstattable one used to read as a fresh workspace, and `init` then
-/// overwrote the foreign roster with a new one.
 #[tokio::test]
 async fn is_initialized_only_treats_a_missing_state_file_as_uninitialized() {
     let dir = tempfile::tempdir().unwrap();
@@ -781,8 +775,6 @@ async fn is_initialized_only_treats_a_missing_state_file_as_uninitialized() {
     store.save(&state_with(Vec::new())).await.unwrap();
     assert!(store.is_initialized().await.unwrap());
 
-    // A NUL byte makes the path unstattable for a reason other than
-    // "missing" on every platform.
     let unstattable = TowerStore::new(dir.path().join("bad\0root"));
     assert!(unstattable.is_initialized().await.is_err());
 }
@@ -1039,12 +1031,12 @@ async fn stale_lock_reaper_releases_a_crashed_git_ref_guard() {
 
     assert!(store.reap_stale_state_lock(&lock).await.unwrap());
     assert_eq!(
-        git::try_git(
+        git::git_probe(
             dir.path(),
             &["rev-parse", "--verify", "--quiet", &reaper_ref],
         )
         .await,
-        None
+        crate::primitives::read::ReadOutcome::Absent
     );
 }
 
@@ -1234,6 +1226,7 @@ async fn overlapping_build_scopes_gain_an_automatic_dependency() {
         title: title.into(),
         scope: vec![scope.into()],
         tasks: None,
+        context: None,
         deps: None,
         kind: None,
     };
@@ -1265,6 +1258,7 @@ async fn widening_into_an_existing_dependents_scope_does_not_create_a_cycle() {
                 title: "first".into(),
                 scope: vec!["src/a/**".into()],
                 tasks: None,
+                context: None,
                 deps: None,
                 kind: None,
             },
@@ -1272,6 +1266,7 @@ async fn widening_into_an_existing_dependents_scope_does_not_create_a_cycle() {
                 title: "second".into(),
                 scope: vec!["src/b/**".into()],
                 tasks: None,
+                context: None,
                 deps: Some(vec!["M1".into()]),
                 kind: None,
             },
@@ -1669,6 +1664,39 @@ async fn complete_rejects_an_empty_report() {
 }
 
 #[tokio::test]
+async fn complete_distinguishes_a_missing_mission_from_a_non_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_record_dirs(dir.path()).await;
+    let mut worker = entry("worker-a", "agent-0");
+    worker.mission_id = Some("M9".into());
+    let mut reviewer = entry("reviewer-a", "agent-1");
+    reviewer.kind = TowerAgentKind::Reviewer;
+    store
+        .save(&state_with(vec![
+            worker,
+            reviewer,
+            entry("other", "agent-2"),
+        ]))
+        .await
+        .unwrap();
+
+    let error = store.complete("worker-a", "report").await.unwrap_err();
+    assert_eq!(error, "unknown mission \"M9\"");
+
+    let error = store.complete("reviewer-a", "report").await.unwrap_err();
+    assert!(
+        error.contains("cannot use TowerComplete"),
+        "a non-worker is refused by role, not by mission: {error}"
+    );
+
+    let error = store.complete(TOWER_NAME, "report").await.unwrap_err();
+    assert!(error.contains("cannot use TowerComplete"), "{error}");
+
+    let error = store.complete("other", "report").await.unwrap_err();
+    assert!(error.contains("cannot use TowerComplete"), "{error}");
+}
+
+#[tokio::test]
 async fn inbox_pages_ack_only_the_returned_unread_messages() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with_record_dirs(dir.path()).await;
@@ -1976,10 +2004,15 @@ async fn clean_tower_rebase_records_an_exact_review_waiver() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let (store, base) = store_ready_to_merge(root, "feat/rebase").await;
-    store
-        .add_worktree("wt-M1", "feat/rebase", &base)
-        .await
-        .unwrap();
+
+    git::worktree_add(
+        root,
+        &store.abs(".tower/worktrees/wt-M1"),
+        "feat/rebase",
+        &base,
+    )
+    .await
+    .unwrap();
     let from_commit = git::branch_tip(root, "feat/rebase").await.unwrap();
     std::fs::write(root.join("base-moved.txt"), "new base").unwrap();
     git::git(root, &["add", "."]).await.unwrap();
@@ -2019,10 +2052,15 @@ async fn conflicting_tower_rebase_aborts_and_blocks_without_a_waiver() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let (store, base) = store_ready_to_merge(root, "feat/rebase-conflict").await;
-    store
-        .add_worktree("wt-M1", "feat/rebase-conflict", &base)
-        .await
-        .unwrap();
+
+    git::worktree_add(
+        root,
+        &store.abs(".tower/worktrees/wt-M1"),
+        "feat/rebase-conflict",
+        &base,
+    )
+    .await
+    .unwrap();
     let from_commit = git::branch_tip(root, "feat/rebase-conflict").await.unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/feature.txt"), "conflicting base").unwrap();
@@ -2080,6 +2118,40 @@ async fn init_reanchors_base_and_reports_stale_open_missions() {
         git::branch_tip(root, "feat/reanchor").await.unwrap(),
         branch_tip_before
     );
+}
+
+#[tokio::test]
+async fn release_clears_only_the_owning_session_and_logs() {
+    let dir = tempfile::tempdir().unwrap();
+
+    repo_with_commit(dir.path()).await;
+    let store = store_with_record_dirs(dir.path()).await;
+    store.save(&state_with(Vec::new())).await.unwrap();
+
+    store.release("session-2").await.unwrap();
+    assert_eq!(
+        store.load().await.unwrap().session_id.as_deref(),
+        Some("session-1"),
+        "a foreign session must not release the tower"
+    );
+
+    store.release("session-1").await.unwrap();
+    assert!(store.load().await.unwrap().session_id.is_none());
+    let log = store.recent_log(10).await;
+    assert!(
+        log.iter()
+            .any(|line| line.contains("tower release session=session-1")),
+        "release must be appended to the activity log: {log:?}"
+    );
+
+    store.release("session-1").await.unwrap();
+    assert!(store.load().await.unwrap().session_id.is_none());
+
+    let empty = tempfile::tempdir().unwrap();
+    TowerStore::new(empty.path())
+        .release("session-1")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2202,5 +2274,137 @@ async fn write_unique_falls_back_to_exclusive_creation_when_links_are_unsupporte
     assert_eq!(
         fs::read_to_string(store.abs(&written)).await.unwrap(),
         "fallback"
+    );
+}
+
+fn plan_input(title: &str, scope: &str) -> TowerPlanInput {
+    TowerPlanInput {
+        title: title.into(),
+        scope: vec![scope.into()],
+        tasks: None,
+        context: None,
+        deps: None,
+        kind: None,
+    }
+}
+
+#[tokio::test]
+async fn plan_rejects_non_ascii_titles_and_colliding_branches() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = repo_with_commit(root).await;
+    let store = store_with_record_dirs(root).await;
+    store.init(None, Some(base)).await.unwrap();
+
+    let error = store
+        .plan(&[plan_input("实现登录", "src/**")])
+        .await
+        .unwrap_err();
+    assert!(error.contains("non-ASCII"), "{error}");
+
+    let error = store
+        .plan(&[
+            plan_input("same", "src/a/**"),
+            plan_input("same", "src/b/**"),
+        ])
+        .await
+        .unwrap_err();
+    assert!(error.contains("already used by M1"), "{error}");
+
+    git::git(root, &["branch", "feat/taken"]).await.unwrap();
+    let error = store
+        .plan(&[plan_input("taken", "src/c/**")])
+        .await
+        .unwrap_err();
+    assert!(error.contains("already exists in git"), "{error}");
+}
+
+#[tokio::test]
+async fn plan_trims_context_and_drops_blank_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = repo_with_commit(root).await;
+    let store = store_with_record_dirs(root).await;
+    store.init(None, Some(base)).await.unwrap();
+
+    let mut blank = plan_input("blank context", "src/a/**");
+    blank.context = Some("   \n".into());
+    let mut padded = plan_input("padded context", "src/b/**");
+    padded.context = Some("  keep me  ".into());
+
+    let planned = store.plan(&[blank, padded]).await.unwrap();
+    assert_eq!(planned[0].context, None);
+    assert_eq!(planned[1].context.as_deref(), Some("keep me"));
+}
+
+#[tokio::test]
+async fn init_creates_a_repository_base_branch_and_wip_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("dirty.txt"), "uncommitted base work").unwrap();
+    let store = store_with_record_dirs(root).await;
+
+    let initialized = store
+        .init(Some("session-1".into()), Some("trunk".into()))
+        .await
+        .unwrap();
+
+    assert!(initialized.created);
+    assert_eq!(initialized.base, "trunk");
+    assert!(git::is_inside_repo(root).await.unwrap());
+    assert!(git::branch_exists(root, "trunk").await.unwrap());
+    assert_eq!(
+        git::git(root, &["log", "-1", "--format=%s"]).await.unwrap(),
+        "tower: snapshot of uncommitted base checkout changes (base trunk)"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("dirty.txt")).unwrap(),
+        "uncommitted base work"
+    );
+}
+
+#[tokio::test]
+async fn worker_branch_starts_from_a_wip_snapshot_without_touching_the_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = repo_with_commit(root).await;
+    let store = store_with_record_dirs(root).await;
+    store
+        .init(Some("session-1".into()), Some(base.clone()))
+        .await
+        .unwrap();
+    let base_tip = git::branch_tip(root, &base).await.unwrap();
+
+    let planned = store
+        .plan(&[plan_input("wip mission", "src/**")])
+        .await
+        .unwrap();
+    let mission = &planned[0];
+    std::fs::write(root.join("wip.txt"), "wip content").unwrap();
+
+    let added = store
+        .add_worktree(&mission.worktree, &mission.branch, &base)
+        .await
+        .unwrap();
+
+    let spawn_base = added
+        .spawn_base
+        .expect("dirty base must produce a snapshot");
+    assert_eq!(
+        git::branch_tip(root, &mission.branch).await.unwrap(),
+        spawn_base
+    );
+
+    assert_eq!(git::branch_tip(root, &base).await.unwrap(), base_tip);
+    assert_eq!(
+        std::fs::read_to_string(root.join("wip.txt")).unwrap(),
+        "wip content"
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            store.abs(&format!("{WORKTREES_DIR}/{}/wip.txt", mission.worktree))
+        )
+        .unwrap(),
+        "wip content"
     );
 }

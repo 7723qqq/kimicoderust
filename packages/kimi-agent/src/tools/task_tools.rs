@@ -1,16 +1,3 @@
-//! Native execution of the task tool family (TaskList / TaskOutput /
-//! TaskStop / TaskWait) over the state bridge protocol (design doc
-//! milestone 7, batch 7).
-//!
-//! The host stays the task authority: it owns the task registry, the
-//! output ring buffers, and the blocking wait. The engine reads the task
-//! list through `host/state_read {domain: "task", key: "task"}` and one
-//! task's output snapshot through `key: "<task_id>"`, and submits
-//! action-shaped writes (`{action: "stop" | "wait", ...}`) through
-//! `host/state_write`. Rendering mirrors the v2 task tools
-//! (`agent-core-v2/src/agent/tools/task/`); the wire shapes
-//! (`TaskEntryWire` / `TaskOutputWire`) are host-defined.
-
 use serde_json::Value;
 use std::time::Instant;
 
@@ -22,15 +9,8 @@ use crate::tools::task_format;
 use crate::turn_loop::types::ExecutableToolResult;
 use crate::turn_loop::wall_time;
 
-/// v2 `WAIT_FOR_MAX_TIMEOUT_S`: the TaskWait `timeout` argument is capped at
-/// 90 seconds. v2 used to derive this from `DEFAULT_BACKGROUND_TIMEOUT_S`
-/// (600) and decoupled it in `20a2cea72f`; the cap is now its own constant.
 const WAIT_FOR_MAX_TIMEOUT_S: u64 = 90;
 
-/// v2 `TurnWaitTally` (`20a2cea72f` #4061): the per-turn WaitFor call tally
-/// behind the `[wait_warning]` repeat block. Stored session-scoped on the
-/// toolset (like `selection_failures`) and reset whenever the turn changes
-/// (v2 `countCall`).
 #[derive(Default)]
 pub struct WaitTally {
     turn_id: Option<usize>,
@@ -39,7 +19,6 @@ pub struct WaitTally {
 }
 
 impl WaitTally {
-    /// v2 `countCall`: a turn change starts a fresh tally.
     fn count_call(&mut self, turn_id: usize) {
         if self.turn_id != Some(turn_id) {
             *self = Self {
@@ -52,19 +31,13 @@ impl WaitTally {
     }
 }
 
-/// The WaitFor execution context the dispatch layer hands down: everything
-/// the repeat warning and the subagent wording need that the bare tool
-/// arguments do not carry.
 pub struct WaitContext<'a> {
-    /// The session-scoped tally (v2 `WaitForTool.tally`).
     pub tally: &'a std::sync::Arc<std::sync::Mutex<WaitTally>>,
-    /// The current turn number (v2 `ctx.turnId`).
+
     pub turn_id: usize,
-    /// v2 `scopeContext.agentId`: anything but `main` selects the subagent
-    /// wording (timeout report and repeat advice).
+
     pub caller_agent_id: &'a str,
-    /// The invoked display name (`WaitFor` / the REPL-only `TaskWait` alias):
-    /// warning and timeout prose name the tool the model actually called.
+
     pub display_name: &'a str,
 }
 
@@ -77,9 +50,6 @@ impl WaitContext<'_> {
         self.caller_agent_id != "main"
     }
 
-    /// v2 `withRepeatWarning`: from the second call in a turn, append the
-    /// `[wait_warning]` block — call count, accumulated wait, and one advice
-    /// variant (subagent / active goal / default).
     async fn with_repeat_warning(
         &self,
         mut result: ExecutableToolResult,
@@ -107,9 +77,7 @@ impl WaitContext<'_> {
     }
 }
 
-/// v2 `formatWaitSeconds` (verbatim): `45s` / `1m` / `1m 30s` / `1h` / `1h 01m`.
 fn format_wait_seconds(waited_ms: u64) -> String {
-    // v2 `Math.round(waitedMs / 1000)`.
     let total_seconds = (waited_ms + 500) / 1000;
     if total_seconds < 60 {
         return format!("{total_seconds}s");
@@ -132,31 +100,24 @@ fn format_wait_seconds(waited_ms: u64) -> String {
     }
 }
 
-/// v2 `repeatWaitAdvice` subagent arm (verbatim apart from the tool name).
 fn subagent_repeat_advice(name: &str) -> String {
     format!(
         "Stop waiting by reflex: repeated waits burn time your caller is waiting on. Before calling {name} again, do every part of your task that does not depend on the running background task. Wait again only for a result you truly cannot finish without — ending your turn is your final hand-off, so do not hand off without it, but never wait for tasks you do not need."
     )
 }
 
-/// v2 `repeatWaitAdvice` active-goal arm (verbatim apart from the tool name).
 fn goal_repeat_advice(name: &str) -> String {
     format!(
         "Stop waiting by reflex: repeated waits stall the goal. Before calling {name} again, do every piece of remaining goal work that does not depend on the running background task — there is almost always some. Wait again only if nothing else can proceed until it finishes; even then, {name} beats polling with Bash sleep or ending the turn only to be continued again."
     )
 }
 
-/// v2 `repeatWaitAdvice` default arm (verbatim apart from the tool name).
 fn default_repeat_advice(name: &str) -> String {
     format!(
         "Stop calling {name}. Repeated waiting wastes the user's time and is almost never the right move. Do not call it again in this turn unless the user explicitly asked you to wait. Do something useful now — another part of the task, or verifying earlier work — or end your turn with a progress update. Finished background tasks notify you automatically, so you will not miss the result."
     )
 }
 
-/// The goal arm of v2 `repeatWaitAdvice` (`goals.getGoal().goal?.status ===
-/// 'active'`). The host is the goal authority (see `goal_tools`), so the check
-/// is a state-bridge read; any bridge failure falls through to the default
-/// advice, matching v2's `?.` short-circuit.
 async fn goal_is_active(callbacks: &dyn HostCallbacks, args: &Value) -> bool {
     let request = StateReadRequest {
         domain: "goal".into(),
@@ -178,13 +139,8 @@ async fn goal_is_active(callbacks: &dyn HostCallbacks, args: &Value) -> bool {
     }
 }
 
-/// Failure message when the connected host does not implement the state
-/// bridge. The model must not retry the tool — the host cannot manage
-/// background tasks for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot manage background tasks.";
 
-/// v2 `TERMINAL_STATUSES`: statuses that mean the task is no longer
-/// running.
 fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
@@ -192,9 +148,6 @@ fn is_terminal_status(status: &str) -> bool {
     )
 }
 
-/// Execute the TaskList tool natively: `state_read` the task registry and
-/// render the v2-aligned list (header, `---`-separated entries, empty
-/// message).
 pub async fn execute_task_list(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -212,17 +165,19 @@ pub async fn execute_task_list(
             }
         },
     };
-    // v2 zod bounds (1..=100). The read request cannot carry the limit, so
-    // the host applies its own cap; the argument is validated for parity.
-    if let Some(limit) = args.get("limit")
-        && limit
-            .as_u64()
-            .is_none_or(|limit| !(1..=100).contains(&limit))
-    {
-        return err_result(
-            "Invalid TaskList arguments: `limit` must be an integer between 1 and 100.".into(),
-        );
-    }
+
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => 20usize,
+        Some(value) => match value.as_u64() {
+            Some(limit) if (1..=100).contains(&limit) => limit as usize,
+            _ => {
+                return err_result(
+                    "Invalid TaskList arguments: `limit` must be an integer between 1 and 100."
+                        .into(),
+                );
+            }
+        },
+    };
     let request = StateReadRequest {
         domain: "task".into(),
         key: "task".into(),
@@ -238,17 +193,12 @@ pub async fn execute_task_list(
             .to_string(),
     };
     match callbacks.state_read(request).await {
-        Ok(response) => render_task_list(&response.value, active_only),
+        Ok(response) => render_task_list(&response.value, active_only, limit),
         Err(error) => map_state_error(error, None),
     }
 }
 
-/// Render the host's task registry wire value (an array of task entries)
-/// as the v2 `TaskList` output: `active_background_tasks: N` header,
-/// entries joined by a lone `---` line, and the dedicated empty message.
-/// The host returns every task (its read cannot carry the filter), so
-/// `active_only` is applied here: terminal entries are dropped.
-fn render_task_list(value: &Value, active_only: bool) -> ExecutableToolResult {
+fn render_task_list(value: &Value, active_only: bool, limit: usize) -> ExecutableToolResult {
     let Some(tasks) = value.as_array() else {
         return err_result(
             "Invalid task state from host: expected an array of task entries.".into(),
@@ -262,9 +212,10 @@ fn render_task_list(value: &Value, active_only: bool) -> ExecutableToolResult {
                     .and_then(|s| s.as_str())
                     .is_none_or(|status| !is_terminal_status(status))
             })
+            .take(limit)
             .collect()
     } else {
-        tasks.iter().collect()
+        tasks.iter().take(limit).collect()
     };
     let label = if active_only {
         "active_background_tasks"
@@ -282,13 +233,6 @@ fn render_task_list(value: &Value, active_only: bool) -> ExecutableToolResult {
     ok_result(format!("{header}\n{}", records.join("\n---\n")))
 }
 
-/// Render one task wire entry as v2 `formatTaskRecord` renders an
-/// `AgentTaskInfo` (upstream #3966): a `Wall time: X.XXX seconds` line from
-/// the entry's `startedAt` / `endedAt`, then `field: value` lines with
-/// camelCase keys snake_cased and nulls skipped. The wire's `id` maps to
-/// v2's `task_id` (the host sends `taskId`; the contract shape uses `id`).
-/// The output preview fields (`preview` / `output`) are rendered separately
-/// by the output/wait renderers, so they are excluded here.
 fn render_task_entry(value: &Value) -> String {
     let Some(obj) = value.as_object() else {
         return String::new();
@@ -304,9 +248,6 @@ fn render_task_entry(value: &Value) -> String {
     task_format::format_task_record(&Value::Object(mapped))
 }
 
-/// Execute the TaskOutput tool natively: `state_read` the task's output
-/// snapshot and render the v2-aligned output (metadata lines, truncation
-/// note, `[output]` preview).
 pub async fn execute_task_output(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -335,9 +276,6 @@ pub async fn execute_task_output(
     }
 }
 
-/// Render the host's output snapshot as the v2 `TaskOutput` output:
-/// metadata lines, a truncation note when the preview is truncated, then
-/// the `[output]` preview section.
 fn render_task_output(value: &Value) -> ExecutableToolResult {
     if !value.is_object() {
         return err_result("Invalid task state from host: expected a task output snapshot.".into());
@@ -351,10 +289,6 @@ fn render_task_output(value: &Value) -> ExecutableToolResult {
     ok_result(lines.join("\n"))
 }
 
-/// v2 `TaskOutputTool` truncation note: only when the preview is
-/// truncated; the full-log variant needs `fullOutputAvailable` plus an
-/// `outputPath`. The host sends `truncated`; the contract shape uses
-/// `outputTruncated`.
 fn truncated_line(value: &Value) -> Option<String> {
     let obj = value.as_object()?;
     let truncated = obj
@@ -372,8 +306,6 @@ fn truncated_line(value: &Value) -> Option<String> {
     }
 }
 
-/// v2 `output.preview || '[no output available]'`. The host sends
-/// `preview`; the contract shape uses `output`.
 fn output_preview(value: &Value) -> String {
     match value.get("preview").or_else(|| value.get("output")) {
         Some(Value::String(preview)) if !preview.is_empty() => preview.clone(),
@@ -381,15 +313,10 @@ fn output_preview(value: &Value) -> String {
     }
 }
 
-/// Whether the value carries an output preview section (`preview` /
-/// `output` field). The host's wait response is the task entry without
-/// one, so the completed wait report omits the `[output]` section then.
 fn has_output_section(value: &Value) -> bool {
     value.get("preview").is_some() || value.get("output").is_some()
 }
 
-/// Execute the TaskStop tool natively: `state_write` an action-shaped
-/// stop and render the v2-aligned `task_id` / `status` / `reason` lines.
 pub async fn execute_task_stop(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -398,9 +325,7 @@ pub async fn execute_task_stop(
         Ok(task_id) => task_id,
         Err(message) => return err_result(message),
     };
-    // v2 default reason. The wire action carries only the id — the host
-    // records its own reason, and the response's stopReason wins in the
-    // render.
+
     let reason = match args.get("reason").and_then(|r| r.as_str()) {
         Some(reason) => {
             let trimmed = reason.trim();
@@ -415,7 +340,7 @@ pub async fn execute_task_stop(
     let request = StateWriteRequest {
         domain: "task".into(),
         key: "task".into(),
-        value: serde_json::json!({ "action": "stop", "id": task_id }),
+        value: serde_json::json!({ "action": "stop", "id": task_id, "reason": reason }),
         undoable: false,
         turn_id: args
             .get("turn_id")
@@ -437,10 +362,6 @@ pub async fn execute_task_stop(
 const NO_PARTIAL_OUTPUT: &str =
     "[partial output] none — the subagent wrote no text in this run before it ended.";
 
-/// Render the host's stop response as the v2 `TaskStop` output: task metadata
-/// preceded by the optional `Wall time` line, plus a stopped subagent's output
-/// and resume coordinates. The id falls back to the requested task id, the
-/// reason to the submitted one.
 fn render_task_stop(value: &Value, task_id: &str, reason: &str) -> ExecutableToolResult {
     let Some(obj) = value.as_object() else {
         return err_result("Invalid task state from host: expected the stopped task.".into());
@@ -490,8 +411,7 @@ fn render_task_stop(value: &Value, task_id: &str, reason: &str) -> ExecutableToo
         }
     }
     let body = lines.join("\n");
-    // v2's stop result is typed with `startedAt`; a host response without
-    // timing renders the bare lines rather than a bogus header.
+
     let content = match task_wall_time_ms(value) {
         Some(duration_ms) => format!("{}\n{body}", wall_time::wall_time_header(duration_ms)),
         None => body,
@@ -499,8 +419,6 @@ fn render_task_stop(value: &Value, task_id: &str, reason: &str) -> ExecutableToo
     ok_result(content)
 }
 
-/// The wall-clock duration a task wire value carries (`endedAt` falling back
-/// to now for a still-running entry), or `None` when it has no `startedAt`.
 fn task_wall_time_ms(value: &Value) -> Option<u64> {
     let obj = value.as_object()?;
     let started_at = obj.get("startedAt").and_then(|v| v.as_u64())?;
@@ -518,16 +436,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Execute the TaskWait tool natively.
-///
-/// With a task runner attached — every production path, since the pipeline
-/// builds one and hands it to the toolset — the wait itself happens here,
-/// against the same runner that spawned the tasks. It blocks until the task
-/// settles, the timeout elapses, or a steering message interrupts it.
-///
-/// Without a runner (a host that owns background tasks itself / a toolset
-/// built without one) the v2 state-bridge `{action: "wait"}` write is issued
-/// and the host's response is rendered, as before.
 pub async fn execute_task_wait(
     callbacks: &dyn HostCallbacks,
     runner: Option<&crate::storage::TaskRunner>,
@@ -544,10 +452,7 @@ pub async fn execute_task_wait(
         Err(message) => return err_result(message),
     };
     let timeout_ms = timeout_s * 1000;
-    // v2 `countCall`: the tally advances before any outcome render, so even
-    // cheap calls (nothing running / unknown id) count toward the repeat
-    // warning. Argument-shape errors above return uncounted and unwrapped,
-    // like v2's schema rejection.
+
     let calls = {
         let mut tally = wait.lock_tally();
         tally.count_call(wait.turn_id);
@@ -555,11 +460,6 @@ pub async fn execute_task_wait(
     };
     let started = Instant::now();
     if let Some(runner) = runner {
-        // Only a task this runner actually knows can be waited on natively.
-        // A task registered by another runner — the server rebuilds its
-        // pipeline per turn, so a task from an earlier turn lives in a runner
-        // this toolset never saw — is still reported by the state bridge, so
-        // fall through for it rather than answering "not found".
         let known = match task_id.as_deref() {
             Some(id) => runner.entry(id).is_some(),
             None => true,
@@ -577,8 +477,6 @@ pub async fn execute_task_wait(
         }
     }
     let Some(task_id) = task_id else {
-        // A wait-any over the bridge would need the host to enumerate its own
-        // running tasks; the host-owned shape has always been keyed by id.
         return err_result(
             "Invalid TaskWait arguments: `task_id` is required when the host owns background tasks."
                 .into(),
@@ -610,23 +508,17 @@ pub async fn execute_task_wait(
                 timeout_ms,
                 waited,
                 &[],
+                &[],
                 wait,
             );
             wait.with_repeat_warning(result, calls, callbacks, args)
                 .await
         }
-        // A host-side failure aborted the wait; like v2's rethrown abort it
-        // carries no repeat warning and does not accumulate wait time.
+
         Err(error) => map_wait_error(error, &task_id, timeout_ms, waited_ms(started), wait),
     }
 }
 
-/// Perform the wait against the engine's own task runner. The wait targets the
-/// requested task, or — with no `task_id` — every task running at call time
-/// (v2 `waitAny`), ending as soon as the first one settles. The boolean half
-/// of the return tells the caller whether an actual wait happened (the repeat
-/// tally accumulates wait time only then; the no-tasks and unknown-id arms
-/// return before waiting, like v2).
 async fn wait_with_runner(
     runner: &crate::storage::TaskRunner,
     steer: Option<&crate::subagent::types::ParentCancel>,
@@ -654,6 +546,12 @@ async fn wait_with_runner(
                 .collect()
         }
     };
+
+    let running_at_start: Vec<String> = running_wires(runner)
+        .iter()
+        .filter_map(|entry| entry.get("taskId").and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .collect();
     let result = match task_id {
         Some(_) => {
             runner
@@ -671,16 +569,48 @@ async fn wait_with_runner(
         TaskWaitResult::NotFound => {
             err_result(format!("Task not found: {}", task_id.unwrap_or("")))
         }
-        // `Completed` always carries a terminal entry and `TimedOut` a
-        // still-running one, so the shared renderer picks the right report.
-        TaskWaitResult::Completed(entry) | TaskWaitResult::TimedOut(entry) => {
-            render_task_wait(&entry, task_id, timeout_ms, waited, &still_running, wait)
+
+        TaskWaitResult::Completed(entry) => {
+            let finished_id = entry
+                .get("taskId")
+                .or_else(|| entry.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let extras: Vec<Value> = running_at_start
+                .iter()
+                .filter(|id| **id != finished_id)
+                .filter_map(|id| runner.entry(id))
+                .filter(|entry| {
+                    entry
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .is_some_and(is_terminal_status)
+                })
+                .collect();
+            render_task_wait(
+                &entry,
+                task_id,
+                timeout_ms,
+                waited,
+                &still_running,
+                &extras,
+                wait,
+            )
         }
+        TaskWaitResult::TimedOut(entry) => render_task_wait(
+            &entry,
+            task_id,
+            timeout_ms,
+            waited,
+            &still_running,
+            &[],
+            wait,
+        ),
     };
     (rendered, true)
 }
 
-/// The wire entries of the tasks still running, oldest first.
 fn running_wires(runner: &crate::storage::TaskRunner) -> Vec<Value> {
     runner
         .list()
@@ -694,23 +624,20 @@ fn running_wires(runner: &crate::storage::TaskRunner) -> Vec<Value> {
         .collect()
 }
 
-/// Render the host's wait response as the v2 `WaitFor` outcome: a
-/// terminal status renders the completed report, anything else the
-/// timeout report (a timeout is not an error).
 fn render_task_wait(
     value: &Value,
     requested_task_id: Option<&str>,
     timeout_ms: u64,
     waited_ms: u64,
     still_running: &[Value],
+    extras: &[Value],
     wait: &WaitContext<'_>,
 ) -> ExecutableToolResult {
     let Some(obj) = value.as_object() else {
         return err_result("Invalid task state from host: expected a task output snapshot.".into());
     };
     let status = obj.get("status").and_then(|s| s.as_str()).unwrap_or("");
-    // The settled task may not be the requested one (wait-any), so the entry's
-    // own id wins.
+
     let task_id = obj
         .get("taskId")
         .or_else(|| obj.get("id"))
@@ -718,7 +645,7 @@ fn render_task_wait(
         .or(requested_task_id)
         .unwrap_or("");
     if is_terminal_status(status) {
-        render_wait_completed(value, task_id, timeout_ms, waited_ms, still_running)
+        render_wait_completed(value, task_id, timeout_ms, waited_ms, still_running, extras)
     } else {
         render_wait_timeout(
             requested_task_id,
@@ -730,15 +657,13 @@ fn render_task_wait(
     }
 }
 
-/// v2 `WaitFor.formatCompleted`: wait metadata, `[finished]` task report
-/// (metadata lines + truncation note + `[output]` preview when the host
-/// included the output snapshot), then the tasks that are still running.
 fn render_wait_completed(
     value: &Value,
     task_id: &str,
     timeout_ms: u64,
     waited_ms: u64,
     still_running: &[Value],
+    extras: &[Value],
 ) -> ExecutableToolResult {
     let mut lines = vec![
         wait_metadata("completed", None, Some(task_id), timeout_ms, waited_ms),
@@ -754,15 +679,25 @@ fn render_wait_completed(
         lines.push("[output]".into());
         lines.push(output_preview(value));
     }
+
+    if !extras.is_empty() {
+        lines.push(String::new());
+        lines.push("[completed_during_wait]".into());
+        lines.push(
+            extras
+                .iter()
+                .map(render_task_entry)
+                .collect::<Vec<_>>()
+                .join("\n---\n"),
+        );
+        lines.push(
+            "Use TaskOutput with one of the task_id values above to read the full output.".into(),
+        );
+    }
     push_still_running(&mut lines, still_running);
     ok_result(lines.join("\n"))
 }
 
-/// v2 `WaitFor.formatTimeout`: the timeout report. A timeout is not an
-/// error — the tool returns it as a success result. v2 splits the body by
-/// caller: a subagent is told to wait again (its turn end is the hand-off,
-/// and a completion after it reaches no one), the main agent to prefer
-/// other work (`20a2cea72f` #4061).
 fn render_wait_timeout(
     task_id: Option<&str>,
     timeout_ms: u64,
@@ -787,8 +722,6 @@ fn render_wait_timeout(
     ok_result(lines.join("\n"))
 }
 
-/// v2 `WaitFor.formatInterrupted`: a steering message ended the wait. Not an
-/// error — the tasks were left running and still report on completion.
 fn render_wait_interrupted(
     task_id: Option<&str>,
     timeout_ms: u64,
@@ -804,7 +737,6 @@ fn render_wait_interrupted(
     ok_result(lines.join("\n"))
 }
 
-/// v2 `WaitFor` when the wait-any form is called with nothing running.
 fn render_wait_no_tasks(timeout_ms: u64) -> String {
     format!(
         "{}\n\nNo background tasks are running, so there is nothing to wait for. Finished tasks report back via automatic notification.",
@@ -812,8 +744,6 @@ fn render_wait_no_tasks(timeout_ms: u64) -> String {
     )
 }
 
-/// v2 `WaitFor`'s shared `[still_running]` tail: the v2-aligned task list of
-/// everything still running after the wait ended.
 fn push_still_running(lines: &mut Vec<String>, still_running: &[Value]) {
     if still_running.is_empty() {
         return;
@@ -825,8 +755,6 @@ fn push_still_running(lines: &mut Vec<String>, still_running: &[Value]) {
     lines.push(records.join("\n---\n"));
 }
 
-/// v2 `formatPlainObject({waitStatus, reason?, taskId?, waitedMs, timeoutMs})`.
-/// `taskId` is omitted for the wait-any forms, where no single task was named.
 fn wait_metadata(
     status: &str,
     reason: Option<&str>,
@@ -847,8 +775,6 @@ fn wait_metadata(
     task_format::format_plain_object_entries(&refs)
 }
 
-/// Parse the optional `task_id` argument: absent / null is the wait-any form;
-/// a present value must be a non-empty string.
 fn parse_optional_task_id(args: &Value) -> Result<Option<String>, String> {
     match args.get("task_id") {
         None | Some(Value::Null) => Ok(None),
@@ -860,7 +786,6 @@ fn parse_optional_task_id(args: &Value) -> Result<Option<String>, String> {
     }
 }
 
-/// Parse the required `task_id` argument (non-empty string).
 fn parse_task_id(args: &Value, tool: &str) -> Result<String, String> {
     match args.get("task_id").and_then(|t| t.as_str()) {
         Some(task_id) if !task_id.is_empty() => Ok(task_id.to_string()),
@@ -870,7 +795,6 @@ fn parse_task_id(args: &Value, tool: &str) -> Result<String, String> {
     }
 }
 
-/// Parse the required `timeout` argument (v2 bounds: integer 1..=90).
 fn parse_timeout(args: &Value) -> Result<u64, String> {
     match args.get("timeout") {
         Some(value) => match value.as_u64() {
@@ -891,10 +815,6 @@ fn waited_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
-/// Map a state bridge error to a tool result: an unwired host (message
-/// carries the `does not support state bridge` phrase) gets the dedicated
-/// failure message; a not-found task (`-32002`) gets the v2 `Task not
-/// found` error; everything else passes through verbatim.
 fn map_state_error(error: String, task_id: Option<&str>) -> ExecutableToolResult {
     if error.contains("does not support state bridge") {
         err_result(STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE.into())
@@ -907,9 +827,6 @@ fn map_state_error(error: String, task_id: Option<&str>) -> ExecutableToolResult
     }
 }
 
-/// Map a wait write error: the state-bridge phrase gets the dedicated
-/// failure message, a not-found task gets the v2 `Task not found` error,
-/// and a timeout error renders the v2 timeout report (not an error).
 fn map_wait_error(
     error: String,
     task_id: &str,
@@ -931,14 +848,10 @@ fn map_wait_error(
     }
 }
 
-/// Whether a host error means the task does not exist: the `-32002` code
-/// (unknown key) or a `task not found` phrase.
 fn is_task_not_found(error: &str) -> bool {
     error.contains("-32002") || error.to_lowercase().contains("task not found")
 }
 
-/// Engine tool definition for TaskList, mirroring v2 `TaskListTool` and
-/// `TaskListInputSchema`.
 pub fn task_list_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "TaskList".into(),
@@ -969,8 +882,6 @@ This tool is read-only and safe in plan mode; it does not return task output."#
     }
 }
 
-/// Engine tool definition for TaskOutput, mirroring v2 `TaskOutputTool`
-/// and `TaskOutputInputSchema`.
 pub fn task_output_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "TaskOutput".into(),
@@ -992,8 +903,6 @@ Use after `Bash(run_in_background=true)`, `Agent(run_in_background=true)`, or `A
     }
 }
 
-/// Engine tool definition for TaskStop, mirroring v2 `TaskStopTool` and
-/// `TaskStopInputSchema`.
 pub fn task_stop_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "TaskStop".into(),
@@ -1030,31 +939,6 @@ Guidelines:
     }
 }
 
-/// The `WaitFor` description, merged line by line from v2's `task-wait.md` at
-/// `20a2cea72f` (#4061) and the fork's own steering behaviour. Every line is
-/// either v2's verbatim or describes something this engine actually does —
-/// the fork's rule is that a port may not invent behaviour, and a description
-/// line is behaviour the model is being told about.
-///
-/// Added from v2 in this pass: the "but the user is kept waiting too" clause,
-/// the standalone "they notify you automatically" paragraph, the "think about
-/// what else you can do meanwhile" guideline, and the "Prefer moving on to
-/// other work … repeated waits keep the user waiting" tail on the timeout
-/// guideline.
-///
-/// **Deliberately not taken from v2**, each with a reason:
-/// - Its restrictive opening ("Only call this tool when you really have no
-///   other work to do"). The fork's tool does more than v2's — it ends early
-///   on a steer — and a wholesale swap of the opening would under-sell that.
-/// - "When the wait ends because a task finished, the result also lists other
-///   tasks that finished during the wait window." **v2 implements this**
-///   (`collectExtras` → `[completed_during_wait]`); the fork has no extras
-///   mechanism at all, so copying the line would tell the model the result
-///   carries something it does not. Porting the line requires porting
-///   `collectExtras` and `markTasksDeliveredViaWait` first.
-/// - "(for example, a new user message)" where the fork says "(for example, a
-///   user interruption)": the fork distinguishes an interruption from a steer,
-///   and the steering guideline below is the one that describes the latter.
 const TASK_WAIT_DESCRIPTION: &str = r#"Wait for background tasks to finish without ending the current turn.
 
 Only call this tool when you really have no other work to do and your next step cannot proceed without the result of a running background task (a sub-agent, a background bash command, or a background AskUserQuestion). The call suspends inside the current turn until the task finishes or the timeout elapses, then returns the outcome so you can keep working in the same turn. While waiting, no LLM requests are made, but the user is kept waiting too.
@@ -1075,9 +959,6 @@ Guidelines:
 
 This engine's own addition: a steering message ends the wait early and reports it (`wait_status: interrupted`); the tasks keep running and still notify you when they finish."#;
 
-/// The `WaitFor` / `TaskWait` definition body, parameterized by the advertised
-/// name so the product tool (`WaitFor`, v2 `WaitForTool`) and the REPL-only
-/// `TaskWait` alias stay byte-identical apart from their own name.
 fn task_wait_def(name: &str) -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: name.into(),
@@ -1102,13 +983,10 @@ fn task_wait_def(name: &str) -> crate::turn_loop::types::ToolInfo {
     }
 }
 
-/// Product-facing `WaitFor` tool definition (the main session tool table).
 pub fn wait_for_tool_def() -> crate::turn_loop::types::ToolInfo {
     task_wait_def("WaitFor")
 }
 
-/// REPL-only `TaskWait` definition (kept distinct so the tool-name contract's
-/// `replOnlyNative` classification stays accurate).
 pub fn task_wait_tool_def() -> crate::turn_loop::types::ToolInfo {
     task_wait_def("TaskWait")
 }
@@ -1119,8 +997,6 @@ mod tests {
     use crate::rpc::types::{BoxFuture, PermissionDecision, StateReadResponse, StateWriteResponse};
     use std::sync::Arc;
 
-    /// Scripted callbacks: records the received state requests and answers
-    /// with canned responses.
     struct ScriptedCallbacks {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,
@@ -1225,13 +1101,10 @@ mod tests {
         })
     }
 
-    /// A fresh per-turn WaitFor tally for tests.
     fn test_tally() -> Arc<std::sync::Mutex<WaitTally>> {
         Arc::new(std::sync::Mutex::new(WaitTally::default()))
     }
 
-    /// A main-agent `WaitFor` context for turn 1 (no subagent wording, no
-    /// `[wait_warning]` on the first call).
     fn main_wait_ctx(tally: &Arc<std::sync::Mutex<WaitTally>>) -> WaitContext<'_> {
         WaitContext {
             tally,
@@ -1240,8 +1113,6 @@ mod tests {
             display_name: "WaitFor",
         }
     }
-
-    // ── TaskList ──────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_list_renders_header_and_records() {
@@ -1266,9 +1137,7 @@ mod tests {
         assert!(lines[1..].contains(&"task_id: task-1"));
         assert!(result.content.contains("description: Running tests"));
         assert!(result.content.contains("status: running"));
-        // Upstream #3966: the timing fields leave the body; the wall-time
-        // line takes their place. task-2 settled after exactly 1s; task-1 is
-        // still running, so its line is elapsed-since-start.
+
         assert!(!result.content.contains("started_at:"));
         assert!(!result.content.contains("ended_at:"));
         assert!(
@@ -1321,7 +1190,6 @@ mod tests {
 
     #[test]
     fn test_render_task_entry_maps_contract_id_to_task_id() {
-        // The contract shape uses `id`; the host shape uses `taskId`.
         let rendered = render_task_entry(&serde_json::json!({
             "id": "task-9",
             "description": "Contract shape",
@@ -1427,8 +1295,6 @@ mod tests {
         assert_eq!(request.tool_call_id, "call_abc");
     }
 
-    // ── TaskOutput ────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn test_output_reads_task_key_and_renders() {
         let (callbacks, read_received, write_received) =
@@ -1442,7 +1308,7 @@ mod tests {
         assert!(result.content.contains("full_output_available: true"));
         assert!(result.content.contains("[output]"));
         assert!(result.content.contains("All tests passed."));
-        // The preview is not duplicated in the metadata lines.
+
         let metadata = result.content.split("[output]").next().unwrap();
         assert!(!metadata.contains("output:"));
         assert!(!metadata.contains("preview:"));
@@ -1483,7 +1349,6 @@ mod tests {
 
     #[test]
     fn test_output_truncated_contract_field_fallback() {
-        // The contract shape uses `outputTruncated` / `output`.
         let mut snapshot = sample_snapshot();
         snapshot.as_object_mut().unwrap().remove("truncated");
         snapshot.as_object_mut().unwrap().remove("preview");
@@ -1552,8 +1417,6 @@ mod tests {
         assert_eq!(result.content, STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE);
     }
 
-    // ── TaskStop ──────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn test_stop_sends_action_and_renders() {
         let (callbacks, read_received, write_received) = scripted(
@@ -1592,7 +1455,7 @@ mod tests {
             rendered.content,
             "task_id: task-1\nstatus: killed\nreason: Stopped by TaskStop"
         );
-        // The wire's `id` and `reason` keys are honored too.
+
         let rendered = render_task_stop(
             &serde_json::json!({ "id": "task-2", "status": "completed", "reason": "done" }),
             "task-1",
@@ -1637,7 +1500,6 @@ mod tests {
 
     #[test]
     fn test_stop_render_prepends_wall_time_when_the_response_is_timed() {
-        // Upstream #3966: both TaskStop branches carry the wall-time line.
         let rendered = render_task_stop(
             &serde_json::json!({
                 "taskId": "task-1",
@@ -1672,7 +1534,7 @@ mod tests {
         .await;
         assert!(!result.is_error);
         assert!(result.content.contains("reason: user asked"));
-        // The wire action carries only the id.
+
         let request = write_received.lock().unwrap().clone().unwrap();
         assert_eq!(request.value["action"], "stop");
         assert!(request.value.get("reason").is_none());
@@ -1714,8 +1576,6 @@ mod tests {
         assert!(result.is_error);
         assert_eq!(result.content, STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE);
     }
-
-    // ── TaskWait ──────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_wait_sends_action_and_renders_completed() {
@@ -1760,6 +1620,7 @@ mod tests {
             30000,
             1234,
             &[],
+            &[],
             &main_wait_ctx(&tally),
         );
         assert!(!rendered.is_error);
@@ -1787,9 +1648,46 @@ mod tests {
     }
 
     #[test]
+    fn test_wait_completed_lists_tasks_finished_during_the_wait() {
+        let tally = test_tally();
+        let extra = serde_json::json!({
+            "taskId": "task-2",
+            "description": "Formatting",
+            "status": "completed",
+            "startedAt": 1700000000000u64,
+            "endedAt": 1700000001000u64
+        });
+        let rendered = render_task_wait(
+            &sample_snapshot(),
+            Some("task-1"),
+            30000,
+            1234,
+            &[],
+            &[extra],
+            &main_wait_ctx(&tally),
+        );
+        assert!(!rendered.is_error);
+        assert!(
+            rendered.content.contains("[completed_during_wait]"),
+            "content: {}",
+            rendered.content
+        );
+        assert!(
+            rendered.content.contains("task_id: task-2"),
+            "content: {}",
+            rendered.content
+        );
+        assert!(
+            rendered
+                .content
+                .contains("Use TaskOutput with one of the task_id values above"),
+            "content: {}",
+            rendered.content
+        );
+    }
+
+    #[test]
     fn test_wait_entry_only_response_skips_output_section() {
-        // The host's wait response is the task entry (no preview): the
-        // completed report has no `[output]` section.
         let entry = serde_json::json!({
             "taskId": "task-1",
             "description": "Running tests",
@@ -1803,6 +1701,7 @@ mod tests {
             Some("task-1"),
             30000,
             1234,
+            &[],
             &[],
             &main_wait_ctx(&tally),
         );
@@ -1833,6 +1732,7 @@ mod tests {
             Some("task-1"),
             30000,
             30000,
+            &[],
             &[],
             &main_wait_ctx(&tally),
         );
@@ -1950,9 +1850,6 @@ mod tests {
         assert!(result.content.contains("something else broke"));
     }
 
-    // ── TaskWait over the engine's own runner ─────────────────────────
-
-    /// A runner with one held task, plus the release handle.
     fn held_runner() -> (
         tempfile::TempDir,
         Arc<crate::storage::TaskRunner>,
@@ -1972,10 +1869,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_with_a_runner_blocks_until_the_timeout() {
-        // The regression this guards: the engine used to route the wait through
-        // a synchronous local store, so a 5s wait on a running task returned in
-        // milliseconds reporting `timed_out`. A real wait must consume the
-        // timeout.
         let (_dir, runner, release) = held_runner();
         let (callbacks, read_received, write_received) =
             scripted(read_ok(Value::Null), write_ok(Value::Null));
@@ -1997,10 +1890,10 @@ mod tests {
             started.elapsed()
         );
         assert!(result.content.starts_with("wait_status: timed_out"));
-        // The still-running tail names the task that was waited on.
+
         assert!(result.content.contains("[still_running]"));
         assert!(result.content.contains("task_id: task-1"));
-        // The native path must not consult the state bridge at all.
+
         assert!(read_received.lock().unwrap().is_none());
         assert!(write_received.lock().unwrap().is_none());
         let _ = release.send(());
@@ -2087,10 +1980,10 @@ mod tests {
             &serde_json::json!({ "timeout": 5 }),
         )
         .await;
-        // Nothing settles, so the wait-any times out and lists the runner.
+
         assert!(!result.is_error);
         assert!(result.content.starts_with("wait_status: timed_out"));
-        // The wait-any form names no single task in its metadata.
+
         assert!(!result.content.contains("\ntask_id: task-1\nwaited_ms"));
         assert!(result.content.contains("[still_running]"));
         let _ = release.send(());
@@ -2118,9 +2011,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_with_a_runner_surfaces_the_bridge_not_found() {
-        // A task unknown to this runner is not necessarily nonexistent (the
-        // server's runner is rebuilt per turn), so the lookup falls through to
-        // the state bridge — which is what actually answers "not found".
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(crate::storage::TaskRunner::for_workspace(dir.path()).unwrap());
         let (callbacks, _, write_received) = scripted(
@@ -2147,10 +2037,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_falls_back_to_the_bridge_for_an_unknown_task() {
-        // The server rebuilds its pipeline per turn, so a task from an earlier
-        // turn lives in a runner this toolset never saw. The state bridge is
-        // still the authority for it — routing it to the runner must not turn a
-        // reportable task into "not found".
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(crate::storage::TaskRunner::for_workspace(dir.path()).unwrap());
         let (callbacks, _, write_received) =
@@ -2194,10 +2080,6 @@ mod tests {
         assert!(write_received.lock().unwrap().is_none());
     }
 
-    // ── WaitFor repeat warning (`20a2cea72f` #4061) ────────────────────
-
-    /// An empty runner: wait-any returns immediately, so repeat-warning tests
-    /// run without real waiting.
     fn empty_runner() -> (tempfile::TempDir, Arc<crate::storage::TaskRunner>) {
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(crate::storage::TaskRunner::for_workspace(dir.path()).unwrap());
@@ -2224,7 +2106,7 @@ mod tests {
         assert!(second.content.contains(
             "This is WaitFor call 2 in this turn, and you have already spent 0s waiting."
         ));
-        // No running task and no active goal: the default advice applies.
+
         assert!(
             second
                 .content
@@ -2252,7 +2134,7 @@ mod tests {
                 .contains("repeated waits burn time your caller is waiting on"),
             "subagent advice: {second:?}"
         );
-        // The subagent arm short-circuits before the goal read (v2 order).
+
         assert!(read_received.lock().unwrap().is_none());
     }
 
@@ -2278,7 +2160,7 @@ mod tests {
                 .contains("WaitFor beats polling with Bash sleep"),
             "goal advice tail: {second:?}"
         );
-        // The goal check is a state-bridge read (the host is the goal authority).
+
         assert_eq!(
             read_received.lock().unwrap().as_ref().unwrap().domain,
             "goal"
@@ -2298,7 +2180,7 @@ mod tests {
             display_name: "WaitFor",
         };
         let _ = execute_task_wait(&callbacks, Some(&runner), None, &turn_one, &args).await;
-        // A new turn starts a fresh tally: its first call carries no warning.
+
         let turn_two = WaitContext {
             tally: &tally,
             turn_id: 2,
@@ -2383,8 +2265,6 @@ mod tests {
         assert_eq!(format_wait_seconds(0), "0s");
     }
 
-    // ── Tool defs ─────────────────────────────────────────────────────
-
     #[test]
     fn test_task_list_tool_def_matches_v2_schema() {
         let def = task_list_tool_def();
@@ -2424,8 +2304,7 @@ mod tests {
     fn test_task_wait_tool_def_matches_v2_schema() {
         let def = task_wait_tool_def();
         assert_eq!(def.name, "TaskWait");
-        // v2 `WaitForInputSchema`: `task_id` is optional — omitting it waits for
-        // any task running at call time.
+
         assert_eq!(def.input_schema["required"][0], "timeout");
         assert_eq!(def.input_schema["required"].as_array().unwrap().len(), 1);
         assert!(def.input_schema["properties"]["task_id"].is_object());
@@ -2433,11 +2312,6 @@ mod tests {
         assert!(def.description.contains("Wait for background tasks"));
     }
 
-    /// Pins the `20a2cea72f` (#4061) description merge: the four v2 lines the
-    /// fork adopted, the one it must not adopt while `collectExtras` is absent,
-    /// and the two names staying byte-identical apart from their own name.
-    /// A line that describes behaviour this engine lacks is a description that
-    /// misleads the model, so the omission is asserted, not just documented.
     #[test]
     fn task_wait_description_carries_the_ported_lines_and_omits_the_unimplemented_one() {
         let description = &wait_for_tool_def().description;
@@ -2460,15 +2334,11 @@ mod tests {
             assert!(description.contains(line), "missing {what}: {description}");
         }
 
-        // v2 `task-wait.md` has this guideline; the fork's WaitFor has no
-        // `[completed_during_wait]` extras mechanism, so the line must stay out
-        // until `collectExtras` is ported.
         assert!(
             !description.contains("other tasks that finished during the wait window"),
             "describes an unimplemented result section: {description}"
         );
 
-        // The two advertised names differ only in the name itself.
         assert_eq!(
             description.replace("WaitFor", "TaskWait"),
             task_wait_tool_def().description

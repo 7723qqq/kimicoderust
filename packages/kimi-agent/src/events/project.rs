@@ -202,7 +202,12 @@ impl Projector {
                 // `{ "type": "think", "think": … }` (+ provider aliases). What
                 // a part *is* is one shared answer (kimi_ui_core), so the
                 // transcript projection cannot disagree with this one by
-                // omission.
+                // omission. A hidden thinking part is history payload the
+                // engine keeps for replay, never a display entry (v2
+                // `loopService.ts:1573`).
+                if crate::events::is_hidden_delta_part(&part) {
+                    return Vec::new();
+                }
                 match delta_part_text(&part) {
                     Some(("assistant", text)) => {
                         self.text_delta(EntryKind::AssistantMsg, &agent_id, text)
@@ -395,19 +400,6 @@ impl Projector {
             }
             // Boundary flush only: step end is transport-only, never an entry.
             EngineEvent::LlmStepEnd { .. } => self.flush_all(false),
-            // v2 #4663 `TurnStepStreamReset`: the provider discarded the
-            // step's partial stream. Seal every open entry and forget the
-            // stream mapping, so a later delta starts a fresh row instead of
-            // appending to text the model never saw.
-            EngineEvent::StepStreamReset { .. } => {
-                let ops = self.flush_all(true);
-                if let Some(turn) = self.turn.as_mut() {
-                    turn.streams.clear();
-                    turn.pendings.clear();
-                    turn.tools.clear();
-                }
-                ops
-            }
             EngineEvent::SubagentSpawned {
                 subagent_id,
                 subagent_name,
@@ -684,4 +676,48 @@ fn tool_result_text(result: &Value) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::EngineEvent;
+    use serde_json::json;
+
+    /// v2 consumes a hidden thinking delta into the assembled message but never
+    /// dispatches it (`agent/loop/loopService.ts:1573`). The raw transport is
+    /// the one place a `think` part reaches this projector, so a `hidden` flag
+    /// there must not open a Thinking entry.
+    #[test]
+    fn hidden_thinking_delta_projects_nothing() {
+        let mut projector = Projector::new(CoalescingPolicy::default());
+        let turn_id = "turn-hidden";
+        projector.project(EngineEvent::TurnStarted {
+            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+            turn_id: turn_id.into(),
+            prompt: None,
+        });
+
+        let hidden = projector.project(EngineEvent::LlmDelta {
+            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+            turn_id: turn_id.into(),
+            step: 1,
+            part: json!({ "type": "think", "think": "secret summary", "hidden": true }),
+        });
+        assert!(
+            hidden.is_empty(),
+            "hidden thinking must not become a display entry"
+        );
+
+        let visible = projector.project(EngineEvent::LlmDelta {
+            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+            turn_id: turn_id.into(),
+            step: 1,
+            part: json!({ "type": "think", "think": "shown" }),
+        });
+        assert!(
+            !visible.is_empty(),
+            "a visible thinking delta still opens its entry"
+        );
+    }
 }

@@ -1,21 +1,3 @@
-//! GitHub API tools — a 34-tool family this fork added on its own (commit
-//! `5868b181cf`), replacing an external GitHub MCP server with a native
-//! transport so GitHub works without a separate MCP process. It is **not** a
-//! port of an `agent-core-v2` tool set: upstream has no GitHub tool family
-//! (verified against `upstream/main` @ `be7d5f5fea` — the only `api.github.com`
-//! reference there is the plugin `github-resolver`), and nothing upstream is
-//! named `GITHUB_SPECS` or `github-tools.ts`. The tables below were originally
-//! defined in this fork's own retired v1 `packages/agent-core`
-//! (`src/tools/builtin/github/github-tools.ts`) and moved here when the native
-//! crate absorbed the tools.
-//!
-//! Tool admission is credential-gated, not flag-gated: the family is advertised
-//! only when a `[github]` token resolves (see `native_tool_defs`), which
-//! replaced the v1 `github_tools` experimental flag. Execution mirrors the v1
-//! transport: Bearer token auth, `X-GitHub-Api-Version` 2022-11-28,
-//! `User-Agent: kimi-code`, 30s timeout, 5MB body cap, and the rate-limit hint
-//! from `x-ratelimit-remaining`.
-
 mod execute;
 mod http;
 mod schema;
@@ -38,21 +20,13 @@ use execute::{base64_encode, encode_path_component, encode_uri_component};
 #[cfg(test)]
 use serde_json::json;
 
-/// Serializes every test that reads or writes the `GITHUB_TOKEN` /
-/// `GH_TOKEN` / `GITHUB_API_URL` process environment. Environment variables
-/// are global mutable state, so two such tests running in parallel flake
-/// each other (one removes the variable the other just set) — hold this
-/// lock for the entire test body, including the save/restore window.
 #[cfg(test)]
 pub(crate) static GITHUB_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// No-token error text, verbatim from the fork's retired v1
-/// `packages/agent-core` `github-tools.ts` (commit `5868b181cf`).
 pub const GITHUB_NO_TOKEN_ERROR: &str = "No GitHub token configured. Set token in the [github] section of config.toml, or set the GITHUB_TOKEN (or GH_TOKEN) environment variable.";
 
 const GITHUB_DEFAULT_BASE_URL: &str = "https://api.github.com";
 
-/// Tool definitions exposed to the model (name/description/schema).
 pub fn github_tool_defs() -> Vec<ToolInfo> {
     SPECS
         .iter()
@@ -64,20 +38,12 @@ pub fn github_tool_defs() -> Vec<ToolInfo> {
         .collect()
 }
 
-// ── Execution ──────────────────────────────────────────────────────────────
-
-/// Whether `tool_name` is one of the 34 GitHub tools (case-insensitive).
 pub fn is_github_tool(tool_name: &str) -> bool {
     SPECS
         .iter()
         .any(|spec| spec.name.eq_ignore_ascii_case(tool_name))
 }
 
-/// The fork's own `mutating: true` specs (v1 `GITHUB_MUTATING_TOOL_NAMES`) —
-/// excluded from the default auto-approve allowlist, so they prompt in non-auto
-/// permission modes. The allowlist policy itself is upstream v2's
-/// `default-tool-approve.ts`; upstream has no GitHub names in it, because
-/// upstream has no GitHub tools.
 static MUTATING_TOOLS: &[&str] = &[
     "GitHubCreateOrUpdateFile",
     "GitHubCreateTree",
@@ -93,21 +59,16 @@ static MUTATING_TOOLS: &[&str] = &[
     "GitHubCreatePRReview",
 ];
 
-/// Whether the tool mutates GitHub state (v2 `spec.mutating`).
 pub fn is_mutating_tool(tool_name: &str) -> bool {
     MUTATING_TOOLS
         .iter()
         .any(|name| name.eq_ignore_ascii_case(tool_name))
 }
 
-/// Whether the tool is a read-only GitHub tool — the set v2 adds to the
-/// default auto-approve allowlist (`GITHUB_READONLY_TOOL_NAMES`).
 pub fn is_readonly_tool(tool_name: &str) -> bool {
     is_github_tool(tool_name) && !is_mutating_tool(tool_name)
 }
 
-/// Permission rule subject (v2 `spec.subject`): repo tools use `owner/repo`,
-/// the search tools use the `q` argument, GetMe uses `me`.
 pub fn rule_subject(tool_name: &str, args: &Value) -> Option<String> {
     let spec = SPECS
         .iter()
@@ -124,15 +85,10 @@ pub fn rule_subject(tool_name: &str, args: &Value) -> Option<String> {
     }
 }
 
-/// Whether any GitHub token is resolvable from the host-provided `[github]`
-/// config values or the environment (v2 `hasGitHubToken` — v2 gates tool
-/// registration on this via the `when` clause).
 pub fn has_token(credentials: Option<&GitHubCredentials>) -> bool {
     resolve_token(credentials).is_some()
 }
 
-/// Execute a GitHub tool by name (case-insensitive). `None` when the name is
-/// not a GitHub tool — the caller falls back to the host path.
 pub async fn execute_github_tool(
     tool_name: &str,
     args: &Value,
@@ -154,8 +110,6 @@ async fn execute_spec(
     execute_with_token(spec, args, token.as_deref(), Some(base_url.as_str())).await
 }
 
-/// Execution with an explicit token, so tests can exercise the no-token and
-/// validation paths without touching the process environment.
 async fn execute_with_token(
     spec: &GitHubToolSpec,
     args: &Value,
@@ -175,9 +129,6 @@ async fn execute_with_token(
     format_result(response)
 }
 
-/// Host-resolved `[github]` config values (v2 `configSection.ts`). Absent
-/// fields fall back to the environment with v2 `envOverlay.ts` semantics:
-/// config wins, env fills the gap.
 #[derive(Clone, Debug, Default)]
 pub struct GitHubCredentials {
     pub token: Option<String>,
@@ -279,7 +230,7 @@ mod tests {
             "Repository owner (user or organization login)."
         );
         assert_eq!(repo.input_schema["required"], json!(["owner", "repo"]));
-        // Optional fields are not forced.
+
         let branches = defs
             .iter()
             .find(|def| def.name == "GitHubListBranches")
@@ -321,7 +272,7 @@ mod tests {
                 .starts_with("Invalid arguments for GitHubGetRepo: ")
         );
         assert!(result.content.contains("repo"));
-        // Both missing: both names appear in the issue list.
+
         let result = execute_with_token(
             spec_by_name("GitHubGetRepo"),
             &json!({}),
@@ -354,13 +305,6 @@ mod tests {
 
     #[test]
     fn test_unknown_tool_returns_none_and_case_insensitive_dispatch() {
-        // The dispatch path resolves credentials from the live GITHUB_TOKEN /
-        // GH_TOKEN / GITHUB_API_URL environment before validation
-        // short-circuits, so the call window holds GITHUB_ENV_TEST_LOCK (see
-        // its doc). A std MutexGuard cannot span the `.await` inside
-        // `execute_github_tool` (clippy await-holding-lock), so the
-        // serialized region runs on a dedicated thread — same pattern as
-        // repl's test_repl_tool_defs_complete.
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 let _env_guard = GITHUB_ENV_TEST_LOCK
@@ -376,8 +320,7 @@ mod tests {
                                 .await
                                 .is_none()
                         );
-                        // Case-insensitive dispatch; invalid args short-circuit
-                        // before any network call.
+
                         let result = execute_github_tool("githubgetrepo", &json!({}), None)
                             .await
                             .unwrap();
@@ -454,7 +397,7 @@ mod tests {
             build_query(commits, &args).as_deref(),
             Some("?sha=main&per_page=10")
         );
-        // Missing optional args are omitted entirely.
+
         let args = json!({ "owner": "o", "repo": "r" });
         assert_eq!(build_query(commits, &args), None);
     }
@@ -499,9 +442,6 @@ mod tests {
 
     #[test]
     fn test_github_token_env() {
-        // Env vars are process-global: serialize against the other
-        // GITHUB_*-touching tests (poison recovery keeps one panic from
-        // cascading into false env failures).
         let _env_guard = GITHUB_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -519,7 +459,7 @@ mod tests {
         unsafe {
             std::env::set_var("GITHUB_TOKEN", "github-token");
         }
-        // GITHUB_TOKEN wins over GH_TOKEN (v2 envOverlay order).
+
         assert_eq!(resolve_token(None).as_deref(), Some("github-token"));
         match saved_token {
             Some(value) => unsafe { std::env::set_var("GITHUB_TOKEN", value) },
@@ -533,8 +473,6 @@ mod tests {
 
     #[test]
     fn test_credentials_config_wins_over_env() {
-        // Env vars are process-global: serialize against the other
-        // GITHUB_*-touching tests (see GITHUB_ENV_TEST_LOCK).
         let _env_guard = GITHUB_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -546,8 +484,7 @@ mod tests {
             std::env::remove_var("GH_TOKEN");
             std::env::set_var("GITHUB_API_URL", "https://env.example.com/");
         }
-        // Config token wins over env; config base_url wins (trailing slash
-        // stripped like v2 buildGitHubUrl).
+
         let credentials = GitHubCredentials {
             token: Some("config-token".into()),
             base_url: Some("https://config.example.com/".into()),
@@ -560,14 +497,14 @@ mod tests {
             resolve_base_url(Some(&credentials)),
             "https://config.example.com"
         );
-        // Blank config values count as unset — env fills the gap.
+
         let blank = GitHubCredentials {
             token: Some("   ".into()),
             base_url: Some("".into()),
         };
         assert_eq!(resolve_token(Some(&blank)).as_deref(), Some("env-token"));
         assert_eq!(resolve_base_url(Some(&blank)), "https://env.example.com");
-        // No config + no env → default base URL, no token.
+
         unsafe {
             std::env::remove_var("GITHUB_TOKEN");
             std::env::remove_var("GH_TOKEN");
@@ -591,7 +528,6 @@ mod tests {
 
     #[test]
     fn test_mutating_and_readonly_partition() {
-        // The two sets partition all 34 tools (v2 GITHUB_READONLY/MUTATING).
         let readonly: Vec<&str> = SPECS
             .iter()
             .map(|spec| spec.name)
@@ -635,25 +571,23 @@ mod tests {
             rule_subject("GitHubCreateIssue", &repo_args).as_deref(),
             Some("octocat/hello-world")
         );
-        // Search tools use the q argument (v2 `subject: (a) => a.q`).
+
         assert_eq!(
             rule_subject("GitHubSearchCode", &json!({ "q": "fmt rust" })).as_deref(),
             Some("fmt rust")
         );
-        // GetMe uses the constant subject.
+
         assert_eq!(
             rule_subject("GitHubGetMe", &json!({})).as_deref(),
             Some("me")
         );
-        // Missing args → no subject (rule falls back to host matching).
+
         assert_eq!(rule_subject("GitHubGetRepo", &json!({})), None);
         assert_eq!(rule_subject("GitHubNope", &repo_args), None);
     }
 
     #[test]
     fn test_has_token_gating() {
-        // Env vars are process-global: serialize against the other
-        // GITHUB_*-touching tests (see GITHUB_ENV_TEST_LOCK).
         let _env_guard = GITHUB_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

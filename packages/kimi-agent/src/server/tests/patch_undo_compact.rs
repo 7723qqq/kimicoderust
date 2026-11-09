@@ -201,7 +201,7 @@ async fn undo_restores_state_domains_from_the_checkpoint_stack() {
 
     assert_eq!(state.checkpoint_depth(), 0, "both snapshots are consumed");
     assert_eq!(
-        state.read_domain("todo"),
+        state.read_domain_state("todo").into_result().unwrap(),
         Some(json!([{ "id": "T1" }])),
         "LIFO unwind must reach the earliest anchor, not stop one level short"
     );

@@ -7,36 +7,8 @@
 //! `NativeLlmConfig.auth_provider`, which is the same set.
 
 use crate::rpc::types::BoxFuture;
+pub use kimi_core::types::{CredentialFuture, UploadError};
 
-/// Why an upload did not produce a file id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UploadError {
-    /// The credential was rejected. The caller must surface this rather than
-    /// silently inlining: the user's login is broken, not the upload.
-    Auth(String),
-    /// The provider serves no files API (v2 `ImageUploadUnsupportedError`).
-    /// The caller remembers this and stops trying for the provider.
-    Unsupported(String),
-    /// Anything else — a network failure, a malformed response. The caller
-    /// falls back to inlining.
-    Other(String),
-}
-
-impl UploadError {
-    pub fn message(&self) -> &str {
-        match self {
-            Self::Auth(message) | Self::Unsupported(message) | Self::Other(message) => message,
-        }
-    }
-}
-
-impl std::fmt::Display for UploadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.message())
-    }
-}
-
-impl std::error::Error for UploadError {}
 
 /// v2 `kimiFilesBaseUrl`: the anthropic route strips the `/v1` segment for the
 /// Messages API, but the files API lives under it.
@@ -151,16 +123,24 @@ pub async fn upload_media(
         .await
         .map_err(|error| UploadError::Other(format!("media upload failed: {error}")))?;
     let status = response.status().as_u16();
-    let text = response.text().await.unwrap_or_default();
+    let text = response.text().await;
     if !(200..300).contains(&status) {
-        return Err(classify_status(status, &text));
+        // A body that cannot be read is not an empty body: keep the status
+        // classification and name the read failure in the detail.
+        let body = match &text {
+            Ok(text) => text.clone(),
+            Err(error) => format!("<body could not be read: {error}>"),
+        };
+        return Err(classify_status(status, &body));
     }
+    let text = text.map_err(|error| {
+        UploadError::Other(format!(
+            "media upload response body could not be read: {error}"
+        ))
+    })?;
     file_id_of(&text)
         .ok_or_else(|| UploadError::Other(format!("media upload returned no file id: {text}")))
 }
-
-/// The credential an upload authenticates with, when the transport has one.
-pub type CredentialFuture<'a> = BoxFuture<'a, Result<String, String>>;
 
 #[cfg(test)]
 mod tests {

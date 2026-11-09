@@ -1,39 +1,3 @@
-//! Native `select_tools` progressive tool disclosure tool.
-//!
-//! Mirrors `packages/agent-core-v2/src/agent/toolSelect/` and
-//! `packages/agent-core-v2/src/agent/tools/select-tools/`.
-//!
-//! # Wiring (2026-09-14)
-//!
-//! Live:
-//! - `execute_select_tools` is dispatched from the `"select_tools"` arm of
-//!   [`crate::tools::NativeToolset::execute`], and the loaded set is now the
-//!   toolset's **session-scoped** `loaded_tools` set instead of a set created
-//!   and dropped on every call. `already_available` therefore reports names
-//!   loaded by an earlier call, and `to_load` reports only genuinely new ones.
-//! - `render_loadable_tools_announcement` is reached from
-//!   `execute_select_tools` and delivered to the model as a follow-up `user`
-//!   message via [`ExecutableToolResult::delivery`], so the
-//!   `<tools_added>` block the tool description refers to actually arrives.
-//! - The loaded schema itself reaches the model through
-//!   [`crate::tools::NativeToolset::shape_tool_table`]: a deferred tool the
-//!   session loaded is advertised again on the next step, with the
-//!   catalogue's definition. v2 sends it as a system message carrying `tools`
-//!   (`selectToolsTool.ts` `ctx.remind`); the advertised table is this
-//!   engine's equivalent channel.
-//!
-//! The two v2 call-time refusals live here and are both wired in
-//! [`crate::tools::dispatch`]: [`not_loaded_tool_output`] for a deferred tool
-//! called before it was loaded (v2 `shouldIntercept`) and
-//! [`missing_tool_output`] for a tool the session loaded that is gone from the
-//! registry (v2 `describeMissingTool`, `toolSelectService.ts:304-318`).
-//!
-//! v2's third refusal, `inactiveLoadedToolOutput` ("was loaded but is no longer
-//! active. Ask the user to enable it"), has no counterpart: the engine's policy
-//! gate runs ahead of every other refusal and answers
-//! `engine.tools.disabled`, which covers the same case with a different
-//! sentence.
-
 use std::collections::HashSet;
 
 use serde_json::{Value, json};
@@ -74,19 +38,14 @@ pub fn select_tools_schema() -> Value {
     })
 }
 
-/// v2 `SelectToolsInputSchema`'s `refine` message, reused for the empty-query
-/// branch (`selectToolsTool.ts` rejects both the same way): neither a name nor
-/// a query gives the tool nothing to do.
 pub const SELECT_TOOLS_PROVIDE_NAMES_OR_QUERY: &str = "Provide names to load or a query to search.";
 
-/// v2's guard for a call that reaches the tool after disclosure closed (a
-/// model switch mid-session): the tool is not advertised then, but a queued
-/// call must still say why it did nothing.
 pub const SELECT_TOOLS_UNAVAILABLE: &str = "select_tools is not available for the current model.";
 
-/// The tool's own result shape: one text payload, no delivery, no display.
 pub fn text_result(content: &str, is_error: bool) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: content.to_string(),
@@ -96,11 +55,6 @@ pub fn text_result(content: &str, is_error: bool) -> ExecutableToolResult {
     }
 }
 
-/// Render the capability-search result (v2 `selectToolsTool.ts` query branch).
-///
-/// A hit lists its name and the first 120 characters of the flattened
-/// description; the trailer tells the model the list is candidates only, so it
-/// does not try to call one before loading it.
 pub fn search_output(query: &str, hits: &[crate::tools::tool_retriever::ToolSearchHit]) -> String {
     if hits.is_empty() {
         return format!(
@@ -134,39 +88,23 @@ call select_tools with exact names to load the others."
 pub struct LoadToolsResult {
     pub to_load: Vec<String>,
     pub already_available: Vec<String>,
-    /// Requested names the model can already call directly — registered and
-    /// not behind the deferred-disclosure gate (upstream #3885
-    /// `isStaticCallable`).
+
     pub already_callable: Vec<String>,
-    /// Names an earlier `select_tools` call loaded that are no longer
-    /// registered (upstream #4190 `staleLoaded`): loading cannot restore
-    /// them, only a new `<tools_added>` announcement can.
+
     pub stale_loaded: Vec<String>,
-    /// Names the current tool policy refuses (upstream #4190 `policyDenied`):
-    /// a deny-list hit on any name, or a registered name the allowlist
-    /// excludes. select_tools cannot enable them.
+
     pub policy_denied: Vec<String>,
     pub unknown: Vec<String>,
-    /// Names whose failed-selection count reached [`STOP_RETRY_THRESHOLD`]
-    /// (upstream #4190 `escalated`), with the attempt count.
+
     pub escalated: Vec<(String, usize)>,
-    /// Consecutive `select_tools` calls that made nothing available (upstream
-    /// #4190 `consecutiveFailures`).
+
     pub consecutive_failures: usize,
-    /// The still-unloaded loadable names (upstream `result.loadable`), sorted
-    /// so rendered guidance is deterministic.
+
     pub loadable: Vec<String>,
 }
 
-/// Upstream #4190 `STOP_RETRY_THRESHOLD`: a name that failed selection this
-/// many times is escalated with a "stop retrying" line.
 pub const STOP_RETRY_THRESHOLD: usize = 2;
 
-/// Upstream #4190 failure bookkeeping (`failedSelectionAttempts` +
-/// `consecutiveFailures` + `selectionEnvironment`): per-name failed-selection
-/// attempts and the consecutive-failure streak, both reset whenever the tool
-/// environment (policy or catalogue) changes. Kept on the toolset so the
-/// counts are session-scoped, like `loaded_tools`.
 #[derive(Debug, Default)]
 pub struct SelectionFailureTracker {
     failed_attempts: std::collections::HashMap<String, usize>,
@@ -175,8 +113,6 @@ pub struct SelectionFailureTracker {
 }
 
 impl SelectionFailureTracker {
-    /// v2 `resetFailuresIfToolsChanged`: a policy or catalogue change makes
-    /// earlier failures unactionable, so the counts start over.
     pub fn reset_if_environment_changed(&mut self, environment: String) {
         if self.environment.as_deref() == Some(environment.as_str()) {
             return;
@@ -186,10 +122,6 @@ impl SelectionFailureTracker {
         self.failed_attempts.clear();
     }
 
-    /// v2 `load()`'s bookkeeping: any success resets the streak, and a
-    /// successful name clears only its own record — failed names in the same
-    /// batch keep accumulating instead of being masked by sibling successes.
-    /// A name repeated within one call counts once (v2 `attemptsByKey`).
     fn record(&mut self, succeeded: &[String], failed: &[String]) -> (Vec<(String, usize)>, usize) {
         self.consecutive_failures = if succeeded.is_empty() {
             self.consecutive_failures + 1
@@ -216,9 +148,6 @@ impl SelectionFailureTracker {
     }
 }
 
-/// The environment fingerprint a change in which resets the failure counts
-/// (v2 `getPolicyFingerprint` + registry signature): the global `[tools]`
-/// lists plus the registered and loadable name sets, sorted for determinism.
 pub fn selection_environment_fingerprint(
     policy: Option<&tool_policy::ToolsFilter>,
     registered_tools: &HashSet<String>,
@@ -244,15 +173,6 @@ pub fn selection_environment_fingerprint(
     .to_string()
 }
 
-/// Classify the requested names (upstream #4190 `AgentToolSelectService.load`).
-///
-/// Order matters and mirrors v2 exactly: a policy refusal outranks everything
-/// (a deny-list hit lands here even for a name that is not registered at all,
-/// so the model is told the policy rather than handed a typo suggestion); a
-/// loadable name loads or reports as already available; a registered name
-/// that is not behind the disclosure gate is statically callable, so
-/// selecting it is a category error, not a load; a name that was loaded
-/// before but left the catalogue is stale; anything else is unknown.
 pub fn evaluate_load_tools(
     requested: &[String],
     loadable_tools: &HashSet<String>,
@@ -261,11 +181,6 @@ pub fn evaluate_load_tools(
     policy: Option<&tool_policy::ToolsFilter>,
     tracker: &mut SelectionFailureTracker,
 ) -> LoadToolsResult {
-    // v2 `isToolDenied`: deny-lists only, so a typo near an allowed name still
-    // lands in `unknown` with suggestions instead of being called a policy
-    // refusal. Deny patterns use the case-sensitive `isToolActive` match
-    // semantics (the case-insensitive `blocks_call` is the execution gate,
-    // not this classification).
     let is_denied = |name: &str| {
         policy.is_some_and(|filter| {
             filter
@@ -274,9 +189,7 @@ pub fn evaluate_load_tools(
                 .any(|pattern| tool_policy::matches_tool_pattern(pattern, name))
         })
     };
-    // v2 `isToolActiveForSelection` minus its select_tools disclosure
-    // special-case (this engine never registers select_tools in the
-    // catalogue, so the special-case has no input to act on).
+
     let is_active = |name: &str| policy.is_none_or(|filter| filter.allows(name));
 
     let mut to_load = Vec::new();
@@ -337,9 +250,6 @@ pub fn evaluate_load_tools(
     }
 }
 
-/// Upstream #3885 `suggestToolNames`: case-only fixes first, then substring
-/// matches over the `mcp__`-stripped query, then matches against the last
-/// `__` segment of the candidate. Sorted, capped at three.
 fn suggest_tool_names(name: &str, pool: &[String]) -> Vec<String> {
     let lower = name.to_ascii_lowercase();
     let mut case_fix: Vec<String> = pool
@@ -391,6 +301,8 @@ pub fn execute_select_tools(
             .collect(),
         None => {
             return ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: "Invalid arguments: 'names' array is required.".into(),
@@ -403,6 +315,8 @@ pub fn execute_select_tools(
 
     if names.is_empty() {
         return ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: "Invalid arguments: 'names' must contain at least one tool name.".into(),
@@ -421,10 +335,6 @@ pub fn execute_select_tools(
         tracker,
     );
 
-    // Sorted so the rendered guidance is deterministic (the upstream TS array
-    // inherited insertion order; a Rust HashSet does not). The suggestion
-    // pool is the full loadable set (upstream `[...loadable]`), not the
-    // already-loaded-filtered `result.loadable` used in the guidance lines.
     let mut suggestion_pool: Vec<String> = loadable_tools.iter().cloned().collect();
     suggestion_pool.sort();
 
@@ -447,7 +357,7 @@ pub fn execute_select_tools(
 select_tools is only for names in the <tools_added> announcements."
         ));
     }
-    // Upstream #4190 bucket wording, verbatim.
+
     for name in &result.stale_loaded {
         lines.push(format!(
             "\"{name}\" was previously selected or loaded but is no longer registered. \
@@ -465,8 +375,8 @@ use an available tool instead."
     for name in &result.unknown {
         let reason = format!(
             "Unknown tool: {name}. This name is not in the current loadable tool list. \
-select_tools only loads exact announced names; it cannot search for capabilities \
-or install tools. "
+Call select_tools with a query to search by capability, then load an exact name; \
+or use an available tool. "
         );
         let candidates = suggest_tool_names(name, &suggestion_pool);
         if !candidates.is_empty() {
@@ -508,20 +418,10 @@ announcements, use tools already available, or tell the user what capability is 
         && result.already_available.is_empty()
         && result.already_callable.is_empty();
 
-    // Announce what just became loadable. `delivery` reaches the model as a
-    // follow-up `user` message — the same channel v2 used for its
-    // `loadable-tools` reminder. Without this the tool description told the
-    // model to fold `<tools_added>` blocks that were never produced, and
-    // `render_loadable_tools_announcement` had no caller at all.
-    let delivery = render_loadable_tools_announcement(&result.to_load, &[], true).map(|text| {
-        crate::turn_loop::types::ToolDelivery {
-            blocks: vec![crate::rpc::types::ContentBlock::Text { text, meta: None }],
-            origin: None,
-        }
-    });
-
     ExecutableToolResult {
-        delivery,
+        spill: None,
+        parts: Vec::new(),
+        delivery: None,
         stop_turn: false,
         content: lines.join("\n"),
         is_error,
@@ -537,12 +437,6 @@ Call select_tools with [\"{name}\"] first, then call the tool."
     )
 }
 
-/// v2 `describeMissingTool` (`toolSelectService.ts:304-318`): the tool was
-/// loaded by an earlier `select_tools`, and is now gone from the registry.
-///
-/// An MCP tool can disappear only because its server went away, and that is
-/// recoverable — the model must not retry now but may after a reconnect. Any
-/// other tool cannot come back on its own, so retrying is pointless.
 pub fn missing_tool_output(name: &str) -> String {
     if name.starts_with("mcp__") {
         return format!(
@@ -556,10 +450,6 @@ Do not retry it unless it becomes available again."
     )
 }
 
-/// v2 `inactiveLoadedToolOutput` (`toolSelectService.ts:515-520`): the session
-/// loaded the tool, and the policy no longer allows it. Unlike
-/// [`missing_tool_output`] this is recoverable within the session — the user
-/// can enable it again — so the model is told to ask rather than to give up.
 pub fn inactive_loaded_tool_output(name: &str) -> String {
     format!(
         "Tool \"{name}\" was loaded but is no longer active. \
@@ -567,23 +457,15 @@ Ask the user to enable it before calling it again."
     )
 }
 
-/// What the current registry says about a name a step asked to run — v2
-/// `toolRegistry.resolve(name)` combined with `isDynamicallyLoadable(info)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolRegistration {
-    /// Registered and advertised inline: callable as it stands.
     Inline,
-    /// Registered but behind deferred disclosure (v2 `disclosure: 'deferred'`):
-    /// it has to be loaded through `select_tools` first.
+
     Deferred,
-    /// Not in the registry.
+
     Missing,
 }
 
-/// v2 `describeMissingTool` at its call site (`toolExecutorService.ts:752-760`):
-/// the registry has no such tool. It is consulted **before** the policy guard,
-/// so a loaded name that left the registry is answered here even when a policy
-/// layer would also deny it.
 pub fn missing_refusal(
     enabled: bool,
     tool_name: &str,
@@ -594,13 +476,6 @@ pub fn missing_refusal(
         .then(|| missing_tool_output(tool_name))
 }
 
-/// v2 `describeUnavailableTool` (`toolSelectService.ts:298-302`), consulted
-/// only for a name the registry still has (`toolExecutorService.ts:773`).
-///
-/// Two reachable arms. `isInactiveLoadedTool`: the session loaded the tool and
-/// the registry now offers it inline instead of deferred — a policy-denied tool
-/// never reaches this arm because the guard runs first. `shouldIntercept`: the
-/// tool is registered and deferred, and the session never loaded it.
 pub fn unavailable_refusal(
     enabled: bool,
     tool_name: &str,
@@ -638,8 +513,7 @@ pub fn render_loadable_tools_announcement(
             removed.join("\n")
         ));
     }
-    // Upstream #4190: an empty loadable set replaces the usage trailer — the
-    // model must stop calling select_tools instead of being invited to try.
+
     if !has_loadable {
         sections.push(
             "No tools are currently available for dynamic loading in this session. \
@@ -684,9 +558,6 @@ mod tests {
         assert_eq!(schema["additionalProperties"], false);
     }
 
-    /// v2 `selectToolsTool.ts`'s query rendering: the no-hits sentence, the
-    /// header/hit/trailer shape with the description flattened, and the
-    /// 120-character cut.
     #[test]
     fn test_search_output_matches_v2_shape() {
         assert_eq!(
@@ -718,7 +589,6 @@ call select_tools with exact names to load the others."
         let description = line.split_once(" — ").expect("name — description").1;
         assert_eq!(description.chars().count(), 120, "the description is cut");
 
-        // An empty description renders the bare name, not a dangling dash.
         let bare = vec![crate::tools::tool_retriever::ToolSearchHit {
             name: "mcp__x__y".into(),
             description: String::new(),
@@ -758,9 +628,6 @@ call select_tools with exact names to load the others."
 
     #[test]
     fn test_already_callable_is_reported_not_loaded() {
-        // A registered name that is not behind the disclosure gate is
-        // statically callable (upstream #3885 `isStaticCallable`): selecting
-        // it is answered with direct-call guidance, not a load.
         let loadable = set(&["mcp__github__search"]);
         let registered = set(&["mcp__github__search", "Grep"]);
         let loaded = HashSet::new();
@@ -780,8 +647,6 @@ call select_tools with exact names to load the others."
 
     #[test]
     fn test_stale_loaded_is_not_reported_as_available() {
-        // Loaded in an earlier call, but the catalogue no longer carries the
-        // name (the MCP server went away): v2 #4190 `staleLoaded`.
         let loadable = HashSet::new();
         let registered = set(&["Grep"]);
         let loaded = set(&["mcp__github__search"]);
@@ -813,11 +678,11 @@ call select_tools with exact names to load the others."
 
         let res = evaluate_load_tools(
             &[
-                "mcp__github__search".into(),    // deny-list hit on a loadable name
-                "mcp__github__get_issue".into(), // deny-list glob on an unregistered name
-                "Bash".into(),                   // registered but outside the allowlist
-                "Grep".into(),                   // allowed: statically callable
-                "mcp__other__ping".into(),       // matches no deny pattern: unknown
+                "mcp__github__search".into(),
+                "mcp__github__get_issue".into(),
+                "Bash".into(),
+                "Grep".into(),
+                "mcp__other__ping".into(),
             ],
             &loadable,
             &registered,
@@ -841,7 +706,6 @@ call select_tools with exact names to load the others."
         let loaded = HashSet::new();
         let mut tracker = SelectionFailureTracker::default();
 
-        // First failure: counted, not yet escalated.
         let res1 = evaluate_load_tools(
             &["bogus".into()],
             &loadable,
@@ -853,7 +717,6 @@ call select_tools with exact names to load the others."
         assert!(res1.escalated.is_empty());
         assert_eq!(res1.consecutive_failures, 1);
 
-        // Second failure of the same name crosses STOP_RETRY_THRESHOLD.
         let res2 = evaluate_load_tools(
             &["bogus".into()],
             &loadable,
@@ -865,8 +728,6 @@ call select_tools with exact names to load the others."
         assert_eq!(res2.escalated, vec![("bogus".to_string(), 2)]);
         assert_eq!(res2.consecutive_failures, 2);
 
-        // A repeated name inside one batch counts once (v2 `attemptsByKey`) —
-        // attempts=1 stays below the escalation threshold.
         let res2b = evaluate_load_tools(
             &["other".into(), "other".into()],
             &loadable,
@@ -878,9 +739,6 @@ call select_tools with exact names to load the others."
         assert!(res2b.escalated.is_empty());
         assert_eq!(res2b.consecutive_failures, 3);
 
-        // A success resets the streak and clears only its own record; the
-        // sibling failure in the same batch keeps accumulating (v2 #4190
-        // "keep failure counts honest in mixed batches").
         let res3 = evaluate_load_tools(
             &["mcp__github__search".into(), "bogus".into()],
             &loadable,
@@ -892,9 +750,8 @@ call select_tools with exact names to load the others."
         assert_eq!(res3.consecutive_failures, 0);
         assert_eq!(res3.escalated, vec![("bogus".to_string(), 3)]);
 
-        // A changed environment (policy or catalogue) forgets the counts.
         tracker.reset_if_environment_changed("env-a".to_string());
-        tracker.reset_if_environment_changed("env-a".to_string()); // no-op
+        tracker.reset_if_environment_changed("env-a".to_string());
         let res4 = evaluate_load_tools(
             &["bogus".into()],
             &loadable,
@@ -913,7 +770,7 @@ call select_tools with exact names to load the others."
             None,
             &mut tracker,
         );
-        // After the reset the attempt count starts over: no escalation at 1.
+
         assert!(res5.escalated.is_empty());
         assert_eq!(res5.consecutive_failures, 1);
     }
@@ -925,15 +782,14 @@ call select_tools with exact names to load the others."
             "mcp__github__create_pr".into(),
             "Grep".into(),
         ];
-        // Case-only fix wins over everything else.
+
         assert_eq!(suggest_tool_names("grep", &pool), vec!["Grep"]);
-        // Substring over the mcp__-stripped query.
+
         assert_eq!(
             suggest_tool_names("mcp__github__search", &pool),
             vec!["mcp__github__search_code"]
         );
-        // Last-segment containment: the query contains the candidate's final
-        // `__` segment, and the substring branch found nothing first.
+
         assert_eq!(
             suggest_tool_names("my_create_pr", &pool),
             vec!["mcp__github__create_pr"]
@@ -948,8 +804,6 @@ call select_tools with exact names to load the others."
         let mut loaded = HashSet::new();
         let mut tracker = SelectionFailureTracker::default();
 
-        // 1. Initial load with exact formatted output (upstream #4190 unknown
-        //    wording: reason + loadable list + no-guessing guidance).
         let res1 = execute_select_tools(
             &json!({ "names": ["tool_a", "tool_a", "tool_b", "nonexistent"] }),
             &loadable,
@@ -963,14 +817,13 @@ call select_tools with exact names to load the others."
             res1.content,
             "Loaded: tool_a, tool_b\n\
 Unknown tool: nonexistent. This name is not in the current loadable tool list. \
-select_tools only loads exact announced names; it cannot search for capabilities \
-or install tools. Loadable tools: tool_a, tool_b. Do not guess aliases; use an \
+Call select_tools with a query to search by capability, then load an exact name; \
+or use an available tool. Loadable tools: tool_a, tool_b. Do not guess aliases; use an \
 available tool or tell the user what capability is missing."
         );
         assert!(loaded.contains("tool_a"));
         assert!(loaded.contains("tool_b"));
 
-        // 2. Subsequent load for already loaded tool
         let res2 = execute_select_tools(
             &json!({ "names": ["tool_a"] }),
             &loadable,
@@ -982,8 +835,6 @@ available tool or tell the user what capability is missing."
         assert!(!res2.is_error);
         assert_eq!(res2.content, "Already available: tool_a");
 
-        // 3. Only unknown tools with nothing left loadable -> the "no tools"
-        //    guidance (upstream #4190's loadable.length === 0 arm).
         let res3 = execute_select_tools(
             &json!({ "names": ["bogus"] }),
             &loadable,
@@ -996,13 +847,12 @@ available tool or tell the user what capability is missing."
         assert_eq!(
             res3.content,
             "Unknown tool: bogus. This name is not in the current loadable tool list. \
-select_tools only loads exact announced names; it cannot search for capabilities \
-or install tools. No additional tools can be loaded right now; use the tools you \
+Call select_tools with a query to search by capability, then load an exact name; \
+or use an available tool. No additional tools can be loaded right now; use the tools you \
 already have. Do not guess aliases; use an available tool or tell the user what \
 capability is missing."
         );
 
-        // 4. Empty names array -> is_error true
         let res_empty = execute_select_tools(
             &json!({ "names": [] }),
             &loadable,
@@ -1017,7 +867,6 @@ capability is missing."
             "Invalid arguments: 'names' must contain at least one tool name."
         );
 
-        // 5. Missing names field -> is_error true
         let res_missing = execute_select_tools(
             &json!({}),
             &loadable,
@@ -1032,8 +881,6 @@ capability is missing."
             "Invalid arguments: 'names' array is required."
         );
 
-        // 6. A statically callable name is answered with direct-call guidance
-        //    and is not an error (upstream #3885).
         let res6 = execute_select_tools(
             &json!({ "names": ["grep"] }),
             &loadable,
@@ -1048,7 +895,6 @@ capability is missing."
             "\"grep\" is already available — call it directly; select_tools is only for names in the <tools_added> announcements."
         );
 
-        // 7. not_loaded_tool_output exact wording match
         assert_eq!(
             not_loaded_tool_output("mcp__github__search"),
             "Tool \"mcp__github__search\" is available but not loaded. Call select_tools with [\"mcp__github__search\"] first, then call the tool."
@@ -1064,24 +910,17 @@ capability is missing."
         assert!(announcement.contains("<tools_removed>\nmcp__tool3\n</tools_removed>"));
         assert!(announcement.contains("Use the select_tools tool with exact names"));
 
-        // Upstream #4190: the empty loadable state replaces the usage trailer.
         let empty = render_loadable_tools_announcement(&[], &[], false).unwrap();
         assert!(
             empty.contains("No tools are currently available for dynamic loading in this session.")
         );
         assert!(!empty.contains("Use the select_tools tool"));
 
-        // Nothing to say: no delta and tools remain loadable.
         assert!(render_loadable_tools_announcement(&[], &[], true).is_none());
     }
 
-    /// v2's two call-time describers at their real call sites
-    /// (`toolExecutorService.ts:752-782`): the missing-tool describer is asked
-    /// **before** the policy guard, the unavailable one **after** it and only
-    /// for a name the registry still has. Each sentence is checked verbatim.
     #[test]
     fn test_refusal_describers_match_v2() {
-        // Missing. Loaded, then gone: answered before anything else runs.
         assert_eq!(
             missing_refusal(true, "mcp__gone__x", ToolRegistration::Missing, true).as_deref(),
             Some(
@@ -1096,13 +935,12 @@ It may become available again when the server reconnects; do not retry immediate
 Do not retry it unless it becomes available again."
             )
         );
-        // Never loaded: the host owns that name, so the engine stays out of it.
+
         assert!(missing_refusal(true, "mcp__x__y", ToolRegistration::Missing, false).is_none());
-        // Still registered: not the missing describer's business.
+
         assert!(missing_refusal(true, "mcp__x__y", ToolRegistration::Deferred, true).is_none());
         assert!(missing_refusal(false, "mcp__gone__x", ToolRegistration::Missing, true).is_none());
 
-        // Unavailable, registered names only.
         assert_eq!(
             unavailable_refusal(
                 true,

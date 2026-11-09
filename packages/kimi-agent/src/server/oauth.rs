@@ -102,6 +102,11 @@ struct FlowState {
 struct OAuthManagerInner {
     flows: Mutex<HashMap<String, FlowState>>,
     tokens: Mutex<HashMap<String, StoredToken>>,
+    /// One async lock per provider: a refresh in flight is the only one
+    /// allowed to hit the token endpoint (v2 `refreshChain`). Without it two
+    /// concurrent callers both spend the same refresh token, and rotating
+    /// servers invalidate the loser.
+    refresh_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     generation: AtomicU64,
 }
 
@@ -671,6 +676,18 @@ impl OAuthManager {
         had_flow || had_token
     }
 
+    /// One async lock per provider, so concurrent refreshes serialize instead
+    /// of spending the same refresh token twice (v2 `refreshChain`).
+    fn refresh_lock(&self, provider: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner
+            .refresh_locks
+            .lock()
+            .unwrap()
+            .entry(provider.to_string())
+            .or_default()
+            .clone()
+    }
+
     /// Refresh the stored token via the refresh grant, mirroring TS
     /// `refreshAccessToken` (oauth.ts:246-306): unauthorized/invalid_grant
     /// drops the token, retryable statuses back off and retry.
@@ -679,6 +696,15 @@ impl OAuthManager {
         provider: &str,
         token: &StoredToken,
     ) -> Result<StoredToken, String> {
+        let lock = self.refresh_lock(provider);
+        let _guard = lock.lock().await;
+        // A caller that queued behind a successful refresh reuses that result
+        // instead of rotating the token a second time.
+        if let Some(current) = self.load_usable_token(provider)
+            && current.access_token != token.access_token
+        {
+            return Ok(current);
+        }
         let mut last_error = String::from("Token refresh failed.");
         for attempt in 0..REFRESH_MAX_ATTEMPTS {
             let (status, data) = self
@@ -1073,6 +1099,77 @@ content-length: {}
         dir
     }
 
+    #[tokio::test]
+    async fn concurrent_refresh_hits_the_token_endpoint_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0u8; 8192];
+                let Ok(n) = sock.read(&mut buf).await else {
+                    break;
+                };
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = if request.starts_with("POST /api/oauth/token") {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    // Long enough that the second caller reaches the refresh
+                    // path while the first exchange is still in flight.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    json!({
+                        "access_token": "at-refreshed",
+                        "refresh_token": "rt-refreshed",
+                        "expires_in": 3600,
+                        "scope": "read write",
+                        "token_type": "Bearer"
+                    })
+                    .to_string()
+                } else {
+                    String::from("{}")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let manager = Arc::new(OAuthManager::with_hosts(
+            format!("http://{addr}"),
+            "http://127.0.0.1:9".into(),
+            Some(temp_credentials_dir("single-flight")),
+        ));
+        manager.save_token(
+            OAuthManager::MANAGED_TOKEN_NAMES[0],
+            &StoredToken {
+                access_token: "at-stale".into(),
+                refresh_token: "rt-stale".into(),
+                expires_at: chrono::Utc::now().timestamp() - 3600,
+                scope: "read write".into(),
+                token_type: "Bearer".into(),
+                expires_in: 3600,
+            },
+        );
+
+        let (first, second) = tokio::join!(
+            manager.managed_access_token(),
+            manager.managed_access_token()
+        );
+
+        assert_eq!(first.unwrap(), "at-refreshed");
+        assert_eq!(second.unwrap(), "at-refreshed");
+        // v2 `refreshChain`: one exchange, shared by both callers.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     async fn wait_for_terminal_status(manager: &Arc<OAuthManager>, provider: &str) -> String {
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1180,8 +1277,22 @@ content-length: {}
             Some(dir),
         ));
         manager.clone().start_login("kimi", None).await;
+        // The generation the spawned poller captured before its first sleep.
+        let poller_generation = manager.current_generation("kimi").unwrap();
         assert!(manager.cancel_login("kimi"));
-        tokio::time::sleep(Duration::from_millis(1800)).await;
+        // The poller wakes up, compares this captured generation against the
+        // flow's and returns without polling again. Replay that wake-up here
+        // instead of sleeping out a whole poll interval: the bump is the
+        // condition the loop exits on.
+        assert_ne!(
+            manager.current_generation("kimi"),
+            Some(poller_generation),
+            "a cancel must make the poller's captured generation stale"
+        );
+        // A poll already in flight when the cancel landed calls `finish_flow`
+        // with the generation it captured. Even a successful exchange must not
+        // overwrite the cancelled status.
+        manager.finish_flow("kimi", poller_generation, "success", None);
         let flow = manager.get_flow("kimi").unwrap();
         assert_eq!(
             flow.status, "cancelled",

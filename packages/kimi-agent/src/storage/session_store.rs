@@ -98,18 +98,33 @@ impl SessionStore {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         let mut messages = Vec::new();
+        let mut skipped = 0usize;
 
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(record) = serde_json::from_str::<SessionRecord>(&line) {
-                messages.push(record.user_message);
-                if let Some(assistant) = record.assistant_message {
-                    messages.push(assistant);
+            match serde_json::from_str::<SessionRecord>(&line) {
+                Ok(record) => {
+                    messages.push(record.user_message);
+                    if let Some(assistant) = record.assistant_message {
+                        messages.push(assistant);
+                    }
                 }
+                // A crash can leave the last line partial, which is normal for
+                // an append-only transcript. A line in the middle that does not
+                // decode is not normal, so the count is reported rather than
+                // the transcript silently coming back shorter than it is.
+                Err(_) => skipped += 1,
             }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                session_id,
+                skipped,
+                "skipped undecodable records while loading the session transcript"
+            );
         }
 
         Ok(messages)
@@ -133,19 +148,30 @@ impl SessionStore {
                 let mut turns_count = 0;
                 let mut last_updated_ms = 0;
                 let mut total_usage = TokenUsage::default();
+                let mut skipped = 0usize;
 
                 for line in reader.lines() {
                     let line = line?;
                     if line.trim().is_empty() {
                         continue;
                     }
-                    if let Ok(rec) = serde_json::from_str::<SessionRecord>(&line) {
-                        turns_count += 1;
-                        last_updated_ms = rec.timestamp_ms;
-                        total_usage.input_tokens += rec.usage.input_tokens;
-                        total_usage.output_tokens += rec.usage.output_tokens;
-                        total_usage.total_tokens += rec.usage.total_tokens;
+                    match serde_json::from_str::<SessionRecord>(&line) {
+                        Ok(rec) => {
+                            turns_count += 1;
+                            last_updated_ms = rec.timestamp_ms;
+                            total_usage.input_tokens += rec.usage.input_tokens;
+                            total_usage.output_tokens += rec.usage.output_tokens;
+                            total_usage.total_tokens += rec.usage.total_tokens;
+                        }
+                        Err(_) => skipped += 1,
                     }
+                }
+                if skipped > 0 {
+                    tracing::warn!(
+                        path = %path.display(),
+                        skipped,
+                        "skipped undecodable records while summarising a session"
+                    );
                 }
 
                 summaries.push(SessionSummary {

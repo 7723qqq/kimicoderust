@@ -181,9 +181,7 @@ impl HttpServer {
             persist_failures.push(format!("session title: {e}"));
         }
         if let Some(new_meta) = current_wire.get("metadata")
-            && let Err(e) = self
-                .store
-                .put_session_state("metadata", session_id, session_id, new_meta)
+            && let Err(e) = self.store.put_session_metadata(session_id, new_meta)
         {
             persist_failures.push(format!("session metadata: {e}"));
         }
@@ -330,9 +328,7 @@ impl HttpServer {
             persist_failures.push(format!("session title: {e}"));
         }
         if let Some(new_meta) = current_wire.get("metadata")
-            && let Err(e) = self
-                .store
-                .put_session_state("metadata", session_id, session_id, new_meta)
+            && let Err(e) = self.store.put_session_metadata(session_id, new_meta)
         {
             persist_failures.push(format!("session metadata: {e}"));
         }

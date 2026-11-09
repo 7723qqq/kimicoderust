@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::callbacks::HostCallbacks;
 use crate::rpc::types::{self, LlmChatMessage};
-use crate::turn_loop::types::*;
+use kimi_core::types::*;
 
 /// An LLM implementation that proxies requests to the JS host via
 /// [`HostCallbacks::llm_chat`].
@@ -20,7 +20,7 @@ pub struct HostLlmProxy {
     /// The turn's tool-call-id ledger. The host streams this transport, so the
     /// engine only normalizes the calls the host returns.
     tool_call_ids:
-        std::sync::Mutex<Option<Arc<crate::turn_loop::tool_call_id::ToolCallIdNormalizer>>>,
+        std::sync::Mutex<Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>>>,
 }
 
 impl HostLlmProxy {
@@ -57,7 +57,7 @@ impl LLM for HostLlmProxy {
         &self.system_prompt
     }
 
-    fn set_tool_call_ids(&self, ledger: Arc<crate::turn_loop::tool_call_id::ToolCallIdNormalizer>) {
+    fn set_tool_call_ids(&self, ledger: Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>) {
         *self.tool_call_ids.lock().unwrap_or_else(|e| e.into_inner()) = Some(ledger);
     }
 
@@ -77,7 +77,7 @@ impl LLM for HostLlmProxy {
         if crate::llm::http::is_cancelled_error(error) {
             return false;
         }
-        if let Some(code) = crate::llm::http::llm_http_status(error) {
+        if let Some(code) = kimi_core::error::llm_http_status(error) {
             // The policy itself is `http::is_retryable_status_code`, shared with
             // the native transport: the two must not drift, because a divergence
             // silently changes the retry budget the user actually experiences.
@@ -199,7 +199,7 @@ impl LLM for HostLlmProxy {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Some(ledger) = ledger {
-                crate::turn_loop::tool_call_id::remap_response_tool_calls(
+                kimi_core::tool_call_id::remap_response_tool_calls(
                     &mut result,
                     &ledger.begin_response(),
                 );

@@ -1,8 +1,6 @@
 use super::*;
 
 impl NativeToolset {
-    /// Execute a read-only tool natively when supported and inside the
-    /// sandbox. `None` means "not handled here — send it to the host".
     pub fn execute(&self, tool_name: &str, args: &Value) -> Option<ExecutableToolResult> {
         let sandbox = self.sandbox();
         match tool_name.to_ascii_lowercase().as_str() {
@@ -15,21 +13,10 @@ impl NativeToolset {
         }
     }
 
-    /// Whether the sandbox knows how to execute this tool natively (subject
-    /// to a host permission grant and sandbox confinement).
     pub fn handles(&self, tool_name: &str) -> bool {
         is_native_tool_name(tool_name)
     }
 
-    /// v2 `toolRegistry.resolve(name)` + `isDynamicallyLoadable(info)`: what the
-    /// current registry says about a name.
-    ///
-    /// A native tool is always inline. An MCP name is deferred while its server
-    /// is marked deferred and inline otherwise, and missing once its client is
-    /// gone. Any other name is missing *as far as this engine knows* — a
-    /// host-registered tool lives in the host's table, and
-    /// [`Self::execute_tool_streaming`] returns `None` for it so the host runs
-    /// it; only a name the session loaded is ever refused on that basis.
     async fn tool_registration(&self, tool_name: &str) -> select_tools::ToolRegistration {
         if is_builtin_tool_name(tool_name) {
             return select_tools::ToolRegistration::Inline;
@@ -46,15 +33,6 @@ impl NativeToolset {
         }
     }
 
-    /// Execute a tool natively (async).
-    ///
-    /// The file-I/O tools (`read` / `grep` / `glob` / `write` / `edit`)
-    /// delegate to [`Self::run_readonly_file_tool_on_blocking_pool`] /
-    /// [`Self::run_mutating_file_tool_on_blocking_pool`]: their bodies
-    /// are synchronous syscalls, and with up to `MAX_PARALLEL_TOOLS` calls
-    /// in flight per step they would otherwise pin tokio worker threads,
-    /// starving the Bash output pumps, LLM streams, and steer queue on the
-    /// same runtime.
     pub async fn execute_tool(
         &self,
         tool_name: &str,
@@ -63,9 +41,6 @@ impl NativeToolset {
         self.execute_tool_ext(None, tool_name, args).await
     }
 
-    /// [`Self::execute_tool`] with the caller's tool-call id, so the
-    /// foreground `Agent` tool can key its lifecycle events onto the right
-    /// transcript card (v2 `parentToolCallId`).
     pub async fn execute_tool_ext(
         &self,
         tool_call_id: Option<&str>,
@@ -76,9 +51,6 @@ impl NativeToolset {
             .await
     }
 
-    /// [`Self::execute_tool_ext`] with a mid-execution output stream
-    /// (P57): bash's stdout/stderr chunks are handed to `on_update` so the
-    /// host can drive live `tool.progress` cards.
     pub async fn execute_tool_streaming(
         &self,
         tool_call_id: Option<&str>,
@@ -86,8 +58,6 @@ impl NativeToolset {
         args: &Value,
         on_update: Option<OutputUpdate<'_>>,
     ) -> Option<ExecutableToolResult> {
-        // BTW side-channel veto (v2 `onBeforeExecuteTool` in `SessionBtwService`):
-        // all tool calls from a side-channel agent are denied with TOOL_CALL_DISABLED_MESSAGE.
         let caller = self.effective_caller_agent_id();
         if let Some(denial) =
             crate::subagent::check_btw_tool_denial(Some(caller.as_str()), tool_name)
@@ -95,28 +65,22 @@ impl NativeToolset {
             return Some(denial);
         }
 
-        // v2 `preflightToolCall`'s order (`toolExecutorService.ts:752-782`): the
-        // missing-tool describer first, then the policy guard, then the
-        // unavailable-tool describer. Both describers live in `select_tools` and
-        // are named after v2's (`describeMissingTool` / `describeUnavailableTool`)
-        // so the two call sites cannot drift into one table that reorders them.
         let registration = self.tool_registration(tool_name).await;
         let was_loaded = self
             .loaded_tools
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(tool_name);
-        // A loaded name that left the registry (its MCP server went away) is
-        // answered here, before the policy guard, exactly as v2 resolves the
-        // tool before guarding it. Without this the call falls through to the
-        // host and comes back as a generic unknown-tool error with no guidance.
+
         if let Some(refusal) = select_tools::missing_refusal(
-            self.tool_select_enabled,
+            self.supports_dynamic_tool_loading(),
             tool_name,
             registration,
             was_loaded,
         ) {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: refusal,
@@ -126,13 +90,12 @@ impl NativeToolset {
             });
         }
 
-        // Global `[tools]` switch (v2 tool policy): enforced again before
-        // execution so a disabled tool is refused even when the model calls
-        // it from memory instead of reading the advertised table.
         if let Some(filter) = &self.tools_filter
             && filter.blocks_call(tool_name)
         {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: LocalizedText::with_params(
@@ -146,19 +109,15 @@ impl NativeToolset {
             });
         }
 
-        // v2 `describeUnavailableTool` is asked only after the guard passes and
-        // only for a name the registry still has (`toolExecutorService.ts:773`).
-        // A deferred tool the model has not loaded is told to load it — the table
-        // hid it, so the call came from memory and running it would defeat
-        // keeping its schema out of the request. A loaded tool the registry now
-        // offers inline is told the session's load no longer applies.
         if let Some(refusal) = select_tools::unavailable_refusal(
-            self.tool_select_enabled,
+            self.supports_dynamic_tool_loading(),
             tool_name,
             registration,
             was_loaded,
         ) {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: refusal,
@@ -170,10 +129,6 @@ impl NativeToolset {
 
         match tool_name.to_ascii_lowercase().as_str() {
             "read" => {
-                // An image read is delivered to the model as media (v2
-                // `executeMediaRead`), `region` / `full_resolution` included.
-                // Text files and plain binary reads fall through to the text
-                // read.
                 if let Some(result) = self.read_media_on_blocking_pool(args).await {
                     return Some(result);
                 }
@@ -200,14 +155,6 @@ impl NativeToolset {
                 Some(subagent_tools::execute_manage_subagents(mgr, args).await)
             }
             "definesubagent" | "define_subagent" => {
-                // Registering a subagent profile is a main-agent decision: a
-                // profile is a standing grant of tools to future runs, and
-                // `ToolPolicyFilter` reads an empty `tools` list as "everything
-                // except the denylist". A subagent holding the unfiltered table
-                // could therefore mint a full-permission profile for itself
-                // and have the parent's own tool policy never re-checked. v2
-                // scopes the tool to the main agent the same way (its
-                // modeMutex and swarm gates are Agent-scoped).
                 if self.effective_caller_agent_id() != "main" {
                     return Some(err_result(
                         "Only the main agent can register a subagent profile. \
@@ -231,25 +178,6 @@ impl NativeToolset {
                 let callbacks = self.callbacks.as_deref()?;
                 Some(todo_list::execute_todo_list(callbacks, args).await)
             }
-            "enterplanmode" | "enter_plan_mode" => {
-                let callbacks = self.callbacks.as_deref()?;
-                let mut result = plan_mode::execute_enter_plan_mode(callbacks, args).await;
-                // Mode mutex (v2 `PlanModeEnter` → tower exit), main agent
-                // only: a subagent's plan entry is scoped to that subagent, so
-                // it must not touch the main agent's tower (v2's modeMutex is
-                // Agent-scoped and `tower.isActive` is main-only).
-                if !result.is_error && self.effective_caller_agent_id() == "main" {
-                    let paused =
-                        mode_mutex::pause_tower_for_mode_enter(&self.root, "plan mode entered")
-                            .await;
-                    if !paused.is_empty() {
-                        result
-                            .content
-                            .push_str(&mode_mutex::tower_paused_note(&paused));
-                    }
-                }
-                Some(result)
-            }
             "cronlist" | "cron_list" => {
                 let callbacks = self.callbacks.as_deref()?;
                 Some(cron_tools::execute_cron_list(callbacks, args).await)
@@ -265,7 +193,15 @@ impl NativeToolset {
             "updategoal" | "update_goal" => {
                 let callbacks = self.callbacks.as_deref()?;
                 let caller = self.effective_caller_agent_id();
-                Some(goal_tools::execute_update_goal(callbacks, caller.as_str(), args).await)
+                let result =
+                    goal_tools::execute_update_goal(callbacks, caller.as_str(), args).await;
+                if !result.is_error {
+                    // v2's `GoalUpdated` handler: a goal that (re)becomes active
+                    // evicts an active tower (`tower.exit('mode-mutex')`).
+                    let _ =
+                        mode_mutex::evict_tower_for_goal_activation(callbacks, &self.root).await;
+                }
+                Some(result)
             }
             "setgoalbudget" | "set_goal_budget" => {
                 let callbacks = self.callbacks.as_deref()?;
@@ -288,9 +224,7 @@ impl NativeToolset {
                 let callbacks = self.callbacks.as_deref()?;
                 let runner = self.task_runner.as_deref();
                 let steer = self.effective_steer();
-                // The advertised names are `WaitFor` (product table) and
-                // `TaskWait` (REPL-only alias); warning/timeout prose names
-                // the one the model actually called.
+
                 let display_name = if tool_name.eq_ignore_ascii_case("waitfor")
                     || tool_name.eq_ignore_ascii_case("wait_for")
                 {
@@ -311,23 +245,56 @@ impl NativeToolset {
             }
             "exitplanmode" | "exit_plan_mode" => {
                 let callbacks = self.callbacks.as_deref()?;
-                // The live session mode, not the mode in `config.toml`. Only
-                // auto exits without asking, so the two must not be confused:
-                // a session the user switched to `manual` this turn would
-                // otherwise auto-exit through a stale config value.
+
                 let mode = self.permission_mode.unwrap_or_else(|| {
                     crate::config::KimiConfig::discover()
                         .map(|(config, _)| config.build_policy_snapshot(None).mode)
-                        // Fail-safe: an unapproved plan must never deactivate
-                        // silently.
                         .unwrap_or(crate::permission::PermissionMode::Manual)
                 });
                 Some(exit_plan_mode::execute_exit_plan_mode_with_mode(callbacks, args, mode).await)
             }
+            "enterspecmode" | "enter_spec_mode" => {
+                let callbacks = self.callbacks.as_deref()?;
+                let caller = self.effective_caller_agent_id();
+                Some(
+                    spec_mode::execute_enter_spec_mode(
+                        callbacks,
+                        &self.root,
+                        caller.as_str(),
+                        args,
+                    )
+                    .await,
+                )
+            }
+            "exitspecmode" | "exit_spec_mode" => {
+                let callbacks = self.callbacks.as_deref()?;
+                let caller = self.effective_caller_agent_id();
+                let mode = self.permission_mode.unwrap_or_else(|| {
+                    crate::config::KimiConfig::discover()
+                        .map(|(config, _)| config.build_policy_snapshot(None).mode)
+                        .unwrap_or(crate::permission::PermissionMode::Manual)
+                });
+                Some(
+                    spec_mode::execute_exit_spec_mode(
+                        callbacks,
+                        &self.root,
+                        caller.as_str(),
+                        args,
+                        mode,
+                    )
+                    .await,
+                )
+            }
             "creategoal" | "create_goal" => {
                 let callbacks = self.callbacks.as_deref()?;
                 let caller = self.effective_caller_agent_id();
-                Some(create_goal::execute_create_goal(callbacks, caller.as_str(), args).await)
+                let result =
+                    create_goal::execute_create_goal(callbacks, caller.as_str(), args).await;
+                if !result.is_error {
+                    let _ =
+                        mode_mutex::evict_tower_for_goal_activation(callbacks, &self.root).await;
+                }
+                Some(result)
             }
             "skill" => {
                 let callbacks = self.callbacks.as_deref()?;
@@ -350,6 +317,8 @@ impl NativeToolset {
                 let message = args.get("message").and_then(Value::as_str).unwrap_or("");
                 if message.trim().is_empty() {
                     Some(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: "message must not be empty.".to_string(),
@@ -359,6 +328,8 @@ impl NativeToolset {
                     })
                 } else {
                     Some(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: "Update shown to the user.".to_string(),
@@ -369,18 +340,13 @@ impl NativeToolset {
                 }
             }
             "select_tools" | "selecttools" => {
-                // v2 `SelectToolsInputSchema`: `names` and `query` are both
-                // optional and at least one is required. The query branch
-                // ranks the deferred catalogue and returns candidates without
-                // loading them (`selectToolsTool.ts`), so it never touches the
-                // loaded set.
+                if !self.supports_dynamic_tool_loading() {
+                    return Some(select_tools::text_result(
+                        select_tools::SELECT_TOOLS_UNAVAILABLE,
+                        true,
+                    ));
+                }
                 if args.get("names").is_none() {
-                    if !self.tool_select_enabled {
-                        return Some(select_tools::text_result(
-                            select_tools::SELECT_TOOLS_UNAVAILABLE,
-                            true,
-                        ));
-                    }
                     let Some(query) = args.get("query").and_then(Value::as_str) else {
                         return Some(select_tools::text_result(
                             select_tools::SELECT_TOOLS_PROVIDE_NAMES_OR_QUERY,
@@ -422,32 +388,17 @@ impl NativeToolset {
                         false,
                     ));
                 }
-                // A failed enumeration is not an empty catalogue. Collapsing it
-                // to an empty set made every requested name look like a typo the
-                // model had made, hiding the RPC failure behind "unknown tool".
-                // The catalogue is the FULL set (advertised plus the deferred
-                // tools the table hides — v2's registry universe), not the
-                // shaped table `list_tools` serves.
+
                 let registered = self.full_tool_catalogue().await;
-                // v2 `loadableToolNames`: the deferred set — but only while
-                // disclosure is on; with the switch off the deferred tools sit
-                // in the advertised table and are called directly, so there is
-                // nothing to load and they classify as statically callable.
-                let loadable: std::collections::HashSet<String> = if self.tool_select_enabled {
-                    self.mcp_manager
-                        .as_ref()
-                        .map(|mcp| mcp.deferred_tool_names_blocking())
-                        .unwrap_or_default()
-                } else {
-                    Default::default()
-                };
-                // The loaded set is the toolset's shared, session-scoped one:
-                // a fresh set per call made `already_available` unreachable and
-                // reported every requested tool as newly loaded.
+
+                let loadable: std::collections::HashSet<String> = self
+                    .mcp_manager
+                    .as_ref()
+                    .map(|mcp| mcp.deferred_tool_names_blocking())
+                    .unwrap_or_default();
+
                 let mut loaded = self.loaded_tools.lock().unwrap_or_else(|e| e.into_inner());
-                // Upstream #4190: failure counts live as long as the catalogue
-                // and policy that produced them; a change on either side
-                // resets the streak.
+
                 let mut tracker = self
                     .selection_failures
                     .lock()
@@ -472,9 +423,6 @@ impl NativeToolset {
                 let mgr = self.subagent_manager.as_ref()?;
                 agent_tool::execute_agent(
                     mgr,
-                    // The toolset's canonical root feeds the tower resume
-                    // gate's roster lookup (P2-2): the session's workspace,
-                    // not the process cwd.
                     Some(&self.root),
                     args,
                     self.subagent_timeout_ms,
@@ -485,13 +433,6 @@ impl NativeToolset {
                 .await
             }
             "agentswarm" | "agent_swarm" => {
-                // v2 #3976: swarm and tower modes are mutually exclusive — the
-                // veto replaces the pre-#3976 auto-pause. With tower active
-                // the fleet runs through TowerSpawn; a batch here would race
-                // worker writes in the same repo. The gate runs before the
-                // manager lookup, so a missing subagent runtime cannot turn a
-                // refusal into a silent decline. Main agent only (v2 swarm
-                // mode is Agent-scoped).
                 if self.effective_caller_agent_id() == "main"
                     && let Some(denial) =
                         mode_mutex::refuse_swarm_with_active_tower(&self.root).await
@@ -510,36 +451,35 @@ impl NativeToolset {
                 .await
             }
             "knowledge" => Some(knowledge_tool::execute_knowledge(&self.root, args)),
-            "memoryread" | "memory_read" => {
-                Some(memory_tool::execute_memory_read(&self.root, args))
+
+            "memory" => {
+                if caller != "main" {
+                    return Some(err_result(memory_action::main_agent_only_message()));
+                }
+                let session_id = self.session_id.as_deref().unwrap_or_default();
+                Some(memory_action::execute(&self.root, args, session_id))
             }
-            "memorywrite" | "memory_write" => {
-                Some(memory_tool::execute_memory_write(&self.root, args))
-            }
-            "memorystrreplace" | "memory_str_replace" => {
-                Some(memory_tool::execute_memory_str_replace(&self.root, args))
-            }
-            "memoryappend" | "memory_append" => {
-                Some(memory_tool::execute_memory_append(&self.root, args))
-            }
-            "memorylist" | "memory_list" => {
-                Some(memory_tool::execute_memory_list(&self.root, args))
-            }
-            "memorydelete" | "memory_delete" => {
-                Some(memory_tool::execute_memory_delete(&self.root, args))
+
+            "sessionquery" | "session_query" => {
+                if caller != "main" {
+                    return Some(err_result(
+                        "The session_query tool is available to the main agent only.".to_string(),
+                    ));
+                }
+                Some(
+                    session_query::execute_session_query(
+                        self.session_store(),
+                        self.session_id.as_deref(),
+                        &self.root,
+                        args,
+                    )
+                    .await,
+                )
             }
             "workflow" => {
                 let home = crate::workflow::kimi_home();
                 let host: Option<std::sync::Arc<dyn crate::workflow::WorkflowHost>> =
                     self.subagent_manager.clone().map(|manager| {
-                        // `search()` backend: without a provider the workflow
-                        // primitive returned an empty list with no error, so a
-                        // script's web lookup silently found nothing. Bound to
-                        // the native DuckDuckGo search (the same engine the
-                        // WebSearch tool uses). The host trait takes a sync
-                        // provider, so this call blocks its executor thread for
-                        // the search timeout — bounded by `timeout_ms` and only
-                        // reached from a workflow script.
                         let search: std::sync::Arc<crate::workflow::host::SearchProvider> =
                             std::sync::Arc::new(|query: String, count: usize| {
                                 let config = crate::native::web_search::WebSearchConfig {
@@ -575,6 +515,8 @@ impl NativeToolset {
                 )
                 .await;
                 Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: outcome.stop_turn,
                     content: outcome.content,
@@ -583,23 +525,19 @@ impl NativeToolset {
                     display: None,
                 })
             }
+            "run_code" | "runcode" => Some(run_code::execute_run_code(args).await),
             "towerinit" | "tower_init" => {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
                 let session = self.session_id.as_deref().unwrap_or("session-main");
                 let mut result =
                     tower::execute_tower_init(&self.root, caller, session, &args.to_string()).await;
-                // Mode mutex (v2 `TowerModeEnter`): a tower starting while plan
-                // mode or swarm mode is open would split the brain — main turns
-                // stay guarded by the old mode while workers run free — so exit
-                // them once the tower actually entered. Ordered after init
-                // because v2 exits on the entry event: a refused or failed init
-                // never entered tower mode, so it must not drop either mode.
-                // Main agent only, matching v2's Agent-scoped mutex.
+
                 if caller == "main"
                     && !result.is_error
                     && let Some(callbacks) = self.callbacks.as_deref()
                 {
+                    let _switch = mode_mutex::mode_switch_lock().lock().await;
                     if mode_mutex::exit_plan_for_tower_enter(callbacks).await {
                         result.content =
                             format!("{}\n\n{}", mode_mutex::plan_exited_note(), result.content);
@@ -608,6 +546,25 @@ impl NativeToolset {
                         result.content =
                             format!("{}\n\n{}", mode_mutex::swarm_exited_note(), result.content);
                     }
+                    match mode_mutex::exit_spec_for_mode_enter(callbacks, caller).await {
+                        Ok(true) => {
+                            result.content = format!(
+                                "{}\n\n{}",
+                                mode_mutex::spec_exited_for_tower_note(),
+                                result.content
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            result.content = format!(
+                                "{}\n\nMode mutex: spec mode could not be exited ({error}); treat spec mode as still active.",
+                                result.content
+                            );
+                        }
+                    }
+                    // v2's `TowerModeEnter` handler: an active goal is paused so
+                    // goal continuations cannot race the tower fleet.
+                    mode_mutex::pause_goal_for_tower_enter(callbacks).await;
                 }
                 Some(result)
             }
@@ -762,6 +719,7 @@ impl NativeToolset {
                     .await
             }
             "bash" => self.bash_with(args, on_update).await,
+            "powershell" => self.powershell_with(args, on_update).await,
             _ if github::is_github_tool(tool_name) => {
                 github::execute_github_tool(tool_name, args, self.github_credentials.as_ref()).await
             }
@@ -769,9 +727,6 @@ impl NativeToolset {
                 if let Some(ref mcp) = self.mcp_manager
                     && mcp.handles(tool_name).await
                 {
-                    // The conversion walks every block and can preserve
-                    // megabytes of media: a turn that was aborted must stop it
-                    // (v2 passes its AbortSignal into the same conversion).
                     let cancelled = self.effective_parent_cancel();
                     let probe = move || cancelled.as_ref().is_some_and(|cancel| cancel.triggered());
                     return mcp.call_tool(tool_name, args, Some(&probe)).await;
@@ -781,8 +736,6 @@ impl NativeToolset {
         }
     }
 
-    /// Execute a mutating tool natively. Callers must have obtained a
-    /// permission grant from the host for this exact call first.
     pub async fn execute_mutating(
         &self,
         tool_name: &str,
@@ -798,21 +751,11 @@ impl NativeToolset {
                     .await
             }
             "bash" => self.bash_with(args, None).await,
+            "powershell" => self.powershell_with(args, None).await,
             _ => None,
         }
     }
 
-    /// Run a synchronous read-only file-I/O tool (`read` / `grep` / `glob`) on
-    /// tokio's blocking pool instead of the async worker thread. The closure
-    /// must be `Send + 'static`, so only owned state crosses over: a clone of
-    /// the sandbox root and of the JSON arguments (both cheap relative to the
-    /// I/O the tool does). No other `NativeToolset` field is needed — these
-    /// tools depend solely on the root.
-    ///
-    /// A `JoinError` (panic / runtime shutdown) returns `None`, which hands the
-    /// call to the host: read-only tools are idempotent, so re-running one
-    /// there is always safe, and a task lost to the runtime must not reach the
-    /// model as a tool failure.
     pub(super) async fn run_readonly_file_tool_on_blocking_pool(
         &self,
         args: &Value,
@@ -831,10 +774,6 @@ impl NativeToolset {
         }
     }
 
-    /// The native Read media path (v2 `executeMediaRead`): an image the model
-    /// asked to read is delivered to the conversation as media, honoring
-    /// `region` and `full_resolution`. `None` = not a media read (a text file
-    /// without those args), so the caller runs the text read instead.
     pub(super) fn read_media(&self, args: &Value) -> Option<ExecutableToolResult> {
         let request = match read_media::ReadMediaRequest::from_args(args) {
             Ok(request) => request,
@@ -845,9 +784,6 @@ impl NativeToolset {
         read_media::read_image_media(&resolved, &request, &self.read_media_limits())
     }
 
-    /// [`Self::read_media`] on the blocking pool: decoding, cropping and
-    /// re-encoding a large image would otherwise pin the tokio workers that
-    /// carry the LLM streams, bash output pumps and steer queue.
     pub(super) async fn read_media_on_blocking_pool(
         &self,
         args: &Value,
@@ -878,11 +814,6 @@ impl NativeToolset {
         tokio::task::spawn_blocking(move || tool(&sandbox, &bridge, &args)).await
     }
 
-    /// Run a synchronous mutating file-I/O tool (`write` / `edit`) on tokio's
-    /// blocking pool. Same ownership rules as the read-only variant, but a
-    /// `JoinError` becomes an error result rather than a `None` host fallback:
-    /// the call was already permission-granted and may have partially applied,
-    /// so letting the host re-run it could double-apply the change.
     pub(super) async fn run_mutating_file_tool_on_blocking_pool(
         &self,
         args: &Value,
@@ -918,12 +849,6 @@ impl NativeToolset {
         turn_id: usize,
     ) -> Result<Option<ExecutableToolResult>, tokio::task::JoinError> {
         tokio::task::spawn_blocking(move || {
-            // Install the recorder and the turn number for the duration of this
-            // blocking call; `write` / `edit` read both back out to record the
-            // change. Thread-locals must be set *here* — the blocking pool runs
-            // on another thread, so a value installed on the async thread would
-            // be invisible. `ctx` is `None` for callers without
-            // `with_file_history`, in which case nothing is recorded.
             FILE_HISTORY.with(|cell| *cell.borrow_mut() = ctx);
             TURN_ID.with(|cell| *cell.borrow_mut() = turn_id);
             let result = tool(&sandbox, &bridge, &args);

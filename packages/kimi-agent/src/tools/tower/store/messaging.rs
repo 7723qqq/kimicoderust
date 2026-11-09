@@ -121,14 +121,21 @@ impl TowerStore {
         caller_agent_id: &str,
         input: TowerSendInput,
     ) -> Result<TowerSendOutcome, String> {
-        let (state, caller, recovered_at) = self.resolve_agent_operation(caller_agent_id).await?;
+        let (state, caller, recovered_at, placeholder) =
+            self.resolve_agent_operation(caller_agent_id).await?;
         let session_id = state.session_id.clone();
+
+        let target_agent_id = self
+            .find_agent(&state, input.to.trim())
+            .map(|agent| agent.agent_id);
         self.with_inbox_publication_lock(move || async move {
             let message = self.send_detailed_locked(&caller, input, false).await?;
             Ok(TowerSendOutcome {
                 caller,
                 session_id,
                 recovered_at,
+                target_agent_id,
+                placeholder,
                 message,
             })
         })
@@ -242,16 +249,12 @@ impl TowerStore {
         Ok(sent)
     }
 
-    pub(super) async fn notify_review_result_locked(
+    pub(super) fn review_mission_for<'a>(
         &self,
-        caller_name: &str,
+        state: &'a TowerState,
         review: &TowerReviewInfo,
-    ) -> (Vec<TowerInboxSent>, Vec<String>) {
-        let state = match self.load().await {
-            Ok(state) => state,
-            Err(error) => return (Vec::new(), vec![error]),
-        };
-        let mission = review
+    ) -> Option<&'a crate::tools::tower::types::TowerMission> {
+        review
             .mission
             .as_deref()
             .and_then(|id| state.missions.iter().find(|mission| mission.id == id))
@@ -261,7 +264,42 @@ impl TowerStore {
                     .iter()
                     .rev()
                     .find(|mission| mission.branch == review.target && mission.status.is_open())
-            });
+            })
+    }
+
+    pub(super) fn review_recipients(
+        &self,
+        state: &TowerState,
+        caller_name: &str,
+        review: &TowerReviewInfo,
+    ) -> Vec<String> {
+        let mission = self.review_mission_for(state, review);
+        let mut recipients = Vec::new();
+        if review.status != "clean"
+            && let Some(mission) = mission
+            && mission.status.is_open()
+            && let Some(owner) = mission.owner.as_deref()
+            && owner != caller_name
+            && self.find_agent(state, owner).is_some_and(|agent| {
+                agent.died_at.is_none() && agent.status.as_deref() != Some("dead")
+            })
+        {
+            recipients.push(owner.to_string());
+        }
+        if caller_name != TOWER_NAME {
+            recipients.push(TOWER_NAME.to_string());
+        }
+        recipients.sort();
+        recipients.dedup();
+        recipients
+    }
+
+    pub(super) fn review_notification(
+        &self,
+        state: &TowerState,
+        review: &TowerReviewInfo,
+    ) -> (String, Option<String>) {
+        let mission = self.review_mission_for(state, review);
         let owner = mission
             .and_then(|mission| mission.owner.as_deref())
             .unwrap_or("(none)");
@@ -285,25 +323,20 @@ impl TowerStore {
         let scope = mission
             .map(|mission| mission.id.clone())
             .or_else(|| review.mission.clone());
+        (body, scope)
+    }
 
-        let mut recipients = Vec::new();
-        if review.status != "clean"
-            && let Some(mission) = mission
-            && mission.status.is_open()
-            && let Some(owner) = mission.owner.as_deref()
-            && owner != caller_name
-            && self.find_agent(&state, owner).is_some_and(|agent| {
-                agent.died_at.is_none() && agent.status.as_deref() != Some("dead")
-            })
-        {
-            recipients.push(owner.to_string());
-        }
-        if caller_name != TOWER_NAME {
-            recipients.push(TOWER_NAME.to_string());
-        }
-        recipients.sort();
-        recipients.dedup();
-
+    pub(super) async fn notify_review_result_locked(
+        &self,
+        caller_name: &str,
+        review: &TowerReviewInfo,
+    ) -> (Vec<TowerInboxSent>, Vec<String>) {
+        let state = match self.load().await {
+            Ok(state) => state,
+            Err(error) => return (Vec::new(), vec![error]),
+        };
+        let (body, scope) = self.review_notification(&state, review);
+        let recipients = self.review_recipients(&state, caller_name, review);
         let mut notifications = Vec::new();
         let mut errors = Vec::new();
         for recipient in recipients {

@@ -134,13 +134,13 @@ impl HostCallbacks for ReplDummyHostCallbacks {
                 match action {
                     "stop" => {
                         let reason = request.value.get("reason").and_then(|r| r.as_str());
-                        let entry = runner
+                        let outcome = runner
                             .stop(id, reason)
                             .await
                             .map_err(|e| format!("State write error: [-32002] {e}"))?;
                         return Ok(StateWriteResponse {
                             ok: true,
-                            value: serde_json::json!({ "ok": true, "value": entry }),
+                            value: serde_json::json!({ "ok": true, "value": outcome.wire }),
                         });
                     }
                     "wait" => {
@@ -180,8 +180,7 @@ impl HostCallbacks for ReplDummyHostCallbacks {
                     _ => {}
                 }
             }
-            let outcome = store.apply_write(&request.domain, &request.value)?;
-            store.write_domain(&request.domain, &outcome.stored)?;
+            let outcome = store.apply_write_and_persist(&request.domain, &request.value)?;
             Ok(StateWriteResponse {
                 ok: true,
                 value: outcome.response,
@@ -298,7 +297,6 @@ async fn build_repl_tool_defs(
     defs.extend(mcp_manager.list_tool_infos().await);
     defs.push(crate::tools::ask_user_question::ask_user_question_tool_def());
     defs.push(crate::tools::todo_list::todo_list_tool_def());
-    defs.push(crate::tools::plan_mode::enter_plan_mode_tool_def());
     defs.push(crate::tools::get_goal::get_goal_tool_def());
     defs.push(crate::tools::cron_tools::cron_list_tool_def());
     defs.push(crate::tools::cron_tools::cron_create_tool_def());
@@ -310,6 +308,8 @@ async fn build_repl_tool_defs(
     defs.push(crate::tools::task_tools::task_stop_tool_def());
     defs.push(crate::tools::task_tools::task_wait_tool_def());
     defs.push(crate::tools::exit_plan_mode::exit_plan_mode_tool_def());
+    defs.push(crate::tools::spec_mode::enter_spec_mode_tool_def());
+    defs.push(crate::tools::spec_mode::exit_spec_mode_tool_def());
     defs.push(crate::tools::create_goal::create_goal_tool_def());
     defs.push(crate::tools::skill::skill_tool_def());
     defs.push(crate::tools::knowledge_tool::knowledge_tool_def());
@@ -370,7 +370,15 @@ pub async fn start_repl(
     // (v2 `getTimezoneOffset` semantics), not UTC.
     let cron_pending: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-    if let Some(entries_value) = state_store.read_domain("cron")
+    let cron_domain = match state_store.read_domain_state("cron") {
+        crate::primitives::read::ReadOutcome::Found(value) => Some(value),
+        crate::primitives::read::ReadOutcome::Absent => None,
+        crate::primitives::read::ReadOutcome::Unreadable(cause) => {
+            tracing::warn!(%cause, "cron state is unreadable; scheduled prompts are not armed");
+            None
+        }
+    };
+    if let Some(entries_value) = cron_domain
         && let Ok(entries) =
             serde_json::from_value::<Vec<crate::cron::scheduler::CronEntry>>(entries_value)
         && !entries.is_empty()
@@ -406,10 +414,17 @@ pub async fn start_repl(
             ));
         }
     };
-    let llm: Arc<dyn crate::turn_loop::types::LLM> = Arc::new(NativeHttpLlm::new(
-        config.native_llm_config(&native_llm_def),
-        "You are Kimi, a helpful agentic coding assistant.".to_string(),
-    ));
+    let main_llm_config = config.native_llm_config(&native_llm_def);
+    let repl_prompt = "You are Kimi, a helpful agentic coding assistant.".to_string();
+    let llm: Arc<dyn crate::turn_loop::types::LLM> = if main_llm_config.protocol == "antigravity" {
+        // A subprocess bridge: no HTTP client, no provider credentials.
+        Arc::new(crate::llm::antigravity::AntigravityLlm::new(
+            main_llm_config,
+            repl_prompt,
+        ))
+    } else {
+        Arc::new(NativeHttpLlm::new(main_llm_config, repl_prompt))
+    };
 
     let policy_snapshot = config.build_policy_snapshot(Some(workspace.clone()));
     // The permission-mode reminders read the mode the snapshot resolved to;
@@ -423,6 +438,11 @@ pub async fn start_repl(
             .with_session_cwd(Some(workspace.to_string_lossy().into_owned())),
     );
     let permission_engine = Arc::new(PermissionEngine::new(policy_snapshot));
+    // v2 `IAgentPermissionModeService` / `broadcastPermissionMode`: the engine
+    // evaluates every agent's tool call under that agent's mode; the initial
+    // session mode is the value every unbound agent inherits.
+    permission_engine.set_agent_permission_modes(subagent_manager.permission_modes());
+    subagent_manager.broadcast_permission_mode(permission_engine.mode());
     let tool_truncator = Arc::new(ToolResultTruncator::for_workspace(&workspace));
     // `TaskStarted` / `Notification` hook dispatch on the same guard.
     task_runner.set_hook_guard(hook_guard.clone());
@@ -469,13 +489,20 @@ pub async fn start_repl(
             let mut llms: std::collections::HashMap<String, Arc<dyn crate::turn_loop::types::LLM>> =
                 std::collections::HashMap::new();
             for entry in &pool.models {
-                llms.insert(
-                    entry.alias.clone(),
-                    Arc::new(NativeHttpLlm::new(
-                        entry.llm.clone(),
-                        "You are Kimi, a helpful agentic coding assistant.".to_string(),
-                    )),
-                );
+                let secondary_prompt = "You are Kimi, a helpful agentic coding assistant.";
+                let llm: Arc<dyn crate::turn_loop::types::LLM> =
+                    if entry.llm.protocol == "antigravity" {
+                        Arc::new(crate::llm::antigravity::AntigravityLlm::new(
+                            entry.llm.clone(),
+                            secondary_prompt.to_string(),
+                        ))
+                    } else {
+                        Arc::new(NativeHttpLlm::new(
+                            entry.llm.clone(),
+                            secondary_prompt.to_string(),
+                        ))
+                    };
+                llms.insert(entry.alias.clone(), llm);
             }
             Some(Arc::new(
                 crate::subagent::secondary::SecondaryModelRuntime::new(pool, llms),
@@ -530,6 +557,7 @@ pub async fn start_repl(
     // and the toolset own their own Arc clones.
     let loop_permission_engine = Arc::clone(&permission_engine);
     let loop_goal_guard = Arc::clone(&goal_guard);
+    let loop_subagent_manager = Arc::clone(&subagent_manager);
     let tool_callbacks: Arc<dyn HostCallbacks> = Arc::new(NativeToolCallbacks {
         inner: base_callbacks,
         toolset: toolset.clone(),
@@ -546,6 +574,7 @@ pub async fn start_repl(
         stale_guard: Some(stale_gate),
         goal_guard: Some(goal_guard),
         hook_guard: Some(hook_guard.clone()),
+        before_execute: None,
         // REPL has no swarm/btw contexts — nothing to veto.
         agent_tool_veto: None,
         tools_veto: None,
@@ -737,6 +766,9 @@ pub async fn start_repl(
                             Ok(history) => {
                                 current_session_id = id.to_string();
                                 engine_session.set_history(history);
+                                // The transcript was replaced: old undo anchors
+                                // no longer name a cut point (v2 ContextClear).
+                                state_store.clear_turn_anchors();
                                 println!(
                                     "Resumed session '{}' with {} messages.",
                                     id,
@@ -766,6 +798,7 @@ pub async fn start_repl(
                 "/new" => {
                     current_session_id = format!("session-{}", fastrand::u64(..));
                     engine_session.clear_history();
+                    state_store.clear_turn_anchors();
                     total_usage = TokenUsage::default();
                     println!("Started new session: {current_session_id}");
                     hook_guard
@@ -815,6 +848,9 @@ pub async fn start_repl(
                     };
                     loop_permission_engine.set_mode(mode);
                     loop_goal_guard.set_mode(Some(mode));
+                    // Broadcast to the agents that inherited the session mode;
+                    // a pinned agent (tower worker → `auto`) keeps its own.
+                    loop_subagent_manager.broadcast_permission_mode(mode);
                     println!(
                         "YOLO Mode {} (active immediately)",
                         if !current { "ENABLED" } else { "DISABLED" }
@@ -838,6 +874,7 @@ pub async fn start_repl(
                 }
                 "/clear" => {
                     engine_session.clear_history();
+                    state_store.clear_turn_anchors();
                     println!("Conversation history cleared.");
                     continue;
                 }
@@ -1053,7 +1090,6 @@ mod tests {
                 "define_subagent",
                 "AskUserQuestion",
                 "TodoList",
-                "EnterPlanMode",
                 "GetGoal",
                 "CronList",
                 "CronCreate",

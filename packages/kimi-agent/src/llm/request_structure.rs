@@ -152,7 +152,7 @@ pub const STRUCTURE_STRICT_CODE: &str = "structure-strict";
 /// rendered transport error the way the sibling classifiers in
 /// `llm::media_budget` do.
 pub fn is_recoverable_request_structure_error(error: &str) -> bool {
-    match crate::llm::http::llm_http_status(error) {
+    match kimi_core::error::llm_http_status(error) {
         Some(status) => is_request_structure_error(status, error),
         None => false,
     }

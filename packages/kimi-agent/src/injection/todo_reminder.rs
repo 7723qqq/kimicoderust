@@ -18,6 +18,7 @@
 use serde_json::Value;
 
 use crate::injection::{DomainValueSource, InjectionContext, InjectionRegistry};
+use crate::primitives::read::ReadOutcome;
 use crate::turn_loop::types::LLMMessage;
 
 /// v2 `TODO_LIST_TOOL_NAME`.
@@ -241,11 +242,38 @@ pub fn register_todo_reminder<S>(registry: &mut InjectionRegistry, state: std::s
 where
     S: DomainValueSource + Send + Sync + 'static,
 {
+    // One warning per registered provider: the body runs every step, and a
+    // shape the host keeps sending would otherwise flood the log.
+    let mut warned = false;
     registry.register(
         TODO_LIST_REMINDER_VARIANT,
         Box::new(move |ctx: &InjectionContext| {
-            let todos = state.read_domain("todo").unwrap_or(Value::Null);
+            let todos = match state.read_domain_state("todo") {
+                ReadOutcome::Found(value) => value,
+                ReadOutcome::Absent => Value::Null,
+                // Skipping the reminder is the honest answer: the alternative
+                // tells the model the list is empty when it could not be read.
+                ReadOutcome::Unreadable(cause) => {
+                    tracing::warn!(%cause, "todo state is unreadable; skipping the stale-todo reminder");
+                    return None;
+                }
+            };
             let items = read_reminder_items(&todos);
+            // A value that is not a list, or whose entries lost the fields the
+            // reminder needs, is a shape failure — not "the list is empty".
+            // Rendering nothing is right; reporting it is what separates the
+            // two.
+            let malformed = match todos.as_array() {
+                None => !todos.is_null(),
+                Some(entries) => entries.len() != items.len(),
+            };
+            if malformed && !warned {
+                warned = true;
+                tracing::warn!(
+                    %todos,
+                    "todo state has an unexpected shape; treating the unreadable entries as empty"
+                );
+            }
             todo_list_stale_reminder_for_items(true, ctx.history, &items)
         }),
     );
@@ -482,8 +510,12 @@ mod tests {
     fn test_registered_provider_injects_through_the_registry() {
         struct StaticTodos(Value);
         impl DomainValueSource for StaticTodos {
-            fn read_domain(&self, domain: &str) -> Option<Value> {
-                (domain == "todo").then(|| self.0.clone())
+            fn read_domain_state(&self, domain: &str) -> ReadOutcome<Value> {
+                if domain == "todo" {
+                    ReadOutcome::Found(self.0.clone())
+                } else {
+                    ReadOutcome::Absent
+                }
             }
         }
 

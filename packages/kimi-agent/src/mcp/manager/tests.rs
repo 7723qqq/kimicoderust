@@ -2,6 +2,36 @@ use super::*;
 use crate::mcp::sse::test_helpers::spawn_mock_mcp_sse_server;
 use serde_json::json;
 
+/// v2 `resolveDeferred` (`connection-manager.ts:244-250`): the declaration
+/// wins, a positive threshold defers at or above the count, and `0` disables
+/// automatic deferral.
+#[test]
+fn auto_defer_threshold_resolution_matches_v2() {
+    assert!(!resolve_deferred(Some(false), 100, 24, Some(true)));
+    assert!(resolve_deferred(Some(true), 0, 24, None));
+
+    assert!(resolve_deferred(None, 24, 24, None));
+    assert!(!resolve_deferred(None, 23, 24, None));
+    assert!(!resolve_deferred(None, 23, 0, None));
+    assert!(resolve_deferred(None, 0, 0, Some(true)), "0 disables");
+    assert!(
+        resolve_deferred(None, 23, 24, Some(true)),
+        "default applies"
+    );
+}
+
+/// v2 `parseAutoDeferToolThresholdEnv`: integers only, capped at 1e6.
+#[test]
+fn auto_defer_threshold_env_parsing_matches_v2() {
+    assert_eq!(parse_auto_defer_tool_threshold(Some("16")), Some(16));
+    assert_eq!(parse_auto_defer_tool_threshold(Some(" 16 ")), Some(16));
+    assert_eq!(parse_auto_defer_tool_threshold(Some("0")), Some(0));
+    assert_eq!(parse_auto_defer_tool_threshold(Some("1.5")), None);
+    assert_eq!(parse_auto_defer_tool_threshold(Some("1000001")), None);
+    assert_eq!(parse_auto_defer_tool_threshold(Some("")), None);
+    assert_eq!(parse_auto_defer_tool_threshold(None), None);
+}
+
 #[tokio::test]
 async fn test_mcp_manager_discovery_and_call() {
     let manager = McpManager::new();
@@ -1867,16 +1897,13 @@ async fn test_mcp_media_is_preserved_and_delivered_as_a_reference() {
         "the notice must name the preserved original: {}",
         result.content
     );
-    let delivery = result
-        .delivery
-        .expect("the image must be delivered to the model");
     assert!(
-        matches!(
-            delivery.blocks.first(),
-            Some(crate::rpc::types::ContentBlock::MediaRef { .. })
-        ),
-        "the image must ride as a reference: {:?}",
-        delivery.blocks
+        result
+            .parts
+            .iter()
+            .any(|part| matches!(part, crate::rpc::types::ContentBlock::MediaRef { .. })),
+        "the image must ride inside the result parts: {:?}",
+        result.parts
     );
     assert_eq!(
         store.list().unwrap().len(),
@@ -2539,4 +2566,17 @@ async fn shutdown_aborts_an_in_flight_startup() {
             "connect_all must settle once shutdown aborts the startup, not at the 30 s timeout",
         );
     settled.expect("connect_all's task must not panic when aborted");
+}
+
+/// A second shutdown must be a no-op: the ledger is already disposed, so no
+/// teardown step runs twice.
+#[tokio::test]
+async fn shutdown_is_idempotent() {
+    let manager = McpManager::new();
+    manager.shutdown().await;
+    manager.shutdown().await;
+    assert_eq!(
+        manager.dispose.lock().await.state(),
+        crate::primitives::teardown::LedgerState::Disposed
+    );
 }

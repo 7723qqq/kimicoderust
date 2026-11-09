@@ -5,10 +5,11 @@
 //! canonical option set, the `outcome` mapping, and the session-scoped
 //! `approve_always` memory.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::acp::channel::AcpChannel;
 use crate::acp::events_map::infer_tool_kind;
@@ -261,6 +262,10 @@ pub struct AcpPermissionHost {
     /// The client's declared capabilities; drives whether the client owns
     /// Read/Write execution (fs reverse RPC) instead of the native sandbox.
     capabilities: Arc<std::sync::Mutex<AcpClientCapabilities>>,
+    /// Per-session turn cancellation, shared with the dispatcher so a
+    /// `$/cancel_request` (or EOF) stops a permission/question wait instead of
+    /// leaving it until the human bound.
+    prompt_cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 impl AcpPermissionHost {
@@ -278,7 +283,26 @@ impl AcpPermissionHost {
             session_cwd,
             approved_tools: Arc::new(Mutex::new(HashSet::new())),
             capabilities,
+            prompt_cancels: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Share the dispatcher's per-session cancellation tokens with this host.
+    pub fn with_prompt_cancels(
+        mut self,
+        cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    ) -> Self {
+        self.prompt_cancels = cancels;
+        self
+    }
+
+    /// The token of the turn currently running for this session, if any.
+    fn prompt_cancel(&self) -> Option<CancellationToken> {
+        self.prompt_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.session_id)
+            .cloned()
     }
 
     fn capabilities(&self) -> AcpClientCapabilities {
@@ -388,6 +412,7 @@ impl HostCallbacks for AcpPermissionHost {
         let channel = self.channel.clone();
         let session_id = self.session_id.clone();
         let elicitation_form = self.capabilities().elicitation.form;
+        let cancel = self.prompt_cancel();
         Box::pin(async move {
             if request.questions.is_empty() {
                 return Ok(dismissed_question_response());
@@ -404,7 +429,10 @@ impl HostCallbacks for AcpPermissionHost {
                     &session_id,
                     &tool_call_id,
                 );
-                if let Ok(response) = channel.request("elicitation/create", params).await {
+                if let Ok(response) = channel
+                    .request_human("elicitation/create", params, cancel.as_ref())
+                    .await
+                {
                     return Ok(
                         match crate::acp::question::elicitation_response_to_question_answers(
                             &request.questions,
@@ -431,7 +459,10 @@ impl HostCallbacks for AcpPermissionHost {
                     }],
                 },
             });
-            match channel.request("session/request_permission", params).await {
+            match channel
+                .request_human("session/request_permission", params, cancel.as_ref())
+                .await
+            {
                 Ok(response) => Ok(
                     match crate::acp::question::outcome_to_question_answer(question, &response) {
                         Some(answers) => answered_question_response(answers),
@@ -454,6 +485,7 @@ impl HostCallbacks for AcpPermissionHost {
         let channel = self.channel.clone();
         let session_id = self.session_id.clone();
         let approved_tools = self.approved_tools.clone();
+        let cancel = self.prompt_cancel();
         Box::pin(async move {
             let tool_name = request.tool_name.clone();
             // v2 `buildPermissionToolCallUpdate`: the approval prompt names the
@@ -477,7 +509,7 @@ impl HostCallbacks for AcpPermissionHost {
                 "options": permission_options(),
             });
             let response = channel
-                .request("session/request_permission", params)
+                .request_human("session/request_permission", params, cancel.as_ref())
                 .await?;
             if response_grants_session_scope(&response)
                 && let Ok(mut approved) = approved_tools.lock()

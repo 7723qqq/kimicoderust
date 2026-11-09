@@ -1,5 +1,3 @@
-//! JSON-schema generation from the declarative specs (split out of `github.rs`).
-
 use serde_json::{Value, json};
 
 use super::specs::{Field, FieldKind, GitHubToolSpec, TREE_ENTRY_FIELDS};

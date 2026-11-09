@@ -351,6 +351,47 @@ impl PromptQueue {
             .map(|entry| entry.item.clone())
     }
 
+    /// The active prompt's id when it is a client-visible (tracked) prompt —
+    /// v2 `LoopSnapshot.activePromptId` is `undefined` for an untracked
+    /// notification turn, so a wake's id must not surface here.
+    pub fn active_tracked_prompt_id(&self, session_id: &str) -> Option<String> {
+        let state = self.lock();
+        state
+            .active
+            .get(session_id)
+            .filter(|entry| entry.prompt_events)
+            .map(|entry| item_id(&entry.item))
+            .filter(|id| !id.is_empty())
+    }
+
+    /// The queued tracked prompt ids, in FIFO order — v2 `LoopSnapshot.queue`
+    /// filtered to entries carrying a `promptId`.
+    pub fn queued_tracked_prompt_ids(&self, session_id: &str) -> Vec<String> {
+        let state = self.lock();
+        state
+            .queued
+            .get(session_id)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| entry.prompt_events)
+                    .map(|entry| item_id(&entry.item))
+                    .filter(|id| !id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Queued task-notification / rich-wake entries — v2
+    /// `LoopSnapshot.notificationCount` (the machine's notification queue).
+    pub fn queued_notification_count(&self, session_id: &str) -> usize {
+        self.lock()
+            .queued
+            .get(session_id)
+            .map(|entries| entries.iter().filter(|entry| !entry.prompt_events).count())
+            .unwrap_or(0)
+    }
+
     /// Replace the replay owner for one session + variant. Deferred payloads
     /// use the handler on their next advance; unregistered variants retain the
     /// original direct replay.
@@ -565,6 +606,31 @@ impl PromptQueue {
         self.lock().active.remove(session_id);
     }
 
+    /// Retire the active prompt and promote anything admitted in the gap.
+    ///
+    /// `advance` decides under one lock whether the queue is idle, but the
+    /// driver then releases the lock before calling this on the `Idle` arm. A
+    /// prompt admitted in that window sees the old active entry, is queued
+    /// behind it, and would be orphaned by a plain `clear_active` — the exact
+    /// race a cancel makes easy to hit, because the engine's turn goes idle
+    /// before the driver finishes its bookkeeping. Doing the remove and the
+    /// promote under one lock closes it: a prompt either queues before this
+    /// call (and is promoted here) or arrives after it (and starts its own
+    /// driver).
+    pub fn finish_active(&self, session_id: &str) -> Option<RunInput> {
+        let mut state = self.lock();
+        state.active.remove(session_id);
+        let next = match state.queued.get_mut(session_id) {
+            Some(queue) if !queue.is_empty() => queue.remove(0),
+            _ => return None,
+        };
+        let run = Self::run_input(&next);
+        let mut next = next;
+        next.item["status"] = json!("running");
+        state.active.insert(session_id.to_string(), next);
+        Some(run)
+    }
+
     /// Remove queued prompts by id, returning them for steering. Ids that are
     /// not queued are absent from the result.
     pub fn take_queued(
@@ -586,6 +652,11 @@ impl PromptQueue {
             *queue = remaining;
         }
         taken
+    }
+
+    /// Prompts waiting behind the active one (v2 `LoopSnapshot.queue.length`).
+    pub fn queued_count(&self, session_id: &str) -> usize {
+        self.lock().queued.get(session_id).map_or(0, Vec::len)
     }
 
     /// Whether a prompt id is active or queued.
@@ -628,8 +699,9 @@ pub fn publish_prompt_event(hub: &EventHub, session_id: &str, event: Value) {
 
 /// Drive a session's prompts to completion: run the admitted prompt, then
 /// promote and run each queued one in turn until the queue drains. Emits
-/// `prompt.completed` per prompt (reason `failed` when the turn errored, the
-/// prompt then surfaces as `blocked`).
+/// `prompt.completed` per prompt (reason `completed`, `failed` when the turn
+/// errored, or `blocked` when the prompt gate rejected it; the latter two
+/// surface the row as `blocked`).
 pub async fn run_prompt_loop(
     engine: Option<Arc<ServerEngine>>,
     store: Arc<SqliteSessionStore>,
@@ -653,11 +725,27 @@ pub async fn run_prompt_loop(
                     run = next;
                     continue;
                 }
-                None => {
-                    queue.clear_active(&session_id);
-                    break;
-                }
+                None => match queue.finish_active(&session_id) {
+                    Some(next) => {
+                        run = next;
+                        continue;
+                    }
+                    None => break,
+                },
             }
+        }
+        // v2 `publishPromptStarted` (`loopService.ts:747-755`): the prompt's
+        // turn is about to launch. A client that queued it moves the entry from
+        // `queued` to `running` on this event; a cancelled trigger never starts.
+        if run.prompt_events && !queue.active_is_cancelled(&session_id) {
+            publish_prompt_event(
+                &hub,
+                &session_id,
+                json!({
+                    "type": "prompt.started",
+                    "promptId": run.prompt_id,
+                }),
+            );
         }
         let history = store.load_session_history(&session_id).unwrap_or_default();
         let turn_number = store.next_turn_number(&session_id).unwrap_or(1);
@@ -675,7 +763,11 @@ pub async fn run_prompt_loop(
                 run.origin.clone(),
             )
             .await;
-        if outcome.is_err() {
+        // The prompt gate can reject the prompt without an error transport-wise
+        // (v2 `settleGateRejectedPrompt`): the row settles as `blocked`, and
+        // the reason below is `blocked` rather than `completed`.
+        let gate_blocked = outcome.as_ref().is_ok_and(|report| report.gate_blocked);
+        if outcome.is_err() || gate_blocked {
             queue.set_active_status(&session_id, "blocked");
         }
         // A prompt the abort route already settled has its terminal event
@@ -699,7 +791,13 @@ pub async fn run_prompt_loop(
                     "sessionId": session_id,
                     "promptId": run.prompt_id,
                     "finishedAt": chrono::Utc::now().to_rfc3339(),
-                    "reason": if outcome.is_ok() { "completed" } else { "failed" },
+                    "reason": if gate_blocked {
+                        "blocked"
+                    } else if outcome.is_ok() {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
                 }),
             );
         }
@@ -737,10 +835,10 @@ pub async fn run_prompt_loop(
         }
         match queue.advance_after_turn(&session_id).await {
             Some(next) => run = next,
-            None => {
-                queue.clear_active(&session_id);
-                break;
-            }
+            None => match queue.finish_active(&session_id) {
+                Some(next) => run = next,
+                None => break,
+            },
         }
     }
 }
@@ -966,6 +1064,30 @@ mod tests {
         assert!(advance(&queue, "s1").is_none());
 
         queue.clear_active("s1");
+        assert!(queue.snapshot("s1").0.is_none());
+    }
+
+    /// The `Idle` arm of `advance_after_turn` releases the queue lock before
+    /// the driver retires the active entry. A prompt admitted in that window
+    /// queues behind the old entry; `finish_active` must promote it rather
+    /// than dropping the slot and orphaning the prompt (the cancel path makes
+    /// the engine idle before the driver's bookkeeping, so this is reachable
+    /// in a single test turn).
+    #[test]
+    fn finishing_the_active_prompt_promotes_one_admitted_in_the_gap() {
+        let queue = PromptQueue::new();
+        queue.admit("s1", item("p1"), "p1".into(), Vec::new(), None);
+        assert!(advance(&queue, "s1").is_none(), "p1 is the only prompt");
+
+        // The driver has seen `Idle`; the next admission still sees `p1`
+        // active and is queued rather than starting its own driver.
+        let (_queued, run) = queue.admit("s1", item("p2"), "p2".into(), Vec::new(), None);
+        assert!(run.is_none());
+
+        let next = queue.finish_active("s1").expect("p2 promoted");
+        assert_eq!(next.prompt, "p2");
+        assert!(queue.active_is("s1", "p2"));
+        assert!(queue.finish_active("s1").is_none());
         assert!(queue.snapshot("s1").0.is_none());
     }
 

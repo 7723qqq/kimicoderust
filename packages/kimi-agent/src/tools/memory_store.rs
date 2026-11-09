@@ -1,24 +1,3 @@
-//! Memory filesystem storage layer.
-//!
-//! The memory store is a tree of markdown files under `~/.kimi-code/memory/`,
-//! laid out by [`crate::tools::memory_paths`] as `global/`,
-//! `projects/<project-id>/`, and `sessions/<session-id>/`. This module owns
-//! the read/write side of that layout: frontmatter parsing, the content
-//! version token that makes every mutation conditional, and the three blocks
-//! the system prompt injects (`<memory_listing>`, `<profile>`,
-//! `<preferences>`).
-//!
-//! Every mutation is guarded by `if_version`: `"new"` means the path must be
-//! unused, any other value must equal the file's current version. A rejected
-//! mutation returns the file's current content, so the caller can merge
-//! against what is actually there and retry in the same turn — the memory
-//! section promises exactly that.
-//!
-//! Path safety is a security boundary: a tool must not reach any file outside
-//! the memory base through this API, so every relative path is re-validated
-//! here (absolute paths, `..`, backslashes, drive letters, and empty segments
-//! are rejected) instead of being trusted from the caller.
-
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,7 +10,6 @@ use crate::tools::memory_paths::{
 use crate::tools::project_identity::resolve_project_identity;
 use crate::tools::tower::frontmatter::parse_frontmatter;
 
-/// A memory file as a listing sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryEntry {
     pub rel_path: String,
@@ -43,34 +21,22 @@ pub struct MemoryEntry {
     pub version: String,
 }
 
-/// The memory root: `$KIMI_CODE_HOME/memory`, else `~/.kimi-code/memory`.
 pub fn memory_base() -> Option<PathBuf> {
     crate::workflow::kimi_home().map(|home| memory_base_at(&home))
 }
 
-/// The memory root under an explicit Kimi home directory (`~/.kimi-code`).
 pub fn memory_base_at(kimi_home: &Path) -> PathBuf {
     memory_dir(kimi_home)
 }
 
-/// The project id of a workspace root (v2 `resolveProjectIdentity`).
-///
-/// The id follows the repository, not the checkout path: a git origin wins,
-/// then the repo root, then the cwd. That is what keeps a project's memory
-/// when the workspace is moved or opened from a nested directory.
 pub fn project_id_for(workspace_root: &Path) -> String {
     resolve_project_identity(&workspace_root.to_string_lossy()).id
 }
 
-/// Resolve a model-supplied relative path to its normalized store path.
-///
-/// Exposed so an action handler can distinguish "file does not exist" from a
-/// path-policy refusal without matching on localized error strings.
 pub fn resolve_read_path(base: &Path, rel_path: &str) -> Result<(String, PathBuf), String> {
     resolve_path(base, rel_path)
 }
 
-/// Read a memory file: its content and the version token of that content.
 pub fn read(base: &Path, rel_path: &str) -> Result<(String, String), String> {
     let (rel, path) = resolve_path(base, rel_path)?;
     let content = fs::read_to_string(&path).map_err(|e| {
@@ -84,7 +50,6 @@ pub fn read(base: &Path, rel_path: &str) -> Result<(String, String), String> {
     Ok((content, version))
 }
 
-/// Create a memory file, or replace one in full. Returns the new version.
 pub fn write(
     base: &Path,
     rel_path: &str,
@@ -97,9 +62,6 @@ pub fn write(
     Ok(content_version(content))
 }
 
-/// Replace one occurrence of `old_str` in a memory file. `old_str` must match
-/// exactly once; zero or several matches are rejected with the current
-/// content, so the caller can pick a unique anchor and retry.
 pub fn str_replace(
     base: &Path,
     rel_path: &str,
@@ -132,8 +94,6 @@ pub fn str_replace(
     Ok(content_version(&updated))
 }
 
-/// Add a line at the end of a memory file, creating it when `if_version` is
-/// `"new"`.
 pub fn append(
     base: &Path,
     rel_path: &str,
@@ -147,7 +107,6 @@ pub fn append(
     Ok(content_version(&updated))
 }
 
-/// Remove a whole memory file.
 pub fn delete(base: &Path, rel_path: &str, if_version: &str) -> Result<(), String> {
     let (rel, path) = resolve_path(base, rel_path)?;
     require_current(&rel, &path, if_version)?;
@@ -160,7 +119,6 @@ pub fn delete(base: &Path, rel_path: &str, if_version: &str) -> Result<(), Strin
     })
 }
 
-/// Every `*.md` file under one scope directory, sorted by relative path.
 pub fn list_entries(base: &Path, scope: MemoryScope, scope_id: &str) -> Vec<MemoryEntry> {
     let mut entries = Vec::new();
     collect_entries(base, &scope_dir(base, scope, scope_id), &mut entries);
@@ -168,14 +126,6 @@ pub fn list_entries(base: &Path, scope: MemoryScope, scope_id: &str) -> Vec<Memo
     entries
 }
 
-/// The entries a listing shows: the global scope plus the current project, or
-/// the scope `path_prefix` names when it names one.
-///
-/// The memory base is shared by every workspace on the machine, so the
-/// default set stays scoped to the caller's project — a listing that mixed
-/// projects would invite the model to read another project's file. A prefix
-/// naming a scope (`global/`, `projects/<id>/`, `sessions/<id>/`) widens the
-/// walk to that scope on request.
 pub fn list_entries_for(base: &Path, project_id: &str, path_prefix: &str) -> Vec<MemoryEntry> {
     let prefix = path_prefix.trim();
     let mut entries = Vec::new();
@@ -189,8 +139,6 @@ pub fn list_entries_for(base: &Path, project_id: &str, path_prefix: &str) -> Vec
     entries
 }
 
-/// Render the `<memory_listing>` block: one line per file with its path, type,
-/// summary, aliases, and sources.
 pub fn render_listing(entries: &[MemoryEntry]) -> String {
     let mut out = String::from("<memory_listing>\n");
     if entries.is_empty() {
@@ -221,18 +169,14 @@ pub fn render_listing(entries: &[MemoryEntry]) -> String {
     out
 }
 
-/// Render the `<profile>` block from `global/profile.md`.
 pub fn render_profile(base: &Path) -> String {
     render_block("profile", base, "global/profile.md")
 }
 
-/// Render the `<preferences>` block from `global/preferences.md`.
 pub fn render_preferences(base: &Path) -> String {
     render_block("preferences", base, "global/preferences.md")
 }
 
-/// Render one injected block from a memory file. The frontmatter is listing
-/// metadata, so only the body reaches the prompt.
 fn render_block(tag: &str, base: &Path, rel_path: &str) -> String {
     let body = read(base, rel_path)
         .ok()
@@ -245,18 +189,10 @@ fn render_block(tag: &str, base: &Path, rel_path: &str) -> String {
     }
 }
 
-/// The body of a memory file, with its frontmatter stripped.
 pub fn body(content: &str) -> String {
     parse_frontmatter(content).1
 }
 
-/// Resolve a relative memory path to an absolute path inside `base`, or
-/// explain why it is not a legal memory path.
-///
-/// The caller is a tool driven by model output, so nothing about the path is
-/// trusted: absolute paths, `..`, backslashes, drive letters, and empty
-/// segments are rejected before the join, and the joined result is checked to
-/// still be under `base`.
 fn resolve_path(base: &Path, rel_path: &str) -> Result<(String, PathBuf), String> {
     let trimmed = rel_path.trim();
     if trimmed.is_empty() {
@@ -301,8 +237,6 @@ fn not_a_memory_path(rel_path: &str) -> String {
     .render()
 }
 
-/// Whether a path segment is safe to join under the memory base: no empty
-/// segment, no `.` / `..`, and no separator or drive-letter characters.
 fn is_safe_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment != "."
@@ -312,8 +246,6 @@ fn is_safe_segment(segment: &str) -> bool {
         && !segment.contains(':')
 }
 
-/// The scopes a listing walks. A prefix naming a scope selects that scope
-/// alone; anything else selects the global scope plus the caller's project.
 fn listing_scopes(base: &Path, project_id: &str, prefix: &str) -> Vec<(MemoryScope, String)> {
     let mut parts = prefix.split('/');
     match (parts.next(), parts.next()) {
@@ -333,7 +265,6 @@ fn listing_scopes(base: &Path, project_id: &str, prefix: &str) -> Vec<(MemorySco
     }
 }
 
-/// Every scope id under `projects/` or `sessions/`, sorted.
 fn child_scope_ids(base: &Path, scope: MemoryScope) -> Vec<(MemoryScope, String)> {
     let Ok(read) = fs::read_dir(scope_dir(base, scope, "")) else {
         return Vec::new();
@@ -347,11 +278,6 @@ fn child_scope_ids(base: &Path, scope: MemoryScope) -> Vec<(MemoryScope, String)
     ids.into_iter().map(|id| (scope, id)).collect()
 }
 
-/// Enforce the `if_version` contract and return the file's current content.
-///
-/// `"new"` requires an unused path; any other value must equal the current
-/// version. Both failures carry the current content, so the caller can merge
-/// and retry without a second read.
 fn check_version(rel: &str, path: &Path, if_version: &str) -> Result<Option<String>, String> {
     let current = current_content(rel, path)?;
     match (if_version, &current) {
@@ -385,7 +311,6 @@ fn check_version(rel: &str, path: &Path, if_version: &str) -> Result<Option<Stri
     }
 }
 
-/// [`check_version`] for the operations that cannot create a file.
 fn require_current(rel: &str, path: &Path, if_version: &str) -> Result<String, String> {
     check_version(rel, path, if_version)?.ok_or_else(|| {
         LocalizedText::with_params("engine.tools.memory.notExist", i18n_params!["rel" => rel])
@@ -418,8 +343,6 @@ fn current_content(rel: &str, path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-/// Write a file atomically (tmp file + rename), so a crash mid-write never
-/// leaves a truncated memory file behind.
 fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -456,8 +379,6 @@ fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     })
 }
 
-/// Append `addition` as a line, keeping exactly one newline between the
-/// existing content and the addition.
 fn append_line(existing: &str, addition: &str) -> String {
     let mut out = existing.to_string();
     if !out.is_empty() && !out.ends_with('\n') {
@@ -525,7 +446,6 @@ fn is_markdown(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Parse a frontmatter list value: `[a, b]`, or a bare single value.
 fn parse_list(value: &str) -> Vec<String> {
     let trimmed = value.trim();
     let inner = trimmed
@@ -556,10 +476,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Quoted because an unquoted `Who they are: name, role, employer.` is not
-    /// valid YAML — a second `: ` makes it a nested mapping — and the engine
-    /// now reads frontmatter as real YAML (v2 uses `js-yaml`, which throws on
-    /// the unquoted form). The old line-by-line reader tolerated it.
     const PROFILE: &str = "---\nname: profile\ndescription: \"Who they are: name, role, employer.\"\ntype: note\nsources: [chat]\naliases: [me, the user]\n---\n\n- [stated] Works on the kimi-code CLI.\n";
 
     fn base() -> (TempDir, PathBuf) {
@@ -597,7 +513,7 @@ mod tests {
         );
         assert!(err.contains(&content_version(PROFILE)), "{err}");
         assert!(err.contains(PROFILE), "{err}");
-        // The rejected write left the file alone.
+
         assert_eq!(read(&base, "global/profile.md").unwrap().0, PROFILE);
     }
 

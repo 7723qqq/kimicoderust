@@ -1,5 +1,3 @@
-//! HTTP transport for the GitHub tools (split out of `github.rs`).
-
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -14,8 +12,6 @@ const GITHUB_USER_AGENT: &str = "kimi-code";
 const GITHUB_DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_REQUEST_TIMEOUT_SECS: u64 = 30;
 const GITHUB_MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024;
-
-// ── HTTP request (the fork's own v1 transport semantics) ────────────────────
 
 pub(super) struct GitHubResponse {
     status: u16,
@@ -151,10 +147,6 @@ pub(super) async fn github_request(
     }
 }
 
-/// Result shaping mirrors v2 `GitHubToolBase.execute`: errors are
-/// `{error} (status {code})\n{body前4000字符}`, successes are
-/// `{body}\n\n(GitHub rate limit remaining: {n})` with `(empty response)`
-/// for an empty body.
 pub(super) fn format_result(response: GitHubResponse) -> ExecutableToolResult {
     if !response.ok {
         let detail = if response.body.is_empty() {

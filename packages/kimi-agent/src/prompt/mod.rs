@@ -7,11 +7,13 @@
 pub mod agents_md;
 pub mod builder;
 pub mod environment;
+pub mod git_context;
 pub mod init;
 pub mod profiles;
 pub mod skills_renderer;
 
 pub use builder::SystemPromptBuilder;
 pub use environment::collect_environment;
+pub use git_context::collect_git_context;
 pub use init::{DEFAULT_INIT_PROMPT, init_completion_reminder};
-pub use profiles::{AgentProfile, ProfileCatalog};
+pub use profiles::{AgentProfile, MergedProfileCatalog, ProfileCandidate, ProfileCatalog};

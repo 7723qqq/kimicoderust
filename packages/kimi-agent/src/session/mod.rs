@@ -23,8 +23,11 @@
 //! telemetry is served by the `host/telemetry` callback (M1c, emitted from
 //! `run_turn`), `host/list_tools` is M1d.
 
+pub mod cache_observation;
+pub mod idle_reclaim;
 pub mod lock;
 pub mod patch;
+pub mod session_log;
 pub mod sqlite_store;
 pub mod title;
 pub mod token_counting;
@@ -39,12 +42,15 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, oneshot};
 
 use crate::callbacks::HostCallbacks;
+use crate::primitives::errors::{ErrorPayload, PayloadOptions, make_error_payload};
 use crate::rpc::types::{
     AskQuestionRequest, AskQuestionResponse, ListToolsResponse, LlmChatRequest, LlmChatResponse,
     PermissionCheckRequest, PermissionDecision, StateReadRequest, StateReadResponse,
     StateWriteRequest, StateWriteResponse, ToolExecuteRequest, ToolExecuteResponse,
 };
-use crate::turn_events::{TurnCancelReason, TurnCancelTarget, TurnEndReason, TurnEvent};
+use crate::turn_events::{
+    TurnCancelReason, TurnCancelTarget, TurnEndReason, TurnEvent, TurnInterruptReason,
+};
 use crate::turn_loop::run_turn::run_turn_continued;
 use crate::turn_loop::types::{GoalContext, LLM, LLMMessage, RunTurnInput, ToolInfo, TurnResult};
 
@@ -490,7 +496,9 @@ fn maybe_settle_locked(core: &mut Core) {
         && core.wake_replay_inflight.is_empty()
     {
         for tx in std::mem::take(&mut core.settle_waiters) {
-            let _ = tx.send(());
+            if tx.send(()).is_err() {
+                tracing::debug!("a session settle waiter had already given up");
+            }
         }
     }
 }
@@ -518,7 +526,9 @@ impl Drop for ReleaseGuard {
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         core.released = true;
         for tx in std::mem::take(&mut core.release_waiters) {
-            let _ = tx.send(());
+            if tx.send(()).is_err() {
+                tracing::debug!("a session release waiter had already given up");
+            }
         }
     }
 }
@@ -1092,6 +1102,14 @@ impl EngineSession {
         }
     }
 
+    /// Fold a compaction request's usage into the live usage snapshot. It grows
+    /// `byModel` / `total` (billable) and the tagged compaction slice, but not
+    /// `currentTurn` — a compaction is not a chat turn.
+    pub fn record_compaction_usage(&self, model: &str, usage: &crate::rpc::types::TokenUsage) {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.usage.record_compaction(model, usage);
+    }
+
     /// Try to acquire quiescence (v2 `tryAcquireQuiescence`): an exclusive
     /// window in which enqueued turns are parked instead of admitted. Fails
     /// (`None`) when a guard is already held or any turn is active, pending,
@@ -1134,8 +1152,8 @@ impl EngineSession {
     /// Resolves once the session is fully idle: no active turn, no pending
     /// or held turns (v2 `settled`). Session teardown awaits this before
     /// disposing engine-owned resources.
-    pub async fn settled(&self) {
-        let rx = {
+    pub async fn settled(&self) -> Result<(), crate::primitives::deadline::WaitTimeout> {
+        let (rx, started) = {
             let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
             if core.active_turn_id.is_none()
                 && core.pending.is_empty()
@@ -1143,13 +1161,13 @@ impl EngineSession {
                 && core.deferred_wakes.is_empty()
                 && core.wake_replay_inflight.is_empty()
             {
-                return;
+                return Ok(());
             }
             let (tx, rx) = oneshot::channel();
             core.settle_waiters.push(tx);
-            rx
+            (rx, std::time::Instant::now())
         };
-        let _ = rx.await;
+        Self::drain("session settle", rx, started).await
     }
 
     /// Whether the pump has exited and dropped the conversation — the
@@ -1164,17 +1182,40 @@ impl EngineSession {
     /// (v2's `disposeAsync` / `waitFor(status==='done')` sequence,
     /// `agentLifecycleService.ts:638-641`) — unlike [`Self::settled`], which
     /// only says the session is idle. Resolves immediately once released.
-    pub async fn released(&self) {
-        let rx = {
+    pub async fn released(&self) -> Result<(), crate::primitives::deadline::WaitTimeout> {
+        let (rx, started) = {
             let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
             if core.released {
-                return;
+                return Ok(());
             }
             let (tx, rx) = oneshot::channel();
             core.release_waiters.push(tx);
-            rx
+            (rx, std::time::Instant::now())
         };
-        let _ = rx.await;
+        Self::drain("session release", rx, started).await
+    }
+
+    /// Wait for one of the session's liveness broadcasts.
+    ///
+    /// Unbounded: the reference's `settled()` never gives up
+    /// (`agent/loop/loopService.ts:970-993`). The only non-success outcome is
+    /// the session being dropped underneath the waiter, which is reported as a
+    /// wait that ended without the condition — the waiter must not treat a
+    /// vanished session as success.
+    async fn drain(
+        operation: &str,
+        rx: oneshot::Receiver<()>,
+        started: std::time::Instant,
+    ) -> Result<(), crate::primitives::deadline::WaitTimeout> {
+        match rx.await {
+            Ok(()) => Ok(()),
+            Err(_) => Err(crate::primitives::deadline::WaitTimeout {
+                operation: operation.to_string(),
+                stage: "the session was dropped before it reached that state".to_string(),
+                limit: std::time::Duration::MAX,
+                waited: started.elapsed(),
+            }),
+        }
     }
 
     /// Replace the session's cross-turn history. The next enqueued turn
@@ -1347,6 +1388,41 @@ async fn heartbeat_tick(guard: Option<&crate::tools::external_hooks::HookGuard>,
         .await;
 }
 
+/// Prepend the plugin reminders the napi/TUI host does not produce itself
+/// (v2 `AgentPluginService`): pending `plugin_change` notices and the one-shot
+/// `plugin_session_start` skill block.
+///
+/// The HTTP engine injects the same variants through the turn's injection
+/// registry; this pump path has no `ServerEngine`, so it hands them to the
+/// turn as history instead. The session-start reminder is reconciled against
+/// the history the pump already holds (frozen after the first injection).
+fn inject_plugin_reminders(ctx: &SessionContext, history: &mut Vec<LLMMessage>) {
+    let Some(session_id) = ctx.session_id.as_deref() else {
+        return;
+    };
+    if let Some(text) = crate::injection::plugin::take_plugin_change_notices(session_id) {
+        history.push(crate::injection::injection_message_named(
+            text,
+            crate::injection::plugin::PLUGIN_CHANGE_VARIANT,
+        ));
+    }
+    let Some(toolset) = ctx.toolset.as_ref() else {
+        return;
+    };
+    let dirs = toolset.plugin_skill_dirs();
+    if dirs.is_empty() {
+        return;
+    }
+    if let Some(text) =
+        crate::injection::plugin::session_start_reminder(dirs, session_id, history, false)
+    {
+        history.push(crate::injection::injection_message_named(
+            text,
+            crate::injection::plugin::PLUGIN_SESSION_START_VARIANT,
+        ));
+    }
+}
+
 async fn pump(
     core: Arc<Mutex<Core>>,
     ctx: Arc<SessionContext>,
@@ -1402,7 +1478,7 @@ async fn pump(
         // host's `cancel_turn` can trip immediately (not just at step tops).
         // (Written after the entry destructure below, where `cancel` lives.)
 
-        let (mut entry, history) = match next {
+        let (mut entry, mut history) = match next {
             Some(pair) => pair,
             None => {
                 // A completed background task is input the model must see
@@ -1437,6 +1513,10 @@ async fn pump(
                 continue;
             }
         };
+        // Plugin reminders are engine-owned, so they join the history before
+        // the turn is handed `history + prompt` (the fold below skips them
+        // with the rest of the handed history).
+        inject_plugin_reminders(&ctx, &mut history);
         // The turn is handed `history + prompt`; its result echoes all of it
         // back. The fold below must skip the system message AND the handed
         // history — re-folding the history would duplicate it from the third
@@ -1473,6 +1553,8 @@ async fn pump(
                 kimi_ui_core::SteerStage::TurnClaimed { turn_id },
             );
         }
+        let (display_prompt, prompt_attachments) =
+            crate::turn_events::started_display(&input, &origin);
         ctx.callbacks.turn_event(TurnEvent::Prompt {
             turn_id,
             prompt_id: prompt_id.clone(),
@@ -1483,6 +1565,8 @@ async fn pump(
             turn_id,
             prompt_id,
             origin: origin.clone(),
+            prompt: display_prompt,
+            prompt_attachments,
         });
         if let Some(ref guard) = ctx.hook_guard {
             guard
@@ -1580,6 +1664,13 @@ async fn pump(
                 // v2 `UsageAgentModel.record`: the engine owns the fold; the
                 // host only persists the snapshot this status exposes.
                 core.usage.record(ctx.llm.model_name(), &result.usage);
+                // Compaction requests are real LLM calls: bill them into the
+                // session's model bucket, tagged so per-turn statistics do not
+                // absorb them.
+                if let Some(compaction_usage) = &result.compaction_usage {
+                    core.usage
+                        .record_compaction(ctx.llm.model_name(), compaction_usage);
+                }
                 // Record the interruption-reminder trigger for the next turn
                 // (v2 filters `TurnEnded` on the cancelled reason).
                 ctx.last_turn_aborted.store(
@@ -1664,8 +1755,11 @@ async fn pump(
             ctx.callbacks.turn_event(TurnEvent::Ended {
                 turn_id,
                 reason,
-                error: error.clone(),
+                error: error.as_ref().map(payload_value),
                 duration_ms: Some(turn_duration_ms),
+                interrupt_reason: interrupt_reason_of(&result.stop_reason),
+                trace_id: Some(format!("turn-{turn_id}")),
+                stop_reason: forced_stop_reason_of(&result.stop_reason),
             });
             if let Some(ref guard) = ctx.hook_guard {
                 notify_agent_turn_end(guard, turn_id, AgentTurnEnd::Ran(result)).await;
@@ -1675,8 +1769,11 @@ async fn pump(
             ctx.callbacks.turn_event(TurnEvent::Ended {
                 turn_id,
                 reason: TurnEndReason::Failed,
-                error: Some(payload.clone()),
+                error: Some(payload_value(&payload)),
                 duration_ms: Some(turn_duration_ms),
+                interrupt_reason: Some(TurnInterruptReason::Error),
+                trace_id: Some(format!("turn-{turn_id}")),
+                stop_reason: None,
             });
             if let Some(ref guard) = ctx.hook_guard {
                 notify_agent_turn_end(guard, turn_id, AgentTurnEnd::Failed(e.as_str())).await;
@@ -1685,7 +1782,7 @@ async fn pump(
             // `turn.ended` (loopService.ts:1533-1537); the host renders that
             // one, so a turn that dies before producing any output is not
             // silent.
-            ctx.callbacks.emit_event(payload);
+            ctx.callbacks.emit_event(error_event(&payload));
         }
         for warning in print_warnings {
             ctx.callbacks.emit_event(warning);
@@ -2149,24 +2246,11 @@ pub(crate) fn render_task_notifications(
             if notification.task_id == crate::tools::tower::TOWER_WAKE_TASK_ID {
                 return notification.description.clone();
             }
-            // Upstream #3966: the notification body opens with the task's
-            // wall time (v2 `buildAgentTaskNotificationBody`).
-            let header = crate::turn_loop::wall_time::wall_time_header(
-                notification
-                    .ended_at
-                    .saturating_sub(notification.started_at),
-            );
-            let mut block = format!(
-                "{header}\nBackground task {} ({}) finished: {}",
-                notification.task_id,
-                notification.status.as_str(),
-                notification.description
-            );
-            if let Some(preview) = &notification.output_preview {
-                block.push('\n');
-                block.push_str(preview);
-            }
-            block
+            // v2 `buildAgentTaskNotification` + `renderNotificationXml`: the
+            // model reads a `<notification>` block carrying the task kind,
+            // status, wall time and — for a failed subagent — the resume
+            // guidance, plus the persisted output file or preview.
+            notification.to_xml()
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -2189,40 +2273,100 @@ fn end_reason_of(stop: &crate::turn_loop::types::LoopTurnStopReason) -> TurnEndR
     }
 }
 
+/// The `interruptReason` v2 puts on a non-completed `turn.ended`
+/// (`interruptReasonFor`, `loopService.ts:2462-2473`). The engine sees the
+/// cancellation flag but not the host's abort reason, so a cancelled turn
+/// reports `aborted` until the reason travels with the cancel request; a
+/// `blocked` stop (goal pause / budget) has no v2 counterpart and carries no
+/// reason, matching v2's `undefined` for clean and blocked stops.
+fn interrupt_reason_of(
+    stop: &crate::turn_loop::types::LoopTurnStopReason,
+) -> Option<TurnInterruptReason> {
+    use crate::turn_loop::types::LoopTurnStopReason as Stop;
+    match stop {
+        Stop::EndTurn
+        | Stop::MaxTokens
+        | Stop::RepeatBreaker
+        | Stop::Paused
+        | Stop::BudgetLimited => None,
+        Stop::Aborted => Some(TurnInterruptReason::Aborted),
+        Stop::MaxSteps => Some(TurnInterruptReason::MaxSteps),
+        Stop::Filtered => Some(TurnInterruptReason::Filtered),
+        Stop::Unknown => Some(TurnInterruptReason::Error),
+    }
+}
+
+/// The `stopReason` v2 puts on a completed `turn.ended`
+/// (`loopService.ts:2217`): the reason a tool forced the stop. Only the repeat
+/// breaker sets one (`REPEAT_BREAKER_STOP_REASON`, `toolDedupe.ts:17`); every
+/// other stop carries no reason.
+fn forced_stop_reason_of(stop: &crate::turn_loop::types::LoopTurnStopReason) -> Option<String> {
+    use crate::turn_loop::types::LoopTurnStopReason as Stop;
+    match stop {
+        Stop::RepeatBreaker => Some("repeat_breaker".to_string()),
+        _ => None,
+    }
+}
+
 /// The `error` payload v2 puts on `turn.ended` for failing reasons
 /// (loop.ts:20-27 `createMaxStepsExceededError`, loopService.ts:877-882
 /// `PROVIDER_FILTERED`). `None` for reasons that end the turn cleanly.
 fn turn_end_error_payload(
     stop: &crate::turn_loop::types::LoopTurnStopReason,
     steps: u32,
-) -> Option<serde_json::Value> {
+) -> Option<ErrorPayload> {
     use crate::turn_loop::types::LoopTurnStopReason as Stop;
     match stop {
-        Stop::MaxSteps => Some(error_payload(
+        // v2 `createMaxStepsExceededError` builds a `LoopError`, so the
+        // serialized payload carries that class name and `{ maxSteps }`
+        // (`loop.ts:20-27`).
+        Stop::MaxSteps => Some(make_error_payload(
             "loop.max_steps_exceeded",
             format!(
                 "Turn exceeded maxSteps={steps}. If max_steps_per_turn is too small, raise it in config.toml (loop_control.max_steps_per_turn), or run \"/update-config\" to update it, then \"/reload\"."
             ),
+            PayloadOptions {
+                name: Some("LoopError".to_string()),
+                details: Some(serde_json::Map::from_iter([(
+                    "maxSteps".to_string(),
+                    serde_json::json!(steps),
+                )])),
+            },
         )),
-        Stop::Filtered => Some(error_payload(
+        // v2's `ProviderFilteredError` is an `Error2` with
+        // `{ finishReason: 'filtered' }` (`loopService.ts` filtered path).
+        Stop::Filtered => Some(make_error_payload(
             "provider.filtered",
             "Provider safety policy blocked the response.".to_string(),
+            PayloadOptions {
+                name: Some("ProviderFilteredError".to_string()),
+                details: Some(serde_json::Map::from_iter([(
+                    "finishReason".to_string(),
+                    serde_json::json!("filtered"),
+                )])),
+            },
         )),
         _ => None,
     }
 }
 
-/// A protocol `KimiErrorPayload` (events.ts) — the shape `turn.ended.error`
-/// and the `error` event both carry. `retryable` is false throughout: the
-/// engine has already exhausted its own retry budget by the time a turn
-/// fails, so the host must not offer another attempt.
-fn error_payload(code: &str, message: String) -> serde_json::Value {
-    serde_json::json!({
-        "type": "error",
-        "code": code,
-        "message": message,
-        "retryable": false,
-    })
+/// A `KimiErrorPayload` (events.ts) with the registry's `retryable`, the same
+/// resolution v2's `makeErrorPayload` performs.
+fn error_payload(code: &str, message: String) -> ErrorPayload {
+    make_error_payload(code, message, PayloadOptions::default())
+}
+
+/// Serialize a payload the way v2 does before it crosses the host boundary.
+fn payload_value(payload: &ErrorPayload) -> serde_json::Value {
+    serde_json::to_value(payload).expect("ErrorPayload is serializable")
+}
+
+/// The separate `error` event: v2's `AgentErrorEvent` is a `KimiErrorPayload`
+/// plus `type: 'error'` (`agent/mcp/mcpEvents.ts`); the host stamps `agentId`.
+fn error_event(payload: &ErrorPayload) -> serde_json::Value {
+    let mut value = payload_value(payload);
+    value["type"] = serde_json::json!("error");
+    value
 }
 
 /// Classify a failed turn's error string onto a protocol error code. The
@@ -2271,7 +2415,7 @@ fn turn_failure_code(message: &str) -> &'static str {
 /// The `error` payload for a turn that failed outright (the engine returned
 /// `Err`). The message is the engine's own error text, kept verbatim so the
 /// provider's response body reaches the user.
-fn turn_failure_payload(message: &str) -> serde_json::Value {
+fn turn_failure_payload(message: &str) -> ErrorPayload {
     error_payload(turn_failure_code(message), message.to_string())
 }
 
@@ -2300,12 +2444,7 @@ pub(crate) async fn notify_agent_turn_end(
                 let error = turn_end_error_payload(&result.stop_reason, result.steps);
                 let (error_type, error_message) = error
                     .as_ref()
-                    .and_then(|payload| {
-                        Some((
-                            payload.get("code")?.as_str()?.to_string(),
-                            payload.get("message")?.as_str()?.to_string(),
-                        ))
-                    })
+                    .map(|payload| (payload.code.to_string(), payload.message.clone()))
                     .unwrap_or_else(|| {
                         ("internal".to_string(), format!("{:?}", result.stop_reason))
                     });
@@ -2315,15 +2454,9 @@ pub(crate) async fn notify_agent_turn_end(
         },
         AgentTurnEnd::Failed(message) => {
             let payload = turn_failure_payload(message);
-            let error_type = payload
-                .get("code")
-                .and_then(|code| code.as_str())
-                .unwrap_or("internal");
-            let error_message = payload
-                .get("message")
-                .and_then(|message| message.as_str())
-                .unwrap_or(message);
-            guard.notify_stop_failure(error_type, error_message).await;
+            guard
+                .notify_stop_failure(payload.code.as_str(), &payload.message)
+                .await;
         }
         AgentTurnEnd::Cancelled => guard.notify_interrupt(turn_id).await,
     }

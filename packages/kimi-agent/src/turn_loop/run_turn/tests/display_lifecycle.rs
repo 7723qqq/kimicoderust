@@ -90,7 +90,8 @@ async fn a_swarm_tool_call_rides_its_display_on_the_started_event() {
 }
 
 /// A tool that declares no display must not grow one — an empty
-/// `display` would make hosts render a card for a plain tool.
+/// `display` would make hosts render a card for a plain tool. `ExitPlanMode`
+/// needs host plan state to build its card, so it stays displayless.
 #[tokio::test]
 async fn a_tool_without_a_display_ships_none() {
     let llm = PredictTestLlm {
@@ -99,8 +100,8 @@ async fn a_tool_without_a_display_ships_none() {
         return_tool_calls: true,
         tool_responses: vec![ToolCall {
             id: "tc-plain".into(),
-            name: "WebSearch".into(),
-            arguments: serde_json::json!({ "query": "x" }),
+            name: "ExitPlanMode".into(),
+            arguments: serde_json::json!({}),
             extras: None,
             args_parse_error: None,
         }],
@@ -156,7 +157,7 @@ async fn a_tool_without_a_display_ships_none() {
         .iter()
         .find(|event| {
             event.get("type").and_then(|t| t.as_str()) == Some("tool.call.started")
-                && event.get("tool_name").and_then(|t| t.as_str()) == Some("WebSearch")
+                && event.get("tool_name").and_then(|t| t.as_str()) == Some("ExitPlanMode")
         })
         .cloned()
         .expect("the call announced itself");
@@ -356,7 +357,16 @@ async fn step_boundaries_are_paired_one_begin_and_one_end_per_step() {
         for event in pair {
             assert_eq!(event["turn_id"], "test-step-boundaries");
             assert_eq!(event["step"], serde_json::json!(index + 1));
+            assert_eq!(
+                event["step_id"],
+                serde_json::json!(format!("test-step-boundaries-step-{}", index + 1)),
+                "v2 stamps the same stepId on started and completed"
+            );
         }
+        assert_eq!(
+            pair[0]["step_id"], pair[1]["step_id"],
+            "begin and end of one step must share the id"
+        );
     }
 }
 

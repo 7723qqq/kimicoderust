@@ -3,13 +3,13 @@
     allow(dead_code, unused_imports, unused_variables)
 )]
 
-mod bash;
+pub(crate) mod bash;
 mod bash_spawn;
 pub mod catalog;
 mod compaction;
 mod edit;
 mod encoding;
-mod escape;
+pub(crate) mod escape;
 pub(crate) mod fetch_url;
 mod file_cache;
 pub mod file_type;

@@ -34,7 +34,7 @@ use crate::subagent::{ParentCancel, SubagentManager};
 use crate::tool_result_truncation::ToolResultTruncator;
 use crate::tools::{
     NativeToolset, external_hooks::HookGuard, github::GitHubCredentials, goal_guard::GoalGuard,
-    plan_mode, stale_guard::StaleGate,
+    mode_mutex, plan_mode, spec_mode, stale_guard::StaleGate,
 };
 use crate::turn_loop::types::LLM;
 
@@ -332,6 +332,13 @@ pub async fn build_engine_pipeline(
             spec.extra_roots.clone(),
         ))
     });
+    if let Some(engine) = permission_engine.as_ref() {
+        // v2 `IAgentPermissionModeService` / `broadcastPermissionMode`: every
+        // agent inherits the session mode; the shared registry lets an agent
+        // pinned at spawn (tower worker → `auto`) keep its own across a switch.
+        engine.set_agent_permission_modes(subagent_manager.permission_modes());
+        subagent_manager.broadcast_permission_mode(engine.mode());
+    }
     // Turn-lifecycle hooks (v2 `agentExternalHooksService`, G-6 #6):
     // user-configured commands can block or prepend context
     // (`UserPromptSubmit`), observe compaction (`PreCompact`), and veto a
@@ -444,10 +451,15 @@ pub async fn build_engine_pipeline(
                         }
                         Err(_) => (base_callbacks.clone(), None),
                     };
-                    // Plan-mode guard (v2 `AgentPlanService.guardToolExecution`):
-                    // guarded native calls read the host's plan state through the
-                    // state bridge and are denied when plan mode forbids them.
-                    // Unguarded tools skip the round-trip.
+                    // Plan- and spec-mode guards (v2
+                    // `AgentPlanService.guardToolExecution` /
+                    // `AgentSpecService.guardToolExecution`): native calls read
+                    // the host's mode state through the state bridge and are
+                    // denied when the active mode forbids them. Both reads run
+                    // under the mode-switch lock so a tool call can never
+                    // observe a transition halfway through; the plan read is
+                    // skipped for unguarded tools, while the spec rule applies
+                    // to every tool (declared accesses decide).
                     let plan_callbacks = base_callbacks.clone();
                     let plan_workspace = spec.workspace_root.clone();
                     // Stale-write gate (fork-original, G-6 #3).
@@ -580,15 +592,42 @@ pub async fn build_engine_pipeline(
                         truncator: truncator.clone(),
                         permission_engine: permission_engine.clone(),
                         plan_guard: Some(Arc::new(move |tool_name, args| {
-                            if !plan_mode::plan_guarded_tool(tool_name) {
-                                return Box::pin(async { None });
-                            }
                             let callbacks = plan_callbacks.clone();
                             let tool_name = tool_name.to_string();
                             let args = args.clone();
                             let workspace = plan_workspace.clone();
                             let plan_bridge = plan_bridge.clone();
                             Box::pin(async move {
+                                let _switch = mode_mutex::mode_switch_lock().lock().await;
+                                let spec_request = crate::rpc::types::StateReadRequest {
+                                    domain: "spec".into(),
+                                    key: "spec".into(),
+                                    turn_id: String::new(),
+                                    tool_call_id: String::new(),
+                                };
+                                let spec = match callbacks.state_read(spec_request).await {
+                                    Ok(response) => response.value,
+                                    // Fail closed for *every* tool: an
+                                    // unreadable spec state is never the
+                                    // default (inactive) mode.
+                                    Err(_) => {
+                                        return Some(spec_mode::spec_state_unavailable_message(
+                                            &tool_name,
+                                        ));
+                                    }
+                                };
+                                if let Some(reason) = spec_mode::spec_denial(
+                                    &spec,
+                                    &tool_name,
+                                    &args,
+                                    workspace.as_deref().map(std::path::Path::new),
+                                    &plan_bridge,
+                                ) {
+                                    return Some(reason);
+                                }
+                                if !plan_mode::plan_guarded_tool(&tool_name) {
+                                    return None;
+                                }
                                 let request = crate::rpc::types::StateReadRequest {
                                     domain: "plan".into(),
                                     key: "plan".into(),
@@ -621,6 +660,10 @@ pub async fn build_engine_pipeline(
                         stale_guard: Some(stale_gate),
                         goal_guard: Some(goal_guard),
                         hook_guard: hook_guard.clone(),
+                        // No production caller registers a general
+                        // `beforeExecute` listener yet; embedders construct
+                        // `NativeToolCallbacks` directly to supply one.
+                        before_execute: None,
                         agent_tool_veto: spec.agent_tool_veto.clone(),
                         tools_veto: spec.tools_veto.clone(),
                         todo_tool_veto: spec.todo_tool_veto.clone(),
@@ -636,11 +679,29 @@ pub async fn build_engine_pipeline(
         };
 
     let llm = build_llm_for_spec(spec, &callbacks, plugin_sections.as_deref())?;
+    // Guardian review (v2 `agent/guardian`): the reviewer rides the same LLM as
+    // the turn. It stays inert until a session installs a conversation provider
+    // and the host sets `KIMI_GUARDIAN=1`.
+    if let Some(engine) = &permission_engine {
+        engine.set_guardian_reviewer(Arc::new(
+            crate::permission::guardian::GuardianReviewer::new(llm.clone()),
+        ));
+    }
     // Subagent execution runtime (P46): spawned subagent turns run with this
     // pipeline's llm + callback chain.
     subagent_manager
         .set_runtime(llm.clone(), callbacks.clone(), spec.session_id.clone())
         .await;
+    // The builtin `explore` profile's git-context prefix is collected from the
+    // session workspace at spawn time (v2 `AgentProfilePromptPrefixContext`).
+    if let Some(session_id) = spec.session_id.as_deref() {
+        subagent_manager
+            .set_workspace_root(
+                session_id,
+                spec.workspace_root.clone().map(std::path::PathBuf::from),
+            )
+            .await;
+    }
 
     // Server-side hook usage telemetry rides the host's own `host/telemetry`
     // seam: the guard emits through it when the host serves that callback, so
@@ -793,9 +854,21 @@ fn build_native_llm(
     session_id: Option<&str>,
 ) -> Box<dyn crate::turn_loop::types::LLM> {
     let sink_callbacks = callbacks.clone();
+    if cfg.protocol == "antigravity" {
+        // The antigravity bridge is a subprocess, not an HTTP request: no auth
+        // provider, no cache key, no request options apply.
+        return Box::new(
+            crate::llm::antigravity::AntigravityLlm::new(cfg.clone(), system_prompt.to_string())
+                .with_sink(Arc::new(move |event| sink_callbacks.emit_event(event))),
+        );
+    }
     let mut llm = NativeHttpLlm::new(cfg.clone(), system_prompt.to_string())
         .with_sink(Arc::new(move |event| sink_callbacks.emit_event(event)))
-        .with_cache_key(session_id.map(str::to_string));
+        .with_cache_key(session_id.map(str::to_string))
+        // Per-model request knobs (structured output, sampling, determinism,
+        // extra params) ride the transport; an empty config leaves the body
+        // byte-identical.
+        .with_request_options(cfg.into());
     if cfg.auth_provider.is_some() {
         let auth_callbacks = callbacks.clone();
         let provider_name = cfg.auth_provider.clone().unwrap_or_default();
@@ -1253,7 +1326,7 @@ X"
         }));
 
         let stopped = runner.stop("task-child", None).await.unwrap();
-        assert_eq!(stopped["status"], "killed");
+        assert_eq!(stopped.wire["status"], "killed");
         let output = runner
             .get_output("task-child")
             .expect("the killed subagent must return its partial output");
@@ -1264,7 +1337,7 @@ X"
         assert!(!output.contains("hidden reasoning"), "{output}");
 
         let stopped_again = runner.stop("task-child", None).await.unwrap();
-        assert!(stopped_again.get("output").is_none());
+        assert!(stopped_again.wire.get("output").is_none());
         assert_eq!(
             runner.get_output("task-child").as_deref(),
             Some(output.as_str())

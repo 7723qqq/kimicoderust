@@ -8,7 +8,9 @@ impl HttpServer {
         req: &HttpRequest,
     ) -> HttpResponse {
         let resp = match (method, path) {
-            ("GET", "/api/v1/models") | ("GET", "/api/v1/model-catalog") => {
+            // v2 exposes the model catalog at `GET /api/v1/models`
+            // (`kap-server/src/routes/modelCatalog.ts:151-164`).
+            ("GET", "/api/v1/models") => {
                 let config = self.config().await;
                 HttpResponse::ok(&crate::server::model_catalog::models(&config))
             }

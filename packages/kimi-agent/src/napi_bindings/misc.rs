@@ -69,6 +69,7 @@ pub fn background_task_stop(
                 runner
                     .stop(&id, reason.as_deref())
                     .await
+                    .map(|outcome| outcome.wire)
                     .map_err(napi::Error::from_reason)
             },
             |env, wire: serde_json::Value| {

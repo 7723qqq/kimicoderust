@@ -91,7 +91,7 @@ impl HttpServer {
                 Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
             },
             // FS endpoints (workspace-agnostic folder browser for Web UI / Desktop)
-            ("GET", "/api/v1/fs:home") | ("GET", "/api/v1/fs::home") => {
+            ("GET", "/api/v1/fs:home") => {
                 let home_path = std::env::var("USERPROFILE")
                     .or_else(|_| std::env::var("HOME"))
                     .unwrap_or_else(|_| ".".into());
@@ -109,7 +109,11 @@ impl HttpServer {
                     "recent_roots": recent_roots,
                 }))
             }
-            ("GET", "/api/v1/fs:browse") | ("GET", "/api/v1/fs::browse") => {
+            // v2 writes this as `/fs::browse`, which is the literal path
+            // `/fs:browse` (`::` escapes the colon in Fastify route syntax,
+            // `kap-server/src/routes/workspaceFs.ts:71`); the Web bundle calls
+            // the literal path.
+            ("GET", "/api/v1/fs:browse") => {
                 let default_home = std::env::var("USERPROFILE")
                     .or_else(|_| std::env::var("HOME"))
                     .unwrap_or_else(|_| ".".into());
@@ -193,14 +197,12 @@ impl HttpServer {
             // revalidation and a single `Range` slice, everything else served
             // in full. Auth is the bearer check at the HTTP layer — same trust
             // level as `fs:browse`, which also walks the whole host.
-            ("GET", "/api/v1/fs::content") | ("GET", "/api/v1/fs:content") => {
-                crate::server::fs_routes::handle_fs_content(
-                    req.query_param("path").as_deref(),
-                    req.header("if-none-match"),
-                    req.header("range"),
-                )
-            }
-            ("POST", "/api/v1/search") | ("POST", "/api/v1/sessions:search") => {
+            ("GET", "/api/v1/fs:content") => crate::server::fs_routes::handle_fs_content(
+                req.query_param("path").as_deref(),
+                req.header("if-none-match"),
+                req.header("range"),
+            ),
+            ("POST", "/api/v1/search") => {
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(v) => v,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
@@ -275,7 +277,9 @@ impl HttpServer {
                     "source": "sqlite"
                 }))
             }
-            ("POST", "/api/v1/workspace/fs:search") | ("POST", "/api/v1/workspace/fs::search") => {
+            // v2 `/workspace/fs::search` is the literal `/workspace/fs:search`
+            // (`::` escapes the colon, `kap-server/src/routes/fs.ts:383`).
+            ("POST", "/api/v1/workspace/fs:search") => {
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(v) => v,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),

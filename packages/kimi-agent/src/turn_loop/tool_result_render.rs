@@ -28,6 +28,8 @@
 //! `toolsV2.*.emptyOutput` catalog entry is therefore *not* the source here —
 //! it stays orphan debt.
 
+use crate::rpc::types::ContentBlock;
+
 /// v2 `TOOL_ERROR_STATUS`.
 const TOOL_ERROR_STATUS: &str = "<system>ERROR: Tool execution failed.</system>";
 
@@ -67,6 +69,60 @@ pub fn render_status(content: &str, is_error: bool) -> String {
 fn is_empty_output_text(content: &str) -> bool {
     let trimmed = content.trim();
     trimmed.is_empty() || trimmed == TOOL_OUTPUT_EMPTY_TEXT
+}
+
+/// v2 `renderStatus` for a `ContentPart[]` output.
+///
+/// Same three branches as v2: an empty array gets a marker, a lone text part
+/// is treated exactly like the string form, and a mixed payload only gains the
+/// error marker when the call failed.
+pub fn render_parts(parts: &[ContentBlock], is_error: bool) -> Vec<ContentBlock> {
+    if parts.is_empty() {
+        return vec![text_block(if is_error {
+            TOOL_EMPTY_ERROR_STATUS
+        } else {
+            TOOL_EMPTY_STATUS
+        })];
+    }
+    if let [ContentBlock::Text { text, .. }] = parts {
+        return vec![text_block(render_status(text, is_error))];
+    }
+    if is_error {
+        let mut rendered = vec![text_block(TOOL_ERROR_STATUS)];
+        rendered.extend_from_slice(parts);
+        return rendered;
+    }
+    parts.to_vec()
+}
+
+/// v2's header step for a `ContentPart[]`: the header joins the first text
+/// part, or becomes a new leading part when the payload opens with media.
+pub fn prepend_wall_time_parts(parts: &mut Vec<ContentBlock>, duration_ms: u64) {
+    let header = crate::turn_loop::wall_time::wall_time_header(duration_ms);
+    match parts.first_mut() {
+        Some(ContentBlock::Text { text, .. }) => {
+            *text = format!("{header}\n{text}");
+        }
+        _ => parts.insert(0, text_block(header)),
+    }
+}
+
+/// v2's trailing note step for a `ContentPart[]`: a lone text part absorbs the
+/// note after a newline, any other payload gets it as a final text part.
+pub fn append_note_parts(parts: &mut Vec<ContentBlock>, note: &str) {
+    if let [ContentBlock::Text { text, .. }] = parts.as_mut_slice() {
+        text.push('\n');
+        text.push_str(note);
+        return;
+    }
+    parts.push(text_block(note));
+}
+
+fn text_block(text: impl Into<String>) -> ContentBlock {
+    ContentBlock::Text {
+        text: text.into(),
+        meta: None,
+    }
 }
 
 #[cfg(test)]

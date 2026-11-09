@@ -771,6 +771,8 @@ impl TranscriptProjector {
                 }
                 Some("turn.steer") => self.fold_turn_steer(value),
                 Some("prompt.steered") => self.fold_prompt_steered(value),
+                Some("prompt.queued") => self.fold_prompt_queued(value),
+                Some("prompt.started") => self.fold_prompt_started(value),
                 Some("prompt.completed") => self.fold_prompt_completed(value),
                 Some("prompt.aborted") => self.fold_prompt_aborted(value),
                 // Prompt lifecycle arms fold prompt entities only: v2 keeps
@@ -800,10 +802,6 @@ impl TranscriptProjector {
                 }],
                 _ => Vec::new(),
             },
-            // v2 #4663: a stream reset discards the step's partial deltas.
-            // There is no text to append and no frame to open; the next delta
-            // continues the same turn's already-open step.
-            EngineEvent::StepStreamReset { .. } => Vec::new(),
             _ => Vec::new(),
         }
     }
@@ -1162,6 +1160,54 @@ impl TranscriptProjector {
                     .map(|prev| prev.created_at.clone())
                     .unwrap_or_else(|| aborted_at.clone()),
                 finished_at: Some(aborted_at.clone()),
+                steered_at: prev.and_then(|prev| prev.steered_at.clone()),
+            }
+        })]
+    }
+
+    /// v2 `onPromptQueued` (coreEventMap.ts:1391): the queued announcement
+    /// carries the content for a prompt whose `prompt.submitted` the fold may
+    /// not have seen (a resumed client replaying only the queue event).
+    fn fold_prompt_queued(&mut self, value: &Value) -> Vec<TranscriptOperation> {
+        let Some(prompt_id) = value.get("promptId").and_then(|v| v.as_str()) else {
+            return Vec::new();
+        };
+        vec![self.upsert_prompt(prompt_id, |prev| {
+            TranscriptPrompt {
+                prompt_id: prompt_id.to_string(),
+                status: TranscriptPromptStatus::Queued,
+                user_message_id: prev.and_then(|prev| prev.user_message_id.clone()),
+                content: value
+                    .get("content")
+                    .cloned()
+                    .or_else(|| prev.and_then(|prev| prev.content.clone())),
+                client_metadata: prev.and_then(|prev| prev.client_metadata.clone()),
+                created_at: prev
+                    .map(|prev| prev.created_at.clone())
+                    .unwrap_or_else(now_iso),
+                finished_at: prev.and_then(|prev| prev.finished_at.clone()),
+                steered_at: prev.and_then(|prev| prev.steered_at.clone()),
+            }
+        })]
+    }
+
+    /// v2 `onPromptStarted` (coreEventMap.ts:1418): the queued prompt became
+    /// the active turn, so the client moves it from `queued` to `running`.
+    fn fold_prompt_started(&mut self, value: &Value) -> Vec<TranscriptOperation> {
+        let Some(prompt_id) = value.get("promptId").and_then(|v| v.as_str()) else {
+            return Vec::new();
+        };
+        vec![self.upsert_prompt(prompt_id, |prev| {
+            TranscriptPrompt {
+                prompt_id: prompt_id.to_string(),
+                status: TranscriptPromptStatus::Running,
+                user_message_id: prev.and_then(|prev| prev.user_message_id.clone()),
+                content: prev.and_then(|prev| prev.content.clone()),
+                client_metadata: prev.and_then(|prev| prev.client_metadata.clone()),
+                created_at: prev
+                    .map(|prev| prev.created_at.clone())
+                    .unwrap_or_else(now_iso),
+                finished_at: prev.and_then(|prev| prev.finished_at.clone()),
                 steered_at: prev.and_then(|prev| prev.steered_at.clone()),
             }
         })]

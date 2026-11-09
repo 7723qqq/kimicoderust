@@ -15,7 +15,7 @@ impl TowerStore {
         state: &mut TowerState,
         base: &str,
     ) -> Result<TowerReanchorDigest, String> {
-        if !branch_exists(&self.repo_root, base).await {
+        if !branch_exists(&self.repo_root, base).await? {
             return Err(format!(
                 "base branch \"{base}\" does not exist as a local branch — create a local branch first"
             ));
@@ -27,7 +27,7 @@ impl TowerStore {
             .iter()
             .filter(|mission| mission.status.is_open())
         {
-            if !branch_exists(&self.repo_root, &mission.branch).await {
+            if !branch_exists(&self.repo_root, &mission.branch).await? {
                 missions.push(TowerReanchorMissionDigest {
                     id: mission.id.clone(),
                     branch: mission.branch.clone(),
@@ -153,20 +153,20 @@ impl TowerStore {
                     .join(", ")
             ));
         }
-        if !branch_exists(&self.repo_root, &mission.branch).await {
+        if !branch_exists(&self.repo_root, &mission.branch).await? {
             return Err(format!(
                 "mission {id} has no branch \"{}\" yet — spawn a worker to create it before rebasing",
                 mission.branch
             ));
         }
         let worktree = self.abs(&format!("{WORKTREES_DIR}/{}", mission.worktree));
-        if !is_registered_worktree(&self.repo_root, &worktree).await {
+        if !is_registered_worktree(&self.repo_root, &worktree).await? {
             return Err(format!(
                 "mission {id} has no registered worktree at {WORKTREES_DIR}/{} — spawn a worker to create it before rebasing",
                 mission.worktree
             ));
         }
-        if is_worktree_dirty(&worktree).await {
+        if is_worktree_dirty(&worktree).await? {
             return Err(format!(
                 "worktree {} has uncommitted changes — commit or stash them before rebasing",
                 mission.worktree
@@ -286,7 +286,7 @@ impl TowerStore {
         if branch_tip(&worktree, "HEAD").await? != to_commit {
             problems.push("worktree HEAD and the mission branch tip differ");
         }
-        if is_worktree_dirty(&worktree).await {
+        if is_worktree_dirty(&worktree).await? {
             problems.push("the worktree is dirty");
         }
         if !is_ancestor(&self.repo_root, &base_commit, &to_commit).await? {
@@ -349,7 +349,7 @@ impl TowerStore {
         if branch_tip(worktree, "HEAD").await? != from_commit {
             problems.push("HEAD was not restored to the pre-rebase commit");
         }
-        if is_worktree_dirty(worktree).await {
+        if is_worktree_dirty(worktree).await? {
             problems.push("the worktree is dirty");
         }
         if problems.is_empty() {

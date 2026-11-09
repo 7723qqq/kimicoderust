@@ -1,24 +1,3 @@
-//! Native execution of the Skill tool (state bridge protocol, design doc
-//! milestone 7, batch 7).
-//!
-//! A skill resolves from the engine's own scan first — the same
-//! `scan_all_skills*` pass that renders the system prompt's `# Skills`
-//! section — so the tool loads exactly what the prompt advertised
-//! (`prompt/skills_renderer.rs` calls that pairing a requirement: a listing
-//! the tool cannot load is a broken promise). The `host/state_read {domain:
-//! "skill", key: <skill_name>}` bridge stays as the fallback for a skill only
-//! the host knows about (v2 serves the domain from the host's session catalog).
-//!
-//! Either way the result follows v2 `executeModelSkill`: the tool output is
-//! the short confirmation line and the skill content is delivered as a
-//! follow-up user message (steer), wrapped in a `<skill-loaded>` block —
-//! content blocks on a tool message are rejected by OpenAI-compatible APIs.
-//!
-//! P82: Full arguments tokenization, parameter placeholders ($NAME, $1,
-//! $ARGUMENTS, $ARGUMENTS[index]), context placeholders (${KIMI_SKILL_DIR},
-//! ${KIMI_SESSION_ID}), plugin instructions prefixing, and disableModelInvocation
-//! / inline-skill type gates.
-
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -30,15 +9,10 @@ use crate::callbacks::HostCallbacks;
 use crate::rpc::types::{ContentBlock, StateReadRequest, ToolDelivery};
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// v2 not-found output tail (`SkillTool.execution`).
 const SKILL_NOT_FOUND_MESSAGE: &str = "not found in the current skill listing.";
 
-/// v2 `MAX_SKILL_QUERY_DEPTH` (`features/skill/tools/skill.ts:7`): how many
-/// skill invocations may nest before the tool refuses to recurse further.
 pub const MAX_SKILL_QUERY_DEPTH: u32 = 3;
 
-/// v2 `NestedSkillTooDeepError`'s message, verbatim: the optional `skillName`
-/// becomes a ` "name"` label, and an absent name leaves the label empty.
 pub fn nested_skill_too_deep_error(depth: u32, skill_name: Option<&str>) -> String {
     let label = skill_name
         .map(|name| format!(" \"{name}\""))
@@ -48,13 +22,8 @@ pub fn nested_skill_too_deep_error(depth: u32, skill_name: Option<&str>) -> Stri
     )
 }
 
-/// Failure message when the connected host does not implement the state
-/// bridge. The model must not retry the tool — the host cannot load skills
-/// for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot load skills.";
 
-/// Wire shape of the skill domain: the host returns the skill's
-/// name/instructions, plus optional metadata for expansion and gating.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SkillWire {
@@ -93,8 +62,6 @@ struct SkillPluginWire {
     instructions: Option<String>,
 }
 
-/// Tokenize command-line style argument string: splits on whitespace,
-/// respecting single and double quotes.
 fn tokenize_args(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
@@ -134,18 +101,14 @@ fn tokenize_args(raw: &str) -> Vec<String> {
     out
 }
 
-/// Escape XML tags `<` and `>` (matches v2 `escapeXmlTags`).
 pub fn escape_xml_tags(input: &str) -> String {
     input.replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// Escape XML attributes `&` and `"` (matches v2 `escapeXmlAttr`).
 fn escape_xml_attr(input: &str) -> String {
     input.replace('&', "&amp;").replace('"', "&quot;")
 }
 
-/// Escape every XML-significant character (`&`, `<`, `>`, `"`) for an
-/// attribute value (matches v2 `escapeXml`).
 fn escape_xml(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -154,8 +117,6 @@ fn escape_xml(input: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Replace named placeholders `$name` where not followed by `[` or a word
-/// character.
 fn replace_named_placeholder(content: &str, name: &str, replacement: &str) -> String {
     let target = format!("${name}");
     let mut result = String::with_capacity(content.len());
@@ -165,7 +126,7 @@ fn replace_named_placeholder(content: &str, name: &str, replacement: &str) -> St
         result.push_str(&rest[..pos]);
         let after_pos = pos + target.len();
         let next_char = rest[after_pos..].chars().next();
-        // v2 uses the JS `\w` class (ASCII [A-Za-z0-9_]) plus `[`.
+
         let is_word_or_bracket =
             next_char.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '[');
 
@@ -180,8 +141,6 @@ fn replace_named_placeholder(content: &str, name: &str, replacement: &str) -> St
     result
 }
 
-/// Replace positional placeholders `$0`, `$1`, ... where not followed by a
-/// word character.
 fn replace_positional_placeholders(content: &str, tokens: &[String]) -> String {
     let mut result = String::with_capacity(content.len());
     let mut rest = content;
@@ -215,12 +174,10 @@ fn replace_positional_placeholders(content: &str, tokens: &[String]) -> String {
     result
 }
 
-/// `$ARGUMENTS[index]` — compiled once, not per call.
 static ARGUMENTS_INDEXED_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"\$ARGUMENTS\[(\d+)\]").unwrap());
 
-/// Expand parameters into skill content (matches v2 `expandSkillParameters`).
-fn expand_skill_parameters(
+pub(crate) fn expand_skill_parameters(
     body: &str,
     raw_args: &str,
     skill_dir: &str,
@@ -230,13 +187,11 @@ fn expand_skill_parameters(
     let tokens = tokenize_args(raw_args);
     let mut content = body.to_string();
 
-    // 1. Named placeholders $name
     for (index, name) in argument_names.iter().enumerate() {
         let val = escape_xml_tags(tokens.get(index).map(|s| s.as_str()).unwrap_or(""));
         content = replace_named_placeholder(&content, name, &val);
     }
 
-    // 2. $ARGUMENTS[index]
     content = ARGUMENTS_INDEXED_RE
         .replace_all(&content, |caps: &regex::Captures| {
             let index: usize = caps[1].parse().unwrap_or(usize::MAX);
@@ -244,21 +199,16 @@ fn expand_skill_parameters(
         })
         .into_owned();
 
-    // 3. Positional placeholders $0, $1, ...
     content = replace_positional_placeholders(&content, &tokens);
 
-    // 4. Raw $ARGUMENTS
     content = content.replace("$ARGUMENTS", &escape_xml_tags(raw_args));
 
-    // 5. Determine if any argument placeholder was present
     let has_argument_placeholder = content != body;
 
-    // 6. Context variables
     content = content
         .replace("${KIMI_SKILL_DIR}", skill_dir)
         .replace("${KIMI_SESSION_ID}", session_id);
 
-    // 7. If no argument placeholder was used and args are non-empty, append ARGUMENTS: line
     if !has_argument_placeholder && !raw_args.is_empty() {
         return format!("{}\n\nARGUMENTS: {}", content, escape_xml_tags(raw_args));
     }
@@ -285,9 +235,7 @@ fn resolve_argument_names(wire: &SkillWire) -> Vec<String> {
     }
 }
 
-/// Drop the YAML frontmatter block, if any: the model sees the body, the
-/// host the metadata (same split as v2's frontmatter parser).
-fn strip_frontmatter(content: &str) -> &str {
+pub(crate) fn strip_frontmatter(content: &str) -> &str {
     let trimmed = content.trim_start();
     match trimmed.strip_prefix("---") {
         Some(rest) => match rest.find("\n---") {
@@ -298,32 +246,19 @@ fn strip_frontmatter(content: &str) -> &str {
     }
 }
 
-/// Whether a user may activate this skill type (v2 `isUserActivatableSkillType`,
-/// `features/skill/catalog/types.ts:85-87`): no declared type, `prompt`,
-/// `inline`, or `flow`. The model-tool gate is narrower on purpose — it also
-/// rejects `flow` — so the two gates stay separate functions.
 pub fn is_user_activatable_skill_type(skill_type: Option<&str>) -> bool {
-    matches!(
-        skill_type,
-        None | Some("prompt") | Some("inline") | Some("flow")
-    )
+    crate::skills::is_user_activatable_skill_type(skill_type)
 }
 
-/// Why a user-slash activation could not be rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillPromptError {
-    /// The scan carries no skill with that name (v2 `SKILL_NOT_FOUND`).
     NotFound,
-    /// The skill exists but its type is not user-activatable (v2
-    /// `SKILL_TYPE_UNSUPPORTED`, `skillService.ts:199-203`).
+
     TypeUnsupported(String),
 }
 
-/// A rendered user-slash skill prompt plus the provenance the activation
-/// origin and the `skill.activated` event carry (v2 `SkillActivationOrigin`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserSlashSkillPrompt {
-    /// The full prompt text: instruction line, blank line, `<skill-loaded>`.
     pub text: String,
     pub name: String,
     pub path: Option<String>,
@@ -331,17 +266,6 @@ pub struct UserSlashSkillPrompt {
     pub skill_type: Option<String>,
 }
 
-/// Render the prompt a `/skill:` activation submits, resolving the skill from
-/// the engine's own scan (v2 `AgentSkillService.prepareBundled` +
-/// `renderUserSlashSkillPrompt`, `features/skill/skillService.ts:189-235` and
-/// `features/skill/prompt.ts:29-33`).
-///
-/// Deliberately the same renderer the `Skill` tool path uses — one
-/// implementation, two triggers. A host that rendered its own would diverge on
-/// the `${KIMI_SKILL_DIR}` / `$ARGUMENTS` expansion, on plugin instructions,
-/// and on which skills resolve at all (the scan carries the user scope, the
-/// `extra_skill_dirs` roots and the builtins; a `<workDir>/.kimi-code/skills`
-/// path lookup finds only project skills).
 pub fn render_user_slash_skill_prompt(
     scan: &SkillScan<'_>,
     name: &str,
@@ -377,8 +301,6 @@ pub fn render_user_slash_skill_prompt(
     })
 }
 
-/// A skill resolved from either the engine scan or the host state bridge,
-/// normalized into one shape for gating and rendering.
 struct ResolvedSkill {
     name: String,
     instructions: String,
@@ -408,30 +330,16 @@ impl ResolvedSkill {
     }
 }
 
-/// Where the `Skill` tool resolves a skill from: the roots **and** the
-/// scope-group policy the system prompt's `# Skills` section was rendered from
-/// (`prompt/builder.rs`). Both halves matter — with
-/// `merge_all_available_skills` off the prompt lists only each scope group's
-/// first existing directory, so a tool that always merged would load skills the
-/// prompt never advertised, and could resolve a name the two scans disagree on.
 #[derive(Debug, Clone, Copy)]
 pub struct SkillScan<'a> {
     pub root: Option<&'a Path>,
     pub extra_dirs: &'a [PathBuf],
-    /// Plugin-contributed roots with their identity, so a skill loaded from one
-    /// gets the plugin's instruction prefix (v2 `SkillRoot.plugin`).
+
     pub plugin_dirs: &'a [crate::skills::PluginSkillDir],
     pub merge_all_available_skills: bool,
 }
 
-/// Resolve a skill from the engine's own scan: file-backed project/user
-/// skills first, then the embedded builtin skills. `None` when the scan
-/// carries no skill with that name (the caller then asks the host).
 fn scan_skill(name: &str, scan: &SkillScan<'_>) -> Option<ResolvedSkill> {
-    // v2 ranks `extra` (10) above `plugin` (5), and plugin skills register
-    // under qualified `<plugin_id>:<skill>` names (v2 `registerPluginSkill`),
-    // so a plugin skill never shadows one the user declared — and is resolved
-    // by its qualified name only.
     let found = crate::skills::scan_all_skills_with_extra_merge_and_plugins(
         scan.root,
         scan.extra_dirs,
@@ -440,11 +348,7 @@ fn scan_skill(name: &str, scan: &SkillScan<'_>) -> Option<ResolvedSkill> {
     )
     .into_iter()
     .find(|s| s.name == name)?;
-    // The plugin a resolved skill belongs to, keyed by the root it was scanned
-    // from: a plugin root is a *container* of skill directories, so the skill's
-    // own directory sits one level below it. v2 carries the plugin on the root
-    // (`SkillRoot.plugin`) and the renderer prefixes that plugin's instructions
-    // onto the skill body.
+
     let plugin = Path::new(&found.path)
         .parent()
         .and_then(Path::parent)
@@ -459,8 +363,7 @@ fn scan_skill(name: &str, scan: &SkillScan<'_>) -> Option<ResolvedSkill> {
         let def = crate::skills::builtin_skill_defs()
             .into_iter()
             .find(|def| def.descriptor.name == skill_name)?;
-        // v2 keeps `dir`/`path` at the builtin pseudo-path so a builtin's
-        // `${KIMI_SKILL_DIR}` resolves to the same pseudo location.
+
         let pseudo_path = def.descriptor.path.clone();
         return Some(ResolvedSkill {
             name: skill_name,
@@ -493,13 +396,6 @@ fn scan_skill(name: &str, scan: &SkillScan<'_>) -> Option<ResolvedSkill> {
     })
 }
 
-/// Execute the Skill tool natively: resolve the skill from the engine's own
-/// scan, falling back to `host/state_read {domain: "skill"}`, and render the
-/// v2-aligned output + steer delivery.
-///
-/// The top-level entry point, at nesting depth 0 — v2's `SkillTool` default
-/// (`private queryDepth: number = 0`). A caller that is itself running inside
-/// an already-loaded skill uses [`execute_skill_with_depth`] instead.
 pub async fn execute_skill(
     callbacks: &dyn HostCallbacks,
     session_id: Option<&str>,
@@ -509,13 +405,6 @@ pub async fn execute_skill(
     execute_skill_with_depth(callbacks, session_id, args, scan, 0).await
 }
 
-/// The nesting-depth-carrying execution, mirroring v2 `executeModelSkill`.
-///
-/// `query_depth` is the depth of the *caller*: a top-level model-tool
-/// invocation passes 0, and each nested skill invocation passes its own depth
-/// plus one (v2 `withInitialQueryDepth`). The gate runs before any resolution
-/// or state-bridge work, so a refused recursion costs nothing and never
-/// activates a skill.
 pub async fn execute_skill_with_depth(
     callbacks: &dyn HostCallbacks,
     session_id: Option<&str>,
@@ -525,8 +414,6 @@ pub async fn execute_skill_with_depth(
 ) -> ExecutableToolResult {
     let current_depth = query_depth;
     if current_depth >= MAX_SKILL_QUERY_DEPTH {
-        // v2 throws `NestedSkillTooDeepError`; the tool contract here carries
-        // refusals as error results, so the same message is returned verbatim.
         let skill_name = args.get("skill").and_then(Value::as_str);
         return err_result(nested_skill_too_deep_error(
             MAX_SKILL_QUERY_DEPTH,
@@ -550,8 +437,6 @@ pub async fn execute_skill_with_depth(
         .and_then(|s| s.as_str())
         .or(session_id);
 
-    // The engine's own scan is the authority: it is what the system prompt
-    // listed, so a skill it finds loads without round-tripping the host.
     let resolved = if let Some(skill) = scan_skill(name, &scan) {
         skill
     } else {
@@ -582,17 +467,13 @@ pub async fn execute_skill_with_depth(
         }
     };
 
-    // Gates in v2's order: user-only skills first, then the inline-type gate.
     if resolved.disable_model_invocation {
         return err_result(format!(
             "Skill \"{}\" can only be triggered by the user (model invocation is disabled).",
             resolved.name
         ));
     }
-    if let Some(ref st) = resolved.skill_type
-        && st != "prompt"
-        && st != "inline"
-    {
+    if !crate::skills::is_inline_skill_type(resolved.skill_type.as_deref()) {
         return err_result(format!(
             "Skill \"{}\" is not an inline skill and cannot be invoked by the model in v1.",
             resolved.name
@@ -609,11 +490,8 @@ pub async fn execute_skill_with_depth(
     );
     let skill_content = prefix_plugin_instructions(&resolved.plugin, expanded_instructions);
 
-    // Activation provenance (v2 `SkillActivationOrigin` + `SkillActivated`).
     let activation_id = ulid::Ulid::new().to_string();
-    // A top-level model invocation is `model-tool`; anything reached from
-    // inside an already-loaded skill is `nested-skill` (v2 skillTool.ts:95).
-    // Unchanged for the depth-0 path every production caller uses.
+
     let trigger = if current_depth > 0 {
         "nested-skill"
     } else {
@@ -636,8 +514,6 @@ pub async fn execute_skill_with_depth(
         origin["skillSource"] = json!(source);
     }
 
-    // v2 `recordModelToolActivation`: the durable event plus telemetry,
-    // before the delivery lands.
     let mut activated = json!({
         "type": "skill.activated",
         "activationId": activation_id,
@@ -660,14 +536,14 @@ pub async fn execute_skill_with_depth(
         "trigger": trigger,
     }));
 
-    // Block attributes: name, trigger, source, dir, args. Undefined values
-    // are dropped; empty strings kept (v2 `renderSkillAttributes`).
     let attrs = render_skill_attributes(&resolved, raw_args, trigger);
     let block = format!("<skill-loaded{attrs}>\n{skill_content}\n</skill-loaded>");
     let delivery_text =
         format!("Skill tool loaded instructions for this request. Follow them.\n\n{block}");
 
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         content: format!(
             "Skill \"{}\" loaded inline. Follow its instructions.",
             resolved.name
@@ -686,8 +562,6 @@ pub async fn execute_skill_with_depth(
     }
 }
 
-/// Prefix the skill content with its plugin's instructions when present
-/// (v2 registry `renderSkillPrompt`).
 fn prefix_plugin_instructions(plugin: &Option<SkillPluginWire>, content: String) -> String {
     if let Some(plugin) = plugin
         && let Some(instructions) = &plugin.instructions
@@ -703,7 +577,6 @@ fn prefix_plugin_instructions(plugin: &Option<SkillPluginWire>, content: String)
     content
 }
 
-/// Render the `skill-loaded` opening tag's attribute list.
 fn render_skill_attributes(skill: &ResolvedSkill, raw_args: &str, trigger: &str) -> String {
     let attrs: [(&str, Option<&str>); 5] = [
         ("name", Some(skill.name.as_str())),
@@ -719,11 +592,6 @@ fn render_skill_attributes(skill: &ResolvedSkill, raw_args: &str, trigger: &str)
         .collect()
 }
 
-/// Map a state bridge error to a tool result: a missing skill (the host's
-/// `-32002` unknown-key verdict) gets the v2 not-found message, an unwired
-/// host (message carries the `does not support state bridge` phrase) gets
-/// the dedicated failure message, and everything else passes through
-/// verbatim.
 fn map_state_error(name: &str, error: String) -> ExecutableToolResult {
     if error.contains("-32002") {
         err_result(format!("Skill \"{name}\" {SKILL_NOT_FOUND_MESSAGE}"))
@@ -734,9 +602,6 @@ fn map_state_error(name: &str, error: String) -> ExecutableToolResult {
     }
 }
 
-/// Engine tool definition for Skill, so the model can discover and call it
-/// (used by the standalone REPL and native tool listing). The description
-/// mirrors v2 `skill.md`; the schema mirrors `SkillToolInputSchema`.
 pub fn skill_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "Skill".into(),
@@ -768,17 +633,12 @@ mod tests {
     };
     use std::sync::Arc;
 
-    /// The `(callbacks, recorded state-read, recorded telemetry events)` triple
-    /// [`scripted`] hands back. Named because the raw tuple trips
-    /// `clippy::type_complexity`.
     type Scripted = (
         ScriptedCallbacks,
         Arc<std::sync::Mutex<Option<StateReadRequest>>>,
         Arc<std::sync::Mutex<Vec<Value>>>,
     );
 
-    /// Scripted callbacks: records the received state requests and emitted
-    /// events, answers with canned responses.
     struct ScriptedCallbacks {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,
@@ -859,8 +719,6 @@ mod tests {
         Ok(StateReadResponse { value })
     }
 
-    /// The scan a test passes when it only cares about roots: merging on, the
-    /// documented default, with no extra roots.
     fn scan(root: Option<&Path>) -> SkillScan<'_> {
         SkillScan {
             root,
@@ -877,15 +735,11 @@ mod tests {
         })
     }
 
-    /// A project skill on disk, the way `scan_skill` resolves one: the
-    /// frontmatter is parsed for the metadata and dropped from the body.
     fn write_project_skill(root: &Path, name: &str, frontmatter: &str, body: &str) {
         let dir = root.join(".kimi-code").join("skills");
         write_skill_in(&dir, name, frontmatter, body);
     }
 
-    /// Write `<container>/<name>/SKILL.md` — the layout a *scan root* holds, as
-    /// opposed to [`write_project_skill`], which anchors on a workspace root.
     fn write_skill_in(container: &Path, name: &str, frontmatter: &str, body: &str) {
         let dir = container.join(name);
         std::fs::create_dir_all(&dir).unwrap();
@@ -896,9 +750,6 @@ mod tests {
         .unwrap();
     }
 
-    /// v2 `isUserActivatableSkillType`, pinned: a skill with no declared type
-    /// activates, and `flow` does too even though the model-tool path refuses
-    /// it — the two gates are deliberately different sets.
     #[test]
     fn user_activatable_gate_matches_v2() {
         for ok in [None, Some("prompt"), Some("inline"), Some("flow")] {
@@ -921,7 +772,6 @@ mod tests {
         let prompt = render_user_slash_skill_prompt(&scan(Some(root)), "commit", "", "ses_1")
             .expect("project skill renders");
 
-        // v2 `renderUserSlashSkillPrompt`: instruction line, blank line, block.
         assert!(
             prompt.text.starts_with(
                 "User activated the skill \"commit\". Follow the loaded skill instructions.\n\n<skill-loaded "
@@ -948,8 +798,6 @@ mod tests {
         assert!(prompt.path.is_some());
     }
 
-    /// The v2 type gate, applied to a real file-backed skill: `reference` is
-    /// reference-only and a user cannot activate it.
     #[test]
     fn user_slash_prompt_refuses_a_non_user_activatable_type() {
         let dir = tempfile::tempdir().unwrap();
@@ -971,8 +819,6 @@ mod tests {
         );
     }
 
-    /// `$ARGUMENTS` expansion is the engine's job, not the host's: a skill
-    /// whose body interpolates it must not reach the model with the literal.
     #[test]
     fn user_slash_prompt_expands_arguments() {
         let dir = tempfile::tempdir().unwrap();
@@ -990,11 +836,6 @@ mod tests {
         assert!(!prompt.text.contains("$ARGUMENTS"), "{}", prompt.text);
     }
 
-    /// A skill resolved from a plugin root carries that plugin's
-    /// `skillInstructions` (v2 `SkillRoot.plugin` →
-    /// `registry.renderSkillPrompt`, `catalog/registry.ts:71-79`). Without the
-    /// identity the scan would hand back a bare body and the plugin's
-    /// instructions would silently never reach the model.
     #[test]
     fn a_plugin_contributed_skill_is_prefixed_with_the_plugin_instructions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1004,6 +845,7 @@ mod tests {
             dir: plugin_dir,
             plugin_id: "brandpack".into(),
             instructions: Some("  The brand pack's rules.  ".into()),
+            session_start: None,
         }];
         let scanned = SkillScan {
             root: None,
@@ -1012,15 +854,9 @@ mod tests {
             merge_all_available_skills: true,
         };
 
-        // v2 `registerPluginSkill` (#4188): a plugin skill is invoked by its
-        // qualified name; the instruction prefix rides the scan's root lookup
-        // unchanged.
         let prompt =
             render_user_slash_skill_prompt(&scanned, "brandpack:brand", "", "ses_1").unwrap();
-        // A plugin root reaches the wire as `source="extra"` (v2 tags plugin
-        // roots the same way, `manager.ts:314`); the plugin's identity is
-        // carried by the instruction prefix, not by a tag attribute — v2's
-        // `renderSkillAttributes` has exactly these five.
+
         assert!(
             prompt.text.contains(
                 "<skill-loaded name=\"brandpack:brand\" trigger=\"user-slash\" source=\"extra\" dir=\""
@@ -1037,9 +873,6 @@ mod tests {
         );
     }
 
-    /// The same prefix on the model-tool path, and the identity is a scan
-    /// lookup rather than something the caller supplies: dropping the plugin
-    /// roots from the scan must be the only way to lose it.
     #[tokio::test]
     async fn the_model_tool_path_prefixes_plugin_instructions_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -1049,8 +882,9 @@ mod tests {
             dir: plugin_dir,
             plugin_id: "brandpack".into(),
             instructions: Some("The brand pack's rules.".into()),
+            session_start: None,
         }];
-        // No host bridge: the answer has to come from the scan.
+
         let (callbacks, read_received, _) = scripted(Err("no bridge".into()));
 
         let result = execute_skill(
@@ -1087,12 +921,12 @@ mod tests {
         )
         .await;
         assert!(!result.is_error);
-        // The tool output is the confirmation line only (v2 tool output).
+
         assert_eq!(
             result.content,
             "Skill \"commit\" loaded inline. Follow its instructions."
         );
-        // The instructions ride a follow-up user delivery, not the tool result.
+
         let delivery = result.delivery.expect("steer delivery");
         let ContentBlock::Text { text, .. } = &delivery.blocks[0] else {
             panic!("expected a text block");
@@ -1101,7 +935,7 @@ mod tests {
             text,
             "Skill tool loaded instructions for this request. Follow them.\n\n<skill-loaded name=\"commit\" trigger=\"model-tool\" args=\"\">\n1. Stage the files.\n2. Write the message.\n</skill-loaded>"
         );
-        // The delivered user message carries the skill_activation origin.
+
         let origin = delivery.origin.expect("origin");
         assert_eq!(origin["kind"], "skill_activation");
         assert_eq!(origin["skillName"], "commit");
@@ -1113,7 +947,6 @@ mod tests {
         assert_eq!(request.turn_id, "");
         assert_eq!(request.tool_call_id, "");
 
-        // The skill.activated activation event fires once.
         let recorded = events.lock().unwrap();
         let activated = recorded
             .iter()
@@ -1261,7 +1094,7 @@ mod tests {
             text.contains("ARGUMENTS: -m \"feat: new feature\""),
             "{text}"
         );
-        // Args ride both the origin and the activation event.
+
         let activated = events
             .lock()
             .unwrap()
@@ -1492,9 +1325,6 @@ mod tests {
         assert!(text.contains("session is session-xyz-123"));
     }
 
-    /// The engine's own scan is the primary source, so a workspace skill loads
-    /// even when the host cannot answer the state bridge at all — and the
-    /// frontmatter stays out of what the model sees.
     #[tokio::test]
     async fn test_workspace_skill_loads_without_the_host_bridge() {
         let dir = tempfile::tempdir().unwrap();
@@ -1502,11 +1332,10 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\ndescription: A workspace skill.\n---\n\nDo the demo thing.\n",
+            "---\nname: demo\ndescription: A workspace skill.\n---\n\nDo the demo thing.\n",
         )
         .unwrap();
 
-        // The host refuses the bridge outright; only the engine scan can answer.
         let (callbacks, read_received, events) =
             scripted(Err("host does not support state bridge".into()));
         let result = execute_skill(
@@ -1527,10 +1356,9 @@ mod tests {
         };
         assert!(text.contains("<skill-loaded name=\"demo\""));
         assert!(text.contains("Do the demo thing."));
-        // The frontmatter block is metadata, not instructions.
+
         assert!(!text.contains("---\ndescription:"));
-        // Resolved locally: the host was never asked, but the activation event
-        // still records it for the transcript.
+
         assert!(read_received.lock().unwrap().is_none());
         assert!(
             events
@@ -1540,8 +1368,6 @@ mod tests {
                 .any(|e| e["type"] == "skill.activated")
         );
 
-        // An unknown name still falls through to the bridge, so a host that
-        // owns extra skills keeps working.
         let result = execute_skill(
             &callbacks,
             None,
@@ -1553,8 +1379,6 @@ mod tests {
         assert!(result.content.contains("does not support the state bridge"));
     }
 
-    /// Scanned skills carry their frontmatter metadata: named `arguments`
-    /// expand positionally, and a non-inline `type` keeps the skill out.
     #[tokio::test]
     async fn test_scanned_skill_honors_arguments_and_type_gates() {
         let dir = tempfile::tempdir().unwrap();
@@ -1586,7 +1410,6 @@ mod tests {
         assert!(text.contains("source=\"project\""), "{text}");
         assert!(text.contains("dir=\""), "{text}");
 
-        // A workspace flow skill is listed by the scan metadata but rejected.
         let flow_dir = dir.path().join(".agents").join("skills").join("flow-skill");
         std::fs::create_dir_all(&flow_dir).unwrap();
         std::fs::write(
@@ -1605,15 +1428,10 @@ mod tests {
         assert!(result.content.contains("not an inline skill"));
     }
 
-    /// The scope-group policy is part of the scan contract: with
-    /// `merge_all_available_skills` off the prompt lists only each group's first
-    /// existing directory, so the tool must miss a skill that lives in the
-    /// second one and hand the question to the host bridge.
     #[tokio::test]
     async fn test_skill_scan_honors_the_merge_switch() {
         let dir = tempfile::tempdir().unwrap();
-        // `.agents/skills` is the project group's first existing directory, so
-        // it is the only one a merge-off scan reads.
+
         let generic = dir.path().join(".agents").join("skills").join("generic");
         std::fs::create_dir_all(&generic).unwrap();
         std::fs::write(
@@ -1629,8 +1447,6 @@ mod tests {
         )
         .unwrap();
 
-        // The host refuses the bridge, so whatever the engine scan misses is
-        // reported as unloadable — the fact under test.
         let (callbacks, read_received, _) =
             scripted(Err("host does not support state bridge".into()));
 
@@ -1678,7 +1494,6 @@ mod tests {
             "a merge-off miss must fall back to the host"
         );
 
-        // The group's first directory stays reachable either way.
         let result = execute_skill(
             &callbacks,
             None,
@@ -1689,9 +1504,6 @@ mod tests {
         assert!(!result.is_error, "{}", result.content);
     }
 
-    /// A sub-skill is user-invocable, so the model must not load it — the same
-    /// gate as any `disable_model_invocation` skill (v2 keeps the two
-    /// catalogs apart for the same reason).
     #[tokio::test]
     async fn test_sub_skill_is_not_model_invocable() {
         let (callbacks, _, _) = scripted(Err("host does not support state bridge".into()));
@@ -1711,8 +1523,6 @@ mod tests {
         );
     }
 
-    /// The four builtin skills are scan-resolved to their embedded bodies,
-    /// so a listing the prompt advertises is actually loadable.
     #[tokio::test]
     async fn test_builtin_skills_load_embedded_bodies() {
         let (callbacks, read_received, _) =
@@ -1736,10 +1546,9 @@ mod tests {
         );
         assert!(text.contains("source=\"builtin\""), "{text}");
         assert!(text.contains("dir=\"builtin://update-config\""), "{text}");
-        // The host bridge was never needed.
+
         assert!(read_received.lock().unwrap().is_none());
 
-        // custom-theme is user-only: model invocation is rejected.
         let result = execute_skill(
             &callbacks,
             None,
@@ -1751,8 +1560,6 @@ mod tests {
         assert!(result.content.contains("model invocation is disabled"));
     }
 
-    /// Skill names and args are XML-escaped inside attributes, so a name
-    /// carrying quotes cannot break out of the tag.
     #[tokio::test]
     async fn test_skill_name_is_escaped_in_attributes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1779,8 +1586,6 @@ mod tests {
         assert!(text.contains("name=\"q&quot;x\""), "{text}");
     }
 
-    /// The depth message is v2's, character for character, including the
-    /// optional ` "name"` label and the em dash.
     #[test]
     fn test_nested_skill_too_deep_error_matches_v2() {
         assert_eq!(MAX_SKILL_QUERY_DEPTH, 3);
@@ -1788,17 +1593,13 @@ mod tests {
             nested_skill_too_deep_error(MAX_SKILL_QUERY_DEPTH, Some("commit")),
             "Nested skill invocation \"commit\" exceeded the maximum depth of 3 — refusing to recurse further."
         );
-        // An absent name leaves the label empty, so the sentence reads
-        // `invocation exceeded`, not `invocation "" exceeded`.
+
         assert_eq!(
             nested_skill_too_deep_error(MAX_SKILL_QUERY_DEPTH, None),
             "Nested skill invocation exceeded the maximum depth of 3 — refusing to recurse further."
         );
     }
 
-    /// Levels 1, 2 and 3 (depth 0, 1, 2) load; level 4 (depth 3) is refused
-    /// with the v2 message. The refusal is a plain error result, and it happens
-    /// before the skill is resolved or the host is asked.
     #[tokio::test]
     async fn test_skill_query_depth_limit() {
         let (callbacks, read_received, events) = scripted(read_ok(sample_skill()));
@@ -1840,8 +1641,7 @@ mod tests {
             result.content,
             "Nested skill invocation \"commit\" exceeded the maximum depth of 3 — refusing to recurse further."
         );
-        // Refused ahead of resolution, so the three allowed loads are the only
-        // state-reads and the only activation events this test records.
+
         let activated = events
             .lock()
             .unwrap()
@@ -1852,9 +1652,6 @@ mod tests {
         assert!(read_received.lock().unwrap().is_some());
     }
 
-    /// A refused recursion is refused on depth alone: an unknown skill name at
-    /// the limit reports the depth error, not the not-found message, and never
-    /// reaches the host.
     #[tokio::test]
     async fn test_depth_refusal_precedes_resolution() {
         let (callbacks, read_received, events) = scripted(Err(
@@ -1883,8 +1680,6 @@ mod tests {
         );
     }
 
-    /// A nested invocation is attributed to `nested-skill`, a top-level one to
-    /// `model-tool` (v2 `SkillPromptTrigger`).
     #[tokio::test]
     async fn test_nested_invocation_records_the_nested_skill_trigger() {
         let (callbacks, _, events) = scripted(read_ok(sample_skill()));
@@ -1909,8 +1704,6 @@ mod tests {
         assert_eq!(activated["trigger"], "nested-skill");
     }
 
-    /// The top-level entry point stays at depth 0, so the pre-existing
-    /// `model-tool` attribution and the whole existing suite are unaffected.
     #[tokio::test]
     async fn test_execute_skill_is_the_depth_zero_entry_point() {
         let (callbacks, _, _) = scripted(read_ok(sample_skill()));

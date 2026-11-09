@@ -2,8 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// An LLM that stalls briefly before answering, so a `timeout_ms` of
-/// `0` misread as "expire immediately" would fail the turn.
 struct SleepyLlm;
 impl LLM for SleepyLlm {
     fn system_prompt(&self) -> &str {
@@ -35,9 +33,6 @@ impl LLM for SleepyLlm {
 
 #[tokio::test]
 async fn zero_timeout_means_no_timeout() {
-    // v2 `taskService` arms the timeout only when `timeoutMs > 0`:
-    // an explicit `0` disables it (it must neither expire immediately
-    // nor fold into the 2h default's timeout error path).
     let manager = manager_with(Arc::new(SleepyLlm)).await;
     manager
         .register_discovered_definition(crate::subagent::types::SubagentDefinition {
@@ -102,11 +97,6 @@ async fn parent_cancellation_interrupts_the_subagent() {
     );
 }
 
-/// LLM whose first *working* answer carries partial text plus a tool call
-/// and whose later answers wait on `release` — a kill landing mid-turn
-/// leaves an aborted turn whose messages hold the partial output.
-/// `seed_first` prepends one plain answer, so the resume test can complete
-/// an initial run before the stop-driven one.
 struct PartialThenBlockLlm {
     calls: std::sync::atomic::AtomicU32,
     entered: Arc<tokio::sync::Notify>,
@@ -160,8 +150,7 @@ impl LLM for PartialThenBlockLlm {
                 extras: None,
                 args_parse_error: None,
             };
-            // Seeding mode: the first call answers plainly and ends the
-            // turn, so the initial run completes with a resumable history.
+
             if seed_first && call == 0 {
                 return Ok(TurnChatResponse {
                     content: "seed answer".into(),
@@ -197,8 +186,6 @@ impl LLM for PartialThenBlockLlm {
     }
 }
 
-/// Kill the one running instance once the LLM is mid-turn, then let the
-/// in-flight call finish so the loop reaches its cancellation checkpoint.
 async fn kill_the_running_instance(
     manager: &Arc<SubagentManager>,
     entered: &tokio::sync::Notify,
@@ -207,7 +194,8 @@ async fn kill_the_running_instance(
     entered.notified().await;
     let list = manager.list().await;
     assert_eq!(list.len(), 1, "exactly one subagent is running");
-    assert!(manager.kill(&list[0].id).await.unwrap());
+
+    assert!(manager.kill_now(&list[0].id).await.unwrap());
     release.notify_one();
 }
 
@@ -259,12 +247,11 @@ async fn stopped_resume_returns_partial_output() {
     let (llm, entered, release) = PartialThenBlockLlm::new(true);
     let manager = manager_with(llm).await;
     register_looper(&manager).await;
-    // Owned by main: v2's resume guard refuses another parent's agent.
+
     let agent_id = as_main_agent(manager.spawn("looper", "resumable"))
         .await
         .unwrap();
-    // Seed the conversation the resume continues (the first LLM call's
-    // partial text becomes the history's last assistant message).
+
     let seeded = manager
         .run_foreground_turn(&agent_id, "start", None)
         .await
@@ -297,12 +284,6 @@ async fn stopped_resume_returns_partial_output() {
     assert_stopped_with_partial_output(&result.content);
 }
 
-/// v2 `formatForegroundAgentSuccess` / `formatForegroundAgentFailure`: the
-/// handoff the parent reads names the stop reason, carries the resume hint, and
-/// — for a repeat-breaker handoff — the notice that the summary is not a
-/// finished result. A failure names its reason too, prints the partial-output
-/// placeholder when there is nothing to show, and skips the resume hint on a
-/// cancelled turn. The fork's report had none of those lines.
 #[test]
 fn foreground_reports_match_the_v2_shape() {
     use super::super::format::{
@@ -368,11 +349,6 @@ fn foreground_reports_match_the_v2_shape() {
     );
 }
 
-/// v2 throws a typed error per failure, and the failure shape prints *that*
-/// error's message: the step cap names the budget it spent (and carries no
-/// config advice, unlike the main-turn message), a filtered response keeps the
-/// provider sentence, a token cap names its reason, and anything longer than
-/// 2,000 UTF-16 code units is cut with v2's `… [truncated]` marker.
 #[test]
 fn failure_messages_carry_the_v2_reason_text() {
     use super::super::format::{failure_message, truncate_reason};

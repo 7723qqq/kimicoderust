@@ -133,6 +133,17 @@ async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
     let first_id = first_item["prompt_id"].as_str().unwrap().to_string();
     assert_eq!(first_item["status"], "running");
     wait_until(10, || engine.is_turn_active("sess-steer-cancel")).await;
+    // `is_turn_active` is set when the turn is admitted, which is *before* its
+    // first step head drains steering. A steer submitted in that window is
+    // ordinary steering — the first head consumes it — so the cancel case this
+    // test pins needs the turn to be inside the model request first. Wait for
+    // the mock to have read that request ("hel" is already streaming); on a
+    // cold start the checkpoint write before the first step head is slow enough
+    // that the steer could otherwise arrive first and be drained.
+    wait_until(10, || {
+        !first_request.load(std::sync::atomic::Ordering::SeqCst)
+    })
+    .await;
 
     // 2. A second prompt queues behind it and is steered into the running turn.
     let second = server
@@ -310,7 +321,7 @@ async fn prompt_submission_options_persist_to_session_profile() {
         "thinking": "high",
         "permission_mode": "yolo",
         "plan_mode": true,
-        "disabled_tools": ["Bash"],
+        "disabled_tools": ["Bash", "Bash", "WebSearch"],
         "profile": "coder",
         "metadata": { "title": "T" },
     });
@@ -324,7 +335,11 @@ async fn prompt_submission_options_persist_to_session_profile() {
     assert_eq!(config["model"], "alias-2");
     assert_eq!(config["thinking"], "high");
     assert_eq!(config["plan_mode"], true);
-    assert_eq!(config["disabled_tools"], json!(["Bash"]));
+    assert_eq!(
+        config["disabled_tools"],
+        json!(["Bash", "WebSearch"]),
+        "v2 setSessionDisabledTools collapses duplicates, order preserved"
+    );
     assert_eq!(config["profile"], "coder");
 
     let metadata = server
@@ -357,7 +372,14 @@ async fn prompt_plan_mode_activates_workspace_plan_state() {
     apply_prompt_submission_options(&server, "sess-plan", &body).unwrap();
 
     let state = crate::storage::StateStore::for_workspace(&dir).unwrap();
-    assert_eq!(state.read_domain("plan").unwrap()["active"], true);
+    assert_eq!(
+        state
+            .read_domain_state("plan")
+            .into_result()
+            .unwrap()
+            .unwrap()["active"],
+        true
+    );
 }
 
 #[tokio::test]
@@ -1162,74 +1184,6 @@ async fn a_clean_config_publishes_no_config_warning_at_startup() {
             .is_err(),
         "a clean config must not broadcast a config.warning"
     );
-}
-
-/// The clear-the-stale-advisory path the reload route exists for: a server
-/// started on a broken `config.toml` warns, and reloading a repaired file
-/// publishes `warnings: []` so the client drops the advisory it is holding.
-/// Upstream has the same asymmetry — `publishConfigWarnings`
-/// (`kap-server/src/start.ts`) publishes on every
-/// diagnostics change with no empty check, and only its startup call
-/// filters.
-#[tokio::test]
-async fn reloading_a_repaired_config_publishes_an_empty_warning_list() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    let broken = r#"
-default_model = "typo"
-
-[models.typo]
-provider = "kimi"
-max_context_size = 1000
-"#;
-    std::fs::write(&path, broken).unwrap();
-
-    let server = HttpServer::in_memory()
-        .unwrap()
-        .with_config_write_path(path.clone());
-    let mut sub = server.hub().attach();
-    let server = server.with_config(crate::config::KimiConfig::from_file(&path).unwrap());
-
-    // Startup: the broken entry is announced.
-    let ev = sub.recv().await.unwrap();
-    assert_eq!(ev.event.event_type(), "event.config.warning");
-    let crate::events::EngineEvent::Custom(value) = &ev.event else {
-        panic!("expected Custom event, got {:?}", ev.event);
-    };
-    assert_eq!(value["warnings"].as_array().unwrap().len(), 1, "{value}");
-
-    // The user fixes the file and reloads.
-    std::fs::write(
-        &path,
-        "[models.good]\nprovider = \"kimi\"\nmodel = \"kimi-k2\"\n",
-    )
-    .unwrap();
-    let res = server
-        .handle_request(&HttpRequest {
-            method: "POST".into(),
-            path: "/api/v1/config:reload".into(),
-            query: None,
-            headers: HashMap::new(),
-            body: Vec::new(),
-        })
-        .await;
-    assert_eq!(res.status, 200);
-
-    let ev = tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv())
-        .await
-        .expect("a reload of a repaired config must publish, not go silent")
-        .unwrap();
-    assert_eq!(&*ev.session_id, "global");
-    assert_eq!(ev.event.event_type(), "event.config.warning");
-    let crate::events::EngineEvent::Custom(value) = &ev.event else {
-        panic!("expected Custom event, got {:?}", ev.event);
-    };
-    assert!(
-        value["warnings"].as_array().unwrap().is_empty(),
-        "a repaired config must clear the client's advisory: {value}"
-    );
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]

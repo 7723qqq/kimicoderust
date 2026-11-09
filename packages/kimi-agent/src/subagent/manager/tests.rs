@@ -32,6 +32,509 @@ async fn test_caller_tokens_accumulates_all_dimensions() {
     assert_eq!(manager.caller_tokens("main").await, None);
 }
 
+#[tokio::test]
+async fn a_profile_snapshot_inherits_the_replaced_profiles_subagents_and_is_inspectable() {
+    let manager = SubagentManager::new();
+    let wire =
+        |name: &str, subagents: Option<Vec<String>>| crate::rpc::types::SubagentProfileWire {
+            name: name.into(),
+            description: "custom".into(),
+            when_to_use: None,
+            system_prompt: "custom role".into(),
+            tools: vec!["Read".into()],
+            disallowed_tools: Vec::new(),
+            prompt_prefix: None,
+            summary_policy: None,
+            subagents,
+        };
+
+    // v2 `reproject`: a same-name replacement that omits `subagents` inherits
+    // the replaced profile's declared list.
+    manager
+        .register_profile_snapshot(&[wire("agent", None)])
+        .await;
+    let inspection = manager.inspect_profile("agent").await.unwrap();
+    assert_eq!(inspection.profile.description, "custom");
+    assert_eq!(
+        inspection.profile.subagents,
+        Some(vec!["coder".to_string(), "explore".into(), "plan".into()])
+    );
+    assert_eq!(inspection.source_id, "session-agent-file");
+
+    // Builtins that were not replaced keep their record, and the names in the
+    // snapshot still form the discovered set.
+    assert_eq!(
+        manager.inspect_profile("coder").await.unwrap().source_id,
+        crate::prompt::profiles::BUILTIN_AGENT_PROFILE_SOURCE_ID
+    );
+    assert!(
+        manager
+            .discovered_types
+            .read()
+            .await
+            .iter()
+            .any(|name| name == "agent")
+    );
+}
+
+#[tokio::test]
+async fn the_builtin_explore_prefix_is_collected_from_the_workspace() {
+    let manager = SubagentManager::new();
+    let temp = tempfile::tempdir().unwrap();
+    manager
+        .set_runtime(
+            Arc::new(MockSubagentLlm),
+            Arc::new(MockCallbacks),
+            Some("session-1".into()),
+        )
+        .await;
+    manager
+        .set_workspace_root("session-1", Some(temp.path().to_path_buf()))
+        .await;
+    // Another session's root is not used.
+    manager
+        .set_workspace_root("session-2", Some(std::path::PathBuf::from(".")))
+        .await;
+
+    let explore = manager.definition_for("explore", "").await;
+    let prefix = manager
+        .builtin_explore_prompt_prefix("agent-1", &explore)
+        .await
+        .expect("explore must get a prefix");
+    // The temp dir is not a repository: v2 keeps the explicit marker.
+    assert_eq!(
+        prefix,
+        "<git-context status=\"unavailable\" reason=\"not-a-repo\"/>"
+    );
+
+    // Only `explore` declares a `promptPrefix`.
+    let coder = manager.definition_for("coder", "").await;
+    assert!(
+        manager
+            .builtin_explore_prompt_prefix("agent-1", &coder)
+            .await
+            .is_none()
+    );
+
+    // A host-pushed profile replaces the builtin wholesale, including its
+    // `promptPrefix`.
+    manager
+        .register_profile_snapshot(&[crate::rpc::types::SubagentProfileWire {
+            name: "explore".into(),
+            description: "custom".into(),
+            when_to_use: None,
+            system_prompt: "custom role".into(),
+            tools: vec!["Read".into()],
+            disallowed_tools: Vec::new(),
+            prompt_prefix: None,
+            summary_policy: None,
+            subagents: None,
+        }])
+        .await;
+    let replaced = manager.definition_for("explore", "").await;
+    assert!(
+        manager
+            .builtin_explore_prompt_prefix("agent-1", &replaced)
+            .await
+            .is_none()
+    );
+}
+
+/// Build a manager whose session carries a frozen environment resolved against
+/// `work`, plus the snapshot it should inherit.
+async fn manager_with_session_environment(
+    session_id: &str,
+    work: &std::path::Path,
+    env: std::collections::BTreeMap<String, String>,
+) -> (SubagentManager, EnvironmentSnapshot) {
+    let manager = SubagentManager::new();
+    manager
+        .set_runtime(
+            Arc::new(MockSubagentLlm),
+            Arc::new(MockCallbacks),
+            Some(session_id.into()),
+        )
+        .await;
+    let roots = WorkspaceRoots::new(work, Vec::new()).unwrap();
+    let snapshot = EnvironmentSnapshot::capture(
+        &crate::environment::EnvironmentDeclaration::default(),
+        None,
+        Some(roots.work_dir()),
+        env,
+        &roots,
+        false,
+    )
+    .unwrap();
+    manager
+        .set_session_environment(session_id, snapshot.clone(), roots)
+        .await;
+    (manager, snapshot)
+}
+
+#[tokio::test]
+async fn a_spawned_agent_inherits_the_session_environment() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manager, parent) = manager_with_session_environment(
+        "session-env",
+        temp.path(),
+        std::collections::BTreeMap::from([("PARENT_ONLY".to_string(), "1".to_string())]),
+    )
+    .await;
+
+    let id = manager.spawn("explore", "child").await.unwrap();
+    let environment = manager
+        .agent_environment(&id)
+        .await
+        .expect("a spawn with a session environment is bound");
+
+    assert_eq!(environment.environment_id(), parent.environment_id());
+    assert_eq!(environment.cwd(), parent.cwd());
+    assert_eq!(
+        environment.env().get("PARENT_ONLY").map(String::as_str),
+        Some("1")
+    );
+}
+
+#[tokio::test]
+async fn a_spawned_agent_may_narrow_its_cwd_and_override_variables() {
+    let temp = tempfile::tempdir().unwrap();
+    let nested = temp.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (manager, _) = manager_with_session_environment(
+        "session-env",
+        temp.path(),
+        std::collections::BTreeMap::from([("PARENT_ONLY".to_string(), "1".to_string())]),
+    )
+    .await;
+
+    let id = manager
+        .spawn_in_environment(
+            "explore",
+            "child",
+            AgentEnvironmentRequest {
+                cwd: Some(std::path::PathBuf::from("nested")),
+                env: std::collections::BTreeMap::from([
+                    ("PARENT_ONLY".to_string(), "child".to_string()),
+                    ("CHILD_ONLY".to_string(), "1".to_string()),
+                ]),
+            },
+        )
+        .await
+        .unwrap();
+
+    let environment = manager.agent_environment(&id).await.unwrap();
+    assert_eq!(environment.cwd(), std::fs::canonicalize(&nested).unwrap());
+    // Key-by-key override: the caller's other variables survive.
+    assert_eq!(
+        environment.env().get("PARENT_ONLY").map(String::as_str),
+        Some("child")
+    );
+    assert_eq!(
+        environment.env().get("CHILD_ONLY").map(String::as_str),
+        Some("1")
+    );
+}
+
+#[tokio::test]
+async fn a_spawned_agent_may_not_leave_the_parent_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let (manager, _) = manager_with_session_environment(
+        "session-env",
+        temp.path(),
+        std::collections::BTreeMap::new(),
+    )
+    .await;
+
+    let error = manager
+        .spawn_in_environment(
+            "explore",
+            "child",
+            AgentEnvironmentRequest {
+                cwd: Some(outside.path().to_path_buf()),
+                env: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.starts_with(crate::environment::codes::WORKDIR_OUTSIDE_WORKSPACE),
+        "unexpected refusal: {error}"
+    );
+    // The refused spawn leaves no half-registered instance behind.
+    assert!(manager.get_instance("agent-1").await.is_none());
+}
+
+/// v2 `workspaceInfo.onDidChange`: the roots a session holds can be re-derived
+/// between turns, and a spawn after the change resolves against the new set.
+#[tokio::test]
+async fn a_published_root_change_bumps_the_revision_and_widens_the_next_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let (manager, _) = manager_with_session_environment(
+        "session-env",
+        temp.path(),
+        std::collections::BTreeMap::new(),
+    )
+    .await;
+
+    let frozen = manager
+        .session_workspace_context("session-env")
+        .expect("the frozen environment registers a workspace context")
+        .snapshot();
+    assert_eq!(frozen.revision, 1);
+    assert!(!frozen.roots.contains(extra.path()));
+
+    // Before the change, a child may not take the extra directory as its cwd.
+    let refused = manager
+        .spawn_in_environment(
+            "explore",
+            "first",
+            AgentEnvironmentRequest {
+                cwd: Some(extra.path().to_path_buf()),
+                env: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.starts_with(crate::environment::codes::WORKDIR_OUTSIDE_WORKSPACE),
+        "unexpected refusal: {refused}"
+    );
+
+    let roots = WorkspaceRoots::new(temp.path(), vec![extra.path().to_path_buf()]).unwrap();
+    let change = manager
+        .refresh_session_workspace_roots("session-env", roots.clone())
+        .expect("a different root set publishes a revision");
+    assert_eq!(change.revision, 2);
+    assert!(
+        change
+            .roots
+            .contains(&std::fs::canonicalize(extra.path()).unwrap())
+    );
+
+    // Re-publishing the same set is not a change.
+    assert!(
+        manager
+            .refresh_session_workspace_roots("session-env", roots)
+            .is_none()
+    );
+    assert_eq!(
+        manager
+            .session_workspace_context("session-env")
+            .unwrap()
+            .revision(),
+        2
+    );
+
+    // The next spawn sees the widened boundary.
+    let id = manager
+        .spawn_in_environment(
+            "explore",
+            "second",
+            AgentEnvironmentRequest {
+                cwd: Some(extra.path().to_path_buf()),
+                env: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        manager.agent_environment(&id).await.unwrap().cwd(),
+        std::fs::canonicalize(extra.path()).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_spawn_without_a_workspace_cannot_request_one() {
+    let manager = SubagentManager::new();
+    // Nothing to inherit: the default spawn still works, unbound.
+    let id = manager.spawn("explore", "child").await.unwrap();
+    assert!(manager.agent_environment(&id).await.is_none());
+    // A requested directory has no boundary to be validated against, so it is
+    // refused instead of running somewhere unconfined.
+    let error = manager
+        .spawn_in_environment(
+            "explore",
+            "child",
+            AgentEnvironmentRequest {
+                cwd: Some(std::path::PathBuf::from("nested")),
+                env: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.starts_with(crate::environment::codes::WORKDIR_REQUIRED),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_grandchild_narrows_relative_to_its_caller() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first");
+    let second = first.join("second");
+    std::fs::create_dir_all(&second).unwrap();
+    let (manager, _) = manager_with_session_environment(
+        "session-env",
+        temp.path(),
+        std::collections::BTreeMap::new(),
+    )
+    .await;
+
+    let child = manager
+        .spawn_in_environment(
+            "explore",
+            "child",
+            AgentEnvironmentRequest {
+                cwd: Some(std::path::PathBuf::from("first")),
+                env: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let grandchild = crate::tools::CALLER_AGENT_ID
+        .scope(child, async {
+            manager
+                .spawn_in_environment(
+                    "explore",
+                    "grandchild",
+                    AgentEnvironmentRequest {
+                        cwd: Some(std::path::PathBuf::from("second")),
+                        env: std::collections::BTreeMap::new(),
+                    },
+                )
+                .await
+        })
+        .await
+        .unwrap();
+
+    let environment = manager.agent_environment(&grandchild).await.unwrap();
+    assert_eq!(
+        environment.cwd(),
+        std::fs::canonicalize(&second).unwrap(),
+        "a relative grandchild cwd resolves against its caller, not the session"
+    );
+}
+
+#[tokio::test]
+async fn agent_ids_continue_past_the_persisted_roster() {
+    // v2 `nextAvailableAgentId` reads `sessionMetadata.agents`: after a
+    // restart the roster still names agent-7, so the next id must be agent-8
+    // even though this manager has observed no ids yet.
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let workspace = store.create_workspace("C:/tmp/roster", None).unwrap();
+    store
+        .create_session_with_workspace("session-roster", None, Some(&workspace.id))
+        .unwrap();
+    store
+        .register_session_agent(
+            "session-roster",
+            "agent-7",
+            &serde_json::json!({ "type": "sub" }),
+        )
+        .unwrap();
+
+    let manager = SubagentManager::with_store(store.clone());
+    manager
+        .set_runtime(
+            Arc::new(MockSubagentLlm),
+            Arc::new(MockCallbacks),
+            Some("session-roster".into()),
+        )
+        .await;
+
+    let id = manager.spawn("coder", "Worker").await.unwrap();
+    assert_eq!(id, "agent-8");
+}
+
+#[tokio::test]
+async fn a_spawned_subagent_joins_the_session_roster_with_its_profile_and_labels() {
+    // v2 `registerAgent` + `subagentLabels` + `withSubagentProfile`: the
+    // roster entry carries the lineage, the depth, and the bound profile.
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let workspace = store.create_workspace("C:/tmp/roster-meta", None).unwrap();
+    store
+        .create_session_with_workspace("session-meta", None, Some(&workspace.id))
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+
+    let manager = SubagentManager::with_store(store.clone());
+    manager
+        .set_runtime(
+            Arc::new(MockSubagentLlm),
+            Arc::new(MockCallbacks),
+            Some("session-meta".into()),
+        )
+        .await;
+    manager
+        .set_workspace_root("session-meta", Some(temp.path().to_path_buf()))
+        .await;
+
+    let id = manager.spawn("explore", "Explorer").await.unwrap();
+
+    let session = store.get_session("session-meta").unwrap().unwrap();
+    let agents = session.agents.expect("the roster was written");
+    let meta = &agents[&id];
+    assert_eq!(meta["type"], "sub");
+    assert_eq!(meta["parentAgentId"], "main");
+    assert_eq!(meta["labels"]["profileName"], "explore");
+    assert_eq!(meta["labels"]["parentAgentId"], "main");
+    assert_eq!(meta["labels"]["subagentDepth"], "1");
+    let homedir = std::path::Path::new(meta["homedir"].as_str().unwrap());
+    assert!(
+        homedir.ends_with(std::path::Path::new("agents").join(&id)),
+        "agent homedir must be the per-agent scope: {meta}"
+    );
+}
+
+#[tokio::test]
+async fn a_fork_records_its_source_and_a_killed_scope_is_rebuilt() {
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let workspace = store.create_workspace("C:/tmp/roster-fork", None).unwrap();
+    store
+        .create_session_with_workspace("session-fork", None, Some(&workspace.id))
+        .unwrap();
+    let manager = SubagentManager::with_store(store.clone());
+    manager
+        .set_runtime(
+            Arc::new(MockSubagentLlm),
+            Arc::new(MockCallbacks),
+            Some("session-fork".into()),
+        )
+        .await;
+
+    let source = manager.spawn("coder", "Worker").await.unwrap();
+    let fork = manager.spawn("coder", "Fork").await.unwrap();
+    manager.set_forked_from(&fork, Some(source.clone())).await;
+
+    // v2 `AgentMeta.forkedFrom` rides on the child's roster entry.
+    let session = store.get_session("session-fork").unwrap().unwrap();
+    let agents = session.agents.unwrap();
+    assert_eq!(agents[&fork]["forkedFrom"], source);
+
+    // v2 `agentLifecycleService.ts:442-447`: only a known source can be forked.
+    assert!(manager.agent_exists(&source).await);
+    assert!(!manager.agent_exists("agent-404").await);
+
+    // A killed scope stays resident with its cancellation flag raised. v2's
+    // create would answer AGENT_ALREADY_EXISTS until the scope closes, so a
+    // resume of that id rebuilds it on a fresh flag instead of reusing a dead
+    // conversation.
+    manager.set_foreground_history(&fork, "coder", "Fork", Vec::new());
+    manager.kill(&fork).await.unwrap();
+    manager
+        .rebuild_instance(&fork, "coder", "Fork")
+        .await
+        .expect("a killed scope is evicted before the rebuild");
+    let instances = manager.instances.read().await;
+    let (instance, cancel_flag) = instances.get(&fork).unwrap();
+    assert_eq!(instance.state, SubagentState::Running);
+    assert!(!cancel_flag.load(Ordering::SeqCst));
+}
+
 #[test]
 fn test_swarm_timeout_zero_is_explicit_no_timeout() {
     let manager = SubagentManager::new();
@@ -57,6 +560,12 @@ fn test_partial_output_section_picks_the_last_assistant_text() {
         messages,
         last_request_usage: None,
         stop_hook_continuation: None,
+        compaction_usage: None,
+        tool_schema_tokens: 0,
+        gate_blocked: false,
+        cache_observations: Vec::new(),
+        cache_probe_requests: Vec::new(),
+        cache_observation_resets: Vec::new(),
     };
     let assistant = |content: &str| LLMMessage {
         role: "assistant".into(),
@@ -847,6 +1356,30 @@ async fn test_persistent_kill_aborts_running_turn() {
     // The kill's Terminated state is not overwritten by turn cleanup.
     let inst = manager.get_instance(&id).await.unwrap();
     assert_eq!(inst.state, SubagentState::Terminated);
+}
+
+#[tokio::test]
+async fn test_spawn_with_existing_id_is_rejected() {
+    let manager = SubagentManager::new();
+    manager
+        .spawn_with_id("dup", "research", "Researcher")
+        .await
+        .unwrap();
+    let error = manager
+        .spawn_with_id("dup", "research", "Researcher")
+        .await
+        .unwrap_err();
+    assert!(error.contains("agent.already_exists"), "{error}");
+}
+
+#[tokio::test]
+async fn foreground_turn_claim_is_single_flight() {
+    let manager = SubagentManager::new();
+    let first = manager.claim_foreground_turn("agent-1").unwrap();
+    let error = manager.claim_foreground_turn("agent-1").unwrap_err();
+    assert!(error.contains("already running"), "{error}");
+    drop(first);
+    assert!(manager.claim_foreground_turn("agent-1").is_ok());
 }
 
 #[tokio::test]
@@ -1990,4 +2523,170 @@ async fn delegation_depth_increments_and_is_refused_at_the_cap() {
         error.contains(&MAX_SUBAGENT_DEPTH.to_string()),
         "the refusal names the cap: {error}"
     );
+}
+
+/// D14: a fork's first turn emits exactly one `prompt_cache_probe`, comparing
+/// the child's first request with the parent snapshot captured at arm time; the
+/// child's last request becomes its own baseline. A later turn, or an agent
+/// with no armed fork, produces no probe. A compaction under the fork bumps the
+/// parent's generation, which drops the captured snapshot instead of comparing
+/// across the replaced context.
+#[test]
+fn a_fork_probe_fires_once_and_stops_comparing_after_a_parent_compaction() {
+    use crate::session::cache_observation::{
+        CacheObservationInput, CacheProbeRequest, build_cache_observation,
+    };
+    use crate::turn_loop::types::{LoopTurnStopReason, TurnResult};
+
+    struct CaptureCallbacks(std::sync::Mutex<Vec<serde_json::Value>>);
+    impl crate::callbacks::HostCallbacks for CaptureCallbacks {
+        fn list_tools(
+            &self,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<crate::rpc::types::ListToolsResponse, String>,
+        > {
+            Box::pin(async { Ok(crate::rpc::types::ListToolsResponse { tools: Vec::new() }) })
+        }
+        fn llm_chat(
+            &self,
+            _req: crate::rpc::types::LlmChatRequest,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<crate::rpc::types::LlmChatResponse, String>,
+        > {
+            Box::pin(async { Err("not needed".into()) })
+        }
+        fn execute_tool(
+            &self,
+            _req: crate::rpc::types::ToolExecuteRequest,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<crate::rpc::types::ToolExecuteResponse, String>,
+        > {
+            Box::pin(async { Err("not needed".into()) })
+        }
+        fn check_permission(
+            &self,
+            _req: crate::rpc::types::PermissionCheckRequest,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<crate::rpc::types::PermissionDecision, String>,
+        > {
+            Box::pin(async { Ok(crate::rpc::types::PermissionDecision::allow()) })
+        }
+        fn telemetry(&self, event: serde_json::Value) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    let manager = SubagentManager::new();
+    let parent = CacheProbeRequest {
+        model_alias: "kimi".into(),
+        tools_hash: "tools".into(),
+        system_prompt_hash: "prompt".into(),
+        message_count: 3,
+        history_hash: "parent-history".into(),
+        input_tokens: Some(900),
+        started_at: 100,
+        finished_at: 200,
+    };
+    manager.record_probe_request(crate::callbacks::MAIN_AGENT_ID, parent);
+    manager.arm_fork_probe("child-1", crate::callbacks::MAIN_AGENT_ID);
+
+    let own = CacheProbeRequest {
+        model_alias: "kimi".into(),
+        tools_hash: "tools".into(),
+        system_prompt_hash: "prompt".into(),
+        message_count: 5,
+        history_hash: "child-history".into(),
+        input_tokens: Some(950),
+        started_at: 250,
+        finished_at: 300,
+    };
+    let usage = crate::rpc::types::TokenUsage {
+        input_tokens: 10,
+        output_tokens: 5,
+        total_tokens: 815,
+        input_cache_read: 800,
+        input_cache_creation: 0,
+    };
+    let observation = build_cache_observation(CacheObservationInput {
+        model_alias: "kimi",
+        protocol: Some("anthropic"),
+        provider_type: Some("anthropic"),
+        message_count: 5,
+        history_hash: "child-history",
+        projection: None,
+        thinking_effort: None,
+        usage: Some(&usage),
+    });
+    let turn = TurnResult {
+        stop_reason: LoopTurnStopReason::EndTurn,
+        steps: 1,
+        usage: usage.clone(),
+        events_emitted: 0,
+        llm_retries: 0,
+        llm_transport: String::new(),
+        native_tool_calls: 0,
+        messages: Vec::new(),
+        last_request_usage: None,
+        compaction_usage: None,
+        tool_schema_tokens: 0,
+        stop_hook_continuation: None,
+        gate_blocked: false,
+        cache_observations: vec![observation],
+        cache_probe_requests: vec![own.clone()],
+        cache_observation_resets: Vec::new(),
+    };
+
+    let callbacks = CaptureCallbacks(std::sync::Mutex::new(Vec::new()));
+    manager.record_turn_cache_probes("child-1", Some("subturn-1"), &turn, &callbacks);
+    let emitted = callbacks.0.lock().unwrap();
+    assert_eq!(emitted.len(), 1, "one probe for the first turn");
+    let probe = &emitted[0];
+    assert_eq!(probe["type"], "prompt_cache_probe");
+    assert_eq!(probe["source"], "fork");
+    assert_eq!(probe["turn_id"], "subturn-1");
+    assert_eq!(probe["tools_match"], true);
+    assert_eq!(probe["system_prompt_match"], true);
+    assert_eq!(probe["parent_input_tokens"], 900);
+    assert_eq!(probe["parent_request_gap_ms"], 50);
+    assert!(
+        probe.get("model_match").is_none(),
+        "v2's fork probe does not report model_match: {probe}"
+    );
+    assert!(
+        probe.get("history_prefix_match").is_none(),
+        "v2's fork probe does not report a history prefix: {probe}"
+    );
+    drop(emitted);
+    assert_eq!(
+        manager.probe_request("child-1"),
+        Some(own),
+        "the child's last request becomes its own baseline"
+    );
+
+    // A second turn is no longer a fork probe.
+    callbacks.0.lock().unwrap().clear();
+    manager.record_turn_cache_probes("child-1", Some("subturn-2"), &turn, &callbacks);
+    assert!(
+        callbacks.0.lock().unwrap().is_empty(),
+        "only the first turn probes the fork"
+    );
+
+    // A parent compaction between arm and first turn invalidates the captured
+    // snapshot: the probe still fires, with no comparisons.
+    manager.arm_fork_probe("child-2", crate::callbacks::MAIN_AGENT_ID);
+    manager.bump_probe_generation(crate::callbacks::MAIN_AGENT_ID);
+    callbacks.0.lock().unwrap().clear();
+    manager.record_turn_cache_probes("child-2", Some("subturn-1"), &turn, &callbacks);
+    let emitted = callbacks.0.lock().unwrap();
+    assert_eq!(emitted.len(), 1);
+    assert!(
+        emitted[0].get("tools_match").is_none(),
+        "a compacted parent snapshot must not be compared: {}",
+        emitted[0]
+    );
+    assert!(emitted[0].get("parent_input_tokens").is_none());
 }

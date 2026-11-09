@@ -1,14 +1,7 @@
-//! Pure todo-list rendering logic, ported from the v2 todo feature
-//! (`agent-core-v2/src/features/todo/todoItem.ts`). Output is
-//! character-for-character aligned with v2 `renderTodoList`, including the
-//! empty-list message, milestone aggregation, progress suffixes, and id
-//! assignment.
-
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-/// Todo item status, mirroring v2 `TodoStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
@@ -37,7 +30,6 @@ impl TodoStatus {
     }
 }
 
-/// Todo item kind, mirroring v2 `TodoKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoKind {
@@ -45,8 +37,6 @@ pub enum TodoKind {
     Task,
 }
 
-/// A single todo item, mirroring the v2 `TodoItem` wire shape (camelCase
-/// fields on the wire).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {
@@ -61,7 +51,6 @@ pub struct TodoItem {
     pub description: Option<String>,
 }
 
-/// Progress report, mirroring v2 `TodoProgressReport`.
 pub struct TodoProgressReport {
     pub overall: u32,
     pub done: usize,
@@ -69,9 +58,6 @@ pub struct TodoProgressReport {
     pub by_id: HashMap<String, u32>,
 }
 
-/// Flat status tallies, mirroring v2 `todoProgress` (`todoItem.ts`): the
-/// stale reminder's open gate and the write echo's next-step hint read these.
-/// v2 has no milestone kind, so every item counts by its declared status.
 pub struct TodoProgress<'a> {
     pub total: usize,
     pub done: usize,
@@ -79,7 +65,6 @@ pub struct TodoProgress<'a> {
     pub in_progress: Vec<&'a TodoItem>,
 }
 
-/// Compute the flat tallies, mirroring v2 `todoProgress`.
 pub fn todo_progress(todos: &[TodoItem]) -> TodoProgress<'_> {
     let done = todos
         .iter()
@@ -96,11 +81,6 @@ pub fn todo_progress(todos: &[TodoItem]) -> TodoProgress<'_> {
     }
 }
 
-/// Normalize raw wire values into todo items, mirroring v2 `readTodoItems`:
-/// non-array input yields an empty list, invalid entries are skipped,
-/// progress is clamped to 0-100 and rounded, and missing ids are assigned
-/// (`T1`/`T2`… at root, `<parentId>.1`… under a parent, skipping ids already
-/// in use).
 pub fn read_todo_items(raw: &Value) -> Vec<TodoItem> {
     let Some(entries) = raw.as_array() else {
         return Vec::new();
@@ -157,11 +137,6 @@ pub fn read_todo_items(raw: &Value) -> Vec<TodoItem> {
     assign_missing_ids(items)
 }
 
-/// Compute the progress report, mirroring v2 `computeTodoProgress`:
-/// milestone progress is the mean of its children (or its own leaf progress
-/// when childless), the overall figure is the mean of the milestone values
-/// (or of all leaf values when no milestone exists), and a milestone counts
-/// as done at 100%.
 pub fn compute_todo_progress(todos: &[TodoItem]) -> TodoProgressReport {
     if todos.is_empty() {
         return TodoProgressReport {
@@ -239,14 +214,10 @@ pub fn compute_todo_progress(todos: &[TodoItem]) -> TodoProgressReport {
     }
 }
 
-/// Render the todo list tree, mirroring v2 `renderTodoList` with the default
-/// title. The empty list renders as `Todo list is empty.`.
 pub fn render_todo_list(todos: &[TodoItem]) -> String {
     render_todo_list_with_title(todos, "Current todo list:")
 }
 
-/// Render the todo list tree with an explicit title line (v2
-/// `renderTodoList(todos, title)`).
 pub fn render_todo_list_with_title(todos: &[TodoItem], title: &str) -> String {
     if todos.is_empty() {
         return "Todo list is empty.".into();
@@ -273,10 +244,7 @@ pub fn render_todo_list_with_title(todos: &[TodoItem], title: &str) -> String {
                 .is_none_or(|parent| !known.contains(parent))
         })
         .collect();
-    // Guard the walk: a parent pointer that points at itself, or a cycle
-    // (A → B → A), is reachable from no root — but a cycle hanging off a root
-    // recursed forever, and any node that no root reaches was dropped from the
-    // output entirely, leaving only the header line.
+
     let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for root in roots {
         render_tree_line(
@@ -312,8 +280,6 @@ fn render_tree_line<'a>(
     lines: &mut Vec<String>,
     visited: &mut std::collections::HashSet<&'a str>,
 ) {
-    // Emit each entry once: stops a cycle from recursing forever and stops a
-    // shared child from being listed twice.
     if !visited.insert(item.id.as_str()) {
         return;
     }

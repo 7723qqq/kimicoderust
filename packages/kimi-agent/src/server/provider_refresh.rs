@@ -410,12 +410,17 @@ struct RefreshReport {
 }
 
 pub async fn refresh(
+    chain: &tokio::sync::Mutex<()>,
     config_lock: &Mutex<Option<KimiConfig>>,
     config_path: Option<&Path>,
     oauth: &OAuthManager,
     scope: &str,
     provider_id: Option<&str>,
 ) -> Value {
+    // v2 `refreshChain`: serialize refreshes end to end. The config lock only
+    // covers each individual read/write, so overlapping runs would both fetch
+    // and then race their rewrites of the provider/model sections.
+    let _chain = chain.lock().await;
     let client = match reqwest::Client::builder().build() {
         Ok(client) => client,
         Err(error) => {
@@ -1036,7 +1041,15 @@ capabilities = ["tool_use"]
         std::fs::write(&config_path, registry_config(&upstream.url, "sk-reg")).unwrap();
 
         let lock: Mutex<Option<KimiConfig>> = Mutex::new(None);
-        let result = refresh(&lock, Some(&config_path), &OAuthManager::new(), "all", None).await;
+        let result = refresh(
+            &tokio::sync::Mutex::new(()),
+            &lock,
+            Some(&config_path),
+            &OAuthManager::new(),
+            "all",
+            None,
+        )
+        .await;
         let changed = result["changed"].as_array().unwrap();
         assert_eq!(changed.len(), 1, "{result}");
         assert_eq!(changed[0]["provider_id"], "acme");
@@ -1057,10 +1070,89 @@ capabilities = ["tool_use"]
         // A second refresh with the same document reports unchanged and does
         // not rewrite the file.
         let before = std::fs::read_to_string(&config_path).unwrap();
-        let result = refresh(&lock, Some(&config_path), &OAuthManager::new(), "all", None).await;
+        let result = refresh(
+            &tokio::sync::Mutex::new(()),
+            &lock,
+            Some(&config_path),
+            &OAuthManager::new(),
+            "all",
+            None,
+        )
+        .await;
         assert!(result["changed"].as_array().unwrap().is_empty(), "{result}");
         assert_eq!(result["unchanged"], json!(["acme"]));
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_are_serialized() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let body = json!({
+            "acme": {
+                "id": "acme",
+                "name": "Acme",
+                "api": "https://registry.example.test/v1",
+                "type": "openai",
+                "models": {
+                    "big": { "id": "big-1", "limit": { "context": 128000 } },
+                    "small": { "id": "small-1", "limit": { "context": 8192 } },
+                },
+            },
+        })
+        .to_string();
+        {
+            let in_flight = in_flight.clone();
+            let peak = peak.clone();
+            let body = body.clone();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    let in_flight = in_flight.clone();
+                    let peak = peak.clone();
+                    let body = body.clone();
+                    tokio::spawn(async move {
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        let mut buf = [0u8; 8192];
+                        let _ = sock.read(&mut buf).await;
+                        // Hold the request so an unserialized second refresh
+                        // overlaps instead of running back to back.
+                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                        let raw = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(raw.as_bytes()).await;
+                        let _ = sock.flush().await;
+                    });
+                }
+            });
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            registry_config(&format!("http://{addr}/api.json"), "sk-reg"),
+        )
+        .unwrap();
+        let lock = Mutex::new(None);
+        let chain = tokio::sync::Mutex::new(());
+        let oauth = OAuthManager::new();
+        let (first, second) = tokio::join!(
+            refresh(&chain, &lock, Some(&config_path), &oauth, "all", None),
+            refresh(&chain, &lock, Some(&config_path), &oauth, "all", None),
+        );
+        assert_eq!(first["changed"].as_array().unwrap().len(), 1, "{first}");
+        assert_eq!(second["unchanged"], json!(["acme"]), "{second}");
+        // v2 `refreshChain`: one refresh at a time, never overlapping fetches.
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1142,7 +1234,15 @@ capabilities = ["tool_use"]
         .unwrap();
 
         let lock: Mutex<Option<KimiConfig>> = Mutex::new(None);
-        let result = refresh(&lock, Some(&config_path), &OAuthManager::new(), "all", None).await;
+        let result = refresh(
+            &tokio::sync::Mutex::new(()),
+            &lock,
+            Some(&config_path),
+            &OAuthManager::new(),
+            "all",
+            None,
+        )
+        .await;
         // Both providers of the group are synced from the one successful
         // fetch; the stale key was tried first.
         let changed = result["changed"].as_array().unwrap();
@@ -1240,6 +1340,7 @@ capabilities = ["tool_use"]
 
         let lock: Mutex<Option<KimiConfig>> = Mutex::new(None);
         let result = refresh(
+            &tokio::sync::Mutex::new(()),
             &lock,
             Some(&config_path),
             &OAuthManager::new(),
@@ -1261,7 +1362,15 @@ capabilities = ["tool_use"]
         std::fs::write(&config_path, registry_config(&upstream.url, "sk-reg")).unwrap();
 
         let lock: Mutex<Option<KimiConfig>> = Mutex::new(None);
-        let result = refresh(&lock, Some(&config_path), &OAuthManager::new(), "all", None).await;
+        let result = refresh(
+            &tokio::sync::Mutex::new(()),
+            &lock,
+            Some(&config_path),
+            &OAuthManager::new(),
+            "all",
+            None,
+        )
+        .await;
         let changed = result["changed"].as_array().unwrap();
         assert_eq!(changed.len(), 1, "{result}");
         assert_eq!(changed[0]["provider_id"], "acme");
@@ -1300,6 +1409,7 @@ capabilities = ["tool_use"]
 
         let lock: Mutex<Option<KimiConfig>> = Mutex::new(None);
         let result = refresh(
+            &tokio::sync::Mutex::new(()),
             &lock,
             Some(&config_path),
             &OAuthManager::new(),
@@ -1326,7 +1436,15 @@ capabilities = ["tool_use"]
         std::fs::write(&config_path, registry_config(&upstream.url, "sk-reg")).unwrap();
 
         let lock: Mutex<Option<KimiConfig>> = Mutex::new(None);
-        let result = refresh(&lock, Some(&config_path), &OAuthManager::new(), "all", None).await;
+        let result = refresh(
+            &tokio::sync::Mutex::new(()),
+            &lock,
+            Some(&config_path),
+            &OAuthManager::new(),
+            "all",
+            None,
+        )
+        .await;
         let failed = result["failed"].as_array().unwrap();
         assert_eq!(failed.len(), 1, "{result}");
         assert_eq!(failed[0]["provider"], "acme");

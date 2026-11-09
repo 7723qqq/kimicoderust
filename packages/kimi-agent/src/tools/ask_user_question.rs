@@ -1,13 +1,3 @@
-//! Native execution of the AskUserQuestion tool (reverse interaction
-//! protocol, design doc step 6).
-//!
-//! The engine asks the host an interactive question and waits for a human
-//! answer through [`crate::callbacks::HostCallbacks::ask_question`] (the
-//! `host/ask_question` RPC). The host owns the interaction runtime (pending
-//! key, dismiss, turn-end cancellation); this module only maps the tool
-//! arguments to the wire request and the wire response to a tool result,
-//! mirroring the v2 AskUserQuestion tool's output contract.
-
 use std::collections::HashSet;
 
 use serde_json::Value;
@@ -19,23 +9,35 @@ use crate::rpc::types::{
 };
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// v2 `QUESTION_DISMISSED_MESSAGE`: the note the model sees when the user
-/// closed the question without answering.
 pub const QUESTION_DISMISSED_MESSAGE: &str = "User dismissed the question without answering.";
 
-/// v2 `QUESTION_UNSUPPORTED_FAILURE_MESSAGE`: returned when the connected
-/// host does not implement the interactive-question seam. The model must
-/// not retry the tool — it should ask the user directly in its text
-/// response instead.
 const QUESTION_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support interactive questions. Do NOT call this tool again. Ask the user directly in your text response instead.";
 
-/// Execute the AskUserQuestion tool natively: parse the tool arguments,
-/// build an [`AskQuestionRequest`], wait for the host's answer, and map the
-/// response to an [`ExecutableToolResult`] matching the v2 tool's output.
+const BACKGROUND_UNAVAILABLE_MESSAGE: &str = "Background questions are not available for this agent because TaskList, TaskOutput, and TaskStop are not enabled.";
+
 pub async fn execute_ask_user_question(
     callbacks: &dyn HostCallbacks,
     args: &Value,
 ) -> ExecutableToolResult {
+    if args.get("background").and_then(Value::as_bool) == Some(true) {
+        let available = match callbacks.list_tools().await {
+            Ok(response) => {
+                let names: HashSet<&str> = response
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect();
+                ["TaskList", "TaskOutput", "TaskStop"]
+                    .iter()
+                    .all(|name| names.contains(name))
+            }
+            Err(_) => false,
+        };
+        if !available {
+            return err_result(BACKGROUND_UNAVAILABLE_MESSAGE.into());
+        }
+    }
+
     let Some(request) = parse_request(args) else {
         return err_result(
             "Invalid AskUserQuestion arguments: expected 1-4 questions, each with 2-4 options; question texts must be unique and option labels unique within each question."
@@ -46,9 +48,6 @@ pub async fn execute_ask_user_question(
     match callbacks.ask_question(request).await {
         Ok(response) => map_response(response),
         Err(error) => {
-            // The trait default and the documented JSON-RPC error both carry
-            // this phrase; anything else is a transient host failure, which
-            // v2 maps to a dismissed result.
             if error.contains("does not support interactive questions") {
                 err_result(QUESTION_UNSUPPORTED_FAILURE_MESSAGE.into())
             } else {
@@ -58,11 +57,6 @@ pub async fn execute_ask_user_question(
     }
 }
 
-/// Parse the tool arguments into an [`AskQuestionRequest`]. `None` when the
-/// shape violates the v2 contract: missing or empty `questions`, more than
-/// 4 questions, fewer than 2 or more than 4 options per question, an empty
-/// question text or option label (v2's schema is `.min(1)` on both), duplicate
-/// question texts, or duplicate option labels within a question.
 fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
     let questions = args.get("questions")?.as_array()?;
     if questions.is_empty() || questions.len() > 4 {
@@ -72,8 +66,7 @@ fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
     let mut seen_texts = HashSet::new();
     for q in questions {
         let question = q.get("question")?.as_str()?.to_string();
-        // v2 caps the schema at `.min(1)`: an empty question or label is
-        // rejected before the host is asked, not rendered as a blank card.
+
         if question.is_empty() {
             return None;
         }
@@ -88,7 +81,7 @@ fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
         let mut seen_labels = HashSet::new();
         for o in options {
             let label = o.get("label")?.as_str()?.to_string();
-            // v2 schema `.min(1)`, same rule as the question text.
+
             if label.is_empty() {
                 return None;
             }
@@ -107,7 +100,7 @@ fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
             question,
             header: q.get("header").and_then(|h| h.as_str()).map(str::to_string),
             options: parsed_options,
-            // v2 accepts the deprecated camelCase alias too.
+
             multi_select: q
                 .get("multi_select")
                 .or_else(|| q.get("multiSelect"))
@@ -136,10 +129,6 @@ fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
     })
 }
 
-/// Map the host's answer to a tool result, mirroring the v2 tool's output
-/// shapes: answered (`{"answers": {...}}`), dismissed (empty answers + note),
-/// cancelled (error result), and — for `background: true` — the host's
-/// verbatim pass-through of the v2 background task output (design doc 3.3).
 fn map_response(response: AskQuestionResponse) -> ExecutableToolResult {
     if response.cancelled == Some(true) {
         let reason = response.reason.as_deref().unwrap_or("unknown");
@@ -148,9 +137,6 @@ fn map_response(response: AskQuestionResponse) -> ExecutableToolResult {
         ));
     }
     if response.answers.is_empty() {
-        // A dismissed question carries the v2 constant note (or none);
-        // anything else in `note` is a background task's output the host
-        // passed through verbatim.
         return match response.note.as_deref() {
             Some(note) if note != QUESTION_DISMISSED_MESSAGE => ok_result(note.to_string()),
             _ => dismissed_result(),
@@ -159,9 +145,6 @@ fn map_response(response: AskQuestionResponse) -> ExecutableToolResult {
     ok_result(serde_json::json!({ "answers": response.answers }).to_string())
 }
 
-/// Engine tool definition for AskUserQuestion, so the model can discover
-/// and call it (used by the standalone REPL and native tool listing). The
-/// schema mirrors v2 `AskUserQuestionInputSchemaWithBackground`.
 pub fn ask_user_question_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "AskUserQuestion".into(),
@@ -244,7 +227,6 @@ Overusing this tool interrupts the user's flow. Only use it when the user's inpu
     }
 }
 
-/// v2 `dismissedQuestionResult()`: `{"answers": {}, "note": ...}`.
 fn dismissed_result() -> ExecutableToolResult {
     ok_result(
         serde_json::json!({
@@ -261,14 +243,40 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    /// Scripted callbacks: records the received request and answers with a
-    /// canned response.
     struct ScriptedCallbacks {
         response: Result<AskQuestionResponse, String>,
         received: Arc<std::sync::Mutex<Option<AskQuestionRequest>>>,
+        task_tools_enabled: bool,
     }
 
     impl HostCallbacks for ScriptedCallbacks {
+        fn list_tools(
+            &self,
+        ) -> crate::rpc::types::BoxFuture<
+            'static,
+            Result<crate::rpc::types::ListToolsResponse, String>,
+        > {
+            let names: Vec<String> = if self.task_tools_enabled {
+                ["TaskList", "TaskOutput", "TaskStop"]
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect()
+            } else {
+                vec!["Read".to_string()]
+            };
+            Box::pin(async move {
+                Ok(crate::rpc::types::ListToolsResponse {
+                    tools: names
+                        .into_iter()
+                        .map(|name| crate::rpc::types::ToolInfo {
+                            name,
+                            description: String::new(),
+                            input_schema: serde_json::json!({}),
+                        })
+                        .collect(),
+                })
+            })
+        }
         fn llm_chat(
             &self,
             _: crate::rpc::types::LlmChatRequest,
@@ -313,11 +321,22 @@ mod tests {
         ScriptedCallbacks,
         Arc<std::sync::Mutex<Option<AskQuestionRequest>>>,
     ) {
+        scripted_with_task_tools(response, true)
+    }
+
+    fn scripted_with_task_tools(
+        response: Result<AskQuestionResponse, String>,
+        task_tools_enabled: bool,
+    ) -> (
+        ScriptedCallbacks,
+        Arc<std::sync::Mutex<Option<AskQuestionRequest>>>,
+    ) {
         let received = Arc::new(std::sync::Mutex::new(None));
         (
             ScriptedCallbacks {
                 response,
                 received: received.clone(),
+                task_tools_enabled,
             },
             received,
         )
@@ -402,6 +421,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_background_requires_the_three_task_tools() {
+        let args = serde_json::json!({
+            "questions": [
+                { "question": "Pick one?", "options": [{ "label": "a" }, { "label": "b" }] }
+            ],
+            "background": true
+        });
+        let (callbacks, received) = scripted_with_task_tools(Ok(empty_response()), false);
+        let result = execute_ask_user_question(&callbacks, &args).await;
+        assert!(result.is_error);
+        assert_eq!(result.content, BACKGROUND_UNAVAILABLE_MESSAGE);
+        assert!(
+            received.lock().unwrap().is_none(),
+            "the host must not be asked"
+        );
+    }
+
+    #[tokio::test]
     async fn test_invalid_args_return_error_without_calling_host() {
         let (callbacks, received) = scripted(Ok(empty_response()));
         for bad in [
@@ -419,8 +456,6 @@ mod tests {
                     { "question": "q", "options": [{ "label": "a" }, { "label": "a" }] }
                 ]
             }),
-            // v2 schema `.min(1)`: an empty question or label never reaches the
-            // host as a blank card.
             serde_json::json!({
                 "questions": [
                     { "question": "", "options": [{ "label": "a" }, { "label": "b" }] }
@@ -498,8 +533,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_background_output_passes_through_verbatim() {
-        // Design doc 3.3: for background=true the host registers a task and
-        // passes the v2 background output through verbatim (in `note`).
         let (callbacks, _) = scripted(Ok(AskQuestionResponse {
             answers: HashMap::new(),
             method: None,

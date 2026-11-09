@@ -1,20 +1,10 @@
-//! Sink-shaped background stream draining.
-//!
-//! v2 `process-task.ts:146-152` appends each chunk to a durable sink as it
-//! arrives; `:119-132` can then bound the drain with a 250 ms grace without
-//! losing output. This module ports the reader half only. The caller that wires
-//! the grace comes next — the existing `read_bounded_stream` is left untouched
-//! until then.
-
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{MAX_RETAINED_OUTPUT_BYTES, MAX_TASK_OUTPUT_BYTES};
 
-/// A bounded, durable tail of one stream. Chunks are appended as they arrive,
-/// so an abandoned read future leaves its output behind.
 #[derive(Debug, Clone, Default)]
 pub struct StreamTail(Arc<Mutex<Vec<u8>>>);
 
@@ -38,12 +28,6 @@ impl StreamTail {
     }
 }
 
-/// Drain one stream into `sink`, keeping the same accounting as
-/// `tools::read_bounded_stream`: one shared byte counter across both streams,
-/// a stop as soon as the cap trips, and a bounded tail retained per stream.
-///
-/// `emit` drives the live progress card. Nothing is returned — the sink is the
-/// output's owner.
 pub async fn read_bounded_stream_to_sink<R>(
     pipe: &mut R,
     stream: &str,
@@ -74,6 +58,51 @@ pub async fn read_bounded_stream_to_sink<R>(
     }
 }
 
+fn reserve(budget: &AtomicUsize, want: usize) -> usize {
+    let mut current = budget.load(Ordering::Relaxed);
+    loop {
+        let granted = want.min(current);
+        match budget.compare_exchange_weak(
+            current,
+            current - granted,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return granted,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+pub async fn read_capped_stream<R>(
+    pipe: Option<&mut R>,
+    stream: &'static str,
+    emit: &(dyn Fn(&str, &[u8]) + Sync),
+    retained: &mut Vec<u8>,
+    remaining: &AtomicUsize,
+    discarded: &AtomicU64,
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(pipe) = pipe else {
+        return Ok(());
+    };
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = pipe.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        emit(stream, &chunk[..n]);
+        let granted = reserve(remaining, n);
+        retained.extend_from_slice(&chunk[..granted]);
+        if granted < n {
+            discarded.fetch_add((n - granted) as u64, Ordering::Relaxed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,8 +122,6 @@ mod tests {
 
     #[tokio::test]
     async fn output_survives_an_abandoned_read_future() {
-        // A pipe that yields one chunk and then never closes. The read future is
-        // dropped, as it would be when a 250 ms grace expires.
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         struct Pending {
             sent: bool,
@@ -123,7 +150,7 @@ mod tests {
         let tripped = AtomicBool::new(false);
         let fut =
             read_bounded_stream_to_sink(&mut pipe, "stdout", &noop_emit, &total, &tripped, &sink);
-        // Poll once so the first chunk is appended, then abandon the future.
+
         let mut fut = Box::pin(fut);
         let _ = tokio::time::timeout(std::time::Duration::from_millis(10), &mut fut).await;
         drop(fut);
@@ -136,13 +163,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_cap_keeps_reading_and_counts_discarded_bytes() {
+        let mut retained = Vec::new();
+        let remaining = AtomicUsize::new(4);
+        let discarded = AtomicU64::new(0);
+
+        let mut pipe: &[u8] = b"abcdefghij";
+        read_capped_stream(
+            Some(&mut pipe),
+            "stdout",
+            &noop_emit,
+            &mut retained,
+            &remaining,
+            &discarded,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retained, b"abcd");
+        assert_eq!(remaining.load(Ordering::Relaxed), 0);
+        assert_eq!(discarded.load(Ordering::Relaxed), 6);
+    }
+
+    #[tokio::test]
+    async fn a_read_error_is_not_reported_as_eof() {
+        struct Failing;
+        impl AsyncRead for Failing {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("boom")))
+            }
+        }
+        let mut pipe = Failing;
+        let mut retained = Vec::new();
+        let outcome = read_capped_stream(
+            Some(&mut pipe),
+            "stdout",
+            &noop_emit,
+            &mut retained,
+            &AtomicUsize::new(64),
+            &AtomicU64::new(0),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "a stream that fails mid-read must not look like a clean EOF"
+        );
+    }
+
+    #[tokio::test]
     async fn the_two_streams_share_one_cap() {
         let a = StreamTail::default();
         let b = StreamTail::default();
         let total = AtomicU64::new(0);
         let tripped = AtomicBool::new(false);
-        // One 8 KiB chunk on each stream stays under the 16 MiB cap; the test
-        // pins that the counter is shared rather than per-stream.
+
         let mut out: &[u8] = &[b'x'; 8192];
         let mut err: &[u8] = &[b'y'; 8192];
         read_bounded_stream_to_sink(&mut out, "stdout", &noop_emit, &total, &tripped, &a).await;

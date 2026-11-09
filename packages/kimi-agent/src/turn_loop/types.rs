@@ -54,9 +54,21 @@ pub struct TurnResult {
     /// The usage of the turn's **last** LLM request, as opposed to `usage`
     /// which sums every request of the turn. Its total (input + output) is the
     /// measured anchor the context-token counting service puts on the
-    /// conversation (v2 `TokenCountingAgentModel.measured`).
+    /// conversation (v2 `TokenCountingAgentModel.measured`), together with the
+    /// input scope the request actually served.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_request_usage: Option<TokenUsage>,
+    pub last_request_usage: Option<RequestMeasurement>,
+    /// Usage of the compactions this turn ran (auto, or the emergency round
+    /// that recovered a context overflow). Kept apart from `usage` so session
+    /// accounting can bill it without mixing it into per-turn request totals;
+    /// `None` when no compaction reached the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_usage: Option<TokenUsage>,
+    /// Tokens the turn's active tool schemas add to every request (v2
+    /// `countRequestTokens` overhead). Persisted with the context gauge so the
+    /// gauge and the compaction trigger share one basis.
+    #[serde(default)]
+    pub tool_schema_tokens: u32,
     /// Stop-hook continuation (v2 `runStopHooks`): when a text-finished turn
     /// trips a matching `Stop` hook, its veto text rides here as the user
     /// message the driver should re-prompt with. `None` = the stop proceeds.
@@ -65,13 +77,78 @@ pub struct TurnResult {
     /// observe (and must act on) this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_hook_continuation: Option<String>,
+    /// The prompt gate rejected this turn (v2 `onBeforeSubmitPrompt` block,
+    /// `loopService.ts:678-690`). A driver that owns a prompt row settles it
+    /// as `blocked` instead of `completed`; direct `run_turn` callers can
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gate_blocked: bool,
+    /// Prompt-cache observations, one per LLM response in step order (v2
+    /// `llmRequesterLastTurnRequest.observation`, consumed by
+    /// `AgentCacheBreakService.observe`). Engine-internal: the wire mappings
+    /// ignore this field and it is not serialized.
+    #[serde(skip)]
+    pub cache_observations: Vec<crate::session::cache_observation::CacheObservation>,
+    /// Every request of the turn as `prompt_cache_probe` compares it (v2
+    /// `llmRequesterLastTurnRequest`): model, tool/system-prompt hashes,
+    /// history shape and timing, in step order. The first one is what a fork's
+    /// first record compares against its parent; the last one is the agent's
+    /// new baseline. Engine-internal; not serialized.
+    #[serde(skip)]
+    pub cache_probe_requests: Vec<crate::session::cache_observation::CacheProbeRequest>,
+    /// Indices into [`Self::cache_observations`] where a compaction replaced
+    /// the history before that step. v2's `AgentCacheBreakService` resets on
+    /// `context.compactionCompleted`, so the engine's end-of-turn fold drops
+    /// the break baseline at each boundary instead of comparing a
+    /// post-compaction cache read with a pre-compaction one. Engine-internal;
+    /// not serialized.
+    #[serde(skip)]
+    pub cache_observation_resets: Vec<usize>,
+}
+
+/// What one LLM request measured, and the input scope it measured it on.
+///
+/// v2's `TokenCountingAgentModel.measured(input, context)` anchors the
+/// conversation only when the request's input is still the current context,
+/// and at the input's length — not at the transcript's final length, which has
+/// the reply appended after it. `input_messages` is that input length in the
+/// loop's coordinates (system message included; callers that do not carry the
+/// system prompt subtract one), and `spliced_after` records that a compaction
+/// replaced the history prefix after this request, which makes the
+/// measurement stale the same way v2's identity check does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestMeasurement {
+    pub usage: TokenUsage,
+    /// Messages the request served, system message included.
+    pub input_messages: usize,
+    /// A compaction spliced the history after this request.
+    pub spliced_after: bool,
 }
 
 impl TurnResult {
-    /// Attach the turn's last-request usage — the measured context anchor
-    /// callers put on the conversation (v2 `TokenCountingAgentModel`).
-    pub fn with_last_request_usage(mut self, usage: Option<TokenUsage>) -> Self {
+    /// Attach the turn's last-request measurement — the measured context
+    /// anchor callers put on the conversation (v2 `TokenCountingAgentModel`).
+    pub fn with_last_request_usage(mut self, usage: Option<RequestMeasurement>) -> Self {
         self.last_request_usage = usage;
+        self
+    }
+
+    /// Mark the turn as rejected by the prompt gate (`blocked`, not
+    /// `completed`/`failed`).
+    pub fn with_gate_blocked(mut self) -> Self {
+        self.gate_blocked = true;
+        self
+    }
+
+    /// Attach the turn's compaction usage and tool-schema overhead so session
+    /// accounting and the context gauge see them on every exit path.
+    pub fn with_accounting(
+        mut self,
+        compaction_usage: Option<TokenUsage>,
+        tool_schema_tokens: u32,
+    ) -> Self {
+        self.compaction_usage = compaction_usage;
+        self.tool_schema_tokens = tool_schema_tokens;
         self
     }
 }
@@ -99,262 +176,8 @@ pub enum LoopTurnStopReason {
 // ── LLM interface ──────────────────────────────────────────────────────────
 
 /// The LLM abstraction that the loop calls.
-pub trait LLM: Send + Sync {
-    /// The system prompt for this LLM.
-    fn system_prompt(&self) -> &str;
-    /// The model name.
-    fn model_name(&self) -> &str;
-    /// Whether the given error is retryable.
-    fn is_retryable_error(&self, error: &str) -> bool;
-    /// Which transport serves this LLM — `native-http`, `host-proxy`, `multi`.
-    /// Reported in the turn result so a caller can tell what actually ran
-    /// without inferring it from error strings; overridden by every
-    /// production implementation.
-    fn transport(&self) -> &'static str {
-        "custom"
-    }
+pub use kimi_core::types::{ArgsParseError, LLM, LLMChatParams, LLMChatResponse, LLMMessage, ToolCall};
 
-    /// The `[models.<alias>]` name this transport was resolved from (v2
-    /// `ApiErrorEvent.alias`).
-    ///
-    /// `None` for a transport that only knows the wire model name — the host
-    /// proxy. Every field below exists so the engine's telemetry can carry the
-    /// values v2 declares, instead of omitting them and leaving a consumer to
-    /// group on the model id alone.
-    fn model_alias(&self) -> Option<&str> {
-        None
-    }
-
-    /// The declared provider family (`[providers.*].type`, v2
-    /// `ApiErrorEvent.provider_type`).
-    fn provider_type(&self) -> Option<&str> {
-        None
-    }
-
-    /// The wire protocol in use (`openai` / `anthropic` / `google`, v2
-    /// `ApiErrorEvent.protocol`).
-    fn protocol(&self) -> Option<&str> {
-        None
-    }
-
-    /// The reasoning effort in effect for this transport's requests (v2
-    /// `CompactionFailedEvent.thinking_effort`, which that event requires).
-    fn thinking_effort(&self) -> Option<&str> {
-        None
-    }
-    /// What the media resolver needs to know about the model behind this LLM
-    /// (v2 `ModelRequester.model`): which media it accepts, and where an
-    /// upload would go. `None` accepts everything and uploads nothing — a
-    /// test stub or a host-proxy transport must not silently drop media.
-    fn media_target(&self) -> Option<crate::llm::media_resolver::MediaTarget> {
-        None
-    }
-    /// The credential a provider-side media upload would use, when this LLM's
-    /// provider takes media by reference. `None` disables uploads, and the
-    /// resolver inlines instead.
-    fn media_upload_credential(&self) -> Option<crate::llm::files_upload::CredentialFuture<'_>> {
-        None
-    }
-    /// Install the turn's tool-call-id ledger (v2 `ToolCallIdNormalizer`).
-    /// A transport that streams tool calls opens one response per request on
-    /// it, so the fragments it forwards and the calls it finalizes share ids,
-    /// and a request that fails hands its claims back before the retry
-    /// re-sends. The default is a no-op, which is what a stub with fixed ids
-    /// wants.
-    fn set_tool_call_ids(
-        &self,
-        _ledger: Arc<crate::turn_loop::tool_call_id::ToolCallIdNormalizer>,
-    ) {
-    }
-    /// Install the agent that owns the turn now starting on this transport.
-    /// The transport is shared between the main agent and every subagent, and
-    /// its stream sink emits bare `llm.delta` payloads with no attribution —
-    /// v2 gets the agent id structurally, one `loopService` per agent scope.
-    /// Here the turn installs it per turn (mirroring
-    /// [`LLM::set_tool_call_ids`]) so each streamed delta carries the
-    /// emitting agent's id and the host can keep a subagent's stream out of
-    /// the main transcript. The default is a no-op for stubs.
-    fn set_stream_agent_id(&self, _agent_id: &str) {}
-    /// Install the running turn's watchdog state (v2 `armTurnWatch`, upstream
-    /// #4280): a streaming transport ticks
-    /// [`crate::turn_loop::watch::TurnWatchState::note_partial`] per streamed
-    /// fragment, so a turn that keeps receiving model output is never
-    /// reported as stalled. The default is a no-op — a non-streaming stub has
-    /// no deltas to report, and the host-proxy transport's stream flows
-    /// host-side, where the engine cannot observe it.
-    fn set_turn_watch(&self, _watch: Option<Arc<crate::turn_loop::watch::TurnWatchState>>) {}
-    /// Send a chat request and get a response.
-    fn chat(
-        &self,
-        params: LLMChatParams,
-    ) -> crate::rpc::types::BoxFuture<
-        '_,
-        Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>,
-    >;
-}
-
-/// Parameters for an LLM chat call.
-///
-/// The history and tool table are shared behind `Arc` so the racing multi-LLM
-/// path and the retry loop can clone the params without deep-copying the whole
-/// conversation on every attempt.
-#[derive(Debug, Clone, Default)]
-pub struct LLMChatParams {
-    pub messages: Arc<[LLMMessage]>,
-    pub tools: Arc<[ToolInfo]>,
-    /// Cooperative cancellation for the in-flight request — the Rust
-    /// counterpart of v2's `AbortSignal` threaded through kosong's generate
-    /// (generate.ts:107-295). Firing aborts the request send and the SSE
-    /// read; the call fails with an `"llm cancelled …"` error that the
-    /// retry layer never retries. `None` = uncancellable (test stubs).
-    pub cancel: Option<tokio_util::sync::CancellationToken>,
-    /// Estimated prompt tokens of this request (v2 `usedContextTokens`): the
-    /// transport subtracts it from the model window to cap the completion
-    /// budget. `None` for callers with no estimate (compaction, titles).
-    pub used_context_tokens: Option<u32>,
-    /// The model's resolved context window for this request (v2
-    /// `maxContextTokens`). `None` leaves the completion budget at the
-    /// model's output cap.
-    pub max_context_tokens: Option<u32>,
-}
-
-/// A message in the LLM conversation.
-///
-/// `Eq` is deliberately not derived: `origin` carries a `serde_json::Value`
-/// (the engine does not model origin variants — see [`crate::session::TurnRequest`]),
-/// and `Value` is not `Eq`. Nothing in the engine hashes or orders messages.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct LLMMessage {
-    pub role: String,
-    pub content: String,
-    /// Optional multimodal content blocks (text/image). When non-empty,
-    /// provider projections use these instead of the plain `content` text.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocks: Vec<ContentBlock>,
-    /// Tool calls issued by an `assistant` message (empty otherwise). Carried
-    /// structurally so multi-step tool turns project faithfully to a native
-    /// provider instead of being flattened into `content`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCall>,
-    /// For a `tool` message: the id of the tool call this result answers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    /// The host prompt id this message answers for (v2 #3906
-    /// `ContextMessage.id` / the queued prompt's `waiter.id`). Only the steer
-    /// queue sets it today: a steered user message keeps its prompt's id so
-    /// the projection can place it inside the host turn (in-turn, non-anchor)
-    /// instead of minting a turn of its own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_id: Option<String>,
-    /// The prompt origin (v2 `PromptOrigin` JSON) the host attached to this
-    /// message — the `skill_activation` variant a user-slash activation
-    /// carries (v2 #3832). Set on the opening user message of a turn so the
-    /// cross-turn history (and the host's replay of it) can tell an
-    /// activation from a typed prompt. Opaque to the engine: it rides the
-    /// message and is echoed verbatim.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<serde_json::Value>,
-}
-
-impl LLMMessage {
-    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            role: role.into(),
-            content: content.into(),
-            blocks: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            prompt_id: None,
-            origin: None,
-        }
-    }
-
-    pub fn user(content: impl Into<String>) -> Self {
-        Self::new("user", content)
-    }
-
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self::new("assistant", content)
-    }
-
-    pub fn system(content: impl Into<String>) -> Self {
-        Self::new("system", content)
-    }
-
-    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            role: "tool".into(),
-            content: content.into(),
-            blocks: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: Some(tool_call_id.into()),
-            prompt_id: None,
-            origin: None,
-        }
-    }
-}
-
-/// The LLM's response to a chat call.
-#[derive(Debug, Clone, Default)]
-pub struct LLMChatResponse {
-    /// Assistant text content. Empty on the host-proxy path (the host owns
-    /// the transcript there); filled by the native HTTP transport so the
-    /// loop can thread assistant text into the message history.
-    pub content: String,
-    /// Provider reasoning, in the order it was produced. Holds `Think`
-    /// blocks only — `content` stays the visible answer, so reasoning never
-    /// reaches the transcript as text.
-    pub thinking: Vec<ContentBlock>,
-    pub tool_calls: Vec<ToolCall>,
-    pub finish_reason: Option<String>,
-    pub usage: TokenUsage,
-    /// Per-request timing measured by the native transport (v2
-    /// `ModelRequestTiming`, upstream #3938). `None` on the host-proxy path
-    /// (the host owns the call there) and from transports that do not
-    /// measure.
-    pub timing: Option<crate::llm::LlmTiming>,
-}
-
-/// A tool call from the LLM.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
-    /// Provider-specific extras that must round-trip with the provider (e.g.
-    /// Gemini `thoughtSignature` attestation, v2 `ToolCall.extras`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extras: Option<serde_json::Value>,
-    /// Why the provider's raw argument payload could not be decoded, when it
-    /// could not, together with the payload itself.
-    ///
-    /// v2 `parseToolCallArguments` keeps such a call: the failure is reported
-    /// at preflight (`toolExecutorService.ts`), so the model reads an error
-    /// result for the call it actually issued. A transport that drops the call
-    /// instead leaves the model with no feedback and no way to correct itself.
-    ///
-    /// Engine-internal and never serialized: the wire carries decoded
-    /// `arguments`, and only this step's preflight and the dedupe key read it.
-    #[serde(skip)]
-    pub args_parse_error: Option<ArgsParseError>,
-}
-
-/// A provider payload that could not be decoded, keeping the payload.
-///
-/// The raw text is load-bearing, not a diagnostic. Decoding collapses every
-/// bad payload to `{}`, and the tool-call dedupe keys on what the provider
-/// actually sent (v2 `registerSkipped`, `toolDedupeService.ts:475-482`): two
-/// different broken payloads are two distinct calls, while the same broken
-/// payload repeated still earns the repeat ladder. Keying on the decoded `{}`
-/// instead makes every malformed call identical, so a turn that keeps issuing
-/// different broken JSON is force-stopped as if it were stuck on one call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArgsParseError {
-    /// The payload exactly as the provider sent it.
-    pub raw: String,
-    /// Why it could not be decoded, as the decoder reported it.
-    pub error: String,
-}
 
 // ── ExecutableTool trait ───────────────────────────────────────────────────
 
@@ -388,6 +211,23 @@ pub struct ToolExecContext {
     pub tool_call_id: String,
 }
 
+/// Metadata a tool returns when it already streamed its own output to a file
+/// (v2 `ToolResultSpill`, `toolContract.ts:11-15`). The truncation service
+/// points the model at that file instead of saving a second copy, and appends
+/// `suffix` after the pointer so a trailing status line survives truncation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolResultSpill {
+    /// The file the tool already wrote; `None` means the truncator must save
+    /// the retained text itself.
+    pub output_path: Option<String>,
+    /// Characters the tool actually produced, which can exceed the retained
+    /// text when the tool saturated its buffer.
+    pub total_chars: Option<usize>,
+    /// A trailing line the tool wants kept verbatim (e.g. the shell's
+    /// `Command failed with exit code: N`).
+    pub suffix: Option<String>,
+}
+
 /// The result of a tool execution.
 #[derive(Debug, Clone)]
 pub struct ExecutableToolResult {
@@ -403,6 +243,11 @@ pub struct ExecutableToolResult {
     /// Rich content delivered to the model as a follow-up user message
     /// (see [`ToolDelivery`]). `None` for every text-only tool.
     pub delivery: Option<ToolDelivery>,
+    /// Media and other non-text blocks returned inside the tool result itself
+    /// (v2 `ExecutableToolOutput = string | ContentPart[]`). Populated by
+    /// readMedia, skill and MCP results; the turn loop still routes delivery as
+    /// a follow-up message until its message assembly is coordinated.
+    pub parts: Vec<ContentBlock>,
     /// What the tool ended up doing, when it differs from what it declared
     /// (v2 `ToolResult.display`). A `diff` that failed to apply, a `file_io`
     /// whose write was rejected: the host shows this on the terminal card.
@@ -413,6 +258,10 @@ pub struct ExecutableToolResult {
     /// `Err` variant. The block is absent for the overwhelming majority of
     /// results, so the indirection costs nothing on the hot path.
     pub display: Option<Box<ToolInputDisplay>>,
+    /// Spill metadata from a tool that already persisted its own output
+    /// (v2 `ExecutableToolResult.spill`). Consumed by the truncation service;
+    /// `None` for tools that produce everything in memory.
+    pub spill: Option<ToolResultSpill>,
 }
 
 /// Error result from tool resolution.
@@ -1011,13 +860,13 @@ pub struct RunTurnInput<'a> {
     /// `media.budgetDropped` is agent state; the engine's turn loop is
     /// stateless, so the caller owns the record and the budget writes every
     /// new omission through to it).
-    pub media_dropped: Option<crate::llm::media_budget::DroppedMedia>,
+    pub media_dropped: Option<kimi_core::types::DroppedMedia>,
     /// The session's media recovery record (v2 #4413 `llmRequester.mediaRecovery`):
     /// a degrade/strip the provider forced on an earlier turn is re-applied to
     /// this turn's requests instead of re-sending the full media and paying
     /// the rejection round-trip again. `None` makes every turn start from the
     /// full projection — the pre-#4413 behavior.
-    pub media_recovery: Option<crate::llm::media_budget::SharedMediaRecovery>,
+    pub media_recovery: Option<kimi_core::types::SharedMediaRecovery>,
     /// The pipeline's native toolset, when native tools are on. The
     /// turn-start disclosure announcement (v2 `toolSelectAnnouncementsService`)
     /// reads the deferred set and the announced diff from it; `None` skips
@@ -1031,6 +880,27 @@ pub struct RunTurnInput<'a> {
     /// not set this until the cancel reason travels with the request.
     pub previous_turn_aborted: bool,
 }
+
+/// Per-step prompt-cache telemetry the turn loop collects, shared out of band
+/// with the caller (D14(a)).
+///
+/// [`TurnResult`] already carries these three vectors on every **completed**
+/// turn, so a caller that gets `Ok` never needs this record. It exists for the
+/// hard-failure path: when `run_turn` returns `Err` there is no `TurnResult`,
+/// and without a sink every step that completed before the failure would be
+/// dropped. A caller that supplies a [`TurnObservationsSink`] receives those
+/// steps as they are produced, in the same order and with the same reset
+/// indices the `Ok` path would report.
+#[derive(Debug, Clone, Default)]
+pub struct TurnObservations {
+    pub cache_observations: Vec<crate::session::cache_observation::CacheObservation>,
+    pub cache_probe_requests: Vec<crate::session::cache_observation::CacheProbeRequest>,
+    pub cache_observation_resets: Vec<usize>,
+}
+
+/// Shared handle the turn loop appends observations to as each step completes.
+/// See [`TurnObservations`].
+pub type TurnObservationsSink = std::sync::Arc<std::sync::Mutex<TurnObservations>>;
 
 // ── Step-level types ───────────────────────────────────────────────────────
 
@@ -1056,7 +926,7 @@ pub struct StepResult {
     pub finish_reason: Option<String>,
     /// The step's LLM request timing (v2 `ModelRequestTiming`, upstream
     /// #3938); `None` when the transport did not measure (host-proxy).
-    pub timing: Option<crate::llm::LlmTiming>,
+    pub timing: Option<kimi_core::timing::LlmTiming>,
 }
 
 /// Reasons a single step can stop.

@@ -11,15 +11,13 @@ use std::time::Duration;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 
-use crate::llm::wire::{StreamDelta, to_wire};
+use crate::llm::model_family::family_default_completion_cap;
+use crate::llm::request_options::RequestOptions;
+use crate::llm::tool_call_id::{ToolCallIdPolicy, normalize_tool_call_ids};
+use crate::llm::wire::{StreamDelta, WireMessage, to_wire};
 use crate::llm::{anthropic, google_genai, openai, openai_responses, opencode_adapter};
 use crate::rpc::types::{BoxFuture, NativeLlmConfig};
-use crate::turn_loop::types::{LLM, LLMChatParams, LLMChatResponse};
-
-/// Per-request timeout. Generous because streaming responses for long
-/// completions can take minutes; the read is still bounded per-chunk by
-/// the connect/idle behavior of the pool.
-const REQUEST_TIMEOUT_SECS: u64 = 600;
+use kimi_core::types::{LLM, LLMChatParams, LLMChatResponse, ToolInfo};
 
 /// v2 `LLM_HEADERS_TIMEOUT_ENV` (`llm-requester/timeout.ts`): an explicit
 /// cap on the wait for a provider's response headers, for the gateway
@@ -28,22 +26,37 @@ const REQUEST_TIMEOUT_SECS: u64 = 600;
 /// can act.
 pub const LLM_HEADERS_TIMEOUT_ENV: &str = "KIMI_CODE_LLM_HEADERS_TIMEOUT_MS";
 
+/// v2 `LLM_BODY_TIMEOUT_ENV`: an explicit cap on the whole response body.
+/// Unset or blank falls back to [`DEFAULT_LLM_IO_TIMEOUT`]; `0` states "no
+/// body timeout" explicitly (undici's `bodyTimeout: 0`).
+pub const LLM_BODY_TIMEOUT_ENV: &str = "KIMI_CODE_LLM_BODY_TIMEOUT_MS";
+
 /// v2 `MAX_HEADERS_TIMEOUT_MS` (2**31-1, the undici ceiling).
 const MAX_HEADERS_TIMEOUT_MS: u64 = 2_147_483_647;
 
-/// The pure half of [`resolve_llm_headers_timeout_ms`]: unset or blank means
-/// no cap; anything else must be a positive integer within range, and a bad
-/// value fails the request the way v2 fails client construction. Testable
-/// without touching the process environment — the async transport test must
-/// not write `LLM_HEADERS_TIMEOUT_ENV` while other tests read the same
-/// process-global map.
+/// The cap applied when neither env var is set: undici's own defaults
+/// (`headersTimeout` / `bodyTimeout`, both 300_000 ms). v2 leaves the
+/// dispatcher undefined in that case (`getLlmDispatcher` returns `undefined`),
+/// so every `fetch` there inherits these defaults — the wire is never left
+/// without a bound. The same 300 s applies here, to every protocol: an
+/// unanswered request fails visibly (and retryably) instead of holding the
+/// turn forever.
+const DEFAULT_LLM_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The pure half of [`resolve_llm_headers_timeout_ms`]: unset or blank takes
+/// the undici default ([`DEFAULT_LLM_IO_TIMEOUT`]); anything else must be a
+/// positive integer within range, and a bad value fails the request the way
+/// v2 fails client construction. Testable without touching the process
+/// environment — the async transport test must not write
+/// `LLM_HEADERS_TIMEOUT_ENV` while other tests read the same process-global
+/// map.
 fn parse_llm_headers_timeout_ms(raw: Option<&str>) -> Result<Option<std::time::Duration>, String> {
     let Some(raw) = raw else {
-        return Ok(None);
+        return Ok(Some(DEFAULT_LLM_IO_TIMEOUT));
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Ok(Some(DEFAULT_LLM_IO_TIMEOUT));
     }
     let valid = trimmed
         .parse::<u64>()
@@ -54,6 +67,71 @@ fn parse_llm_headers_timeout_ms(raw: Option<&str>) -> Result<Option<std::time::D
         None => Err(format!(
             "config.invalid: {LLM_HEADERS_TIMEOUT_ENV} must be a positive integer no greater than {MAX_HEADERS_TIMEOUT_MS}, got {raw:?}."
         )),
+    }
+}
+
+/// v2 `resolveLlmBodyTimeoutMs`: unset or blank takes the undici default
+/// ([`DEFAULT_LLM_IO_TIMEOUT`]), `0` explicitly disables the body timeout,
+/// and any other integer up to the undici ceiling is the cap. A bad value
+/// fails the request, like the headers timeout.
+fn parse_llm_body_timeout_ms(raw: Option<&str>) -> Result<Option<std::time::Duration>, String> {
+    let Some(raw) = raw else {
+        return Ok(Some(DEFAULT_LLM_IO_TIMEOUT));
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Some(DEFAULT_LLM_IO_TIMEOUT));
+    }
+    let valid = trimmed
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value <= MAX_HEADERS_TIMEOUT_MS);
+    match valid {
+        Some(0) => Ok(None),
+        Some(ms) => Ok(Some(std::time::Duration::from_millis(ms))),
+        None => Err(format!(
+            "config.invalid: {LLM_BODY_TIMEOUT_ENV} must be an integer between 0 and {MAX_HEADERS_TIMEOUT_MS}, got {raw:?}."
+        )),
+    }
+}
+
+fn resolve_llm_body_timeout_ms() -> Result<Option<std::time::Duration>, String> {
+    #[cfg(test)]
+    if let Some(scoped) = body_timeout_override::current() {
+        return scoped;
+    }
+    parse_llm_body_timeout_ms(std::env::var(LLM_BODY_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// Test-only hook for the body-timeout value, mirroring
+/// [`headers_timeout_override`] so tests never write the process-global env.
+#[cfg(test)]
+mod body_timeout_override {
+    use std::cell::RefCell;
+
+    type Resolved = Result<Option<std::time::Duration>, String>;
+
+    thread_local! {
+        static SLOT: RefCell<Option<Resolved>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn current() -> Option<Resolved> {
+        SLOT.with(|slot| slot.borrow().clone())
+    }
+
+    pub(super) struct Scoped;
+
+    impl Scoped {
+        pub(super) fn set(value: Resolved) -> Self {
+            SLOT.with(|slot| *slot.borrow_mut() = Some(value));
+            Self
+        }
+    }
+
+    impl Drop for Scoped {
+        fn drop(&mut self) {
+            SLOT.with(|slot| *slot.borrow_mut() = None);
+        }
     }
 }
 
@@ -221,7 +299,7 @@ pub struct NativeHttpLlm {
     /// the turn through [`LLM::set_tool_call_ids`]. Every request opens one
     /// attempt on it.
     tool_call_ids:
-        std::sync::Mutex<Option<Arc<crate::turn_loop::tool_call_id::ToolCallIdNormalizer>>>,
+        std::sync::Mutex<Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>>>,
     /// The agent owning the turn in flight (v2 `scopeContext.agentId`),
     /// installed by the turn through [`LLM::set_stream_agent_id`]. Streamed
     /// deltas carry it so the host attributes a subagent's stream to the
@@ -231,11 +309,16 @@ pub struct NativeHttpLlm {
     /// the turn through [`LLM::set_turn_watch`]. Every streamed fragment
     /// ticks it, so a turn that keeps receiving model output is never
     /// reported as stalled. Replaced per turn like `stream_agent_id`.
-    turn_watch: std::sync::Mutex<Option<Arc<crate::turn_loop::watch::TurnWatchState>>>,
+    turn_watch: std::sync::Mutex<Option<Arc<kimi_core::watch::TurnWatchState>>>,
     /// The session's stable prompt-cache key (v2 `cacheKey`: the session id).
     /// OpenAI-compatible wires send it as `prompt_cache_key`, anthropic as
     /// `metadata.user_id`. `None` for a transport with no session.
     cache_key: Option<String>,
+    /// The optional body knobs v2 carries on `ModelRequestInput` /
+    /// `modelOverrides` (`responseFormat`, `seed`, sampling, `extraParams`).
+    /// The host has no channel for them yet, so they default to inert and the
+    /// transport only translates what [`Self::with_request_options`] supplies.
+    request_options: RequestOptions,
 }
 
 /// v2 `protocolAdapterRegistry.detectedReasoningKeys`: the reasoning dialect
@@ -324,12 +407,13 @@ impl NativeHttpLlm {
             stream_agent_id: std::sync::Mutex::new(None),
             turn_watch: std::sync::Mutex::new(None),
             cache_key: None,
+            request_options: RequestOptions::default(),
         }
     }
 
     fn tool_call_ledger(
         &self,
-    ) -> Option<Arc<crate::turn_loop::tool_call_id::ToolCallIdNormalizer>> {
+    ) -> Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>> {
         self.tool_call_ids
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -353,6 +437,13 @@ impl NativeHttpLlm {
     /// Attach the session's prompt-cache key (v2 `cacheKey`).
     pub fn with_cache_key(mut self, key: Option<String>) -> Self {
         self.cache_key = key.filter(|value| !value.is_empty());
+        self
+    }
+
+    /// Attach the optional request-body knobs (v2 `ModelRequestInput`):
+    /// `response_format`, `seed`, sampling and per-protocol `extraParams`.
+    pub fn with_request_options(mut self, options: RequestOptions) -> Self {
+        self.request_options = options;
         self
     }
 
@@ -403,6 +494,53 @@ impl NativeHttpLlm {
         Some(cap.max(1))
     }
 
+    /// v2 `prepareOpenAIRequest`'s cap chain for Chat Completions:
+    /// `resolveMaxCompletionCap` → the trait's `completionTokensWhenUnset` →
+    /// `familyDefaultCap`. The model-family tier is what fills an otherwise
+    /// unset `max_tokens` (DeepSeek: 8192 / 65536 / 131072 by effort, then
+    /// clamped by the remaining context); an explicit `0` is the opt-out
+    /// spelling and stops the chain. Responses and Anthropic have no family
+    /// tier in v2 and keep [`Self::completion_cap`] unchanged.
+    fn openai_completion_cap(&self, params: &LLMChatParams) -> Option<u32> {
+        if self.config.max_tokens.is_some() {
+            return self.completion_cap(params);
+        }
+        let remaining = match (params.max_context_tokens, params.used_context_tokens) {
+            (Some(window), Some(used)) if window > 0 => Some(window.saturating_sub(used)),
+            _ => None,
+        };
+        self.completion_cap(params).or_else(|| {
+            family_default_completion_cap(
+                &self.config.model,
+                self.config.reasoning_effort.as_deref(),
+                remaining,
+            )
+        })
+    }
+
+    /// The wire history for one request. Tool-call ids are normalised per
+    /// protocol first (v2 `normalizeToolCallIdsForProvider`, applied to the
+    /// message list before lowering): the id alphabet providers accept is
+    /// narrower than what a gateway returns, and both halves of a call must be
+    /// rewritten through one map or the pair splits into an unknown call plus
+    /// an orphan result. The ledger normalizer that assigned the ids is a
+    /// different layer and is not consulted here.
+    fn wire_messages(&self, params: &LLMChatParams) -> Vec<WireMessage> {
+        let policy = match self.config.protocol.as_str() {
+            "openai_responses" | "openai-responses" => Some(ToolCallIdPolicy::Responses),
+            // v2's Google requester has no call-id policy; Gemini ids travel
+            // as issued.
+            "google" | "google-genai" | "gemini" => None,
+            _ => Some(ToolCallIdPolicy::Chat),
+        };
+        let Some(policy) = policy else {
+            return to_wire(&params.messages);
+        };
+        let mut messages = params.messages.to_vec();
+        normalize_tool_call_ids(&mut messages, policy, 64);
+        to_wire(&messages)
+    }
+
     /// Moonshot preserved-thinking keep is active (`[thinking] keep` /
     /// `KIMI_MODEL_THINKING_KEEP`); the host filters off-values, so any value
     /// here reaches the wire.
@@ -451,7 +589,7 @@ impl NativeHttpLlm {
     fn emit_delta(
         &self,
         delta: StreamDelta,
-        ids: Option<&crate::turn_loop::tool_call_id::ToolCallIdResponseNormalizer>,
+        ids: Option<&kimi_core::tool_call_id::ToolCallIdResponseNormalizer>,
     ) {
         // Every streamed fragment is observable progress for the turn's
         // watchdog (v2's `partials.length` arm) — including the fragments
@@ -478,7 +616,7 @@ impl NativeHttpLlm {
                 },
                 Some(ids),
             ) if !id.trim().is_empty() => {
-                let slot = index.map(crate::turn_loop::tool_call_id::StreamSlot::Index);
+                let slot = index.map(kimi_core::tool_call_id::StreamSlot::Index);
                 let assigned = ids.remap_streamed_id(&id, slot.as_ref());
                 StreamDelta::ToolCall {
                     id: assigned,
@@ -521,7 +659,7 @@ impl NativeHttpLlm {
         &self,
         params: LLMChatParams,
     ) -> Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let wire = to_wire(&params.messages);
+        let wire = self.wire_messages(&params);
         let is_anthropic = self.config.protocol == "anthropic";
         let is_responses = matches!(
             self.config.protocol.as_str(),
@@ -560,7 +698,7 @@ impl NativeHttpLlm {
 
         let completion_cap = self.completion_cap(&params);
         let mut body = if is_anthropic {
-            anthropic::build_request_for_provider(
+            match anthropic::build_request_for_provider(
                 &self.config.model,
                 self.config
                     .max_tokens
@@ -575,9 +713,14 @@ impl NativeHttpLlm {
                 self.cache_key.as_deref(),
                 completion_cap,
                 self.config.adaptive_thinking.unwrap_or(false),
-            )
+                self.beta_messages_api(),
+                &self.request_options,
+            ) {
+                Ok(body) => body,
+                Err(error) => return Err(error.into()),
+            }
         } else if is_responses {
-            openai_responses::build_request_with_budget(
+            openai_responses::build_request_with_budget_and_options(
                 &self.config.model,
                 &wire,
                 &params.tools,
@@ -585,6 +728,7 @@ impl NativeHttpLlm {
                 self.config.reasoning_effort.as_deref(),
                 self.cache_key.as_deref(),
                 completion_cap,
+                &self.request_options,
             )
         } else if is_google {
             // The host expresses "thinking on" as an *effort* for every
@@ -612,18 +756,32 @@ impl NativeHttpLlm {
                 completion_cap,
             )
         } else {
-            openai::build_request_for_provider(
+            let kimi_tools;
+            let tools: &[ToolInfo] = if self
+                .config
+                .provider_type
+                .as_deref()
+                .is_some_and(|provider| provider.eq_ignore_ascii_case("kimi"))
+            {
+                kimi_tools = openai::normalize_kimi_tools(&params.tools)
+                    .map_err(|error| kimi_core::error::LlmError::typed(&error, None))?;
+                &kimi_tools
+            } else {
+                &params.tools
+            };
+            openai::build_request_for_provider_with_options(
                 &self.config.model,
                 &wire,
-                &params.tools,
+                tools,
                 true,
                 self.config.reasoning_effort.as_deref(),
                 self.config.thinking_keep.as_deref(),
                 self.config.reasoning_key.as_deref(),
                 self.config.provider_type.as_deref(),
                 self.cache_key.as_deref(),
-                completion_cap,
+                self.openai_completion_cap(&params),
                 detected_reasoning_key_for(&self.config.base_url, &self.config.model).as_deref(),
+                &self.request_options,
             )
         };
 
@@ -654,6 +812,10 @@ impl NativeHttpLlm {
         // The request reached the wire (v2 `requestSentAt`): the mark the
         // build/server split of the request timing is measured against.
         let t_sent = started_at.elapsed();
+        // One resolution for both body readers: the success stream and the
+        // error-body excerpt below must share the same idle cap, or a failing
+        // provider that stalls mid-error-body would still hold the turn.
+        let body_timeout = resolve_llm_body_timeout_ms()?;
         if !status.is_success() {
             // The provider may ask for a specific wait; carry it on the typed
             // error so the retry layer can honour it instead of burning its
@@ -678,10 +840,10 @@ impl NativeHttpLlm {
                 .get("x-trace-id")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
-            let (brief, body_retry_after) = read_error_body(response).await;
+            let (brief, body_retry_after) = read_error_body(response, body_timeout).await;
             let retry_after = header_retry_after.or(body_retry_after);
             return Err(Box::new(
-                crate::llm::LlmError::http(status.as_u16(), &brief, retry_after)
+                kimi_core::error::LlmError::http(status.as_u16(), &brief, retry_after)
                     .with_trace_id(trace_id.as_deref()),
             ));
         }
@@ -737,6 +899,12 @@ impl NativeHttpLlm {
         // must round-trip with its signature intact.
         let mut thinking_guard = crate::llm::thinking_guard::ThinkingGuard::from_settings();
         let mut stream = response.bytes_stream().eventsource();
+        // v2 `LLM_BODY_TIMEOUT_ENV`: undici's body timeout is the idle gap
+        // between body chunks after the headers, not a whole-exchange cap —
+        // so it wraps each read. Unset takes the undici default (300 s);
+        // `0` is the explicit escape hatch that disables it. Google shares
+        // the same default: v2 gives it no explicit dispatcher, so its fetch
+        // runs on the same undici global defaults.
         while let Some(event) = tokio::select! {
             // Mid-stream cancellation (generate.ts:154-202): abort the read
             // instead of draining the rest of the response. Already-emitted
@@ -745,7 +913,22 @@ impl NativeHttpLlm {
             _ = cancelled_or_pending(params.cancel.as_ref()) => {
                 return Err(CANCELLED_MESSAGE.into());
             }
-            event = stream.next() => event,
+            event = async {
+                match body_timeout {
+                    Some(cap) => tokio::time::timeout(cap, stream.next())
+                        .await
+                        .map_err(|_| {
+                            format!(
+                                "llm sse decode error: body timeout after {}ms",
+                                cap.as_millis()
+                            )
+                        }),
+                    None => Ok(stream.next().await),
+                }
+            } => match event {
+                Ok(event) => event,
+                Err(message) => return Err(message.into()),
+            },
         } {
             let event = event.map_err(|e| format!("llm sse decode error: {e}"))?;
             if event.data == "[DONE]"
@@ -845,7 +1028,7 @@ impl NativeHttpLlm {
         // (v2 `remapFinalizedCalls`). An id the provider left empty is skipped:
         // the step mints it, and claiming "" here would only take the slot.
         if let Some(ids) = attempt.ids() {
-            crate::turn_loop::tool_call_id::remap_response_tool_calls(&mut response, ids);
+            kimi_core::tool_call_id::remap_response_tool_calls(&mut response, ids);
         }
 
         // A stream that produced no usable events is a transport failure, not an
@@ -928,12 +1111,20 @@ impl NativeHttpLlm {
             req = req
                 .header("x-api-key", token)
                 .header("anthropic-version", "2023-06-01");
-            // Preserved thinking rides the beta Messages API
-            // (`context-management-2025-06-27`), mirroring the host provider;
-            // `endpoint()` switches the URL to `?beta=true` for the same
-            // reason.
-            if self.thinking_keep_active() {
-                req = req.header("anthropic-beta", "context-management-2025-06-27");
+            // v2 `executeAnthropicRequest`: `betas` travels as a header on the
+            // standard Messages API and in the body on the beta API (which is
+            // also where preserved thinking routes, see `endpoint()`). The
+            // default list carries the interleaved-thinking beta.
+            if !self.beta_messages_api() {
+                let betas = anthropic::anthropic_betas(
+                    self.config.provider_type.as_deref(),
+                    self.config.adaptive_thinking.unwrap_or(false),
+                    self.config.reasoning_effort.is_some() || self.config.thinking_budget.is_some(),
+                    self.config.thinking_keep.as_deref(),
+                );
+                if !betas.is_empty() {
+                    req = req.header("anthropic-beta", betas.join(","));
+                }
             }
         } else {
             req = req.header("authorization", format!("Bearer {token}"));
@@ -944,21 +1135,15 @@ impl NativeHttpLlm {
         // v2 aborts preflight sends through the same signal
         // (generate.ts:107-109): a cancel landing before the response
         // headers arrives must not pay for the request.
-        // The shared client no longer carries the whole-request timeout, so it
-        // rides on each request (same value the per-instance client used).
-        let send = req
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .send();
-        // v2 #4092 (`llm-requester/timeout.ts`): an explicit cap on the wait
-        // for the response headers — `send()` resolves as they arrive, so
-        // wrapping it ports the undici `headersTimeout`. Upstream arms it on
-        // the openai / openai-responses / anthropic clients only; the Google
-        // wire is out of scope there and stays so here.
-        let headers_cap = if is_google {
-            None
-        } else {
-            resolve_llm_headers_timeout_ms()?
-        };
+        let send = req.send();
+        // v2 #4092 (`llm-requester/timeout.ts`): a cap on the wait for the
+        // response headers — `send()` resolves as they arrive, so wrapping it
+        // ports the undici `headersTimeout`. Unset takes the undici default
+        // (300 s) on every wire: v2 arms an explicit dispatcher only for the
+        // openai / openai-responses / anthropic clients, but the google wire
+        // runs on the same undici fetch defaults, so leaving it uncapped here
+        // would be strictly worse than the reference.
+        let headers_cap = resolve_llm_headers_timeout_ms()?;
         let send = async move {
             let result = match headers_cap {
                 Some(cap) => match tokio::time::timeout(cap, send).await {
@@ -1150,15 +1335,6 @@ const NOT_AN_SSE_ENDPOINT_PREFIX: &str = crate::native::NOT_AN_SSE_ENDPOINT_PREF
 ///
 /// Status failures are rendered as `llm http status {code}: {brief}` (see the
 /// response check in this module), so the classification layers read the code
-/// back out instead of re-deriving it from a body that only happens to look
-/// right. `None` means no status ever reached the error — an in-stream provider
-/// error, a transport fault or a decode failure — and such a failure has to be
-/// classified on its own terms rather than assumed to be an HTTP one.
-pub fn llm_http_status(error: &str) -> Option<u16> {
-    let rest = error.strip_prefix("llm http status ")?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
-}
 
 /// Keeps a diagnosis readable: the first frame of a non-SSE body is the useful
 /// part, and a catch-all gateway can answer with a megabyte of HTML.
@@ -1203,8 +1379,6 @@ fn transport_error_message(e: &reqwest::Error) -> String {
     format!("llm transport error {kind}")
 }
 
-/// Read the start of an error body, bounded, for inclusion in the error
-/// message.
 /// Read the error body once and return both the excerpt that goes into the
 /// error message and any wait the provider embedded in it.
 ///
@@ -1212,20 +1386,46 @@ fn transport_error_message(e: &reqwest::Error) -> String {
 /// detail can sit past the excerpt cut, and a wait that is silently dropped
 /// means the retry layer backs off on its own schedule against a provider that
 /// just told it to wait longer.
-async fn read_error_body(response: reqwest::Response) -> (String, Option<Duration>) {
+///
+/// Bounded twice: bytes kept ([`ERROR_BODY_MAX_BYTES`]) and, when a body cap
+/// is armed, each read — a provider that sends headers and then stalls must
+/// not hold the failure path open. A read failure is not the end of the body:
+/// it is recorded as `[body unreadable: …]` so the detail never claims the
+/// provider said less than it did.
+async fn read_error_body(
+    response: reqwest::Response,
+    body_timeout: Option<Duration>,
+) -> (String, Option<Duration>) {
     let mut stream = response;
     let mut buf: Vec<u8> = Vec::new();
+    let mut unreadable: Option<String> = None;
     while buf.len() < ERROR_BODY_MAX_BYTES {
-        match stream.chunk().await {
+        let next = match body_timeout {
+            Some(cap) => match tokio::time::timeout(cap, stream.chunk()).await {
+                Ok(next) => next,
+                Err(_elapsed) => {
+                    unreadable = Some(format!("read timed out after {}ms", cap.as_millis()));
+                    break;
+                }
+            },
+            None => stream.chunk().await,
+        };
+        match next {
             Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
-            _ => break,
+            Ok(None) => break,
+            Err(error) => {
+                unreadable = Some(error.to_string());
+                break;
+            }
         }
     }
     let text = String::from_utf8_lossy(&buf);
-    (
-        text.chars().take(500).collect(),
-        parse_google_retry_info_delay(&text),
-    )
+    let retry_after = parse_google_retry_info_delay(&text);
+    let mut brief: String = text.chars().take(500).collect();
+    if let Some(reason) = unreadable {
+        brief.push_str(&format!(" [body unreadable: {reason}]"));
+    }
+    (brief, retry_after)
 }
 
 /// The wait Google reports for a throttled or overloaded request.
@@ -1304,19 +1504,19 @@ fn is_quota_exhaustion_error(error: &str) -> bool {
 /// release what it claimed" the default instead of a rule every exit has to
 /// remember (v2 #3734).
 struct AttemptLedger {
-    ids: Option<crate::turn_loop::tool_call_id::ToolCallIdResponseNormalizer>,
+    ids: Option<kimi_core::tool_call_id::ToolCallIdResponseNormalizer>,
     committed: bool,
 }
 
 impl AttemptLedger {
-    fn new(ids: Option<crate::turn_loop::tool_call_id::ToolCallIdResponseNormalizer>) -> Self {
+    fn new(ids: Option<kimi_core::tool_call_id::ToolCallIdResponseNormalizer>) -> Self {
         Self {
             ids,
             committed: false,
         }
     }
 
-    fn ids(&self) -> Option<&crate::turn_loop::tool_call_id::ToolCallIdResponseNormalizer> {
+    fn ids(&self) -> Option<&kimi_core::tool_call_id::ToolCallIdResponseNormalizer> {
         self.ids.as_ref()
     }
 
@@ -1341,7 +1541,7 @@ impl LLM for NativeHttpLlm {
         &self.system_prompt
     }
 
-    fn set_tool_call_ids(&self, ledger: Arc<crate::turn_loop::tool_call_id::ToolCallIdNormalizer>) {
+    fn set_tool_call_ids(&self, ledger: Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>) {
         *self.tool_call_ids.lock().unwrap_or_else(|e| e.into_inner()) = Some(ledger);
     }
 
@@ -1352,7 +1552,7 @@ impl LLM for NativeHttpLlm {
             .unwrap_or_else(|e| e.into_inner()) = Some(agent_id.to_string());
     }
 
-    fn set_turn_watch(&self, watch: Option<Arc<crate::turn_loop::watch::TurnWatchState>>) {
+    fn set_turn_watch(&self, watch: Option<Arc<kimi_core::watch::TurnWatchState>>) {
         *self.turn_watch.lock().unwrap_or_else(|e| e.into_inner()) = watch;
     }
 
@@ -1391,6 +1591,7 @@ impl LLM for NativeHttpLlm {
                 .auth_provider
                 .clone()
                 .unwrap_or_else(|| self.config.protocol.clone()),
+            provider_type: self.config.provider_type.clone().unwrap_or_default(),
             // An undeclared capability set accepts everything: the host only
             // sends a set when it means to narrow the model.
             image_in: capabilities.is_empty() || declares("image_in"),
@@ -1400,6 +1601,13 @@ impl LLM for NativeHttpLlm {
             // (`modelSource === 'oauth-catalog'`); `auth_provider` is the
             // engine's marker for the same set.
             uploads_media: self.config.auth_provider.is_some(),
+            // v2 `standard.ts:45`: only the google provider declares
+            // `media.inlineVideo`; every other provider can take a video
+            // exclusively through an upload.
+            inline_video: matches!(
+                self.config.protocol.as_str(),
+                "google" | "google-genai" | "gemini"
+            ),
         })
     }
 
@@ -1425,7 +1633,7 @@ impl LLM for NativeHttpLlm {
             // The prefix is present, so this is a status-coded failure: the
             // code decides, and the keyword list below is never consulted for
             // it. An unparseable code classifies as non-retryable.
-            let code = llm_http_status(error).unwrap_or(0);
+            let code = kimi_core::error::llm_http_status(error).unwrap_or(0);
             // The code set is [`is_retryable_status_code`], shared with the
             // host-proxy transport so the two cannot drift. The quota
             // exemption mirrors v2 `APIProviderQuotaExhaustedError`
@@ -1481,7 +1689,7 @@ impl LLM for NativeHttpLlm {
         params: LLMChatParams,
     ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>> {
         // The error is boxed as-is rather than flattened into an `io::Error`:
-        // a status-coded failure is a [`crate::llm::LlmError`], and the retry
+        // a status-coded failure is a [`kimi_core::error::LlmError`], and the retry
         // layer downcasts it to read the provider's `retryAfterMs` / status
         // instead of re-parsing the rendered message (v2 reads the fields).
         // Wrapping it would throw that type away.
@@ -1492,6 +1700,7 @@ impl LLM for NativeHttpLlm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kimi_core::types::LLMMessage;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1654,12 +1863,12 @@ mod tests {
 
         // The restored history already carries `call_1`: the provider replaying
         // it must not create a second call with the same id.
-        let ledger = Arc::new(crate::turn_loop::tool_call_id::ToolCallIdNormalizer::new());
-        ledger.seed_from(&[crate::turn_loop::types::LLMMessage {
+        let ledger = Arc::new(kimi_core::tool_call_id::ToolCallIdNormalizer::new());
+        ledger.seed_from(&[kimi_core::types::LLMMessage {
             role: "assistant".into(),
             content: String::new(),
             blocks: Vec::new(),
-            tool_calls: vec![crate::turn_loop::types::ToolCall {
+            tool_calls: vec![kimi_core::types::ToolCall {
                 id: "call_1".into(),
                 name: "Read".into(),
                 arguments: serde_json::json!({}),
@@ -1722,7 +1931,7 @@ mod tests {
             config("openai", &format!("http://{addr}/v1")),
             String::new(),
         );
-        let ledger = Arc::new(crate::turn_loop::tool_call_id::ToolCallIdNormalizer::new());
+        let ledger = Arc::new(kimi_core::tool_call_id::ToolCallIdNormalizer::new());
         llm.set_tool_call_ids(Arc::clone(&ledger));
 
         chat_once(&llm)
@@ -1745,7 +1954,7 @@ mod tests {
     /// is dropped without committing releases them.
     #[test]
     fn attempt_ledger_commits_or_releases() {
-        let ledger = Arc::new(crate::turn_loop::tool_call_id::ToolCallIdNormalizer::new());
+        let ledger = Arc::new(kimi_core::tool_call_id::ToolCallIdNormalizer::new());
 
         let mut committed = AttemptLedger::new(Some(ledger.begin_response()));
         assert_eq!(
@@ -1829,6 +2038,12 @@ mod tests {
             adaptive_thinking: None,
             reasoning_key: None,
             off_effort: None,
+            response_format: None,
+            sampling: None,
+            determinism: None,
+            extra_params: None,
+            binary_path: None,
+            antigravity: None,
         }
     }
 
@@ -1957,7 +2172,7 @@ mod tests {
         let llm = NativeHttpLlm::new(cfg, String::new()).with_cache_key(Some("sess-1".to_string()));
         let result = llm
             .chat(LLMChatParams {
-                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                messages: Arc::from(vec![kimi_core::types::LLMMessage::user("hi")]),
                 tools: Arc::from(Vec::new()),
                 used_context_tokens: Some(10_000),
                 max_context_tokens: Some(20_000),
@@ -1986,7 +2201,7 @@ mod tests {
         // rejects it — this test only inspects the captured request.
         let _ = llm
             .chat(LLMChatParams {
-                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                messages: Arc::from(vec![kimi_core::types::LLMMessage::user("hi")]),
                 tools: Arc::from(Vec::new()),
                 used_context_tokens: Some(10_000),
                 max_context_tokens: Some(50_000),
@@ -2019,9 +2234,11 @@ mod tests {
         assert_eq!(detected_reasoning_key_for(base, "m-other"), None);
     }
 
-    /// v2 #4092 `resolveLlmHeadersTimeoutMs`: unset and blank mean no cap,
-    /// a positive integer within the undici range is the cap, and anything
-    /// else is a `config.invalid` failure.
+    /// v2 `resolveLlmHeadersTimeoutMs`, plus the engine's undici-default
+    /// fallback: unset and blank take 300 s (what v2 inherits from the global
+    /// undici Agent when it leaves the dispatcher undefined), a positive
+    /// integer within the undici range is the cap, and anything else is a
+    /// `config.invalid` failure.
     ///
     /// These legs are pure, so the process-global
     /// `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS` is never written here: every other
@@ -2030,8 +2247,14 @@ mod tests {
     /// `chat_fails_cleanly_on_unreachable_endpoint` reading `"abc"`).
     #[test]
     fn headers_timeout_env_parses_like_v2() {
-        assert_eq!(parse_llm_headers_timeout_ms(None).unwrap(), None);
-        assert_eq!(parse_llm_headers_timeout_ms(Some("  ")).unwrap(), None);
+        assert_eq!(
+            parse_llm_headers_timeout_ms(None).unwrap(),
+            Some(DEFAULT_LLM_IO_TIMEOUT)
+        );
+        assert_eq!(
+            parse_llm_headers_timeout_ms(Some("  ")).unwrap(),
+            Some(DEFAULT_LLM_IO_TIMEOUT)
+        );
         for (raw, expect_ms) in [("45000", 45_000), ("2147483647", 2_147_483_647), ("+5", 5)] {
             assert_eq!(
                 parse_llm_headers_timeout_ms(Some(raw))
@@ -2046,6 +2269,48 @@ mod tests {
             assert!(
                 error.starts_with(
                     "config.invalid: KIMI_CODE_LLM_HEADERS_TIMEOUT_MS must be a positive integer no greater than 2147483647,"
+                ),
+                "{raw}: {error}"
+            );
+        }
+    }
+
+    /// v2 `resolveLlmBodyTimeoutMs`, plus the engine's undici-default
+    /// fallback: unset/blank take 300 s, `0` means "no cap" explicitly, a
+    /// positive integer is the cap, and anything else is a config error.
+    #[test]
+    fn body_timeout_env_parses_like_v2() {
+        assert_eq!(
+            parse_llm_body_timeout_ms(None).unwrap(),
+            Some(DEFAULT_LLM_IO_TIMEOUT)
+        );
+        assert_eq!(
+            parse_llm_body_timeout_ms(Some("")).unwrap(),
+            Some(DEFAULT_LLM_IO_TIMEOUT)
+        );
+        assert_eq!(
+            parse_llm_body_timeout_ms(Some("   ")).unwrap(),
+            Some(DEFAULT_LLM_IO_TIMEOUT)
+        );
+        assert_eq!(
+            parse_llm_body_timeout_ms(Some("0")).unwrap(),
+            None,
+            "v2's NO_TIMEOUT_MS is an explicit no-cap, not a zero-length timeout"
+        );
+        for (raw, expect_ms) in [("120000", 120_000), ("1", 1), ("2147483647", 2_147_483_647)] {
+            assert_eq!(
+                parse_llm_body_timeout_ms(Some(raw))
+                    .unwrap()
+                    .map(|d| d.as_millis() as u64),
+                Some(expect_ms),
+                "{raw}"
+            );
+        }
+        for raw in ["-5", "abc", "1.5", "2147483648"] {
+            let error = parse_llm_body_timeout_ms(Some(raw)).unwrap_err();
+            assert!(
+                error.starts_with(
+                    "config.invalid: KIMI_CODE_LLM_BODY_TIMEOUT_MS must be an integer between 0 and 2147483647,"
                 ),
                 "{raw}: {error}"
             );
@@ -2093,7 +2358,7 @@ mod tests {
     #[tokio::test]
     async fn headers_timeout_cap_and_bad_value_gate_the_wait() {
         let chat_params = || LLMChatParams {
-            messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+            messages: Arc::from(vec![kimi_core::types::LLMMessage::user("hi")]),
             tools: Arc::from(Vec::new()),
             ..Default::default()
         };
@@ -2245,7 +2510,7 @@ mod tests {
         let llm = NativeHttpLlm::new(cfg.clone(), String::new());
         let first = llm
             .chat(LLMChatParams {
-                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                messages: Arc::from(vec![kimi_core::types::LLMMessage::user("hi")]),
                 tools: Arc::from(Vec::new()),
                 ..Default::default()
             })
@@ -2260,10 +2525,10 @@ mod tests {
         // Turn 2 (a fresh transport, as built per turn): an unmarked
         // history think part replays under the detected dialect.
         let llm = NativeHttpLlm::new(cfg, String::new());
-        let history = crate::turn_loop::types::LLMMessage {
+        let history = kimi_core::types::LLMMessage {
             role: "assistant".into(),
             content: String::new(),
-            blocks: vec![crate::turn_loop::types::ContentBlock::Think {
+            blocks: vec![kimi_core::types::ContentBlock::Think {
                 think: "earlier reasoning".into(),
                 encrypted: None,
                 details_index: None,
@@ -2276,7 +2541,7 @@ mod tests {
             .chat(LLMChatParams {
                 messages: Arc::from(vec![
                     history,
-                    crate::turn_loop::types::LLMMessage::user("and now?"),
+                    kimi_core::types::LLMMessage::user("and now?"),
                 ]),
                 tools: Arc::from(Vec::new()),
                 ..Default::default()
@@ -2375,6 +2640,147 @@ mod tests {
         assert_eq!(claude.completion_cap(&params(None, None)), None);
     }
 
+    /// B8: v2's Chat Completions cap chain ends in `familyDefaultCap`, so an
+    /// unconfigured `max_tokens` takes the family tier (DeepSeek 8192 / 65536 /
+    /// 131072 by effort) bounded by the remaining window. Responses and
+    /// Anthropic have no such tier in v2 and stay unset.
+    #[test]
+    fn an_unset_openai_budget_falls_back_to_the_model_family_tier() {
+        let params = |used: Option<u32>, window: Option<u32>| LLMChatParams {
+            used_context_tokens: used,
+            max_context_tokens: window,
+            ..Default::default()
+        };
+        let llm = |model: &str, effort: Option<&str>, max_tokens: Option<u32>| {
+            let mut cfg = config("openai", "https://api.deepseek.com/v1");
+            cfg.model = model.into();
+            cfg.reasoning_effort = effort.map(str::to_string);
+            cfg.max_tokens = max_tokens;
+            NativeHttpLlm::new(cfg, String::new())
+        };
+
+        let deepseek = llm("deepseek-chat", Some("high"), None);
+        assert_eq!(
+            deepseek.openai_completion_cap(&params(None, None)),
+            Some(65_536)
+        );
+        assert_eq!(
+            llm("deepseek-chat", Some("off"), None).openai_completion_cap(&params(None, None)),
+            Some(8_192)
+        );
+        assert_eq!(
+            llm("deepseek-chat", Some("max"), None).openai_completion_cap(&params(None, None)),
+            Some(131_072)
+        );
+        // The remaining window can only lower the tier, and a fully consumed
+        // window yields no cap at all.
+        assert_eq!(
+            deepseek.openai_completion_cap(&params(Some(10_000), Some(20_000))),
+            Some(10_000)
+        );
+        assert_eq!(
+            deepseek.openai_completion_cap(&params(Some(20_000), Some(20_000))),
+            None
+        );
+
+        // An explicit budget wins over the tier, and `0` is the opt-out
+        // spelling that suppresses it.
+        assert_eq!(
+            llm("deepseek-chat", Some("high"), Some(4_000))
+                .openai_completion_cap(&params(None, None)),
+            Some(4_000)
+        );
+        assert_eq!(
+            llm("deepseek-chat", Some("high"), Some(0)).openai_completion_cap(&params(None, None)),
+            None
+        );
+
+        // No family, no tier.
+        assert_eq!(
+            llm("gpt-5", Some("high"), None).openai_completion_cap(&params(None, None)),
+            None
+        );
+    }
+
+    /// B16: the wire history normalises both halves of a tool call through one
+    /// map, keyed by the protocol's policy. The Responses wire keeps the part
+    /// before `|`; Google ids travel as issued.
+    #[test]
+    fn wire_history_normalises_tool_call_ids_per_protocol() {
+        let call = |id: &str| LLMMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_calls: vec![kimi_core::types::ToolCall {
+                id: id.into(),
+                name: "Read".into(),
+                arguments: serde_json::json!({}),
+                extras: None,
+                args_parse_error: None,
+            }],
+            ..LLMMessage::default()
+        };
+        let messages: std::sync::Arc<[LLMMessage]> = std::sync::Arc::from(vec![
+            LLMMessage::user("hi"),
+            call("rs_1|call_abc/1"),
+            LLMMessage::tool_result("rs_1|call_abc/1", "ok"),
+        ]);
+        let params = LLMChatParams {
+            messages,
+            ..Default::default()
+        };
+
+        let chat = NativeHttpLlm::new(
+            config("openai", "https://api.example.com/v1"),
+            String::new(),
+        );
+        let wire = chat.wire_messages(&params);
+        assert_eq!(wire[1].tool_calls[0].id, "rs_1_call_abc_1");
+        assert_eq!(wire[2].tool_call_id.as_deref(), Some("rs_1_call_abc_1"));
+
+        let responses = NativeHttpLlm::new(
+            config("openai_responses", "https://api.example.com/v1"),
+            String::new(),
+        );
+        let wire = responses.wire_messages(&params);
+        assert_eq!(wire[1].tool_calls[0].id, "rs_1");
+        assert_eq!(wire[2].tool_call_id.as_deref(), Some("rs_1"));
+
+        let google = NativeHttpLlm::new(
+            config("google", "https://generativelanguage.googleapis.com/v1beta"),
+            String::new(),
+        );
+        let wire = google.wire_messages(&params);
+        assert_eq!(wire[1].tool_calls[0].id, "rs_1|call_abc/1");
+        assert_eq!(wire[2].tool_call_id.as_deref(), Some("rs_1|call_abc/1"));
+    }
+
+    /// v2 `standard.ts:45`: only the google provider declares
+    /// `media.inlineVideo`; every other provider can take a video solely
+    /// through an upload, so the resolver must not inline it.
+    #[test]
+    fn only_the_google_provider_inlines_video() {
+        for protocol in ["google", "google-genai", "gemini"] {
+            let llm = NativeHttpLlm::new(
+                config(protocol, "https://generativelanguage.googleapis.com/v1beta"),
+                String::new(),
+            );
+            assert!(
+                llm.media_target().unwrap().inline_video,
+                "{protocol} must inline video"
+            );
+        }
+        for protocol in ["openai", "openai_responses", "anthropic"] {
+            let llm = NativeHttpLlm::new(
+                config(protocol, "https://api.example.com/v1"),
+                String::new(),
+            );
+            assert!(
+                !llm.media_target().unwrap().inline_video,
+                "{protocol} must not inline video"
+            );
+        }
+    }
+
     /// Upstream #4091 on the wire: an unconfigured budget sends no field for
     /// OpenAI Chat Completions, Responses, or Google; Anthropic still carries
     /// its required `max_tokens`; Kimi's OpenAI trait sends `window - used`.
@@ -2392,7 +2798,7 @@ mod tests {
             );
             let _ = llm
                 .chat(LLMChatParams {
-                    messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                    messages: Arc::from(vec![kimi_core::types::LLMMessage::user("hi")]),
                     tools: Arc::from(Vec::new()),
                     used_context_tokens: Some(90_000),
                     max_context_tokens: Some(100_000),
@@ -2421,7 +2827,7 @@ mod tests {
         let llm = NativeHttpLlm::new(cfg, String::new());
         let _ = llm
             .chat(LLMChatParams {
-                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                messages: Arc::from(vec![kimi_core::types::LLMMessage::user("hi")]),
                 tools: Arc::from(Vec::new()),
                 used_context_tokens: Some(90_000),
                 max_context_tokens: Some(100_000),
@@ -2441,7 +2847,7 @@ mod tests {
         let llm = NativeHttpLlm::new(cfg, String::new());
         let _ = llm
             .chat(LLMChatParams {
-                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage::user("hi")]),
+                messages: Arc::from(vec![kimi_core::types::LLMMessage::user("hi")]),
                 tools: Arc::from(Vec::new()),
                 used_context_tokens: Some(90_000),
                 max_context_tokens: Some(100_000),
@@ -2712,7 +3118,7 @@ mod tests {
             chat_llm
                 .chat(LLMChatParams {
                     cancel: Some(chat_token),
-                    messages: Arc::from(vec![crate::turn_loop::types::LLMMessage {
+                    messages: Arc::from(vec![kimi_core::types::LLMMessage {
                         role: "user".into(),
                         content: "hi".into(),
                         ..Default::default()
@@ -2852,7 +3258,7 @@ mod tests {
         let result = llm
             .chat(LLMChatParams {
                 cancel: None,
-                messages: Arc::from(vec![crate::turn_loop::types::LLMMessage {
+                messages: Arc::from(vec![kimi_core::types::LLMMessage {
                     role: "user".into(),
                     content: "hi".into(),
                     ..Default::default()
@@ -2864,7 +3270,7 @@ mod tests {
 
         let error = result.expect_err("a 500 must fail the call");
         let typed = error
-            .downcast_ref::<crate::llm::LlmError>()
+            .downcast_ref::<kimi_core::error::LlmError>()
             .expect("the transport must keep its typed error, not only its text");
         assert_eq!(typed.status_code(), Some(500));
         assert_eq!(
@@ -2885,7 +3291,7 @@ mod tests {
     /// Google does not send a `Retry-After` header; the wait rides in the body
     /// as a `google.rpc.RetryInfo` detail, which the transport used to drop
     /// entirely. It must now reach the retry layer as a typed field — the whole
-    /// point of carrying an [`crate::llm::LlmError`] instead of a bare string,
+    /// point of carrying an [`kimi_core::error::LlmError`] instead of a bare string,
     /// since only the field keeps the sub-second precision the rendered
     /// `(retry-after Ns)` suffix rounds away.
     #[tokio::test]
@@ -2921,7 +3327,7 @@ mod tests {
             .expect_err("a 429 must not be Ok");
 
         let typed = err
-            .downcast_ref::<crate::llm::LlmError>()
+            .downcast_ref::<kimi_core::error::LlmError>()
             .expect("the transport must hand the retry layer a typed error, not a bare string");
         assert_eq!(typed.status_code(), Some(429));
         assert_eq!(typed.retry_after(), Some(Duration::from_millis(1500)));
@@ -2967,7 +3373,7 @@ mod tests {
             .await
             .expect_err("a 429 must not be Ok");
         let typed = err
-            .downcast_ref::<crate::llm::LlmError>()
+            .downcast_ref::<kimi_core::error::LlmError>()
             .expect("typed error");
         assert_eq!(typed.retry_after(), Some(Duration::from_secs(30)));
         server.abort();
@@ -3338,7 +3744,7 @@ mod tests {
 
         llm.chat(LLMChatParams {
             cancel: None,
-            messages: Arc::from(vec![crate::turn_loop::types::LLMMessage {
+            messages: Arc::from(vec![kimi_core::types::LLMMessage {
                 role: "user".into(),
                 content: "hi".into(),
                 ..Default::default()

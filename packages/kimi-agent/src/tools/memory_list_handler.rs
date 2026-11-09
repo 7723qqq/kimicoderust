@@ -1,13 +1,3 @@
-//! The `list` action wired to the memory store (v2
-//! `app/memory/tools/memoryTool.ts:411-440`).
-//!
-//! v2 lists **every** scope by default — all projects and all sessions. This
-//! engine's `list_entries_for` defaults to global plus the caller's project,
-//! so the unfiltered case walks three prefixes and merges the results:
-//! `""` (global + current project), `projects/` (every project) and
-//! `sessions/` (every session). With an explicit scope, just v2's prefix is
-//! used. Duplicate paths are removed before rendering.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -21,6 +11,8 @@ use crate::turn_loop::types::ExecutableToolResult;
 
 fn ok_result(text: String) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: text,
@@ -39,7 +31,6 @@ fn parse_scope(value: Option<&Value>) -> Option<MemoryScope> {
     }
 }
 
-/// Run `Memory({ action: "list", scope? })`.
 pub fn list_action(
     context: &MemoryContext,
     args: &Value,
@@ -69,11 +60,12 @@ pub fn list_action(
     ok_result(render_list(&entries, prefix.as_deref()))
 }
 
-/// Convenience entry matching the six existing tool functions' signature.
 pub fn execute_list(workspace_root: &Path, args: &Value) -> ExecutableToolResult {
     match MemoryContext::resolve(workspace_root) {
         Ok(context) => list_action(&context, args, ""),
         Err(error) => ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: error,

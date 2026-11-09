@@ -1,22 +1,11 @@
-//! OpenAI Responses API (`/v1/responses`) adapter.
-//!
-//! Handles OpenAI's structured responses endpoint with streaming SSE accumulation.
-
 use serde_json::{Value, json};
 
+use crate::llm::request_options::RequestOptions;
+use crate::llm::usage::read_openai_cache_fields;
 use crate::llm::wire::{StreamDelta, WireMessage};
 use crate::rpc::types::TokenUsage;
-use crate::turn_loop::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
+use kimi_core::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
 
-/// v2 `OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS`
-/// (`openai-responses/lower.ts:104-116`): the exact set, plus a prefix match so
-/// a dated alias (`o3-mini-2025-01-31`) keeps the role.
-///
-/// The set is v2's verbatim, and that includes its omission of the plain
-/// `gpt-5` / `gpt-5-mini` / `gpt-5.1` ids (only `gpt-5-codex` is listed). Do not
-/// "fix" that here: a member added on the Rust side alone has no v2
-/// counterpart, and the wrong role is what a vendor rejects. Whether v2's set
-/// should gain the gpt-5 family is an upstream decision.
 const DEVELOPER_ROLE_MODELS: &[&str] = &[
     "gpt-4.1",
     "gpt-4.1-mini",
@@ -31,26 +20,10 @@ const DEVELOPER_ROLE_MODELS: &[&str] = &[
     "o4-mini",
 ];
 
-/// The bare model id behind an OpenRouter-style `provider/model` alias.
-///
-/// The Responses body carries the model string verbatim, so a relay alias
-/// reaches the wire — but the *role* is a property of the model family, not of
-/// the relay that fronts it, so the prefix is stripped before matching (the
-/// same one-line normalization `crate::llm::http::google_model_id` applies on
-/// the Google URL path; it lives in the transport module, which the wire
-/// adapters must not depend on).
 fn bare_model_id(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
-/// Whether the model requires the `developer` role in place of `system` in the
-/// Responses API.
-///
-/// A substring test (`contains("o1")`) misfires on any unrelated model whose id
-/// happens to carry those characters, and a vendor rejects the resulting
-/// `developer` role. v2 matches an explicit set plus a `<name>-` prefix — after
-/// lowercasing, which is what keeps `openai/o3-mini` and `zenmux/o1-pro` on
-/// the developer role instead of regressing them to `system`.
 pub fn uses_developer_role(model: &str) -> bool {
     let normalized = bare_model_id(model).to_ascii_lowercase();
     if DEVELOPER_ROLE_MODELS.contains(&normalized.as_str()) {
@@ -61,7 +34,6 @@ pub fn uses_developer_role(model: &str) -> bool {
         .any(|known| normalized.starts_with(&format!("{known}-")))
 }
 
-/// Build an OpenAI `/v1/responses` request payload.
 pub fn build_request_full(
     model: &str,
     messages: &[WireMessage],
@@ -69,10 +41,24 @@ pub fn build_request_full(
     stream: bool,
     reasoning_effort: Option<&str>,
 ) -> Value {
-    /// Rebuild v2 `reasoning` input items from the assistant message's think
-    /// blocks (`openai-responses/lower.ts:176-203`). Consecutive parts that share
-    /// an `encrypted` value coalesce into one item carrying several
-    /// `summary_text` entries, exactly as v2 accumulates them.
+    build_request_full_with_options(
+        model,
+        messages,
+        tools,
+        stream,
+        reasoning_effort,
+        &RequestOptions::default(),
+    )
+}
+
+pub fn build_request_full_with_options(
+    model: &str,
+    messages: &[WireMessage],
+    tools: &[ToolInfo],
+    stream: bool,
+    reasoning_effort: Option<&str>,
+    options: &RequestOptions,
+) -> Value {
     fn reasoning_items(blocks: &[ContentBlock]) -> Vec<Value> {
         let mut items: Vec<Value> = Vec::new();
         let mut current: Option<(Option<&str>, Vec<Value>)> = None;
@@ -85,11 +71,6 @@ pub fn build_request_full(
                 flush_reasoning(&mut items, &mut current);
                 continue;
             };
-            // v2 sends `part.think` verbatim; an empty part contributes no
-            // summary entry, so an attestation-only part (the shape v2's
-            // `output_item.done` handler produces,
-            // `openai-responses/format.ts:557`) rides as an empty summary list
-            // rather than as an empty string on the wire.
             let text = think.as_str();
             let matches = current
                 .as_ref()
@@ -112,10 +93,6 @@ pub fn build_request_full(
         let Some((encrypted, summaries)) = current.take() else {
             return;
         };
-        // An item with neither a summary nor an encrypted payload is nothing
-        // the server can act on — but one carrying only `encrypted_content` is
-        // the whole point of the replay (v2 sends exactly that shape with an
-        // empty `summary`), so it must not be dropped here.
         if summaries.is_empty() && encrypted.is_none() {
             return;
         }
@@ -127,10 +104,18 @@ pub fn build_request_full(
     }
     let mut input: Vec<Value> = Vec::new();
     let dev_role = uses_developer_role(model);
+    let mut instructions: Option<String> = None;
 
-    for m in messages {
+    for (index, m) in messages.iter().enumerate() {
         match m.role.as_str() {
             "system" => {
+                if index == 0 && instructions.is_none() && !m.content.is_empty() {
+                    instructions = Some(m.content.clone());
+                    continue;
+                }
+                if m.content.is_empty() && m.blocks.is_empty() {
+                    continue;
+                }
                 let role = if dev_role { "developer" } else { "system" };
                 input.push(json!({
                     "type": "message",
@@ -139,14 +124,6 @@ pub fn build_request_full(
                 }));
             }
             "assistant" => {
-                // v2 `lowerMessage` (openai-responses/lower.ts:176-203):
-                // reasoning is its own input item, emitted BEFORE the
-                // text message, and consecutive think parts sharing an
-                // `encrypted` value coalesce into one item with several
-                // summaries. Dropping it loses the model's own prior
-                // reasoning on every replay — and without
-                // `encrypted_content` the Responses server cannot
-                // restore reasoning continuity across turns.
                 for item in reasoning_items(&m.blocks) {
                     input.push(item);
                 }
@@ -168,10 +145,15 @@ pub fn build_request_full(
             }
             "tool" => {
                 let call_id = m.tool_call_id.as_deref().unwrap_or("call_default");
+                let output = if m.blocks.is_empty() {
+                    json!(m.content)
+                } else {
+                    json!(function_output_items(&m.blocks))
+                };
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": m.content,
+                    "output": output,
                 }));
             }
             _ => {
@@ -213,14 +195,14 @@ pub fn build_request_full(
         "model": model,
         "input": input,
         "stream": stream,
-        // v2 sends `store: false` on this wire
-        // (`kosong/src/providers/openai-responses.ts:1138`). Without it the
-        // server keeps the response and expects continuity through
-        // `previous_response_id`; this engine never sends one — it replays the
-        // whole history itself — so the stored copy is both unused and a
-        // retention the user did not ask for.
         "store": false,
     });
+    if let Some(instructions) = instructions {
+        req["instructions"] = json!(instructions);
+    }
+    if let Some(seed) = options.seed_for(model, messages) {
+        req["seed"] = json!(seed);
+    }
 
     if !tools.is_empty() {
         let tool_defs: Vec<Value> = tools
@@ -237,25 +219,31 @@ pub fn build_request_full(
         req["tools"] = json!(tool_defs);
     }
 
-    // Same host-level tokens as the chat-completions body: `on` is the
-    // boolean-model sentinel and has no wire meaning, while a declared
-    // `none` / `minimal` / `xhigh` is a real effort the provider accepts.
     if let Some(effort) = crate::llm::effort::wire_reasoning_effort(reasoning_effort) {
-        req["reasoning"] = json!({ "effort": effort });
-        // `reasoning.encrypted_content` is returned ONLY when it is asked for
-        // (v2 `normalizeOpenAIResponsesReasoning`,
-        // `openai-responses/format.ts:346-359`), and it rides the same gate as
-        // `reasoning` itself there. Without this the replayed item below would
-        // carry an `encrypted` value the engine can never have been given.
+        req["reasoning"] = json!({ "effort": effort, "summary": "auto" });
         req["include"] = json!(["reasoning.encrypted_content"]);
+    }
+    if let Some(format) = options.response_format.as_ref() {
+        let mut text = req.get("text").cloned().unwrap_or_else(|| json!({}));
+        text["format"] = format.to_responses_text_value();
+        req["text"] = text;
+    }
+    if let Value::Object(map) = &mut req {
+        if let Some(temperature) = options.temperature {
+            map.entry("temperature".to_string())
+                .or_insert(json!(temperature));
+        }
+        if let Some(top_p) = options.top_p {
+            map.entry("top_p".to_string()).or_insert(json!(top_p));
+        }
+        for (key, value) in &options.extra_params.responses {
+            map.insert(key.clone(), value.clone());
+        }
     }
 
     req
 }
 
-/// [`build_request_full`] plus the session cache key and the per-request
-/// completion cap. v2's Responses trait sends the key as `prompt_cache_key`
-/// and the cap as `max_output_tokens` (`resolveMaxCompletionCap`).
 pub fn build_request_with_budget(
     model: &str,
     messages: &[WireMessage],
@@ -265,7 +253,31 @@ pub fn build_request_with_budget(
     cache_key: Option<&str>,
     max_output_tokens: Option<u32>,
 ) -> Value {
-    let mut req = build_request_full(model, messages, tools, stream, reasoning_effort);
+    build_request_with_budget_and_options(
+        model,
+        messages,
+        tools,
+        stream,
+        reasoning_effort,
+        cache_key,
+        max_output_tokens,
+        &RequestOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_request_with_budget_and_options(
+    model: &str,
+    messages: &[WireMessage],
+    tools: &[ToolInfo],
+    stream: bool,
+    reasoning_effort: Option<&str>,
+    cache_key: Option<&str>,
+    max_output_tokens: Option<u32>,
+    options: &RequestOptions,
+) -> Value {
+    let mut req =
+        build_request_full_with_options(model, messages, tools, stream, reasoning_effort, options);
     if let Some(cache_key) = cache_key.filter(|key| !key.is_empty()) {
         req["prompt_cache_key"] = json!(cache_key);
     }
@@ -275,7 +287,64 @@ pub fn build_request_with_budget(
     req
 }
 
-/// Parse an OpenAI `/v1/responses` non-streaming response.
+const OMITTED_AUDIO_PLACEHOLDER: &str = "(audio omitted: unsupported audio format)";
+const OMITTED_VIDEO_PLACEHOLDER: &str = "(video omitted: not supported by this provider)";
+
+fn function_output_items(blocks: &[ContentBlock]) -> Vec<Value> {
+    let mut items = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text, .. } => {
+                if !text.is_empty() {
+                    items.push(json!({ "type": "input_text", "text": text }));
+                }
+            }
+            ContentBlock::Image {
+                media_type, data, ..
+            } => items.push(json!({
+                "type": "input_image",
+                "image_url": format!("data:{media_type};base64,{data}"),
+            })),
+            ContentBlock::ImageUrl { url, .. } => {
+                items.push(json!({ "type": "input_image", "image_url": url }));
+            }
+            ContentBlock::AudioUrl { url, .. } => items.push(map_audio_url(url).unwrap_or_else(
+                || json!({ "type": "input_text", "text": OMITTED_AUDIO_PLACEHOLDER }),
+            )),
+            ContentBlock::VideoUrl { .. } => {
+                items.push(json!({ "type": "input_text", "text": OMITTED_VIDEO_PLACEHOLDER }));
+            }
+            ContentBlock::MediaRef { kind, .. } => items.push(json!({
+                "type": "input_text",
+                "text": crate::llm::media_resolver::unavailable_text(*kind),
+            })),
+            ContentBlock::Think { .. } => {}
+        }
+    }
+    items
+}
+
+fn map_audio_url(url: &str) -> Option<Value> {
+    if let Some(rest) = url.strip_prefix("data:audio/") {
+        let (meta, data) = rest.split_once(',')?;
+        let subtype = meta.split(';').next()?.to_ascii_lowercase();
+        let ext = match subtype.as_str() {
+            "mp3" | "mpeg" => "mp3",
+            "wav" => "wav",
+            _ => return None,
+        };
+        return Some(json!({
+            "type": "input_file",
+            "file_data": data,
+            "filename": format!("inline.{ext}"),
+        }));
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return Some(json!({ "type": "input_file", "file_url": url }));
+    }
+    None
+}
+
 pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
     let mut content = String::new();
     let mut thinking = Vec::new();
@@ -306,12 +375,6 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_string();
-                    // v2 `parseToolCallArguments`: an absent or empty payload is
-                    // a valid no-args call, and one that will not decode keeps
-                    // its call with the reason attached — the loop answers it
-                    // with an error result. Failing the whole response (what
-                    // this did) turned one corrupt call into a dead turn the
-                    // model could not correct.
                     let (arguments, args_parse_error) = match item.get("arguments") {
                         None => (json!({}), None),
                         Some(Value::String(raw)) => {
@@ -376,21 +439,29 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
     let raw_input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
     let output_tokens = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
 
-    let input_cache_read = u
-        .get("input_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
-
-    let input_tokens = raw_input.saturating_sub(input_cache_read);
+    let split = read_openai_cache_fields(
+        None,
+        None,
+        u.get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u32),
+        u.get("prompt_cache_hit_tokens")
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u32),
+        u.get("prompt_cache_miss_tokens")
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u32),
+        raw_input,
+    );
+    let input_cache_read = split.cached();
+    let input_tokens = split.input_other(raw_input);
 
     let total_tokens = u
         .get("total_tokens")
         .and_then(|x| x.as_u64())
         .map(|t| t as u32)
         .unwrap_or_else(|| {
-            // `input_tokens` is the uncached remainder; the provider total (or
-            // this reconstruction) includes the cached prompt.
             input_tokens
                 .saturating_add(input_cache_read)
                 .saturating_add(output_tokens)
@@ -405,8 +476,6 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
     }
 }
 
-// ── Streaming (SSE) accumulator for /v1/responses ─────────────────────
-
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     content: String,
@@ -417,20 +486,8 @@ pub struct StreamAccumulator {
     tool_calls: Vec<ToolCall>,
     finish_reason: Option<String>,
     usage: TokenUsage,
-    /// Terminal transport-level failure observed mid-stream (truncated
-    /// function-call arguments, `response.failed`). The transport must turn
-    /// this into an `Err`, never into a silently completed empty answer.
     error: Option<String>,
-    /// Tool-call argument fragments the last [`Self::feed`] carried, drained by
-    /// the caller through [`Self::take_tool_call_deltas`].
     pending_tool_calls: Vec<StreamDelta>,
-    /// The `encrypted_content` of the reasoning item the stream closed with
-    /// (v2 `openai-responses/format.ts:553-559`).
-    ///
-    /// It arrives on `response.output_item.done`, not on the summary deltas, so
-    /// the accumulator dropped the item on that event and the Think block
-    /// [`Self::finish`] built always carried `encrypted: None` — a state the
-    /// request's `encrypted_content` replay could never be given.
     reasoning_encrypted: Option<String>,
 }
 
@@ -439,22 +496,13 @@ impl StreamAccumulator {
         Self::default()
     }
 
-    /// Drain the tool-call argument fragments the last [`Self::feed`] carried,
-    /// in arrival order.
     pub fn take_tool_call_deltas(&mut self) -> Vec<StreamDelta> {
         std::mem::take(&mut self.pending_tool_calls)
     }
 
-    /// Feed an SSE event object from the responses stream.
     pub fn feed(&mut self, v: &Value) -> Option<StreamDelta> {
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-        // v2 #4485 (`openai-responses/decode.ts:462-475`): usage is read on
-        // every event, not only the terminal ones — an ordinary event
-        // contributes the nested response's usage when it has one and its
-        // own top-level usage otherwise; the two terminal events read the
-        // nested usage only, so a stale top-level figure cannot overwrite
-        // the terminal accounting.
         let nested_usage = v.get("response").and_then(|resp| resp.get("usage"));
         let usage = if event_type == "response.completed" || event_type == "response.incomplete" {
             nested_usage
@@ -498,9 +546,6 @@ impl StreamAccumulator {
             "response.function_call_arguments.delta" => {
                 if let Some(delta) = v.get("delta").and_then(|d| d.as_str()) {
                     self.current_call_args.push_str(delta);
-                    // The call's id is announced before its arguments stream, so
-                    // it is available here; without it the fragment could not be
-                    // addressed to the tool-call entity.
                     if let Some(id) = self.current_call_id.clone() {
                         self.pending_tool_calls.push(StreamDelta::ToolCall {
                             id,
@@ -512,11 +557,6 @@ impl StreamAccumulator {
             }
             "response.output_item.done" => {
                 self.flush_current_tool_call();
-                // v2 `openai-responses/format.ts:553-559` reads the closed
-                // reasoning item's attestation here and nothing else; a
-                // function_call item contributes only its final arguments,
-                // which the flushed accumulator already holds. An empty string
-                // is treated as no attestation rather than replayed as one.
                 if let Some(item) = v.get("item")
                     && item.get("type").and_then(|t| t.as_str()) == Some("reasoning")
                     && let Some(encrypted) = item
@@ -533,9 +573,6 @@ impl StreamAccumulator {
                     .get("status")
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
-                // Usage is read for every event at the top of `feed` (v2
-                // #4485): terminal events take the nested figure, ordinary
-                // events fall back to their own top-level usage.
             }
             "response.failed" => {
                 let resp = v.get("response").unwrap_or(v);
@@ -545,10 +582,6 @@ impl StreamAccumulator {
                     .and_then(|m| m.as_str())
                     .unwrap_or("response.failed");
                 self.finish_reason = Some(format!("failed: {err_msg}"));
-                // A failed response is a terminal transport failure, not an
-                // empty answer: record it so the transport returns Err even
-                // if a caller feeds the accumulator without the shared
-                // in-band-error pre-check.
                 if self.error.is_none() {
                     self.error = Some(format!("responses stream failed: {err_msg}"));
                 }
@@ -575,11 +608,6 @@ impl StreamAccumulator {
                 .current_call_id
                 .take()
                 .unwrap_or_else(|| format!("call_{}", self.tool_calls.len()));
-            // v2 `parseToolCallArguments`: a truncated argument stream keeps its
-            // call with the reason attached, so the model reads an error result
-            // for it. Failing the whole response (what this did) left the model
-            // nothing to correct and turned one corrupt call into a dead turn.
-            // An empty stream is a valid no-args call.
             let (arguments, args_parse_error) =
                 crate::llm::tool_args::parse_tool_arguments(Some(self.current_call_args.as_str()));
             self.tool_calls.push(ToolCall {
@@ -593,8 +621,6 @@ impl StreamAccumulator {
         }
     }
 
-    /// Terminal failure observed while accumulating, if any. The transport
-    /// must return it as `Err` instead of completing the turn silently.
     pub fn take_error(&mut self) -> Option<String> {
         self.error.take()
     }
@@ -602,11 +628,6 @@ impl StreamAccumulator {
     pub fn finish(mut self) -> LLMChatResponse {
         self.flush_current_tool_call();
 
-        // Fail closed on a provider or stream failure: handing upward a partial
-        // tool set — or an empty answer with a "failed" finish reason — is what
-        // turned provider failures into silent empty completions. A tool call
-        // whose arguments did not decode is not this case: it stays in the
-        // response with its reason, and the loop answers that one call.
         if self.error.is_some() {
             return LLMChatResponse {
                 content: String::new(),
@@ -619,10 +640,6 @@ impl StreamAccumulator {
         }
 
         let mut thinking = Vec::new();
-        // v2 emits a think part carrying only the attestation
-        // (`openai-responses/format.ts:557`, `think: ''`), so the block
-        // exists on the encrypted value alone — the same rule the Anthropic
-        // accumulator applies to its signature (`anthropic.rs:624`).
         if !self.thinking.is_empty() || self.reasoning_encrypted.is_some() {
             thinking.push(ContentBlock::Think {
                 think: self.thinking,
@@ -648,12 +665,56 @@ impl StreamAccumulator {
 mod tests {
     use super::*;
 
-    /// v2 `lowerMessage` rebuilds assistant reasoning as its own `reasoning`
-    /// input item (openai-responses/lower.ts:176-203). Without it the
-    /// model loses its prior reasoning on every replay, and without
-    /// `encrypted_content` the server cannot restore continuity.
-    /// v2 matches an explicit set plus a `<name>-` prefix. A substring test
-    /// claims any model whose id merely contains "o1"/"o3"/"o4".
+    #[test]
+    fn a_tool_result_with_an_image_block_carries_it_in_the_function_output() {
+        let messages = vec![
+            WireMessage::text("user", "look at this"),
+            WireMessage::assistant_tool_calls(
+                "reading",
+                vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "readMedia".into(),
+                    arguments: json!({ "path": "a.png" }),
+                    extras: None,
+                    args_parse_error: None,
+                }],
+            ),
+            WireMessage {
+                role: "tool".into(),
+                content: "<image path=\"a.png\">".into(),
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "<image path=\"a.png\">".into(),
+                        meta: None,
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".into(),
+                        data: "QUJD".into(),
+                        name: None,
+                    },
+                ],
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call_1".into()),
+            },
+        ];
+
+        let req = build_request_full("gpt-5", &messages, &[], false, None);
+        let output = req["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .expect("the tool result must be a function_call_output item");
+        assert_eq!(output["call_id"], "call_1");
+        let parts = output["output"]
+            .as_array()
+            .expect("a tool result with media must carry output items");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], "data:image/png;base64,QUJD");
+    }
+
     #[test]
     fn developer_role_matches_the_v2_model_set_exactly() {
         for model in [
@@ -668,11 +729,8 @@ mod tests {
             "o3-mini",
             "o3-pro",
             "o4-mini",
-            // Dated / regional aliases reach the prefix arm.
             "o3-mini-2025-01-31",
             "O1",
-            // OpenRouter-style `provider/model` aliases: the body carries the
-            // prefix verbatim, the role belongs to the model behind it.
             "openai/o3-mini",
             "zenmux/o1-pro",
             "OpenAI/O4-Mini",
@@ -680,7 +738,6 @@ mod tests {
             assert!(uses_developer_role(model), "{model} needs developer role");
         }
 
-        // A relay model that merely carries those substrings does not.
         for model in [
             "gpt-4o",
             "gpt-4o-mini",
@@ -697,16 +754,9 @@ mod tests {
         }
     }
 
-    /// The replay is only reachable if the engine can actually obtain an
-    /// `encrypted` value, so this drives the real stream path: the
-    /// `response.output_item.done` event a reasoning turn ends with, the
-    /// accumulator's Think block, and the request built from it. The
-    /// `encrypted_content` the request asks for is asserted here too, because
-    /// the field only comes back when it is included.
     #[test]
     fn assistant_thinking_is_replayed_as_a_reasoning_item() {
         let mut acc = StreamAccumulator::new();
-        // Summary text streams as deltas ...
         acc.feed(&json!({
             "type": "response.reasoning_summary_text.delta",
             "delta": "first step"
@@ -715,7 +765,6 @@ mod tests {
             "type": "response.reasoning_summary_text.delta",
             "delta": "second step"
         }));
-        // ... and the attestation only arrives with the closed item.
         acc.feed(&json!({
             "type": "response.output_item.done",
             "item": {
@@ -757,18 +806,13 @@ mod tests {
             tool_call_id: None,
         }];
         let req = build_request_full("o3-mini", &messages, &[], true, Some("high"));
-        // The field is only returned when the request asks for it.
         assert_eq!(req["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(req["store"], false);
         let input = req["input"].as_array().unwrap();
 
-        // Reasoning precedes the text message.
         assert_eq!(input[0]["type"], "reasoning");
         assert_eq!(input[0]["encrypted_content"], "enc-1");
         let summary = input[0]["summary"].as_array().unwrap();
-        // The accumulator holds one reasoning text buffer, so the two
-        // `reasoning_summary_text.delta` events coalesce into a single
-        // summary item rather than one item per delta.
         assert_eq!(summary.len(), 1, "the deltas coalesce into one item");
         assert_eq!(summary[0]["type"], "summary_text");
         assert_eq!(summary[0]["text"], "first stepsecond step");
@@ -777,10 +821,6 @@ mod tests {
         assert_eq!(input[1]["content"], "the answer is 4");
     }
 
-    /// A turn whose reasoning carried no summary text at all — the shape v2
-    /// produces from `response.output_item.done` alone
-    /// (`openai-responses/format.ts:557`) — must still replay the attestation:
-    /// that value is the only thing restoring the model's reasoning continuity.
     #[test]
     fn an_attestation_only_turn_still_replays_its_reasoning_item() {
         let mut acc = StreamAccumulator::new();
@@ -832,7 +872,12 @@ mod tests {
 
         let req = build_request_full("gpt-4o", &messages, &tools, true, Some("low"));
         assert_eq!(req["model"], "gpt-4o");
-        assert_eq!(req["input"].as_array().unwrap().len(), 2);
+        assert_eq!(req["instructions"], "Be helpful");
+        assert_eq!(
+            req["input"].as_array().unwrap().len(),
+            1,
+            "the system turn lives in `instructions`, not `input`"
+        );
         assert_eq!(req["tools"].as_array().unwrap().len(), 1);
         assert_eq!(req["reasoning"]["effort"], "low");
 
@@ -860,8 +905,6 @@ mod tests {
     fn test_build_request_omits_host_level_efforts() {
         let messages = vec![WireMessage::text("user", "hi")];
 
-        // `on` is the boolean-model sentinel, not a wire value; `off` means
-        // thinking is disabled. Neither belongs in `reasoning.effort`.
         for effort in ["on", "off", ""] {
             let req = build_request_full("gpt-5", &messages, &[], true, Some(effort));
             assert!(
@@ -913,29 +956,20 @@ mod tests {
         assert_eq!(resp.thinking.len(), 1);
     }
 
-    /// v2 #4485's other half: an ordinary Responses event contributes its
-    /// own top-level usage when the nested response carries none, while a
-    /// terminal event reads the nested figure only — a stale top-level
-    /// `usage` on the completed event must not overwrite the accounting.
     #[test]
     fn ordinary_events_fall_back_to_top_level_usage_terminal_events_do_not() {
         let mut acc = StreamAccumulator::new();
-        // Ordinary delta with no nested response: the top-level usage counts.
         acc.feed(&json!({
             "type": "response.output_text.delta",
             "delta": "Hello",
             "usage": { "input_tokens": 7, "output_tokens": 1, "total_tokens": 8 }
         }));
-        // Ordinary delta WITH a nested usage: the nested figure wins over
-        // its own top-level one (v2 `responseUsage ?? event.usage`).
         acc.feed(&json!({
             "type": "response.output_text.delta",
             "delta": " world",
             "response": { "usage": { "input_tokens": 9, "output_tokens": 2, "total_tokens": 11 } },
             "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 }
         }));
-        // A terminal event carrying only a top-level figure contributes
-        // nothing: the ordinary events' accounting survives it.
         acc.feed(&json!({
             "type": "response.completed",
             "usage": { "input_tokens": 100, "output_tokens": 50, "total_tokens": 150 }
@@ -1009,7 +1043,6 @@ mod tests {
                 "name": "Bash"
             }
         }));
-        // Stream cut mid-arguments: `{"command": "rm -rf /tmp/x` never parses.
         acc.feed(&json!({
             "type": "response.function_call_arguments.delta",
             "delta": "{\"command\": \"rm -rf /tmp/x"
@@ -1096,22 +1129,20 @@ mod tests {
         let msgs = vec![
             WireMessage::text("system", "You are an expert coder."),
             WireMessage::text("user", "Hello o3"),
+            WireMessage::text("system", "Mid-conversation reminder."),
         ];
         let req_o3 = build_request_full("o3-mini", &msgs, &[], true, None);
+        assert_eq!(req_o3["instructions"], "You are an expert coder.");
         let input_o3 = req_o3["input"].as_array().unwrap();
-        // o1/o3 model assertion: the system role must map to developer and
-        // carry type: message
-        assert_eq!(input_o3[0]["type"], "message");
-        assert_eq!(input_o3[0]["role"], "developer");
-        assert_eq!(input_o3[0]["content"], "You are an expert coder.");
+        assert_eq!(input_o3.len(), 2);
         assert_eq!(input_o3[1]["type"], "message");
-        assert_eq!(input_o3[1]["role"], "user");
+        assert_eq!(input_o3[1]["role"], "developer");
+        assert_eq!(input_o3[1]["content"], "Mid-conversation reminder.");
 
-        // An ordinary model keeps role: system
         let req_4o = build_request_full("gpt-4o", &msgs, &[], true, None);
         let input_4o = req_4o["input"].as_array().unwrap();
-        assert_eq!(input_4o[0]["type"], "message");
-        assert_eq!(input_4o[0]["role"], "system");
+        assert_eq!(input_4o[1]["type"], "message");
+        assert_eq!(input_4o[1]["role"], "system");
     }
 
     #[test]
@@ -1125,9 +1156,59 @@ mod tests {
         });
         let parsed = parse_usage(Some(&usage));
         assert_eq!(parsed.input_cache_read, 800);
-        // The key assertion: uncached input tokens must subtract the cached
-        // portion (1000 - 800 = 200)
         assert_eq!(parsed.input_tokens, 200);
         assert_eq!(parsed.output_tokens, 50);
+    }
+
+    #[test]
+    fn test_responses_usage_splits_a_deepseek_cache_hit_and_miss() {
+        let usage = json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "prompt_cache_hit_tokens": 800,
+            "prompt_cache_miss_tokens": 200
+        });
+        let parsed = parse_usage(Some(&usage));
+        assert_eq!(parsed.input_cache_read, 800);
+        assert_eq!(parsed.input_tokens, 200);
+        assert_eq!(parsed.output_tokens, 50);
+    }
+
+    #[test]
+    fn test_the_system_prompt_is_instructions_not_an_input_item() {
+        let msgs = vec![
+            WireMessage::text("system", "be brief"),
+            WireMessage::text("user", "hi"),
+            WireMessage::text("system", ""),
+        ];
+        let req = build_request_full("gpt-5", &msgs, &[], true, None);
+        assert_eq!(req["instructions"], "be brief");
+        let input = req["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1, "only the user turn remains");
+        assert_eq!(input[0]["role"], "user");
+        assert!(
+            input
+                .iter()
+                .all(|item| item["role"].as_str() != Some("system")),
+            "the system prompt must not be duplicated as an input item"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_requests_the_auto_summary() {
+        let msgs = vec![WireMessage::text("user", "hi")];
+        let req = build_request_full("gpt-5", &msgs, &[], true, Some("high"));
+        assert_eq!(
+            req["reasoning"],
+            json!({ "effort": "high", "summary": "auto" })
+        );
+        assert_eq!(req["include"], json!(["reasoning.encrypted_content"]));
+
+        let plain = build_request_full("gpt-5", &msgs, &[], true, None);
+        assert!(
+            plain.get("reasoning").is_none(),
+            "no effort, no reasoning block"
+        );
+        assert!(plain.get("include").is_none());
     }
 }

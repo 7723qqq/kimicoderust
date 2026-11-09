@@ -1,5 +1,5 @@
 use super::*;
-use crate::tools::tower::types::{TowerCompleteResult, TowerInboxSent};
+use crate::tools::tower::types::{TowerAgentKind, TowerCompleteResult, TowerInboxSent};
 
 fn completion_input(mission: &TowerMission, report: &str) -> TowerSendInput {
     TowerSendInput {
@@ -98,7 +98,7 @@ impl TowerStore {
         if report.trim().is_empty() {
             return Err("TowerComplete report must not be empty".into());
         }
-        let (_, caller, recovered_at) = self.resolve_agent_operation(caller_agent_id).await?;
+        let (_, caller, recovered_at, _) = self.resolve_agent_operation(caller_agent_id).await?;
         self.complete_resolved(&caller, report.trim(), recovered_at)
             .await
     }
@@ -201,9 +201,16 @@ impl TowerStore {
         };
 
         let Some(mission) = mission else {
-            if recovered_at.is_none() {
+            let worker = caller
+                .as_ref()
+                .is_some_and(|agent| agent.kind == TowerAgentKind::Worker);
+            let mission_id = caller.as_ref().and_then(|agent| agent.mission_id.clone());
+            if !(worker && recovered_at.is_some()) {
+                if worker && let Some(mission_id) = mission_id {
+                    return Err(format!("unknown mission \"{mission_id}\""));
+                }
                 return Err(format!(
-                    "agent \"{caller_name}\" has no existing mission to complete"
+                    "agent \"{caller_name}\" cannot use TowerComplete — only the worker who owns a mission can complete it"
                 ));
             }
             let input = recovered_completion_input(report);

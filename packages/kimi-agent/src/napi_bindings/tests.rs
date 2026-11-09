@@ -27,6 +27,10 @@ fn js_native_llm() -> JsNativeLlmConfig {
         adaptive_thinking: None,
         reasoning_key: None,
         off_effort: None,
+        response_format: None,
+        sampling: None,
+        determinism: None,
+        extra_params: None,
     }
 }
 

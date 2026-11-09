@@ -146,9 +146,19 @@ async fn summary_request_reports_used_context_tokens() {
     let llm = SummarizerMockLlm::ok("summary");
     let window = 1_000_000u32;
 
-    let summary = summarize_with_llm_budgeted(&history, &llm, None, None, None, Some(window))
-        .await
-        .expect("summary");
+    let summary = summarize_with_llm_budgeted(
+        &history,
+        &llm,
+        None,
+        None,
+        None,
+        Some(window),
+        "",
+        None,
+        None,
+    )
+    .await
+    .expect("summary");
     assert_eq!(summary.summary, "summary");
 
     let expected_estimate = summarization_prompt(&history, None)
@@ -164,7 +174,7 @@ async fn summary_request_reports_used_context_tokens() {
 
     // No window → no estimate (the clamp cannot engage without both).
     let llm = SummarizerMockLlm::ok("summary");
-    summarize_with_llm_budgeted(&history, &llm, None, None, None, None)
+    summarize_with_llm_budgeted(&history, &llm, None, None, None, None, "", None, None)
         .await
         .expect("summary");
     assert_eq!(*llm.last_used_context_tokens.lock().unwrap(), None);
@@ -281,24 +291,22 @@ fn test_estimate_tokens_ascii_boundaries_and_unicode() {
 #[test]
 fn test_estimate_tokens_for_json() {
     assert_eq!(estimate_tokens_for_json(""), 0);
-    // 1 token base -> ceil(1 * 1.3) = 2
-    assert_eq!(estimate_tokens_for_json("abcd"), 2);
-    // 2 tokens base -> ceil(2 * 1.3) = 3
-    assert_eq!(estimate_tokens_for_json("abcdefgh"), 3);
-    // 3 tokens base -> ceil(3 * 1.3) = 4
-    assert_eq!(estimate_tokens_for_json("abcdefghi"), 4);
-    // 4 tokens base (15-16 ASCII chars) -> ceil(4 * 1.3) = 6
-    assert_eq!(estimate_tokens_for_json("{\"key\":\"value\"}"), 6);
-    // 5 tokens base (17 ASCII chars) -> ceil(5 * 1.3) = 7
-    assert_eq!(estimate_tokens_for_json("{\"path\":\"/a.txt\"}"), 7);
-    // JSON with CJK: 10 ASCII (3 tokens) + 2 CJK (2 tokens) = 5 tokens -> ceil(5 * 1.3) = 7
-    assert_eq!(estimate_tokens_for_json("{\"name\":\"张三\"}"), 7);
+    // v2 uses the plain character heuristic for `JSON.stringify(...)`.
+    assert_eq!(estimate_tokens_for_json("abcd"), 1);
+    assert_eq!(estimate_tokens_for_json("abcdefgh"), 2);
+    assert_eq!(estimate_tokens_for_json("abcdefghi"), 3);
+    // 15 ASCII chars -> ceil(15 / 4) = 4
+    assert_eq!(estimate_tokens_for_json("{\"key\":\"value\"}"), 4);
+    // 17 ASCII chars -> ceil(17 / 4) = 5
+    assert_eq!(estimate_tokens_for_json("{\"path\":\"/a.txt\"}"), 5);
+    // JSON with CJK: 11 ASCII (3 tokens) + 2 CJK (2 tokens) = 5 tokens
+    assert_eq!(estimate_tokens_for_json("{\"name\":\"张三\"}"), 5);
 }
 
 #[test]
 fn test_estimate_message_tokens_multimodal_content_blocks() {
-    let text_msg = msg("user", "12345678"); // 8 chars -> 2 tokens
-    assert_eq!(estimate_message_tokens(&text_msg), 2);
+    let text_msg = msg("user", "12345678"); // role 1 + 2 tokens
+    assert_eq!(estimate_message_tokens(&text_msg), 1 + 2);
 
     // ContentBlock::Text
     let mut m_text = msg("user", "");
@@ -306,7 +314,7 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
         text: "123456789012".into(), // 12 chars -> 3 tokens
         meta: None,
     });
-    assert_eq!(estimate_message_tokens(&m_text), 3);
+    assert_eq!(estimate_message_tokens(&m_text), 1 + 3);
 
     // ContentBlock::Think
     let mut m_think = msg("assistant", "");
@@ -317,7 +325,19 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
         reasoning_key: None,
         details_summary: None,
     });
-    assert_eq!(estimate_message_tokens(&m_think), 4);
+    assert_eq!(estimate_message_tokens(&m_think), 3 + 4);
+
+    // A details-derived summary lives in `details_summary` with `think` empty
+    // in Rust; it is still replayed through `reasoning_details`, so it counts.
+    let mut m_details = msg("assistant", "");
+    m_details.blocks.push(ContentBlock::Think {
+        think: String::new(),
+        encrypted: None,
+        details_index: Some(0),
+        reasoning_key: None,
+        details_summary: Some("summarized reasoning".into()), // 20 chars -> 5
+    });
+    assert_eq!(estimate_message_tokens(&m_details), 3 + 5);
 
     // Multimodal media blocks: all count MEDIA_TOKEN_ESTIMATE (2000)
     let mut m_img = msg("user", "");
@@ -326,7 +346,7 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
         data: "base64data".into(),
         name: None,
     });
-    assert_eq!(estimate_message_tokens(&m_img), MEDIA_TOKEN_ESTIMATE);
+    assert_eq!(estimate_message_tokens(&m_img), 1 + MEDIA_TOKEN_ESTIMATE);
 
     let mut m_img_url = msg("user", "");
     m_img_url.blocks.push(ContentBlock::ImageUrl {
@@ -334,7 +354,10 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
         id: None,
         name: None,
     });
-    assert_eq!(estimate_message_tokens(&m_img_url), MEDIA_TOKEN_ESTIMATE);
+    assert_eq!(
+        estimate_message_tokens(&m_img_url),
+        1 + MEDIA_TOKEN_ESTIMATE
+    );
 
     let mut m_audio = msg("user", "");
     m_audio.blocks.push(ContentBlock::AudioUrl {
@@ -342,7 +365,7 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
         id: Some("a1".into()),
         name: None,
     });
-    assert_eq!(estimate_message_tokens(&m_audio), MEDIA_TOKEN_ESTIMATE);
+    assert_eq!(estimate_message_tokens(&m_audio), 1 + MEDIA_TOKEN_ESTIMATE);
 
     let mut m_video = msg("user", "");
     m_video.blocks.push(ContentBlock::VideoUrl {
@@ -350,10 +373,10 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
         id: None,
         name: None,
     });
-    assert_eq!(estimate_message_tokens(&m_video), MEDIA_TOKEN_ESTIMATE);
+    assert_eq!(estimate_message_tokens(&m_video), 1 + MEDIA_TOKEN_ESTIMATE);
 
-    // Additive combination: content + text block + think block + image block
-    let mut m_combo = msg("user", "abcd"); // 1 token
+    // Additive combination: role + content + text block + think block + image block
+    let mut m_combo = msg("user", "abcd"); // role 1 + content 1
     m_combo.blocks.push(ContentBlock::Text {
         text: "efgh".into(),
         meta: None,
@@ -370,41 +393,41 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
         id: None,
         name: None,
     });
-    assert_eq!(estimate_message_tokens(&m_combo), 1 + 1 + 1 + 2000);
+    assert_eq!(estimate_message_tokens(&m_combo), 1 + 1 + 1 + 1 + 2000);
 }
 
 #[test]
 fn test_estimate_message_tokens_tool_calls_and_results_exact() {
-    let mut m = msg("assistant", "hello world!"); // 12 chars -> 3 tokens
-    // tool_call 1: name "read" (4 chars -> 1 token), args {"path":"/a.txt"} (17 chars -> 5 tokens -> ceil(5*1.3) = 7 tokens)
-    // Subtotal = 1 + 7 = 8 tokens.
+    let mut m = msg("assistant", "hello world!"); // role 3 + 12 chars -> 3 tokens
+    // tool_call 1: name "read" (4 chars -> 1 token), args {"path":"/a.txt"} (17 chars -> 5 tokens)
+    // Subtotal = 3 + 3 + 1 + 5 = 12 tokens.
     m.tool_calls.push(tool_call(
         "tc1",
         "read",
         serde_json::json!({ "path": "/a.txt" }),
     ));
-    assert_eq!(estimate_message_tokens(&m), 3 + 8);
+    assert_eq!(estimate_message_tokens(&m), 3 + 3 + 1 + 5);
 
-    // tool_call 2: name "bash" (4 chars -> 1 token), args {"cmd":"ls"} (10 chars -> 3 tokens -> ceil(3*1.3) = 4 tokens)
-    // Subtotal = 1 + 4 = 5 tokens.
+    // tool_call 2: name "bash" (4 chars -> 1 token), args {"cmd":"ls"} (11 chars -> 3 tokens)
+    // Subtotal = 1 + 3 = 4 tokens.
     m.tool_calls
         .push(tool_call("tc2", "bash", serde_json::json!({ "cmd": "ls" })));
-    assert_eq!(estimate_message_tokens(&m), 3 + 8 + 5);
+    assert_eq!(estimate_message_tokens(&m), 3 + 3 + 1 + 5 + 1 + 3);
 
     // Tool result message with tool_call_id
-    let mut tool_msg = msg("tool", "file content"); // 12 chars -> 3 tokens
+    let mut tool_msg = msg("tool", "file content"); // role 1 + 12 chars -> 3 tokens
     tool_msg.tool_call_id = Some("tc1_unique_id".into()); // 13 chars -> 4 tokens
-    assert_eq!(estimate_message_tokens(&tool_msg), 3 + 4);
+    assert_eq!(estimate_message_tokens(&tool_msg), 1 + 3 + 4);
 }
 
 #[test]
 fn test_estimate_messages_tokens_empty_and_accumulated() {
     assert_eq!(estimate_messages_tokens(&[]), 0);
 
-    let m1 = msg("user", "1234"); // 1 token
-    let m2 = msg("assistant", "12345678"); // 2 tokens
-    let m3 = msg("user", "123456789012"); // 3 tokens
-    assert_eq!(estimate_messages_tokens(&[m1, m2, m3]), 6);
+    let m1 = msg("user", "1234"); // role 1 + 1 token
+    let m2 = msg("assistant", "12345678"); // role 3 + 2 tokens
+    let m3 = msg("user", "123456789012"); // role 1 + 3 tokens
+    assert_eq!(estimate_messages_tokens(&[m1, m2, m3]), 2 + 5 + 4);
 }
 
 #[test]
@@ -597,24 +620,25 @@ fn test_compact_preserves_system_replaces_middle_with_exact_placeholder_and_tail
 #[test]
 fn test_budget_boundary_exact() {
     let config = small_config(1_000);
-    // Each message is 16 chars = 4 tokens.
-    // 211 messages * 4 tokens = 844 tokens < 850 threshold -> no compaction.
+    // System costs 6 (role 2 + content 4); each user/assistant pair costs
+    // 5 (role 1 + content 4) + 7 (role 3 + content 4) = 12.
+    // 70 pairs: 6 + 840 = 846 tokens < 850 threshold -> no compaction.
     let mut messages = vec![msg("system", "sys-16chars-pad!")];
-    for i in 0..210 {
+    for i in 0..140 {
         let role = if i % 2 == 0 { "user" } else { "assistant" };
         messages.push(msg(role, &format!("msg-{:012}", i)));
     }
-    assert_eq!(estimate_messages_tokens(&messages), 844);
+    assert_eq!(estimate_messages_tokens(&messages), 846);
     assert!(!should_compact(
         estimate_messages_tokens(&messages),
         &config
     ));
     assert_messages_eq(&compact_messages(&messages, &config), &messages);
 
-    // Add 2 more messages: 213 messages * 4 tokens = 852 tokens >= 850 threshold -> triggers compaction.
-    messages.push(msg("user", "msg-000000000210"));
-    messages.push(msg("assistant", "msg-000000000211"));
-    assert_eq!(estimate_messages_tokens(&messages), 852);
+    // Add one more pair: 6 + 852 = 858 tokens >= 850 threshold -> triggers compaction.
+    messages.push(msg("user", "msg-000000000140"));
+    messages.push(msg("assistant", "msg-000000000141"));
+    assert_eq!(estimate_messages_tokens(&messages), 858);
     assert!(should_compact(estimate_messages_tokens(&messages), &config));
 
     let count = compute_compact_count(&messages, &config);
@@ -820,24 +844,23 @@ fn test_fit_compact_count_to_window_shrinks_safely() {
     zero_cfg.max_context_tokens = 0;
     assert_eq!(fit_compact_count_to_window(&[], 5, &zero_cfg), 5);
 
-    // 8 messages, each 4 chars = 1 token
+    // Estimates count role + content: system 3, user 2, assistant 4.
     let messages = vec![
-        msg("system", "s000"),    // 1 token
-        msg("user", "u001"),      // 1 token
-        msg("assistant", "a002"), // 1 token (can split after index 2)
-        msg("user", "u003"),      // 1 token
-        msg("assistant", "a004"), // 1 token (can split after index 4)
-        msg("user", "u005"),      // 1 token
-        msg("assistant", "a006"), // 1 token (can split after index 6)
-        msg("user", "u007"),      // 1 token
+        msg("system", "s000"),    // 3 tokens
+        msg("user", "u001"),      // 2 tokens
+        msg("assistant", "a002"), // 4 tokens (can split after index 2)
+        msg("user", "u003"),      // 2 tokens
+        msg("assistant", "a004"), // 4 tokens (can split after index 4)
+        msg("user", "u005"),      // 2 tokens
+        msg("assistant", "a006"), // 4 tokens (can split after index 6)
+        msg("user", "u007"),      // 2 tokens
     ];
 
-    // Candidate count 7 has 7 tokens > max_context_tokens 5.
-    // It must shrink backwards:
-    // n = 6: tokens = 6 > 5.
-    // n = 5: tokens = 5 <= 5. Can split after index 4 (assistant a004)? Yes!
-    // Returns 5.
-    assert_eq!(fit_compact_count_to_window(&messages, 7, &config), 5);
+    // Candidate count 7 has 21 tokens > max_context_tokens 5.
+    // It must shrink backwards; only a split after a non-user message is
+    // safe, so n = 5 (15 tokens) and n = 3 (9 tokens) are still over budget,
+    // and n = 2 cannot split after a user. n = 1 leaves 3 tokens <= 5.
+    assert_eq!(fit_compact_count_to_window(&messages, 7, &config), 1);
 }
 
 #[test]
@@ -1218,6 +1241,15 @@ struct SummarizerMockLlm {
     fail_times: u32,
     retryable: bool,
     fail_message: String,
+    /// The first `empty_times` calls answer `Ok` with empty content and a
+    /// `stop` finish reason (v2's empty-summary recovery path).
+    empty_times: u32,
+    /// The first `truncated_times` calls answer `Ok` with text and the
+    /// provider's `length` finish reason (v2's truncated-summary recovery).
+    truncated_times: u32,
+    /// Finish reason every `Ok` answer carries (`stop` unless a test drives the
+    /// filtered branch).
+    finish_reason: &'static str,
     calls: std::sync::atomic::AtomicU32,
     last_user_content: std::sync::Mutex<Option<String>>,
     last_used_context_tokens: std::sync::Mutex<Option<u32>>,
@@ -1232,10 +1264,41 @@ impl SummarizerMockLlm {
             fail_times: 0,
             retryable: false,
             fail_message: "summarizer unavailable".into(),
+            empty_times: 0,
+            truncated_times: 0,
+            finish_reason: "stop",
             calls: std::sync::atomic::AtomicU32::new(0),
             last_user_content: std::sync::Mutex::new(None),
             last_used_context_tokens: std::sync::Mutex::new(None),
             last_max_context_tokens: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The first `empty_times` calls answer with empty content, then calls
+    /// succeed with `content`.
+    fn empty_then_ok(content: &str, empty_times: u32) -> Self {
+        Self {
+            empty_times,
+            ..Self::ok(content)
+        }
+    }
+
+    /// The first `truncated_times` calls answer with text marked as truncated
+    /// by the provider (`finish_reason: "length"`), then calls succeed.
+    fn truncated_then_ok(content: &str, truncated_times: u32) -> Self {
+        Self {
+            truncated_times,
+            ..Self::ok(content)
+        }
+    }
+
+    /// Every call answers with empty content and a filtered finish reason (v2
+    /// constructs this as a non-retryable error instead of a recovery).
+    fn filtered_empty() -> Self {
+        Self {
+            content: String::new(),
+            finish_reason: "content_filter",
+            ..Self::ok("")
         }
     }
 
@@ -1246,10 +1309,7 @@ impl SummarizerMockLlm {
             fail_times: u32::MAX,
             retryable: false,
             fail_message: "summarizer unavailable".into(),
-            calls: std::sync::atomic::AtomicU32::new(0),
-            last_user_content: std::sync::Mutex::new(None),
-            last_used_context_tokens: std::sync::Mutex::new(None),
-            last_max_context_tokens: std::sync::Mutex::new(None),
+            ..Self::ok("")
         }
     }
 
@@ -1257,14 +1317,9 @@ impl SummarizerMockLlm {
     /// calls succeed with `content`.
     fn transient(content: &str, fail_times: u32) -> Self {
         Self {
-            content: content.into(),
-            fail_times,
             retryable: true,
-            fail_message: "summarizer unavailable".into(),
-            calls: std::sync::atomic::AtomicU32::new(0),
-            last_user_content: std::sync::Mutex::new(None),
-            last_used_context_tokens: std::sync::Mutex::new(None),
-            last_max_context_tokens: std::sync::Mutex::new(None),
+            fail_times,
+            ..Self::ok(content)
         }
     }
 
@@ -1273,14 +1328,10 @@ impl SummarizerMockLlm {
     /// calls succeed with `content`.
     fn overflow_then_ok(content: &str, fail_times: u32) -> Self {
         Self {
-            content: content.into(),
             fail_times,
             retryable: false,
             fail_message: "llm http status 400 Bad Request: context_length_exceeded".into(),
-            calls: std::sync::atomic::AtomicU32::new(0),
-            last_user_content: std::sync::Mutex::new(None),
-            last_used_context_tokens: std::sync::Mutex::new(None),
-            last_max_context_tokens: std::sync::Mutex::new(None),
+            ..Self::ok(content)
         }
     }
 
@@ -1322,6 +1373,9 @@ impl LLM for SummarizerMockLlm {
         let fail_message = self.fail_message.clone();
         let attempt = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let fails = attempt <= self.fail_times;
+        let empty = attempt <= self.empty_times;
+        let truncated = attempt <= self.truncated_times;
+        let finish_reason = self.finish_reason;
         let user_content = params
             .messages
             .iter()
@@ -1343,12 +1397,30 @@ impl LLM for SummarizerMockLlm {
         Box::pin(async move {
             if fails {
                 Err(fail_message.into())
+            } else if empty {
+                Ok(LLMChatResponse {
+                    content: String::new(),
+                    thinking: vec![],
+                    tool_calls: vec![],
+                    finish_reason: Some(finish_reason.into()),
+                    usage: TokenUsage::default(),
+                    timing: None,
+                })
+            } else if truncated {
+                Ok(LLMChatResponse {
+                    content: "partial summary cut off mid-".into(),
+                    thinking: vec![],
+                    tool_calls: vec![],
+                    finish_reason: Some("length".into()),
+                    usage: TokenUsage::default(),
+                    timing: None,
+                })
             } else {
                 Ok(LLMChatResponse {
                     content,
                     thinking: vec![],
                     tool_calls: vec![],
-                    finish_reason: Some("stop".into()),
+                    finish_reason: Some(finish_reason.into()),
                     usage: TokenUsage::default(),
                     timing: None,
                 })
@@ -1411,6 +1483,126 @@ async fn test_summarize_with_llm_returns_error_on_error() {
     assert!(result.is_err());
 }
 
+/// v2 `collectSummary` + `compactionGeneration`: a truncated answer is not a
+/// summary even though it has text; the round drops the oldest message and
+/// retries, and the retry no longer carries it.
+#[tokio::test]
+async fn test_truncated_summary_drops_the_oldest_message_and_retries() {
+    let omitted = vec![
+        msg("user", "oldest-user"),
+        msg("assistant", "assistant-1"),
+        msg("user", "newest-user"),
+    ];
+    let llm = SummarizerMockLlm::truncated_then_ok("Complete summary.", 1);
+    let summary = summarize_with_llm(&omitted, &llm, None, None, None)
+        .await
+        .expect("the retry succeeds");
+    assert_eq!(summary, "Complete summary.");
+    assert_eq!(llm.call_count(), 2);
+    let retry_prompt = llm.last_user_content();
+    assert!(
+        !retry_prompt.contains("oldest-user"),
+        "the retry must drop the oldest message: {retry_prompt}"
+    );
+    assert!(retry_prompt.contains("newest-user"));
+}
+
+/// A truncated answer with nothing left to drop fails with the truncation
+/// error instead of accepting the partial text.
+#[tokio::test]
+async fn test_truncated_summary_fails_when_no_message_can_be_dropped() {
+    let omitted = vec![msg("assistant", "only-assistant")];
+    let llm = SummarizerMockLlm::truncated_then_ok("partial", u32::MAX);
+    let result = summarize_with_llm(&omitted, &llm, None, None, None).await;
+    assert!(matches!(result, Err(CompactionError::Truncated)));
+    assert_eq!(llm.call_count(), 1);
+}
+
+/// v2's empty-summary recovery: drop the oldest message and retry, and the
+/// drop must reach the next request (the earlier code only rebound a local).
+#[tokio::test]
+async fn test_empty_summary_retry_drops_the_oldest_message() {
+    let omitted = vec![
+        msg("user", "oldest-user"),
+        msg("assistant", "assistant-1"),
+        msg("user", "newest-user"),
+    ];
+    let llm = SummarizerMockLlm::empty_then_ok("Complete summary.", 1);
+    let summary = summarize_with_llm(&omitted, &llm, None, None, None)
+        .await
+        .expect("the retry succeeds");
+    assert_eq!(summary, "Complete summary.");
+    assert_eq!(llm.call_count(), 2);
+    let retry_prompt = llm.last_user_content();
+    assert!(
+        !retry_prompt.contains("oldest-user"),
+        "the retry must drop the oldest message: {retry_prompt}"
+    );
+}
+
+/// v2 constructs an empty *filtered* answer as a non-retryable error: it fails
+/// the round instead of dropping a message.
+#[tokio::test]
+async fn test_filtered_empty_summary_fails_without_dropping_history() {
+    let omitted = vec![
+        msg("user", "user-1"),
+        msg("assistant", "assistant-1"),
+        msg("user", "user-2"),
+    ];
+    let llm = SummarizerMockLlm::filtered_empty();
+    let result = summarize_with_llm(&omitted, &llm, None, None, None).await;
+    assert!(matches!(result, Err(CompactionError::EmptySummary)));
+    assert_eq!(llm.call_count(), 1);
+}
+
+/// v2 `snipLargeToolResults`: a large tool result is replaced by its first and
+/// last 40 lines; short results, other roles and an already-snipped result
+/// pass through untouched.
+#[test]
+fn test_snip_large_tool_results_keeps_head_and_tail() {
+    let body: Vec<String> = (1..=200).map(|line| format!("line-{line}")).collect();
+    let large = body.join("\n");
+    let messages = vec![
+        msg("user", "hello"),
+        msg("tool", &large),
+        msg("assistant", "done"),
+    ];
+    let snipped = snip_large_tool_results(&messages);
+    assert_eq!(snipped.len(), 3);
+    assert_eq!(snipped[0].content, "hello");
+    assert_eq!(snipped[2].content, "done");
+    let tool = &snipped[1];
+    assert!(
+        tool.content
+            .starts_with("[snipped tool result — 120 lines omitted"),
+        "{}",
+        tool.content
+    );
+    assert!(tool.content.contains("line-1\n"));
+    assert!(tool.content.contains("\nline-40\n"));
+    assert!(tool.content.contains("\nline-161\n"));
+    assert!(tool.content.ends_with("line-200"));
+    assert!(
+        !tool.content.contains("line-100"),
+        "the middle must be cut: {}",
+        tool.content
+    );
+
+    // A short result is untouched.
+    let short = vec![msg("tool", "short output")];
+    assert!(matches!(
+        snip_large_tool_results(&short),
+        std::borrow::Cow::Borrowed(_)
+    ));
+
+    // An already-snipped result is never snipped twice.
+    let already = vec![msg("tool", &tool.content)];
+    assert!(matches!(
+        snip_large_tool_results(&already),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
 #[tokio::test]
 async fn test_summarization_prompt_includes_instruction_and_transcript() {
     let omitted = vec![msg("user", "hello"), msg("assistant", "hi there")];
@@ -1449,8 +1641,8 @@ async fn test_summarization_prompt_uses_the_v2_handoff_template_when_none() {
     // The two demands the retired one-liner omitted and the observed
     // summaries then omitted too: exact history, and a forward plan.
     assert!(
-        prompt[1].content.contains("the exact file paths touched")
-            && prompt[1].content.contains("The forward plan"),
+        prompt[1].content.contains("exact file paths touched")
+            && prompt[1].content.contains("## Next steps"),
         "the v2 handoff template must ship in full"
     );
 }
@@ -1466,7 +1658,7 @@ async fn test_a_caller_instruction_lands_inside_the_template() {
         "v2 appends the caller's instruction inside the template"
     );
     assert!(
-        rendered.contains("The forward plan"),
+        rendered.contains("## Next steps"),
         "a caller instruction must not replace the template"
     );
     // A blank instruction is v2's `custom.length > 0` guard: no empty block.
@@ -1522,7 +1714,7 @@ async fn test_force_compact_with_summary_uses_llm_summary() {
     assert!(
         summary_message
             .content
-            .ends_with("LLM summary of the conversation.")
+            .contains("LLM summary of the conversation.")
     );
     assert!(
         compacted
@@ -1585,7 +1777,11 @@ async fn test_compact_with_summary_triggers_when_above_threshold() {
         .iter()
         .find(|m| m.content.contains(COMPACTION_SUMMARY_PREFIX))
         .expect("the prefixed summary must be present");
-    assert!(summary_message.content.ends_with("Real summary."));
+    assert!(
+        summary_message.content.starts_with("<system-reminder>"),
+        "v2 wraps the summary in a system-reminder"
+    );
+    assert!(summary_message.content.contains("Real summary."));
 }
 
 #[tokio::test]
@@ -1605,7 +1801,7 @@ async fn test_compact_with_summary_passes_instruction_to_summarizer() {
     assert!(
         summary_message
             .content
-            .ends_with("Instruction-aware summary.")
+            .contains("Instruction-aware summary.")
     );
     assert!(
         llm.last_user_content().contains("Focus on user goals."),
@@ -1620,7 +1816,7 @@ async fn test_manual_compaction_with_summary_uses_deepest_split() {
     let config = compacting_config();
     let llm = SummarizerMockLlm::ok("Manual summary.");
     let (compacted, raw_summary) = force_compact_messages_manual_with_summary(
-        &messages, &config, &llm, None, None, None, None,
+        &messages, &config, &llm, None, None, None, None, "",
     )
     .await
     .unwrap();
@@ -1633,15 +1829,79 @@ async fn test_manual_compaction_with_summary_uses_deepest_split() {
         .iter()
         .find(|m| m.content.contains(COMPACTION_SUMMARY_PREFIX))
         .expect("the prefixed summary must be present");
-    assert!(summary_message.content.ends_with("Manual summary."));
+    assert!(summary_message.content.contains("Manual summary."));
+    // v2's compaction shape keeps real user input and drops completed-turn
+    // assistant messages; the manual split depth no longer changes the final
+    // shape (both paths summarize everything they replace).
+    let user_contents: Vec<&str> = compacted
+        .iter()
+        .filter(|message| message.role == "user" && message.content.starts_with("user-"))
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(user_contents, vec!["user-1", "user-2", "user-3", "user-4"]);
     assert!(
-        compacted.len()
-            < force_compact_messages_with_summary(&messages, &config, &llm, None, None)
-                .await
-                .unwrap()
-                .len(),
-        "manual compaction must keep a smaller tail than auto compaction"
+        compacted
+            .iter()
+            .all(|message| !message.content.starts_with("assistant-")),
+        "completed-turn assistant messages are summarized away, got: {:?}",
+        compacted
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn test_compaction_shape_keeps_the_in_flight_turn_and_closes_open_calls() {
+    let mut running = msg("assistant", "running a command");
+    running.tool_calls = vec![tool_call(
+        "call-1",
+        "bash",
+        serde_json::json!({ "cmd": "ls" }),
+    )];
+    let messages = vec![
+        msg("system", "system-prompt"),
+        msg("user", "older ask"),
+        msg("assistant", "older reply"),
+        msg("user", "current ask"),
+        running,
+    ];
+
+    let compacted = apply_compaction_with_summary(&messages, 3, "Summary.".into(), true);
+    assert_eq!(compacted[0].content, "system-prompt");
+    assert!(compacted.iter().any(|m| m.content == "older ask"));
+    assert!(compacted.iter().any(|m| m.content == "current ask"));
+    assert!(
+        !compacted.iter().any(|m| m.content == "older reply"),
+        "completed-turn assistant messages do not survive"
+    );
+    let synthesized = compacted
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("the open in-flight tool call is closed with a synthetic result");
+    assert_eq!(synthesized.tool_call_id.as_deref(), Some("call-1"));
+    assert!(synthesized.content.contains("still executing"));
+    let in_flight_index = compacted
+        .iter()
+        .position(|m| m.content == "running a command")
+        .expect("the in-flight assistant message survives verbatim");
+    let summary_index = compacted
+        .iter()
+        .position(|m| m.content.contains(COMPACTION_SUMMARY_PREFIX))
+        .expect("the summary message is present");
+    assert!(
+        in_flight_index < summary_index,
+        "v2 places the in-flight turn before the summary"
+    );
+    assert_eq!(
+        compacted.last().map(|m| m.content.as_str()),
+        Some(COMPACTION_CONTINUATION_TEXT)
+    );
+
+    // Between turns there is no in-flight turn to carry (v2 `inFlightTurnOf`).
+    let without = apply_compaction_with_summary(&messages, 3, "Summary.".into(), false);
+    assert!(!without.iter().any(|m| m.content == "running a command"));
+    assert!(!without.iter().any(|m| m.role == "tool"));
 }
 
 #[tokio::test]
@@ -1661,7 +1921,7 @@ async fn test_manual_compaction_with_summary_guards_against_header_only_count() 
     assert_eq!(compute_compact_count_manual(&messages, &config), 0);
     let llm = SummarizerMockLlm::ok("unused");
     let (compacted, raw_summary) = force_compact_messages_manual_with_summary(
-        &messages, &config, &llm, None, None, None, None,
+        &messages, &config, &llm, None, None, None, None, "",
     )
     .await
     .unwrap();
@@ -1697,7 +1957,8 @@ async fn test_summarizer_shrinks_history_after_overflow_and_retries() {
         msg("user", "user-3"),
     ];
     let llm = SummarizerMockLlm::overflow_then_ok("Recovered summary.", 1);
-    let result = summarize_with_llm_budgeted(&omitted, &llm, None, None, None, None).await;
+    let result =
+        summarize_with_llm_budgeted(&omitted, &llm, None, None, None, None, "", None, None).await;
     assert_eq!(result.unwrap().summary, "Recovered summary.");
     assert_eq!(llm.call_count(), 2, "one shrink-retry after the overflow");
     let second_prompt = llm.last_user_content();
@@ -1726,7 +1987,9 @@ async fn test_summarizer_gives_up_after_max_overflow_shrinks() {
     }
     let llm = SummarizerMockLlm::overflow_always();
     // A generous attempt cap isolates the shrink bound as the stop reason.
-    let result = summarize_with_llm_budgeted(&omitted, &llm, None, None, Some(10), None).await;
+    let result =
+        summarize_with_llm_budgeted(&omitted, &llm, None, None, Some(10), None, "", None, None)
+            .await;
     assert!(
         matches!(result, Err(CompactionError::Provider { .. })),
         "the original overflow error must surface"
@@ -1800,7 +2063,7 @@ fn test_select_kept_user_messages_head_elision_tail_budget() {
     // v2 `selectCompactionUserMessages` (compactionHandoff.ts:234): above
     // the 20k budget the selection keeps at most the 2k head (ended by the
     // first truncating message) plus the 18k tail, with the elision note
-    // between. 10 user messages x 3000 tokens = 30000 > 20000.
+    // between. 10 user messages x (role 1 + 3000) = 30010 > 20000.
     let user_messages: Vec<LLMMessage> = (0..10)
         .map(|i| LLMMessage {
             role: "user".into(),
@@ -1808,7 +2071,7 @@ fn test_select_kept_user_messages_head_elision_tail_budget() {
             ..Default::default()
         })
         .collect();
-    assert_eq!(estimate_messages_tokens(&user_messages), 30_000);
+    assert_eq!(estimate_messages_tokens(&user_messages), 30_010);
 
     let kept = select_kept_user_messages(&user_messages);
     // [1 truncated head, elision, 6 full tail messages]
@@ -1816,8 +2079,8 @@ fn test_select_kept_user_messages_head_elision_tail_budget() {
     let head_message = &kept[0];
     assert_eq!(
         estimate_message_tokens(head_message),
-        COMPACT_USER_MESSAGE_HEAD_TOKENS,
-        "one truncating message ends the head at the head budget"
+        COMPACT_USER_MESSAGE_HEAD_TOKENS + 1,
+        "one truncating message ends the head at the head budget (plus its role)"
     );
     let elision = &kept[1];
     assert_eq!(elision.role, "user");
@@ -1827,19 +2090,24 @@ fn test_select_kept_user_messages_head_elision_tail_budget() {
         &elision.content[..elision.content.len().min(80)]
     );
     assert!(
-        elision.content.contains("roughly 10000 tokens"),
-        "elision records 30000 - 20000 = 10000 omitted tokens"
+        elision.content.contains("roughly 10008 tokens"),
+        "elision records 30010 - 20002 = 10008 omitted tokens"
     );
     let tail = &kept[2..];
     assert_eq!(tail.len(), 6, "the tail survives verbatim below the note");
-    for message in tail {
-        assert_eq!(estimate_message_tokens(message), 3_000);
+    // The oldest tail message is suffix-truncated to the remaining budget.
+    assert_eq!(estimate_message_tokens(&tail[0]), 2_996);
+    for message in &tail[1..] {
+        assert_eq!(estimate_message_tokens(message), 3_001);
     }
     let verbatim: u32 = std::iter::once(head_message)
         .chain(tail.iter())
         .map(estimate_message_tokens)
         .sum();
-    assert_eq!(verbatim, COMPACT_USER_MESSAGE_MAX_TOKENS);
+    // 20000 content tokens plus the two truncated messages' roles: the head
+    // is cut to its full budget by content, and the tail boundary keeps the
+    // leftover.
+    assert_eq!(verbatim, COMPACT_USER_MESSAGE_MAX_TOKENS + 2);
     // The tail loop stops at tail_remaining == 0 — no empty suffix message.
     assert!(
         kept.iter().all(|m| !m.content.is_empty()),
@@ -1898,4 +2166,99 @@ async fn test_compaction_failure_reports_the_retries_it_spent() {
         2,
         "the cap bounds requests, and both were made"
     );
+}
+
+/// D14: the summarizer request reports `prompt_cache_probe` with `source:
+/// 'compaction'`. The baseline is the agent's last turn request captured
+/// before the summarizer started, so the probe compares the model, the tool
+/// set, the system prompt, and whether the request still carries the
+/// baseline's message head. Without a baseline the probe is still emitted,
+/// with every comparison undefined.
+#[tokio::test]
+async fn a_compaction_probe_compares_the_captured_last_turn_request() {
+    use crate::session::cache_observation::{CacheProbeRequest, fingerprint};
+
+    let omitted = vec![msg("user", "user-1"), msg("assistant", "assistant-1")];
+    let prompt = summarization_prompt(&omitted, None);
+    let baseline = CacheProbeRequest {
+        model_alias: "test-summarizer".into(),
+        tools_hash: fingerprint("[]"),
+        system_prompt_hash: fingerprint(""),
+        message_count: prompt.len(),
+        history_hash: fingerprint(&serde_json::to_string(&prompt).expect("serialize prompt")),
+        input_tokens: Some(900),
+        started_at: 100,
+        finished_at: 200,
+    };
+
+    let llm = SummarizerMockLlm::ok("summary");
+    let outcome = summarize_with_llm_budgeted(
+        &omitted,
+        &llm,
+        None,
+        None,
+        None,
+        None,
+        "agent-1",
+        Some(&baseline),
+        Some("turn-7"),
+    )
+    .await
+    .expect("summary");
+    let probe = outcome.cache_probe.expect("a compaction probe is emitted");
+    assert_eq!(
+        probe.source,
+        crate::session::cache_observation::CacheProbeSource::Compaction
+    );
+    assert_eq!(probe.turn_id.as_deref(), Some("turn-7"));
+    assert_eq!(probe.model_match, Some(true));
+    assert_eq!(probe.tools_match, Some(true));
+    assert_eq!(probe.system_prompt_match, Some(true));
+    assert_eq!(
+        probe.history_prefix_match,
+        Some(true),
+        "the request still carries the captured message head"
+    );
+    assert_eq!(probe.parent_input_tokens, Some(900));
+
+    // A changed message breaks the prefix comparison.
+    let mut changed = baseline.clone();
+    changed.history_hash = fingerprint("something else");
+    let outcome = summarize_with_llm_budgeted(
+        &omitted,
+        &SummarizerMockLlm::ok("summary"),
+        None,
+        None,
+        None,
+        None,
+        "agent-1",
+        Some(&changed),
+        None,
+    )
+    .await
+    .expect("summary");
+    assert_eq!(
+        outcome.cache_probe.expect("probe").history_prefix_match,
+        Some(false)
+    );
+
+    // No baseline: the probe still fires with no comparisons.
+    let outcome = summarize_with_llm_budgeted(
+        &omitted,
+        &SummarizerMockLlm::ok("summary"),
+        None,
+        None,
+        None,
+        None,
+        "agent-1",
+        None,
+        None,
+    )
+    .await
+    .expect("summary");
+    let probe = outcome.cache_probe.expect("probe");
+    assert_eq!(probe.model_match, None);
+    assert_eq!(probe.tools_match, None);
+    assert_eq!(probe.history_prefix_match, None);
+    assert_eq!(probe.parent_input_tokens, None);
 }

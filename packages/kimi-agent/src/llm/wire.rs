@@ -1,7 +1,7 @@
 //! Provider-agnostic wire message used to project a turn's history into a
 //! specific provider's request format.
 
-use crate::turn_loop::types::{ContentBlock, LLMMessage, ToolCall};
+use kimi_core::types::{ContentBlock, LLMMessage, ToolCall};
 
 /// One piece of a streamed response, as the transport forwards it to the host.
 ///
@@ -196,6 +196,227 @@ pub fn project_vacuous_messages(messages: &[LLMMessage]) -> Vec<LLMMessage> {
     out
 }
 
+/// v2 `TOOL_INTERRUPTED_TEXT` (`contextProjector/projection.ts:394-395`): the
+/// synthetic tool result for a call whose result never arrived.
+pub const TOOL_INTERRUPTED_TEXT: &str = "Tool result is not available in the current context. Do not assume the tool completed successfully.";
+
+/// v2 `projectStrict` (`contextProjector/projection.ts:70-79`), applied where
+/// the provider request is assembled.
+///
+/// The stored history keeps its anomalies; the request must not. This performs
+/// the full repair pipeline in v2's order:
+///
+/// 1. clean vacuous content parts (`cleanContent`);
+/// 2. attach every tool result to its call in declaration order, synthesizing
+///    an interrupted result for a call with none and dropping orphan results
+///    (`project`);
+/// 3. dedupe duplicate tool-call ids and result ids
+///    (`dedupeDuplicateToolCalls`);
+/// 4. merge consecutive assistants, content and tool calls concatenated
+///    (`mergeConsecutiveAssistantMessages`);
+/// 5. merge consecutive real-user messages (`canMergeUserMessage`);
+/// 6. drop everything before the first user message, keeping the leading
+///    system prompt this engine stores at index 0.
+pub fn project_strict(messages: &[LLMMessage]) -> Vec<LLMMessage> {
+    let cleaned: Vec<LLMMessage> = messages.iter().filter_map(clean_message).collect();
+    let reordered = attach_tool_results(cleaned);
+    let deduped = dedupe_tool_calls(reordered);
+    let merged = merge_consecutive_assistants(deduped);
+    let merged = merge_consecutive_user_messages(merged);
+    drop_leading_non_user(merged)
+}
+
+pub fn project_messages(messages: &[LLMMessage]) -> Vec<LLMMessage> {
+    let cleaned: Vec<LLMMessage> = messages.iter().filter_map(clean_message).collect();
+    let attached = attach_tool_results(cleaned);
+    merge_consecutive_user_messages(attached)
+}
+
+/// v2 `cleanContent`: drop vacuous content parts, and drop a whole
+/// non-tool/non-system message that held nothing else.
+fn clean_message(message: &LLMMessage) -> Option<LLMMessage> {
+    let mut projected = message.clone();
+    if !message.blocks.is_empty() {
+        projected.blocks = message
+            .blocks
+            .iter()
+            .filter(|part| !is_vacuous_part(part))
+            .cloned()
+            .collect();
+    }
+    let keep = message.role == "system"
+        || message.role == "tool"
+        || !message.tool_calls.is_empty()
+        || !projected.blocks.is_empty()
+        || !projected.content.trim().is_empty();
+    keep.then_some(projected)
+}
+
+fn interrupted_tool_result(tool_call_id: &str) -> LLMMessage {
+    LLMMessage {
+        role: "tool".into(),
+        content: TOOL_INTERRUPTED_TEXT.into(),
+        tool_call_id: Some(tool_call_id.to_string()),
+        ..Default::default()
+    }
+}
+
+/// v2 `project`'s exchange repair: results follow their call in declaration
+/// order; a call with no result gets an interrupted one; results whose id no
+/// call declared are orphans and disappear.
+fn attach_tool_results(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
+    let mut out = Vec::with_capacity(messages.len());
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        if message.role == "assistant" && !message.tool_calls.is_empty() {
+            out.push(message.clone());
+            // An exchange ends at the next user message; a result outside its
+            // own exchange is an orphan.
+            let end = messages[index + 1..]
+                .iter()
+                .position(|candidate| candidate.role == "user")
+                .map(|offset| index + 1 + offset)
+                .unwrap_or(messages.len());
+            let mut consumed = std::collections::HashSet::new();
+            for call in &message.tool_calls {
+                let found = (index + 1..end).find(|position| {
+                    !consumed.contains(position)
+                        && messages[*position].role == "tool"
+                        && messages[*position].tool_call_id.as_deref() == Some(call.id.as_str())
+                });
+                if let Some(position) = found {
+                    consumed.insert(position);
+                    out.push(messages[position].clone());
+                } else {
+                    out.push(interrupted_tool_result(&call.id));
+                }
+            }
+            index += 1;
+            continue;
+        }
+        // A tool message reaching this arm was not consumed by any call in its
+        // exchange, so it has no declaration to answer.
+        if message.role != "tool" {
+            out.push(message.clone());
+        }
+        index += 1;
+    }
+    out
+}
+
+/// v2 `dedupeDuplicateToolCalls`: the first declaration of an id wins; later
+/// ones are dropped, and a result whose id duplicates an earlier result is
+/// dropped unless the earlier one is the synthetic interrupted placeholder.
+fn dedupe_tool_calls(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
+    let mut seen_calls = std::collections::HashSet::new();
+    let mut result_indexes: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut out: Vec<LLMMessage> = Vec::with_capacity(messages.len());
+    for mut message in messages {
+        if message.role == "assistant" && !message.tool_calls.is_empty() {
+            let kept: Vec<kimi_core::types::ToolCall> = message
+                .tool_calls
+                .iter()
+                .filter(|call| seen_calls.insert(call.id.clone()))
+                .cloned()
+                .collect();
+            if kept.len() == message.tool_calls.len() {
+                out.push(message);
+            } else if !kept.is_empty() || !message.content.trim().is_empty() {
+                message.tool_calls = kept;
+                out.push(message);
+            }
+            continue;
+        }
+        if message.role == "tool"
+            && let Some(id) = message.tool_call_id.clone()
+        {
+            if let Some(previous) = result_indexes.get(&id).copied() {
+                if out[previous].content == TOOL_INTERRUPTED_TEXT
+                    && message.content != TOOL_INTERRUPTED_TEXT
+                {
+                    out[previous] = message;
+                }
+                continue;
+            }
+            result_indexes.insert(id, out.len());
+        }
+        out.push(message);
+    }
+    out
+}
+
+/// v2 `mergeConsecutiveAssistantMessages`: unconditional merge — a provider
+/// that requires alternating roles rejects two assistants in a row.
+fn merge_consecutive_assistants(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
+    let mut out: Vec<LLMMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        if let Some(previous) = out.last_mut()
+            && previous.role == "assistant"
+            && message.role == "assistant"
+        {
+            previous.content.push_str(&message.content);
+            previous.blocks.extend(message.blocks);
+            previous.tool_calls.extend(message.tool_calls);
+            continue;
+        }
+        out.push(message);
+    }
+    out
+}
+
+/// v2 `canMergeUserMessage`: only real user input merges. Injected reminders
+/// are `user`-role but must stay distinct, or their text fuses into the user's.
+fn can_merge_user(message: &LLMMessage) -> bool {
+    if crate::injection::is_system_reminder(&message.content) {
+        return false;
+    }
+    match &message.origin {
+        None => true,
+        Some(origin) => origin.get("kind").and_then(serde_json::Value::as_str) == Some("user"),
+    }
+}
+
+/// v2's user merge: texts join with a blank line, non-text parts accumulate.
+fn merge_consecutive_user_messages(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
+    let mut out: Vec<LLMMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        if let Some(previous) = out.last_mut()
+            && previous.role == "user"
+            && message.role == "user"
+            && can_merge_user(previous)
+            && can_merge_user(&message)
+        {
+            if !previous.content.is_empty() && !message.content.is_empty() {
+                previous.content.push_str("\n\n");
+            }
+            previous.content.push_str(&message.content);
+            previous.blocks.extend(message.blocks);
+            continue;
+        }
+        out.push(message);
+    }
+    out
+}
+
+/// v2 `dropLeadingNonUserMessages`, keeping the leading system prompt this
+/// engine stores at index 0 (v2 passes it outside the history list).
+fn drop_leading_non_user(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
+    let prefix = messages
+        .iter()
+        .take_while(|message| message.role == "system")
+        .count();
+    let rest = &messages[prefix..];
+    let start = rest
+        .iter()
+        .position(|message| message.role == "user")
+        .unwrap_or(rest.len());
+    let mut out = messages[..prefix].to_vec();
+    out.extend_from_slice(&rest[start..]);
+    out
+}
+
 #[cfg(test)]
 mod projection_tests {
     use super::*;
@@ -350,5 +571,88 @@ mod projection_tests {
             text: " \n".into(),
             meta: None,
         }));
+    }
+
+    fn call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "Read".into(),
+            arguments: json!({}),
+            extras: None,
+            args_parse_error: None,
+        }
+    }
+
+    #[test]
+    fn the_default_projection_closes_an_unanswered_tool_call() {
+        let messages = vec![
+            LLMMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "assistant".into(),
+                tool_calls: vec![call("c1")],
+                ..Default::default()
+            },
+        ];
+
+        let projected = project_messages(&messages);
+
+        assert_eq!(projected.len(), 3, "{projected:?}");
+        assert_eq!(projected[2].role, "tool");
+        assert_eq!(projected[2].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(projected[2].content, TOOL_INTERRUPTED_TEXT);
+    }
+
+    #[test]
+    fn the_default_projection_drops_an_orphan_tool_result() {
+        let messages = vec![
+            LLMMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "tool".into(),
+                content: "stray".into(),
+                tool_call_id: Some("c_missing".into()),
+                ..Default::default()
+            },
+        ];
+
+        let projected = project_messages(&messages);
+
+        assert_eq!(projected.len(), 1, "{projected:?}");
+        assert_eq!(projected[0].role, "user");
+    }
+
+    #[test]
+    fn the_default_projection_merges_real_user_messages_only() {
+        let messages = vec![
+            LLMMessage {
+                role: "user".into(),
+                content: "first".into(),
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "user".into(),
+                content: "second".into(),
+                ..Default::default()
+            },
+            LLMMessage {
+                role: "user".into(),
+                content: "reminder".into(),
+                origin: Some(json!({ "kind": "injection" })),
+                ..Default::default()
+            },
+        ];
+
+        let projected = project_messages(&messages);
+
+        assert_eq!(projected.len(), 2, "{projected:?}");
+        assert_eq!(projected[0].content, "first\n\nsecond");
+        assert_eq!(projected[1].content, "reminder");
     }
 }

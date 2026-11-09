@@ -320,7 +320,12 @@ impl EngineSession {
             if let Some(payload) = entry.wake.take() {
                 entry.cancel.store(true, Ordering::SeqCst);
                 if let Some(tx) = entry.outcome.take() {
-                    let _ = tx.send(Ok(TurnOutcome::CancelledBeforeStart));
+                    if tx.send(Ok(TurnOutcome::CancelledBeforeStart)).is_err() {
+                        tracing::debug!(
+                            turn_id = entry.turn_id,
+                            "a cancelled turn's waiter had already gone"
+                        );
+                    }
                 }
                 interruption.queued.push(entry.turn_id);
                 core.deferred_wakes.push(payload);
@@ -334,7 +339,12 @@ impl EngineSession {
             if let Some(payload) = entry.wake.take() {
                 entry.cancel.store(true, Ordering::SeqCst);
                 if let Some(tx) = entry.outcome.take() {
-                    let _ = tx.send(Ok(TurnOutcome::CancelledBeforeStart));
+                    if tx.send(Ok(TurnOutcome::CancelledBeforeStart)).is_err() {
+                        tracing::debug!(
+                            turn_id = entry.turn_id,
+                            "a cancelled turn's waiter had already gone"
+                        );
+                    }
                 }
                 interruption.queued.push(entry.turn_id);
                 core.deferred_wakes.push(payload);
@@ -349,6 +359,10 @@ impl EngineSession {
         interruption
     }
 
+    /// A wake interrupted by user input or by producer teardown is cancelled by
+    /// the engine, not by the user pressing cancel: v2 aborts those turns with
+    /// `abortError('Interrupted by user prompt')` and `cancelReasonFor` maps any
+    /// non-user cancellation to `aborted` (`loopService.ts:876-894`).
     pub(super) fn emit_wake_interruption(&self, interruption: WakeInterruption) {
         if interruption.active.is_some()
             && let Some(slot) = &self.agent_cancel_slot
@@ -360,14 +374,14 @@ impl EngineSession {
             self.callbacks.turn_event(TurnEvent::Cancel {
                 turn_id: Some(turn_id),
                 target: Some(TurnCancelTarget::Active),
-                reason: Some(TurnCancelReason::UserCancelled),
+                reason: Some(TurnCancelReason::Aborted),
             });
         }
         for turn_id in interruption.queued {
             self.callbacks.turn_event(TurnEvent::Cancel {
                 turn_id: Some(turn_id),
                 target: Some(TurnCancelTarget::Queued),
-                reason: Some(TurnCancelReason::UserCancelled),
+                reason: Some(TurnCancelReason::Aborted),
             });
         }
     }
@@ -398,7 +412,12 @@ impl EngineSession {
             {
                 entry.cancel.store(true, Ordering::SeqCst);
                 if let Some(tx) = entry.outcome.take() {
-                    let _ = tx.send(Ok(TurnOutcome::CancelledBeforeStart));
+                    if tx.send(Ok(TurnOutcome::CancelledBeforeStart)).is_err() {
+                        tracing::debug!(
+                            turn_id = entry.turn_id,
+                            "a cancelled turn's waiter had already gone"
+                        );
+                    }
                 }
                 interruption.queued.push(entry.turn_id);
             } else {
@@ -415,7 +434,12 @@ impl EngineSession {
             {
                 entry.cancel.store(true, Ordering::SeqCst);
                 if let Some(tx) = entry.outcome.take() {
-                    let _ = tx.send(Ok(TurnOutcome::CancelledBeforeStart));
+                    if tx.send(Ok(TurnOutcome::CancelledBeforeStart)).is_err() {
+                        tracing::debug!(
+                            turn_id = entry.turn_id,
+                            "a cancelled turn's waiter had already gone"
+                        );
+                    }
                 }
                 interruption.queued.push(entry.turn_id);
             } else {
@@ -445,7 +469,27 @@ impl EngineSession {
 /// and user-interruption replays use this equivalent internal prompt waiter.
 pub(super) fn spawn_notification_waiter(mut receipt: TurnReceipt) {
     tokio::spawn(async move {
-        let _ = receipt.outcome().await;
+        let turn_id = receipt.turn_id;
+        // The waiter exists so the pump can settle the turn; its outcome is
+        // still inspected because "the waiter vanished" and "the turn was
+        // cancelled" are conditions an operator needs to see, not values to
+        // drop on the floor.
+        match receipt.outcome().await {
+            Ok(TurnOutcome::Ran(_)) => {}
+            Ok(TurnOutcome::CancelledBeforeStart) => {
+                tracing::warn!(
+                    turn_id,
+                    "a notification turn was cancelled before it started"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    turn_id,
+                    %error,
+                    "a notification turn's waiter was dropped without an outcome"
+                );
+            }
+        }
     });
 }
 
@@ -567,7 +611,16 @@ impl TowerWakeDriver for EngineSessionWakeDriver {
         // entry before the JoinHandle has been installed.
         let mut pending = self.receipt_tasks.lock().unwrap_or_else(|e| e.into_inner());
         let task = tokio::spawn(async move {
-            let _ = receipt.outcome().await;
+            // Same rule as `spawn_notification_waiter`: the receipt is held so
+            // the pump can settle the turn, but a dropped waiter is reported
+            // rather than discarded.
+            if let Err(error) = receipt.outcome().await {
+                tracing::warn!(
+                    turn_id,
+                    %error,
+                    "an enqueued wake turn's waiter was dropped without an outcome"
+                );
+            }
             receipt_tasks
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

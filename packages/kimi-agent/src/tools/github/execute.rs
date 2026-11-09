@@ -1,13 +1,8 @@
-//! Argument validation and URL/query/body building (split out of `github.rs`).
-
 use serde_json::{Value, json};
 
 use super::specs::{FieldKind, GitHubToolSpec};
 use super::{GITHUB_DEFAULT_BASE_URL, GitHubCredentials};
 
-/// Token resolution mirrors v2 `envOverlay.ts`: the config `[github].token`
-/// wins, then `GITHUB_TOKEN`, then `GH_TOKEN`; empty/whitespace-only values
-/// count as unset.
 pub(super) fn resolve_token(credentials: Option<&GitHubCredentials>) -> Option<String> {
     if let Some(value) = credentials.and_then(|c| c.token.as_deref()) {
         let trimmed = value.trim();
@@ -26,9 +21,6 @@ pub(super) fn resolve_token(credentials: Option<&GitHubCredentials>) -> Option<S
     None
 }
 
-/// Base URL mirrors v2 `envOverlay.ts`: the config `[github].baseUrl` wins,
-/// then `GITHUB_API_URL`, then the default. Trailing slashes are stripped
-/// like v2 `buildGitHubUrl`.
 pub(super) fn resolve_base_url(credentials: Option<&GitHubCredentials>) -> String {
     let mut configured: Option<String> = None;
     if let Some(value) = credentials.and_then(|c| c.base_url.as_deref()) {
@@ -51,11 +43,6 @@ pub(super) fn resolve_base_url(credentials: Option<&GitHubCredentials>) -> Strin
         .to_string()
 }
 
-// ── Argument validation (v2 zod `safeParse` semantics) ───────────────────────
-
-/// Returns the v2-style `Invalid arguments for {name}: ...` payload, or
-/// `None` when the args are valid. Issues mirror zod v4's shape
-/// (`code`/`expected`/`received`/`path`/`message`).
 pub(super) fn validate_args(spec: &GitHubToolSpec, args: &Value) -> Option<String> {
     let mut issues: Vec<Value> = Vec::new();
     for field in spec.fields {
@@ -181,8 +168,6 @@ fn too_small_issue(path: &str, minimum: i64) -> Value {
     })
 }
 
-// ── URL / query / body building (v2 path/query/body fns) ────────────────────
-
 pub(super) fn build_url(spec: &GitHubToolSpec, args: &Value, base_url: &str) -> String {
     let mut path = String::new();
     let mut rest = spec.path;
@@ -266,7 +251,6 @@ pub(super) fn arg_string(args: &Value, key: &str) -> Option<String> {
     }
 }
 
-/// JS `encodeURIComponent`: encodes everything except `A-Za-z0-9-_.!~*'()`.
 pub(super) fn encode_uri_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -284,9 +268,6 @@ pub(super) fn encode_uri_component(s: &str) -> String {
     out
 }
 
-/// WHATWG path percent-encode set — what fetch applies to the interpolated
-/// path in v2. Encodes space, `"`, `#`, `<`, `>`, `?`, backtick, `{`, `}`,
-/// and non-ASCII/control bytes; existing `%` escapes pass through.
 pub(super) fn encode_path_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -321,7 +302,6 @@ pub(super) fn encode_path_component(s: &str) -> String {
     out
 }
 
-/// Standard base64 (RFC 4648) — v2 `Buffer.from(content, 'utf8').toString('base64')`.
 pub(super) fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);

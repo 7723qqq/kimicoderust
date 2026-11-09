@@ -26,6 +26,11 @@ enum McpTransport {
         /// Bounded tail of the child's stderr (v2 `BoundedTail`,
         /// client-stdio.ts:STDERR_BUFFER_CAPACITY).
         stderr: Arc<Mutex<Vec<u8>>>,
+        /// Reader tasks, awaited by [`McpClient::close`] so the tail of the
+        /// server's output is still processed before the session is declared
+        /// closed (v2 `finish()` → `fireOnClose` drain grace).
+        stdout_reader: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+        stderr_reader: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     },
     Sse(McpSseTransport),
     Http(McpHttpTransport),
@@ -40,6 +45,12 @@ enum McpTransport {
 /// v2 `STDERR_BUFFER_CAPACITY` (client-stdio.ts:20): the last 4 KiB of the
 /// child's stderr are kept for error reporting.
 const STDERR_BUFFER_CAPACITY: usize = 4 * 1024;
+
+/// v2 `STDIO_TERMINATION_GRACE_MS` (client-stdio.ts:39): SIGTERM gets five
+/// seconds before SIGKILL. v2 has no drain bound for the readers — `close`
+/// calls `void tracked?.dispose()` (client-stdio.ts:293) and declares the
+/// session closed without waiting, so there is no second constant here.
+const STDIO_TERMINATION_GRACE: Duration = Duration::from_secs(5);
 
 /// Keep the tail inside `STDERR_BUFFER_CAPACITY` without cutting a UTF-8
 /// character in half (v2 `BoundedTail` "does not split a surrogate pair at the
@@ -79,6 +90,36 @@ fn resolve_client_name(client_name: Option<&str>) -> String {
 /// Unexpected-close listener slot (v2 `unexpectedCloseListener`): at most one
 /// `Fn(String)` listener, later registrations replace earlier ones.
 pub(crate) type UnexpectedCloseListener = Arc<Mutex<Option<Box<dyn Fn(String) + Send + Sync>>>>;
+
+/// v2 `client-stdio.ts:280-298`: the first `process.kill()` is a graceful
+/// signal, a five-second grace follows, then SIGKILL. `tokio::process::Child`
+/// only exposes an immediate kill, so Unix goes through `libc` for SIGTERM.
+async fn terminate_stdio_child(child: &mut Child) {
+    #[cfg(unix)]
+    match child.id() {
+        // SAFETY: `pid` is the child this handle owns; signalling an already
+        // exited process only returns ESRCH.
+        Some(pid) => unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        },
+        None => {
+            let _ = child.start_kill();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows console children have no SIGTERM equivalent; TerminateProcess
+        // is the only stop available, so the grace window is Unix-only.
+        let _ = child.start_kill();
+    }
+    if tokio::time::timeout(STDIO_TERMINATION_GRACE, child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
 
 pub struct McpClient {
     server_name: String,
@@ -399,7 +440,7 @@ impl McpClient {
         // Drain the child's stderr into a bounded tail (v2 `BoundedTail`).
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let stderr_sink = stderr_buf.clone();
-        tokio::spawn(async move {
+        let stderr_reader = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut reader = stderr;
             let mut chunk = [0u8; 1024];
@@ -419,7 +460,7 @@ impl McpClient {
         let close_pending = pending_close_reason.clone();
         let stderr_for_reason = stderr_buf.clone();
         let name_for_reason = server_name.to_string();
-        tokio::spawn(async move {
+        let stdout_reader = tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let trimmed = line.trim();
@@ -472,6 +513,8 @@ impl McpClient {
                 stdin: Arc::new(Mutex::new(stdin)),
                 pending,
                 stderr: stderr_buf,
+                stdout_reader: Arc::new(Mutex::new(Some(stdout_reader))),
+                stderr_reader: Arc::new(Mutex::new(Some(stderr_reader))),
             },
             next_id: AtomicU64::new(1),
             tool_timeout: None,
@@ -592,23 +635,47 @@ impl McpClient {
         self.tool_timeout
     }
 
-    /// Close the client: kill the stdio child, stop the SSE reader, or mark the
-    /// HTTP transport closed. Dropping the client would achieve the same
-    /// eventually; an explicit close makes reconnect bookkeeping
-    /// deterministic.
+    /// Close the client: terminate the stdio child gracefully, stop the SSE
+    /// reader, or mark the HTTP transport closed. Dropping the client would
+    /// achieve the same eventually; an explicit close makes reconnect
+    /// bookkeeping deterministic.
+    ///
+    /// v2 `client-stdio.ts:272-298`: SIGTERM, five seconds of grace, SIGKILL.
+    /// The reader disposal is fire-and-forget there (`:293` `void
+    /// tracked?.dispose()`), so the close does not wait for the readers either
+    /// — they are detached and end at EOF on their own.
     pub async fn close(&self) {
+        // v2 sets `closed` first: concurrent sends fail instead of racing a
+        // dying pipe.
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         self.intentionally_closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
         match &self.transport {
-            McpTransport::Stdio { _process, .. } => {
-                let mut child = _process.lock().await;
-                let _ = child.kill().await;
+            McpTransport::Stdio {
+                _process,
+                pending,
+                stdout_reader,
+                stderr_reader,
+                ..
+            } => {
+                {
+                    let mut child = _process.lock().await;
+                    terminate_stdio_child(&mut child).await;
+                }
+                // Requests tracked when the session goes away can never be
+                // answered; dropping the senders rejects them now instead of
+                // leaving callers to their per-request timeout.
+                pending.lock().await.clear();
+                // v2 `client-stdio.ts:293`: disposal is not awaited. Taking
+                // and dropping the handles detaches the same reader tasks;
+                // they finish at EOF without holding the close open.
+                let _ = stdout_reader.lock().await.take();
+                let _ = stderr_reader.lock().await.take();
             }
             McpTransport::Sse(sse) => sse.shutdown().await,
             McpTransport::Http(http) => http.shutdown().await,
             McpTransport::Mock { .. } => {}
         }
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn transport_type(&self) -> &'static str {

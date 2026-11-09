@@ -1,9 +1,3 @@
-//! `Workflow` tool: the model-facing entry to the native workflow engine.
-//!
-//! Ported from the retired `agent-core-v2` `WorkflowTool`; `run` starts a
-//! background workflow and returns a run id, with `status` / `wait` / `cancel`
-//! managing the run, plus a `list` extension for the `/workflow list` hint.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -80,8 +74,6 @@ impl WorkflowToolOutcome {
     }
 }
 
-/// Execute one `Workflow` tool call. `host` is only required for `run`; the
-/// read/control operations work without a subagent runtime attached.
 pub async fn run_workflow_tool(
     service: &WorkflowService,
     host: Option<Arc<dyn WorkflowHost>>,

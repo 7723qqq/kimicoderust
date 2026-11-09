@@ -119,6 +119,13 @@ pub fn spawn_managed(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        // v2 `windowsHide: true` — a managed child must not flash a console
+        // window when the host has none.
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
 
     let mut child = cmd
         .spawn()

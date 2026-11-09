@@ -1,5 +1,3 @@
-//! Tower inbox wake mapping, batching, rendering, and delegated replay.
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -18,9 +16,6 @@ pub const TOWER_INBOX_WAKE_VARIANT: &str = "tower_inbox";
 const WAKE_SUBJECT_PREVIEW_MAX: usize = 120;
 const WAKE_DIGEST_LIMIT: usize = 4;
 
-/// Map the inbox publication metadata into the generic wake reference. Legacy
-/// records without a message id fall back to their stable file identity; an
-/// event with neither lets `WakeBuffer` allocate its legacy sequence key.
 pub fn tower_wake_item(delivery: &TowerInboxDelivery) -> WakeItem {
     let key = if delivery.message_id.is_empty() {
         (!delivery.file.is_empty()).then(|| format!("file:{}", delivery.file))
@@ -59,9 +54,6 @@ impl WakeChannel {
     }
 }
 
-/// Shared owner of the driver and all per-session wake buffers. A server-built
-/// toolset is short-lived, so this runtime — not the toolset itself — owns the
-/// batching and replay state.
 pub struct TowerWakeRuntime {
     driver: Arc<dyn TowerWakeDriver>,
     channels: Arc<Mutex<HashMap<(String, String), SharedWakeChannel>>>,
@@ -89,9 +81,6 @@ impl TowerWakeRuntime {
             .clone()
     }
 
-    /// Queue one inbox reference and schedule a single flush for its channel.
-    /// The actual gate read and rendering happen after the producer yields, so
-    /// a burst published in one task coalesces into one payload.
     pub async fn enqueue(
         self: &Arc<Self>,
         repo_root: &Path,
@@ -153,16 +142,11 @@ impl TowerWakeRuntime {
             return;
         };
         if self.driver.enqueue(session_id, payload.clone()).is_err() {
-            // An initial enqueue has no engine-retained payload. Keep the batch
-            // queued so a later publication can retry it without losing work.
             guard.buffer.requeue(payload);
         }
         guard.scheduled = false;
     }
 
-    /// Build the session/server-registered replay owner for one session. The
-    /// captured session id is required by the standalone driver; the native
-    /// driver deliberately ignores it because it is already session-bound.
     #[must_use]
     pub fn replay_handler(
         self: &Arc<Self>,
@@ -213,8 +197,7 @@ impl TowerWakeRuntime {
         let result = async {
             let active_agent_ids = super::active_tower_agent_ids(task_runner.as_deref());
             let store = TowerStore::new(repo_root);
-            // Delegated replay is stricter than the initial notification: a
-            // failed reread leaves the engine's original payload pending.
+
             let (message, gate_digests) = render_wake(
                 &store,
                 guard.buffer.items(),
@@ -227,8 +210,6 @@ impl TowerWakeRuntime {
                 return Ok(());
             };
             if let Err(error) = self.driver.enqueue(session_id, payload.clone()) {
-                // Do not retry here. The engine retains the original payload;
-                // requeue only restores this buffer for its next delegation.
                 guard.buffer.requeue(payload);
                 return Err(error);
             }
@@ -236,15 +217,11 @@ impl TowerWakeRuntime {
         }
         .await;
         if result.is_err() {
-            // A scheduled initial flush must not become an accidental second
-            // attempt after a delegated replay failed.
             guard.replay_failed = true;
         }
         result
     }
 
-    /// Clear both the producer state and every wake already admitted by the
-    /// engine/server. No turn or wake id is retained across replay.
     pub async fn clear(&self, session_id: &str, variant: &str) -> bool {
         let key = (session_id.to_string(), variant.to_string());
         let channel = self

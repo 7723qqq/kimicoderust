@@ -7,6 +7,7 @@ use crate::callbacks::{
     HOST_AUTH_TOKEN_TIMEOUT, HOST_LIST_TOOLS_TIMEOUT, HOST_LLM_TIMEOUT, HOST_TOOL_TIMEOUT,
     HostCallbacks,
 };
+use crate::primitives::deadline::Deadline;
 use crate::rpc::types::{
     AskQuestionRequest, AskQuestionResponse, AuthTokenResponse, BoxFuture, CheckpointRequest,
     ListToolsResponse, LlmChatRequest, LlmChatResponse, PermissionCheckRequest, PermissionDecision,
@@ -99,7 +100,9 @@ pub fn get_callback_payload(id: u32) -> napi::Result<Option<String>> {
 /// Called by JS to resolve a pending host callback.
 ///
 /// * `id` — the callback ID that was passed to the JS function
-/// * `error` — if present, the callback failed with this error message
+/// * `error` — if present, the callback failed. A plain message keeps the
+///   human-readable path; a JSON `{"code","message","details"}` object is
+///   normalized into the boundary envelope so the code is not lost.
 /// * `result` — if present (and `error` is absent), the JSON-serialized response
 #[napi]
 pub fn resolve_callback(
@@ -114,7 +117,7 @@ pub fn resolve_callback(
             .remove(&id)
         {
             let outcome = match (error, result) {
-                (Some(err), _) => Err(err),
+                (Some(err), _) => Err(errors::normalize_host_error(err)),
                 (_, Some(res)) => Ok(res),
                 (None, None) => Err("callback resolved with no result".to_string()),
             };
@@ -343,9 +346,8 @@ impl HostCallbacks for NapiHostCallbacks {
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize: {}"}}"#, e));
         let cancel = self.cancellation.clone();
         Box::pin(async move {
-            // No timeout: this one waits on a human, and giving up would
-            // discard an approval the user has already granted. A turn
-            // cancellation still interrupts the wait.
+            // The reference host RPC has no generic timeout, so this wait is
+            // unbounded; a turn cancellation still interrupts it.
             let output =
                 invoke_via_registry(&tsfn, input, "check_permission", None, cancel).await?;
             serde_json::from_str(&output).map_err(|e| format!("check_permission parse: {e}"))
@@ -366,9 +368,8 @@ impl HostCallbacks for NapiHostCallbacks {
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize: {}"}}"#, e));
         let cancel = self.cancellation.clone();
         Box::pin(async move {
-            // No timeout: this one waits on a human, and giving up would
-            // discard an answer the user has already given. A turn
-            // cancellation still interrupts the wait.
+            // The reference host RPC has no generic timeout; a turn
+            // cancellation interrupts the wait.
             let output = invoke_via_registry(&tsfn, input, "ask_question", None, cancel).await?;
             serde_json::from_str(&output).map_err(|e| format!("ask_question parse: {e}"))
         })
@@ -508,9 +509,10 @@ impl HostCallbacks for NapiHostCallbacks {
         let tsfn = tsfn.clone();
         let cancel = self.cancellation.clone();
         Box::pin(async move {
-            // Unbounded like the host-side goal read: host bookkeeping, no
-            // human in the loop; the stale gate treats a failure as
-            // fail-open, so no timeout contract is needed here.
+            // Host bookkeeping with no human in the loop, and no generic
+            // timeout in the reference host RPC: the wait is unbounded, so a
+            // failed stale gate can fail open without the call hanging a turn
+            // any longer than the host takes.
             let output = invoke_via_registry(&tsfn, "{}".to_string(), "goal", None, cancel).await?;
             if output == "null" {
                 return Ok(None);
@@ -612,10 +614,9 @@ fn fire_payload_only(tsfn: &ThreadsafeFunction<u32, ErrorStrategy::Fatal>, paylo
 ///
 /// Returns the JSON-serialized response string, or an error message.
 ///
-/// `timeout` bounds how long the host may take to answer. `None` waits
-/// indefinitely, which is right for a permission check: that one is
-/// answered by a human, and a timeout would land after the user approved.
-/// Either way, a turn cancellation interrupts the wait.
+/// `timeout` bounds how long the host may take to answer. `None` leaves the
+/// wait unbounded, matching the reference host RPC, which has no generic
+/// timeout. Either way, a turn cancellation interrupts the wait.
 pub(crate) async fn invoke_via_registry(
     tsfn: &Arc<ThreadsafeFunction<u32, ErrorStrategy::Fatal>>,
     input: String,
@@ -651,14 +652,23 @@ pub(crate) async fn invoke_via_registry(
         return Err(format!("{label} call: {status:?}"));
     }
 
-    let pending = match timeout {
-        Some(limit) => {
-            match tokio::time::timeout(limit, wait_for_callback(rx, cancel, label)).await {
-                Ok(outcome) => outcome,
-                Err(_) => Err(format!("{label} timed out after {}s", limit.as_secs())),
-            }
-        }
-        None => wait_for_callback(rx, cancel, label).await,
+    // Only the call site decides the bound; an absent one is unbounded.
+    let deadline = match timeout {
+        Some(limit) => Deadline::new(label, limit),
+        None => Deadline::unbounded(label),
+    };
+    let pending = match deadline
+        .wait(
+            "waiting for the host to answer",
+            wait_for_callback(rx, cancel, label),
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => Err(format!(
+            "{label} timed out after {}s",
+            deadline.remaining().as_secs()
+        )),
     };
 
     // Whatever ended the wait (resolution, timeout, cancellation, dropped

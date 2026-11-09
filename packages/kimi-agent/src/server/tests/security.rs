@@ -99,7 +99,7 @@ async fn a_host_outside_the_allowlist_is_refused_before_the_credential() {
         }
         HttpRequest {
             method: "GET".into(),
-            path: "/api/v1/health".into(),
+            path: "/api/v1/healthz".into(),
             query: None,
             headers,
             body: Vec::new(),
@@ -143,7 +143,7 @@ async fn an_in_process_server_without_a_guard_ignores_the_host_header() {
     let res = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
-            path: "/api/v1/health".into(),
+            path: "/api/v1/healthz".into(),
             query: None,
             headers,
             body: Vec::new(),

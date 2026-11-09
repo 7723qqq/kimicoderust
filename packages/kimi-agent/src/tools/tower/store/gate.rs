@@ -81,6 +81,7 @@ impl TowerStore {
         let base_tip = base_tip?;
         let head_tip = head_tip?;
         let base_dirty_files = dirty_files?;
+        let has_branch = has_branch?;
         let branch = if has_branch {
             let tip = branch_tip(&self.repo_root, &mission.branch).await?;
             let (base_is_ancestor, spawn_base_is_ancestor) =

@@ -586,3 +586,43 @@ async fn test_approval_resolve_is_fail_closed() {
         .await;
     assert_eq!(res.status, 400, "malformed question body must be rejected");
 }
+
+/// The `DELETE /sessions/{id}` path must clean the session's on-disk state
+/// too. The rows cascade in SQLite, but the undo snapshots and logs live in a
+/// directory no cascade reaches: leaving it behind while answering `deleted`
+/// is exactly the orphan this guards against.
+#[tokio::test]
+async fn deleting_a_session_removes_its_state_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let server = HttpServer::new(store.clone());
+    let workspace = store
+        .create_workspace(dir.path().to_str().unwrap(), None)
+        .unwrap();
+    store
+        .create_session_with_workspace("sess-orphan", Some("Orphan"), Some(&workspace.id))
+        .unwrap();
+
+    let state_dir = crate::storage::paths::engine_session_dir(dir.path(), "sess-orphan").unwrap();
+    std::fs::create_dir_all(state_dir.join("state/checkpoints")).unwrap();
+    std::fs::write(state_dir.join("state/checkpoints/turn-1.json"), "{}").unwrap();
+    assert!(state_dir.exists());
+
+    let res = server
+        .handle_request(&HttpRequest {
+            method: "DELETE".into(),
+            path: "/api/v1/sessions/sess-orphan".into(),
+            query: None,
+            headers: HashMap::new(),
+            body: Vec::new(),
+        })
+        .await;
+    assert_eq!(res.status, 200);
+    assert!(
+        !state_dir.exists(),
+        "the deleted session's state directory must not be left behind"
+    );
+    assert!(store.get_session("sess-orphan").unwrap().is_none());
+
+    std::fs::remove_dir_all(&dir).ok();
+}

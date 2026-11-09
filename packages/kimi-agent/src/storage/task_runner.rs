@@ -32,6 +32,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::primitives::deadline::Deadline;
+use crate::primitives::read::ReadOutcome;
 use crate::storage::StateStore;
 use crate::turn_loop::types::LLMMessage;
 
@@ -230,6 +232,20 @@ pub enum TaskWaitResult {
     NotFound,
 }
 
+/// What [`TaskRunner::stop`] did: the entry as it now stands.
+#[derive(Debug, Clone)]
+pub struct TaskStopOutcome {
+    /// The task entry after the stop attempt.
+    pub wire: Value,
+}
+
+/// What [`TaskRunner::stop_session`] did: the ids it flagged.
+#[derive(Debug, Clone)]
+pub struct SessionStopOutcome {
+    /// The ids whose cancel flags were set.
+    pub flagged: Vec<String>,
+}
+
 /// Spawn context a caller can attach: which session the task belongs to and
 /// what kind of work it is, so the lifecycle events reach the right lane with
 /// the Web vocabulary's task shapes.
@@ -369,6 +385,10 @@ pub struct TaskRunner {
     /// `event.task.completed` / `background.task.terminated` on settle, with
     /// the task's session for lane routing. Absent = purely local runner.
     event_sink: Mutex<Option<TaskEventSink>>,
+    /// Fired after a task settles, with its session, so the server can
+    /// recompute the session activity fold (v2 `TaskTerminatedNotice`). The
+    /// event sink publishes terminal facts; this hook re-derives `busy`.
+    settle_sink: Mutex<Option<TaskSettleSink>>,
     /// Host-injected liveness predicate (v2 `taskService.lifecycleActive`):
     /// `Some(task_session) -> bool`. `false` = the owning session is gone
     /// (pump disposed), so a late settle announces nothing and queues
@@ -401,6 +421,10 @@ pub struct TaskRunner {
 /// lifecycle to outlive.
 pub type TaskLivenessCheck = Arc<dyn Fn(Option<&str>) -> bool + Send + Sync>;
 
+/// A sink invoked once a task settles, with the task's session, so the host
+/// can re-evaluate whether that session is still busy (`background` fold).
+pub type TaskSettleSink = Arc<dyn Fn(Option<&str>) + Send + Sync>;
+
 /// A task completion event queued by [`TaskRunner::settle_task`] and
 /// drained via [`TaskRunner::take_pending_notifications`]. Mirrors v2's
 /// `task.notificationDelivery` payload shape: identifier, description,
@@ -419,6 +443,195 @@ pub struct TaskNotification {
     /// [`TaskRunner::take_pending_notifications`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// `subagent` | `bash` | `tool` (v2 `TaskInfo.kind`, mapped to
+    /// `agent` / `process` in the rendered notification).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The subagent's agent id (v2 `TaskInfo.agentId`), which the recovery
+    /// guidance tells the model to resume with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Why a non-completed task ended (v2 `TaskInfo.stopReason`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// Where the full output was persisted, when the runner kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    /// Total bytes of the task output.
+    #[serde(default)]
+    pub output_size_bytes: u64,
+    /// Whether [`Self::output_preview`] is a head/tail truncation.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl TaskNotification {
+    /// v2 `buildAgentTaskNotification` + `renderNotificationXml`: the XML the
+    /// model reads when a background task settles. The id/type/source fields
+    /// are fixed by the task status; the body carries the wall time, the
+    /// status sentence, and — for a failed subagent — the resume guidance.
+    pub fn to_xml(&self) -> String {
+        let kind = match self.kind.as_deref() {
+            Some("subagent") => "agent",
+            Some("bash") | Some("tool") | None => "process",
+            Some(other) => other,
+        };
+        let status = self.status.as_str();
+        let id = format!("task:{}:{status}", self.task_id);
+        let type_name = format!("task.{status}");
+        let agent_attr = self
+            .agent_id
+            .as_deref()
+            .filter(|agent_id| kind == "agent" && !agent_id.is_empty())
+            .map(|agent_id| format!(" agent_id=\"{}\"", escape_xml_attr(agent_id)))
+            .unwrap_or_default();
+        let mut lines = vec![format!(
+            "<notification id=\"{}\" category=\"task\" type=\"{}\" source_kind=\"background_task\" \
+             source_id=\"{}\"{}>",
+            escape_xml_attr(&id),
+            escape_xml_attr(&type_name),
+            escape_xml_attr(&self.task_id),
+            agent_attr
+        )];
+        lines.push(format!("Title: Background {kind} {status}"));
+        lines.push(format!(
+            "Severity: {}",
+            if self.status == TaskStatus::Completed {
+                "info"
+            } else {
+                "warning"
+            }
+        ));
+        lines.push(self.body(kind));
+        if let Some(child) = self.output_child() {
+            lines.push(child);
+        }
+        lines.push("</notification>".to_string());
+        lines.join("\n")
+    }
+
+    /// v2 `buildAgentTaskNotificationBody`.
+    fn body(&self, kind: &str) -> String {
+        let status = self.status.as_str();
+        let base = match self.status {
+            TaskStatus::TimedOut => format!("{} timed out.", self.description),
+            TaskStatus::Killed if is_user_cancellation(self.stop_reason.as_deref()) => {
+                format!("{} was stopped by user.", self.description)
+            }
+            _ => match self
+                .stop_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+            {
+                Some(reason) => format!(
+                    "{} {}. Reason: {reason}",
+                    self.description,
+                    if self.status == TaskStatus::Killed {
+                        "was stopped"
+                    } else {
+                        status
+                    }
+                ),
+                None => format!("{} {status}.", self.description),
+            },
+        };
+        let timed = format!(
+            "{}\n{base}",
+            crate::turn_loop::wall_time::wall_time_header(
+                self.ended_at.saturating_sub(self.started_at)
+            )
+        );
+        if kind != "agent" || self.status == TaskStatus::Completed {
+            return timed;
+        }
+        let Some(agent_id) = self.agent_id.as_deref() else {
+            return timed;
+        };
+        if agent_id == self.task_id {
+            return timed;
+        }
+        let recovery = [
+            String::new(),
+            format!(
+                "To recover or continue this subagent, call Agent(resume=\"{agent_id}\", \
+                 prompt=\"Pick up where you left off; redo the last tool call if its result was \
+                 never observed.\")."
+            ),
+            format!(
+                "Use agent_id (\"{agent_id}\"), NOT source_id / task_id (\"{}\") — the two look \
+                 alike but only agent_id is accepted by the resume parameter.",
+                self.task_id
+            ),
+            "Add run_in_background=true to keep it backgrounded, or omit it to take the result \
+             inline in the current turn."
+                .to_string(),
+            "The subagent retains its full prior context across the restart, but any in-flight \
+             tool call lost its result and may need to be redone."
+                .to_string(),
+        ]
+        .join("\n");
+        format!("{timed}{recovery}")
+    }
+
+    /// v2 `agentTaskNotificationChildren`: the persisted output file when
+    /// there is one, else the buffered preview.
+    fn output_child(&self) -> Option<String> {
+        if let Some(path) = &self.output_path {
+            return Some(format!(
+                "<output-file path=\"{}\" bytes=\"{}\">\nRead the output file to retrieve the \
+                 result: {}\n</output-file>",
+                escape_xml_attr(path),
+                self.output_size_bytes,
+                escape_xml(path)
+            ));
+        }
+        let preview = self
+            .output_preview
+            .as_deref()
+            .filter(|text| !text.is_empty())?;
+        let preview_bytes = preview.len();
+        let guidance = if self.truncated {
+            format!(
+                "Showing the last {preview_bytes} bytes. No persisted full output is available."
+            )
+        } else {
+            "No persisted full output is available; this preview is the currently buffered task \
+             output."
+                .to_string()
+        };
+        Some(format!(
+            "<output-preview bytes=\"{preview_bytes}\" total_bytes=\"{}\" truncated=\"{}\">\n\
+             {guidance}\n{}\n</output-preview>",
+            self.output_size_bytes,
+            self.truncated,
+            escape_xml(preview)
+        ))
+    }
+}
+
+/// v2 `isSerializedUserCancellation`: the reason a user stop records.
+fn is_user_cancellation(reason: Option<&str>) -> bool {
+    reason.is_some_and(|reason| {
+        let reason = reason.trim();
+        reason.eq_ignore_ascii_case("aborted by the user")
+            || reason.eq_ignore_ascii_case("stopped by user")
+            || reason.eq_ignore_ascii_case("user cancelled")
+    })
+}
+
+/// v2 `escapeXml`.
+fn escape_xml(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// v2 `escapeXmlAttr`.
+fn escape_xml_attr(input: &str) -> String {
+    input.replace('&', "&amp;").replace('"', "&quot;")
 }
 
 impl TaskRunner {
@@ -432,6 +645,7 @@ impl TaskRunner {
             store,
             pending_notifications: Mutex::new(Vec::new()),
             event_sink: Mutex::new(None),
+            settle_sink: Mutex::new(None),
             liveness_check: Mutex::new(None),
             hook_guard: Mutex::new(None),
             kill_grace: Mutex::new(STOP_GRACE),
@@ -461,7 +675,7 @@ impl TaskRunner {
         keep_alive_on_exit: Option<bool>,
     ) {
         if let Some(ms) = kill_grace_period_ms.filter(|ms| *ms > 0) {
-            *self.kill_grace.lock().unwrap() = Duration::from_millis(ms);
+            *self.kill_grace.lock().unwrap_or_else(|e| e.into_inner()) = Duration::from_millis(ms);
         }
         if let Some(Ok(cap)) = max_running_tasks
             .filter(|cap| *cap > 0)
@@ -470,19 +684,45 @@ impl TaskRunner {
             self.max_running.store(cap, Ordering::Relaxed);
         }
         if let Some(value) = keep_alive_on_exit {
-            *self.keep_alive_on_exit.lock().unwrap() = value;
+            *self
+                .keep_alive_on_exit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = value;
         }
     }
 
     /// v2 `keepAliveOnExit`: when true, `stop_session` leaves running task alive.
     pub fn set_keep_alive_on_exit(&self, value: bool) {
-        *self.keep_alive_on_exit.lock().unwrap() = value;
+        *self
+            .keep_alive_on_exit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = value;
     }
 
     /// Install the lifecycle event sink (the server does this once, fanning
     /// out to the task's session lane — or `global` when the task has none).
     pub fn set_event_sink(&self, sink: TaskEventSink) {
-        *self.event_sink.lock().unwrap() = Some(sink);
+        *self.event_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+    }
+
+    /// Install the settle sink: called after a task's terminal events with its
+    /// session id, so the host can recompute the session's `busy` fold.
+    pub fn set_settle_sink(&self, sink: TaskSettleSink) {
+        *self.settle_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+    }
+
+    /// Whether any task spawned for `session_id` is still running (v2
+    /// `sessionActivityService`'s background fold). Settled entries stay in the
+    /// registry for inspection, hence the status check.
+    pub fn has_running_task_for_session(&self, session_id: &str) -> bool {
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|entry| {
+                entry.status == TaskStatus::Running
+                    && entry.session_id.as_deref() == Some(session_id)
+            })
     }
 
     /// Install the external-hook gate so task lifecycle events reach
@@ -490,7 +730,7 @@ impl TaskRunner {
     /// `Notification`). Like the event sink, this is per-runner state the
     /// pipeline installs once it owns the runner.
     pub fn set_hook_guard(&self, guard: Arc<crate::tools::external_hooks::HookGuard>) {
-        *self.hook_guard.lock().unwrap() = Some(guard);
+        *self.hook_guard.lock().unwrap_or_else(|e| e.into_inner()) = Some(guard);
     }
 
     /// Install the liveness predicate (v2 `taskService.lifecycleActive`): the
@@ -500,13 +740,21 @@ impl TaskRunner {
     /// (no terminal events, no queued notification), matching v2's
     /// `recordTaskTerminated` + `notifyAgentTask` early return.
     pub fn set_liveness_check(&self, check: TaskLivenessCheck) {
-        *self.liveness_check.lock().unwrap() = Some(check);
+        *self
+            .liveness_check
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(check);
     }
 
     /// The liveness gate for one task's session: absent predicate = always
     /// alive (legacy behavior), `None` session = server-level (alive).
     fn session_alive(&self, session_id: Option<&str>) -> bool {
-        match self.liveness_check.lock().unwrap().as_ref() {
+        match self
+            .liveness_check
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             None => true,
             Some(check) => check(session_id),
         }
@@ -535,7 +783,12 @@ impl TaskRunner {
     }
 
     fn fire_event(&self, session_id: Option<&str>, event: Value) {
-        if let Some(sink) = self.event_sink.lock().unwrap().as_ref() {
+        if let Some(sink) = self
+            .event_sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             sink(session_id, event);
         }
     }
@@ -592,7 +845,7 @@ impl TaskRunner {
     where
         F: Future<Output = TaskOutcome> + Send + 'static,
     {
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         if tasks.contains_key(&id) {
             return Err(format!("task already exists: {id}"));
         }
@@ -718,7 +971,11 @@ impl TaskRunner {
         );
         // v2 `TaskStarted` hook event (agentExternalHooksService): hooks
         // match against the task kind.
-        let guard = self.hook_guard.lock().unwrap().clone();
+        let guard = self
+            .hook_guard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(guard) = guard {
             let kind = spawn_kind.clone();
             let description = description.clone();
@@ -739,7 +996,7 @@ impl TaskRunner {
     /// signal a caller can await on, so a poll is the only way to observe
     /// "the background work finished".
     pub fn running_ids(&self) -> Vec<String> {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         let mut running: Vec<(&u64, &String)> = tasks
             .values()
             .filter(|entry| entry.status == TaskStatus::Running)
@@ -781,12 +1038,32 @@ impl TaskRunner {
             // misreported. Lock order is `tasks` before `persist_lock`:
             // spawn and settle take the two in that order, and reversing it
             // deadlocks.
-            let live_tasks = self.tasks.lock().unwrap();
-            let _guard = self.persist_lock.lock().unwrap();
-            let tasks = store
-                .read_domain("task")
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default();
+            let live_tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let tasks = match store.read_domain_state("task") {
+                ReadOutcome::Found(Value::Array(tasks)) => tasks,
+                ReadOutcome::Absent => Vec::new(),
+                // Writing the table back would replace the only copy of every
+                // task entry with the list this pass happens to know about, so
+                // the reattach scan is skipped instead. A file that parses but
+                // is not a list lands here too: reading it as "no entries"
+                // would let the scan rewrite the file and drop its contents.
+                ReadOutcome::Found(_) => {
+                    tracing::warn!(
+                        target: "kimi_agent::storage::task_runner",
+                        "reattach scan: task domain is not a list; skipping the scan"
+                    );
+                    return None;
+                }
+                ReadOutcome::Unreadable(cause) => {
+                    tracing::warn!(
+                        target: "kimi_agent::storage::task_runner",
+                        %cause,
+                        "reattach scan: task domain is unreadable; skipping the scan"
+                    );
+                    return None;
+                }
+            };
 
             let mut reported: Vec<String> = Vec::new();
             let mut notifications: Vec<TaskNotification> = Vec::new();
@@ -840,9 +1117,15 @@ impl TaskRunner {
                 updated.push(task);
             }
 
-            if changed && store.write_domain("task", &Value::Array(updated)).is_err() {
+            if changed && let Err(error) = store.write_domain("task", &Value::Array(updated)) {
                 // A failed write means the reminder would fire again next time;
-                // reporting it now is still the honest outcome.
+                // reporting it now is still the honest outcome. The failure
+                // itself must be visible, not just noted in a comment.
+                tracing::warn!(
+                    target: "kimi_agent::storage::task_runner",
+                    %error,
+                    "reattach scan: could not persist the lost-task markers"
+                );
             }
             (reported, notifications)
         };
@@ -862,7 +1145,10 @@ impl TaskRunner {
                 );
                 continue;
             }
-            let mut queue = self.pending_notifications.lock().unwrap();
+            let mut queue = self
+                .pending_notifications
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let duplicate = queue.iter().any(|queued| {
                 queued.task_id == notification.task_id && queued.status == notification.status
             });
@@ -914,7 +1200,7 @@ impl TaskRunner {
         if turn_id.is_empty() {
             return;
         }
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         for entry in tasks.values_mut().filter(|entry| {
             entry.status == TaskStatus::Running
                 && entry.kind == "subagent"
@@ -957,7 +1243,7 @@ impl TaskRunner {
         else {
             return;
         };
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         for entry in tasks
             .values_mut()
             .filter(|entry| entry.status == TaskStatus::Running && entry.kind == "subagent")
@@ -970,7 +1256,7 @@ impl TaskRunner {
     /// still running (or unknown), or when a stopped subagent produced no
     /// public assistant text.
     pub fn get_output(&self, id: &str) -> Option<String> {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         let entry = tasks.get(id)?;
         if entry.status == TaskStatus::Running {
             return None;
@@ -988,9 +1274,9 @@ impl TaskRunner {
     /// The `reason` becomes the entry's `stopReason` (blank/`None` falls
     /// back to `"Stopped by TaskStop"`); a reason already on the entry is
     /// never overwritten.
-    pub async fn stop(&self, id: &str, reason: Option<&str>) -> Result<Value, String> {
+    pub async fn stop(&self, id: &str, reason: Option<&str>) -> Result<TaskStopOutcome, String> {
         let done = {
-            let mut tasks = self.tasks.lock().unwrap();
+            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = tasks.get_mut(id) else {
                 return Err(format!("Task not found: {id}"));
             };
@@ -1004,7 +1290,7 @@ impl TaskRunner {
                     object.remove("output");
                     object.remove("outputPath");
                 }
-                return Ok(wire);
+                return Ok(TaskStopOutcome { wire });
             }
             if entry.stop_reason.is_none() {
                 let reason = reason
@@ -1018,11 +1304,23 @@ impl TaskRunner {
             entry.cancel_notify.notify_waiters();
             entry.done.clone()
         };
-        let grace = *self.kill_grace.lock().unwrap();
-        let _ = tokio::time::timeout(grace, done).await;
-        let tasks = self.tasks.lock().unwrap();
+        let grace = *self.kill_grace.lock().unwrap_or_else(|e| e.into_inner());
+        // v2 `terminateWithGrace` races the lifecycle promise against the grace
+        // window and settles a task that outlives it as `killed`
+        // (`agent/task/taskService.ts:840-856`).
+        let deadline = Deadline::new(format!("stopping task {id}"), grace);
+        if deadline
+            .wait("waiting for the task to reach a yield point", done)
+            .await
+            .is_err()
+        {
+            self.settle_task(id, TaskStatus::Killed, None, None);
+        }
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         let entry = tasks.get(id).unwrap();
-        Ok(self.entry_wire(entry))
+        Ok(TaskStopOutcome {
+            wire: self.entry_wire(entry),
+        })
     }
 
     /// Cooperatively stop EVERY running task spawned for `session_id`.
@@ -1045,9 +1343,15 @@ impl TaskRunner {
     /// nothing running returns an empty list. As with [`Self::stop`], a task
     /// that does not yield stays `running` in the entry until its wrapper
     /// settles it; the flag and the reason are what this guarantees.
-    pub async fn stop_session(&self, session_id: &str, reason: Option<&str>) -> Vec<String> {
-        if *self.keep_alive_on_exit.lock().unwrap() {
-            return Vec::new();
+    pub async fn stop_session(&self, session_id: &str, reason: Option<&str>) -> SessionStopOutcome {
+        if *self
+            .keep_alive_on_exit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            return SessionStopOutcome {
+                flagged: Vec::new(),
+            };
         }
         let reason = reason
             .map(str::trim)
@@ -1055,9 +1359,9 @@ impl TaskRunner {
             .unwrap_or("Session closed")
             .to_string();
         let mut ids = Vec::new();
-        let mut waits: Vec<Shared<BoxFuture<'static, ()>>> = Vec::new();
+        let mut waits: Vec<(String, Shared<BoxFuture<'static, ()>>)> = Vec::new();
         {
-            let mut tasks = self.tasks.lock().unwrap();
+            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             for (id, entry) in tasks.iter_mut() {
                 if entry.session_id.as_deref() != Some(session_id) {
                     continue;
@@ -1071,20 +1375,27 @@ impl TaskRunner {
                 entry.cancel.store(true, Ordering::Relaxed);
                 entry.cancel_notify.notify_waiters();
                 ids.push(id.clone());
-                waits.push(entry.done.clone());
+                waits.push((id.clone(), entry.done.clone()));
             }
         }
         if waits.is_empty() {
-            return ids;
+            return SessionStopOutcome { flagged: ids };
         }
-        let grace = *self.kill_grace.lock().unwrap();
-        let settle = async {
-            for done in waits {
-                done.await;
+        let grace = *self.kill_grace.lock().unwrap_or_else(|e| e.into_inner());
+        // v2 `stopAll` awaits each task's own `terminateWithGrace`
+        // (`agent/task/taskService.ts:868-874`): every task gets its own grace
+        // window instead of sharing one budget.
+        for (id, done) in waits {
+            let deadline = Deadline::new(format!("stopping task {id}"), grace);
+            if deadline
+                .wait(format!("waiting for task {id} to settle"), done)
+                .await
+                .is_err()
+            {
+                self.settle_task(&id, TaskStatus::Killed, None, None);
             }
-        };
-        let _ = tokio::time::timeout(grace, settle).await;
-        ids
+        }
+        SessionStopOutcome { flagged: ids }
     }
 
     /// Wait for a task to settle, up to `timeout_ms` (v2 `wait`
@@ -1106,7 +1417,7 @@ impl TaskRunner {
         signal: Option<&crate::subagent::types::ParentCancel>,
     ) -> TaskWaitResult {
         let done = {
-            let tasks = self.tasks.lock().unwrap();
+            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = tasks.get(id) else {
                 return TaskWaitResult::NotFound;
             };
@@ -1116,7 +1427,7 @@ impl TaskRunner {
             entry.done.clone()
         };
         if timeout_ms == 0 {
-            let tasks = self.tasks.lock().unwrap();
+            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             let entry = tasks.get(id).unwrap();
             return TaskWaitResult::TimedOut(self.entry_wire(entry));
         }
@@ -1133,12 +1444,12 @@ impl TaskRunner {
         };
         tokio::select! {
             _ = done => {
-                let tasks = self.tasks.lock().unwrap();
+                let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
                 let entry = tasks.get(id).unwrap();
                 TaskWaitResult::Completed(self.entry_wire(entry))
             }
             _ = &mut deadline => {
-                let tasks = self.tasks.lock().unwrap();
+                let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
                 let entry = tasks.get(id).unwrap();
                 let wire = self.entry_wire(entry);
                 // A task that settled just as the timeout fired reports the
@@ -1176,7 +1487,7 @@ impl TaskRunner {
     /// Every registered task's entry wire, oldest first; the output
     /// snapshot is omitted (TaskList does not carry output).
     pub fn list(&self) -> Vec<Value> {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         let mut entries: Vec<Value> = tasks.values().map(|entry| self.entry_wire(entry)).collect();
         for entry in &mut entries {
             if let Some(obj) = entry.as_object_mut() {
@@ -1196,7 +1507,7 @@ impl TaskRunner {
     /// One task's entry wire (with the output snapshot when settled), or
     /// `None` for an unknown id.
     pub fn entry(&self, id: &str) -> Option<Value> {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         tasks.get(id).map(|entry| self.entry_wire(entry))
     }
 
@@ -1219,8 +1530,12 @@ impl TaskRunner {
             session_id,
             kind,
             output_bytes,
+            agent_id,
+            stop_reason,
+            output_path,
+            truncated,
         ) = {
-            let mut tasks = self.tasks.lock().unwrap();
+            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = tasks.get_mut(id) else {
                 return;
             };
@@ -1245,6 +1560,10 @@ impl TaskRunner {
             }
             let ended_at = entry.ended_at.unwrap_or(now_ms());
             let preview = entry.output.as_deref().and_then(truncate_preview);
+            let truncated = entry
+                .output
+                .as_ref()
+                .is_some_and(|output| output.chars().count() > NOTIFICATION_PREVIEW_CHARS);
             let description = entry.description.clone();
             let wire = self.entry_wire(entry);
             (
@@ -1255,7 +1574,19 @@ impl TaskRunner {
                 wire,
                 entry.session_id.clone(),
                 entry.kind.clone(),
-                entry.output.as_ref().map(|o| o.len()),
+                entry.output.as_ref().map(|o| o.len() as u64).unwrap_or(0),
+                entry.agent_id.clone(),
+                entry.stop_reason.clone(),
+                self.store
+                    .as_ref()
+                    .filter(|_| {
+                        entry
+                            .output
+                            .as_ref()
+                            .is_some_and(|output| !output.is_empty())
+                    })
+                    .map(|store| store.task_output_path(id).to_string_lossy().into_owned()),
+                truncated,
             )
         };
         if let Some(output) = wire.get("output").and_then(|v| v.as_str())
@@ -1275,7 +1606,11 @@ impl TaskRunner {
             // v2 `Notification` hook event (agentExternalHooksService,
             // delivered-as-context task notifications): hooks match against
             // the terminal status.
-            let guard = self.hook_guard.lock().unwrap().clone();
+            let guard = self
+                .hook_guard
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             if let Some(guard) = guard {
                 let (task_id, description, status, started_at) = (
                     id.to_string(),
@@ -1296,7 +1631,10 @@ impl TaskRunner {
                 });
             }
             let pending = {
-                let mut queue = self.pending_notifications.lock().unwrap();
+                let mut queue = self
+                    .pending_notifications
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 queue.push(TaskNotification {
                     task_id: id.to_string(),
                     description,
@@ -1305,6 +1643,12 @@ impl TaskRunner {
                     started_at,
                     ended_at,
                     session_id: session_id.clone(),
+                    kind: Some(kind.clone()),
+                    agent_id,
+                    stop_reason,
+                    output_path,
+                    output_size_bytes: output_bytes,
+                    truncated,
                 });
                 queue.len()
             };
@@ -1359,6 +1703,18 @@ impl TaskRunner {
                 "task terminal event dropped: agent lifecycle inactive"
             );
         }
+        // v2 `sessionActivityService` recomputes the fold on every terminated
+        // task: a session that was busy only for this task flips idle now.
+        if self.session_alive(session_id.as_deref()) {
+            let sink = self
+                .settle_sink
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(sink) = sink {
+                sink(session_id.as_deref());
+            }
+        }
     }
 
     /// Drain the completion notifications **of one session**: only
@@ -1377,7 +1733,10 @@ impl TaskRunner {
         let Some(session_id) = session_id else {
             return Vec::new();
         };
-        let mut queue = self.pending_notifications.lock().unwrap();
+        let mut queue = self
+            .pending_notifications
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut taken = Vec::new();
         let mut kept = Vec::with_capacity(queue.len());
         for notification in queue.drain(..) {
@@ -1467,7 +1826,10 @@ impl TaskRunner {
             );
             return;
         }
-        let mut queue = self.pending_notifications.lock().unwrap();
+        let mut queue = self
+            .pending_notifications
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = now_ms();
         let description = match queue.iter_mut().find(|notification| {
             notification.task_id == task_id
@@ -1487,6 +1849,12 @@ impl TaskRunner {
                     started_at: now,
                     ended_at: now,
                     session_id: Some(session_id.to_string()),
+                    kind: None,
+                    agent_id: None,
+                    stop_reason: None,
+                    output_path: None,
+                    output_size_bytes: 0,
+                    truncated: false,
                 });
                 description
             }
@@ -1518,7 +1886,10 @@ impl TaskRunner {
     /// with a stale "check your inbox" notification (v2 drops queued tower
     /// inbox wakes on exit).
     pub fn cancel_wake(&self, session_id: &str, task_id: &str) {
-        let mut queue = self.pending_notifications.lock().unwrap();
+        let mut queue = self
+            .pending_notifications
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         queue.retain(|notification| {
             !(notification.task_id == task_id
                 && notification.session_id.as_deref() == Some(session_id))
@@ -1606,11 +1977,31 @@ impl TaskRunner {
         let Some(store) = &self.store else {
             return;
         };
-        let _guard = self.persist_lock.lock().unwrap();
-        let mut tasks = store
-            .read_domain("task")
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
+        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tasks = match store.read_domain_state("task") {
+            ReadOutcome::Found(Value::Array(tasks)) => tasks,
+            ReadOutcome::Absent => Vec::new(),
+            // Writing the table back would replace the only copy of every task
+            // entry with the list this task alone knows about, so the mirror is
+            // skipped and the failure is logged instead. A parsed-but-other
+            // shape is skipped for the same reason: it may still hold entries
+            // this process does not know about.
+            ReadOutcome::Found(_) => {
+                tracing::warn!(
+                    target: "kimi_agent::storage::task_runner",
+                    "persist task state: task domain is not a list; skipping the mirror"
+                );
+                return;
+            }
+            ReadOutcome::Unreadable(cause) => {
+                tracing::warn!(
+                    target: "kimi_agent::storage::task_runner",
+                    %cause,
+                    "persist task state: task domain is unreadable; skipping the mirror"
+                );
+                return;
+            }
+        };
         let id = wire
             .get("taskId")
             .and_then(|v| v.as_str())
@@ -1753,6 +2144,29 @@ fn previous_session_notification(task: &Value) -> TaskNotification {
             .or_else(|| task.get("session_id"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        kind: task
+            .get("kind")
+            .or_else(|| task.get("taskKind"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        agent_id: task
+            .get("agentId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        stop_reason: task
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        output_path: None,
+        output_size_bytes: task
+            .get("output")
+            .and_then(Value::as_str)
+            .map(|output| output.len() as u64)
+            .unwrap_or(0),
+        truncated: task
+            .get("output")
+            .and_then(Value::as_str)
+            .is_some_and(|output| output.chars().count() > NOTIFICATION_PREVIEW_CHARS),
     }
 }
 

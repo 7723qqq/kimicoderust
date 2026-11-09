@@ -1,175 +1,68 @@
-//! v2 `agent/toolSelect/toolSelectOps.ts` + `dynamicTools.ts` (final state).
-//!
-//! A session records an initial tool table, then an ordered list of changes
-//! as the live registry is reconciled. Announcements are keyed by a revision
-//! number so a model that has only seen revision N receives the delta from N
-//! to the current one, skipping changes that contain no dynamically loadable
-//! tool. Unsupported-dynamic-tool history shaping rewrites a prior
-//! `<tools_added>` announcement into the runtime-change reminder.
+use crate::tools::tool_retriever::ToolSearchHit;
+use crate::turn_loop::types::LLMMessage;
 
-use crate::tools::registry::{ToolDefinition, ToolDisclosure};
+pub const LOADABLE_TOOLS_VARIANT: &str = "loadable-tools";
 
-/// One ordered change to the live tool table (v2 `ToolSelectChange`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolChange {
-    pub added: Vec<ToolDefinition>,
-    pub removed: Vec<ToolDefinition>,
-}
+pub const RETRIEVED_TOOLS_VARIANT: &str = "retrieved-tools";
 
-/// The persisted per-session disclosure state (v2 `ToolSelectModelState`).
-#[derive(Debug, Default)]
-pub struct ToolSelectState {
-    initial: Option<Vec<ToolDefinition>>,
-    current: Vec<ToolDefinition>,
-    changes: Vec<ToolChange>,
-    /// Signatures already reported by `notifyUpdatedTools` (once per
-    /// service instance, v2 `notifiedUpdates`).
-    notified_updates: std::collections::HashSet<String>,
-    /// Reminder texts waiting for the next turn's injection provider
-    /// (v2 `AgentReminder.notify` → `reminder` history message).
-    pending_notices: Vec<String>,
-}
+const LEGACY_TOOL_SELECT_VARIANT: &str = "tool_select";
 
-impl ToolSelectState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// v2 `ToolSelectInitialized`: pin the initial table. Repeated calls are
-    /// a no-op, like the v2 reducer.
-    pub fn initialize(&mut self, tools: Vec<ToolDefinition>) {
-        if self.initial.is_none() {
-            self.initial = Some(tools.clone());
-            self.current = tools;
-        }
-    }
-
-    /// v2 `reconcile`: diff the live table against `current` and append a
-    /// change for genuinely added / removed names. Same-name definition
-    /// updates do not produce a delta (the active schema stays pinned).
-    pub fn reconcile(&mut self, live: Vec<ToolDefinition>) -> Option<&ToolChange> {
-        if self.initial.is_none() {
-            self.initialize(live);
-            return None;
-        }
-        let live_names: std::collections::HashSet<String> =
-            live.iter().map(|tool| tool.name.clone()).collect();
-        let current_names: std::collections::HashSet<&str> =
-            self.current.iter().map(|tool| tool.name.as_str()).collect();
-        let removed: Vec<ToolDefinition> = self
-            .current
-            .iter()
-            .filter(|tool| !live_names.contains(&tool.name))
-            .cloned()
-            .collect();
-        let added: Vec<ToolDefinition> = live
-            .into_iter()
-            .filter(|tool| !current_names.contains(tool.name.as_str()))
-            .collect();
-        if added.is_empty() && removed.is_empty() {
-            return None;
-        }
-        self.current
-            .retain(|tool| live_names.contains(tool.name.as_str()));
-        self.current.extend(added.iter().cloned());
-        self.current
-            .sort_by(|left, right| left.name.cmp(&right.name));
-        self.changes.push(ToolChange { added, removed });
-        self.changes.last()
-    }
-
-    pub fn revision(&self) -> usize {
-        self.changes.len()
-    }
-
-    pub fn current(&self) -> &[ToolDefinition] {
-        &self.current
-    }
-
-    pub fn initial(&self) -> Option<&[ToolDefinition]> {
-        self.initial.as_deref()
-    }
-
-    /// v2 `loadableToolsAnnouncement` delta walk: from `last_revision`, find
-    /// the first change that has a loadable added or removed tool, filtering
-    /// out non-loadable announcements.
-    pub fn announcement_since(
-        &self,
-        last_revision: usize,
-    ) -> Option<(usize, Vec<String>, Vec<String>)> {
-        for (index, change) in self.changes.iter().enumerate().skip(last_revision) {
-            let added: Vec<String> = change
-                .added
-                .iter()
-                .filter(|tool| tool.disclosure == ToolDisclosure::Deferred)
-                .map(|tool| tool.name.clone())
-                .collect();
-            let removed: Vec<String> = change
-                .removed
-                .iter()
-                .filter(|tool| {
-                    tool.disclosure == ToolDisclosure::Deferred
-                        || !change.added.iter().any(|next| {
-                            next.name == tool.name && next.disclosure != ToolDisclosure::Deferred
-                        })
-                })
-                .map(|tool| tool.name.clone())
-                .collect();
-            if added.is_empty() && removed.is_empty() {
-                continue;
-            }
-            return Some((index + 1, added, removed));
-        }
-        None
-    }
-
-    /// v2 `notifyUpdatedTools`: a same-name update that is not applied in
-    /// this session is reported once per service instance, by signature.
-    /// Returns the reminder text when it has not been reported before.
-    pub fn notify_update_once(&mut self, name: &str, signature: &str) -> Option<String> {
-        if !self.notified_updates.insert(signature.to_string()) {
-            return None;
-        }
-        let text = format!(
-            "Tool \"{name}\" has an update, but the update is not applied in this session. \
-             Continue using the currently registered version."
-        );
-        self.pending_notices.push(text.clone());
-        Some(text)
-    }
-
-    /// The next turn's `tool_update_pending` injection text, if any. One
-    /// notice is delivered per turn, in the order the updates were seen.
-    pub fn take_pending_notice(&mut self) -> Option<String> {
-        if self.pending_notices.is_empty() {
-            None
-        } else {
-            Some(self.pending_notices.remove(0))
-        }
-    }
-
-    /// v2 `notifyUpdatedTools`: compare the active table this session sees
-    /// against what a new session would register. A same-name definition
-    /// whose version signature changed queues one reminder.
-    pub fn observe_live_updates(&mut self, active: &[ToolDefinition], live: &[ToolDefinition]) {
-        use crate::tools::registry::version_signature;
-        let live_by_name: std::collections::HashMap<&str, &ToolDefinition> =
-            live.iter().map(|tool| (tool.name.as_str(), tool)).collect();
-        for tool in active {
-            let Some(next) = live_by_name.get(tool.name.as_str()) else {
-                continue;
-            };
-            let signature = version_signature(next);
-            if signature == version_signature(tool) {
-                continue;
-            }
-            self.notify_update_once(&tool.name, &signature);
-        }
+fn origin_variant(message: &LLMMessage) -> Option<&str> {
+    let origin = message.origin.as_ref()?;
+    match origin.get("kind")?.as_str()? {
+        "injection" => origin.get("variant")?.as_str(),
+        "system_trigger" => origin.get("name")?.as_str(),
+        _ => None,
     }
 }
 
-/// v2 `matchToolNameBlocks` / `foldAnnouncedToolNames`: read the tool names
-/// out of a `<tools_added>` or `<tools_removed>` block.
+pub fn is_retrieved_tools_announcement(message: &LLMMessage) -> bool {
+    if origin_variant(message) == Some(RETRIEVED_TOOLS_VARIANT) {
+        return true;
+    }
+    matches!(
+        origin_variant(message),
+        Some(LOADABLE_TOOLS_VARIANT) | Some(LEGACY_TOOL_SELECT_VARIANT)
+    ) && message.content.contains("<tools_relevant>")
+}
+
+fn is_added_removed_announcement(message: &LLMMessage) -> bool {
+    matches!(
+        origin_variant(message),
+        Some(LOADABLE_TOOLS_VARIANT) | Some(LEGACY_TOOL_SELECT_VARIANT)
+    )
+}
+
+pub fn is_loadable_tools_announcement(message: &LLMMessage) -> bool {
+    is_retrieved_tools_announcement(message) || is_added_removed_announcement(message)
+}
+
+pub fn strip_dynamic_tool_context(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
+    if !messages.iter().any(is_loadable_tools_announcement) {
+        return messages;
+    }
+    messages
+        .into_iter()
+        .filter(|message| !is_loadable_tools_announcement(message))
+        .collect()
+}
+
+pub fn fold_announced_tool_names(messages: &[LLMMessage]) -> std::collections::HashSet<String> {
+    let mut announced = std::collections::HashSet::new();
+    for message in messages {
+        if !is_loadable_tools_announcement(message) {
+            continue;
+        }
+        for name in match_tool_name_blocks(&message.content, "tools_removed") {
+            announced.remove(&name);
+        }
+        for name in match_tool_name_blocks(&message.content, "tools_added") {
+            announced.insert(name);
+        }
+    }
+    announced
+}
+
 pub fn match_tool_name_blocks(text: &str, tag: &str) -> Vec<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
@@ -191,184 +84,259 @@ pub fn match_tool_name_blocks(text: &str, tag: &str) -> Vec<String> {
     names
 }
 
-/// v2 `shapeUnsupportedDynamicToolContext`: when the current model cannot
-/// dynamically load tools, a prior `<tools_added>` announcement in the
-/// history must not keep telling it to call `select_tools`. Rewrite that
-/// message's text into the runtime-change reminder, preserving the added /
-/// removed names for the model's context.
-pub fn shape_unsupported_dynamic_tool_history(
-    messages: &mut [crate::turn_loop::types::LLMMessage],
-    supports_dynamic_loading: bool,
-) {
-    if supports_dynamic_loading {
-        return;
+pub fn render_retrieved_tools_announcement(
+    entries: &[ToolSearchHit],
+    total_loadable: usize,
+) -> String {
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|entry| {
+            let description: String = one_line(&entry.description).chars().take(120).collect();
+            if description.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{} — {description}", entry.name)
+            }
+        })
+        .collect();
+    let block = if lines.is_empty() {
+        "<tools_relevant>\nNo tool descriptions matched the current request.\n</tools_relevant>"
+            .to_string()
+    } else {
+        format!("<tools_relevant>\n{}\n</tools_relevant>", lines.join("\n"))
+    };
+    let guidance = if entries.is_empty() {
+        format!(
+            "{total_loadable} tools are loadable. Call select_tools with a query to search by \
+capability, then call it again with exact names to load tools."
+        )
+    } else {
+        format!(
+            "These are the {} most relevant of {total_loadable} loadable tools. Call select_tools \
+with exact names to load them. If the capability you need is not listed, call select_tools with \
+a query to search all loadable tools; search results are candidates until you load them by exact \
+name.",
+            entries.len()
+        )
+    };
+    format!("{block}\n\n{guidance} A newer <tools_relevant> block replaces older ones.")
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn strip_stale_retrieved_tools_announcements(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
+    let count = messages
+        .iter()
+        .filter(|message| is_retrieved_tools_announcement(message))
+        .count();
+    if count <= 1 {
+        return messages;
     }
-    for message in messages {
-        if message.role != "user" || message.content.is_empty() {
-            continue;
-        }
-        let added = match_tool_name_blocks(&message.content, "tools_added");
-        let removed = match_tool_name_blocks(&message.content, "tools_removed");
-        if added.is_empty() && removed.is_empty() {
-            continue;
-        }
-        message.content = render_runtime_tool_change_reminder(&added, &removed);
-        message.blocks.clear();
+    let last = messages
+        .iter()
+        .rposition(is_retrieved_tools_announcement)
+        .expect("count > 1 implies a position");
+    messages
+        .into_iter()
+        .enumerate()
+        .filter(|(index, message)| *index == last || !is_retrieved_tools_announcement(message))
+        .map(|(_, message)| message)
+        .collect()
+}
+
+pub fn shape_history(messages: Vec<LLMMessage>, supports_dynamic_loading: bool) -> Vec<LLMMessage> {
+    if supports_dynamic_loading {
+        strip_stale_retrieved_tools_announcements(messages)
+    } else {
+        strip_dynamic_tool_context(messages)
     }
 }
 
-/// v2 `renderRuntimeToolChangeReminder` (final wording, #4720). A model that
-/// cannot dynamically load tools sees this instead of a stale
-/// `<tools_added>` announcement from an earlier capable model.
-pub fn render_runtime_tool_change_reminder(added: &[String], removed: &[String]) -> String {
-    let mut sections = Vec::new();
-    if !added.is_empty() {
-        sections.push(format!(
-            "<tools_added>\n{}\n</tools_added>",
-            added.join("\n")
-        ));
+pub fn latest_user_query(messages: &[LLMMessage]) -> Option<String> {
+    for message in messages.iter().rev() {
+        if message.role != "user" {
+            continue;
+        }
+        if let Some(origin) = &message.origin {
+            if origin.get("kind").and_then(|kind| kind.as_str()) != Some("user") {
+                continue;
+            }
+        }
+        let text = message.content.trim();
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
     }
-    if !removed.is_empty() {
-        sections.push(format!(
-            "<tools_removed>\n{}\n</tools_removed>",
-            removed.join("\n")
-        ));
-    }
-    sections.push(
-        "The available tools changed during this session. The current model cannot load runtime \
-         tool additions with select_tools. Do not call select_tools. Use the tool definitions \
-         provided in this request. Removed tools may be unavailable or fail when called."
-            .to_string(),
-    );
-    sections.join("\n\n")
+    None
+}
+
+pub fn last_retrieved_announcement_text(messages: &[LLMMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| is_retrieved_tools_announcement(message))
+        .map(|message| {
+            message
+                .content
+                .strip_prefix(crate::injection::SYSTEM_REMINDER_PREFIX)
+                .and_then(|text| text.strip_suffix(crate::injection::SYSTEM_REMINDER_SUFFIX))
+                .unwrap_or(&message.content)
+                .to_string()
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::registry::{ToolSource, schema_signature};
-    use serde_json::json;
+    use crate::tools::tool_retriever::ToolSearchHit;
 
-    fn tool(name: &str, deferred: bool) -> ToolDefinition {
-        ToolDefinition {
+    fn announcement(variant: &str, text: &str) -> LLMMessage {
+        LLMMessage {
+            role: "user".into(),
+            content: crate::injection::wrap_system_reminder(text),
+            origin: Some(serde_json::json!({ "kind": "injection", "variant": variant })),
+            ..Default::default()
+        }
+    }
+
+    fn hit(name: &str, description: &str) -> ToolSearchHit {
+        ToolSearchHit {
             name: name.into(),
-            description: format!("{name} description"),
-            input_schema: json!({ "type": "object" }),
-            source: ToolSource::Mcp,
-            disclosure: if deferred {
-                ToolDisclosure::Deferred
-            } else {
-                ToolDisclosure::Inline
-            },
+            description: description.into(),
+            score: 1.0,
         }
     }
 
     #[test]
-    fn reconcile_records_only_real_additions_and_removals() {
-        let mut state = ToolSelectState::new();
-        state.initialize(vec![tool("A", false)]);
-        assert_eq!(state.reconcile(vec![tool("A", false)]), None);
-        let change = state
-            .reconcile(vec![tool("A", false), tool("B", true)])
-            .unwrap()
-            .clone();
-        assert_eq!(change.added.len(), 1);
-        assert_eq!(change.added[0].name, "B");
-        assert!(change.removed.is_empty());
-        assert_eq!(state.revision(), 1);
-        assert_eq!(state.current().len(), 2);
+    fn fold_applies_removed_then_added_in_order() {
+        let messages = vec![
+            announcement(
+                LOADABLE_TOOLS_VARIANT,
+                "<tools_added>\nA\nB\n</tools_added>",
+            ),
+            announcement(
+                LOADABLE_TOOLS_VARIANT,
+                "<tools_removed>\nA\n</tools_removed>",
+            ),
+            announcement(LOADABLE_TOOLS_VARIANT, "<tools_added>\nC\n</tools_added>"),
+        ];
+        let announced = fold_announced_tool_names(&messages);
+        assert!(announced.contains("B"));
+        assert!(announced.contains("C"));
+        assert!(!announced.contains("A"));
     }
 
     #[test]
-    fn announcement_walk_skips_changes_without_loadable_tools() {
-        let mut state = ToolSelectState::new();
-        state.initialize(vec![tool("A", false)]);
-        state.reconcile(vec![tool("A", false), tool("inline", false)]);
-        state.reconcile(vec![tool("A", false), tool("deferred", true)]);
-        // The first change (adding an inline tool) has no loadable delta and
-        // is skipped. The second replaces it with a deferred tool: the
-        // deferred addition is announced, and the inline removal cannot be
-        // hidden by a same-name non-loadable addition (v2's removed filter).
-        let (revision, added, removed) = state.announcement_since(0).unwrap();
-        assert_eq!(revision, 2);
-        assert_eq!(added, vec!["deferred"]);
-        assert_eq!(removed, vec!["inline"]);
-        assert!(state.announcement_since(revision).is_none());
-    }
-
-    #[test]
-    fn runtime_reminder_uses_the_final_wording_and_keeps_both_blocks() {
-        let text = render_runtime_tool_change_reminder(&["new_tool".into()], &["old_tool".into()]);
-        assert!(text.contains("<tools_added>\nnew_tool\n</tools_added>"));
-        assert!(text.contains("<tools_removed>\nold_tool\n</tools_removed>"));
-        assert!(text.contains("Use the tool definitions provided in this request."));
-        assert!(!text.contains("initial session snapshot"));
-    }
-
-    #[test]
-    fn a_pending_update_queues_one_notice_per_signature() {
-        use crate::tools::registry::version_signature;
-        let mut state = ToolSelectState::new();
-        let active = vec![tool("A", false)];
-        let mut updated = tool("A", false);
-        updated.description = "changed".into();
-        let signature = version_signature(&updated);
-        state.observe_live_updates(&active, std::slice::from_ref(&updated));
-        state.observe_live_updates(&active, std::slice::from_ref(&updated));
-        assert_eq!(
-            state.take_pending_notice().as_deref(),
-            Some(
-                "Tool \"A\" has an update, but the update is not applied in this session. \
-                 Continue using the currently registered version."
-            )
-        );
-        assert!(state.take_pending_notice().is_none());
-        assert_eq!(version_signature(&updated), signature);
-    }
-
-    #[test]
-    fn unsupported_history_rewrites_a_prior_announcement() {
-        let mut messages = vec![
-            crate::turn_loop::types::LLMMessage::user("hello"),
-            crate::turn_loop::types::LLMMessage::user(
-                "<tools_added>\nA\nB\n</tools_added>\n\n<tools_removed>\nC\n</tools_removed>",
+    fn a_retrieved_block_is_recognized_by_content_and_stripped_to_the_last() {
+        let messages = vec![
+            announcement(
+                LOADABLE_TOOLS_VARIANT,
+                "<tools_relevant>\nold — first\n</tools_relevant>",
+            ),
+            LLMMessage::user("continue"),
+            announcement(
+                LOADABLE_TOOLS_VARIANT,
+                "<tools_relevant>\nnew — second\n</tools_relevant>",
             ),
         ];
-        shape_unsupported_dynamic_tool_history(&mut messages, false);
-        assert_eq!(messages[0].content, "hello");
-        assert!(
-            messages[1]
-                .content
-                .contains("Use the tool definitions provided in this request.")
-        );
-        assert!(
-            messages[1]
-                .content
-                .contains("<tools_added>\nA\nB\n</tools_added>")
-        );
-        assert!(
-            messages[1]
-                .content
-                .contains("<tools_removed>\nC\n</tools_removed>")
-        );
-
-        let mut capable = vec![crate::turn_loop::types::LLMMessage::user(
-            "<tools_added>\nA\n</tools_added>",
-        )];
-        shape_unsupported_dynamic_tool_history(&mut capable, true);
-        assert_eq!(capable[0].content, "<tools_added>\nA\n</tools_added>");
+        assert!(is_retrieved_tools_announcement(&messages[0]));
+        let stripped = strip_stale_retrieved_tools_announcements(messages);
+        assert_eq!(stripped.len(), 2);
+        assert!(stripped[1].content.contains("new — second"));
+        assert_eq!(stripped[0].content, "continue");
     }
 
     #[test]
-    fn update_notification_is_once_per_signature() {
-        let mut state = ToolSelectState::new();
-        let signature = schema_signature(&tool("A", false));
-        assert!(state.notify_update_once("A", &signature).is_some());
-        assert!(state.notify_update_once("A", &signature).is_none());
-        assert!(
-            state
-                .notify_update_once("A", "different-signature")
-                .is_some()
+    fn a_variant_keyed_retrieval_block_is_recognized_without_the_marker() {
+        let message = LLMMessage {
+            role: "user".into(),
+            content: "anything".into(),
+            origin: Some(
+                serde_json::json!({ "kind": "system_trigger", "name": RETRIEVED_TOOLS_VARIANT }),
+            ),
+            ..Default::default()
+        };
+        assert!(is_retrieved_tools_announcement(&message));
+    }
+
+    #[test]
+    fn a_plain_user_message_is_not_an_announcement_even_when_it_quotes_one() {
+        let message = LLMMessage::user("<tools_added>\nA\n</tools_added>");
+        assert!(!is_loadable_tools_announcement(&message));
+    }
+
+    #[test]
+    fn the_legacy_tool_select_variant_still_folds_and_strips() {
+        let messages = vec![
+            LLMMessage::user("hi"),
+            announcement(
+                LEGACY_TOOL_SELECT_VARIANT,
+                "<tools_added>\nA\n</tools_added>",
+            ),
+        ];
+        assert!(fold_announced_tool_names(&messages).contains("A"));
+        let stripped = strip_dynamic_tool_context(messages);
+        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped[0].content, "hi");
+    }
+
+    #[test]
+    fn rendering_matches_v2s_retrieval_text() {
+        let rendered = render_retrieved_tools_announcement(
+            &[hit("mcp__gh__search", "Search  issues\nand PRs")],
+            42,
         );
+        assert!(rendered.contains(
+            "<tools_relevant>\nmcp__gh__search — Search issues and PRs\n</tools_relevant>"
+        ));
+        assert!(rendered.contains("These are the 1 most relevant of 42 loadable tools."));
+        assert!(rendered.ends_with("A newer <tools_relevant> block replaces older ones."));
+
+        let empty = render_retrieved_tools_announcement(&[], 3);
+        assert!(empty.contains("No tool descriptions matched the current request."));
+        assert!(empty.contains(
+            "3 tools are loadable. Call select_tools with a query to search by capability"
+        ));
+    }
+
+    #[test]
+    fn latest_user_query_skips_injections_and_blank_prompts() {
+        let messages = vec![
+            LLMMessage::user("first"),
+            announcement(LOADABLE_TOOLS_VARIANT, "<tools_added>\nA\n</tools_added>"),
+            LLMMessage::user("second"),
+            LLMMessage::user("   "),
+            LLMMessage {
+                role: "user".into(),
+                content: "skill body".into(),
+                origin: Some(serde_json::json!({ "kind": "skill_activation" })),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(latest_user_query(&messages).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn shaping_keeps_only_the_newest_retrieval_block_when_enabled() {
+        let messages = vec![
+            announcement(
+                LOADABLE_TOOLS_VARIANT,
+                "<tools_relevant>\nold\n</tools_relevant>",
+            ),
+            LLMMessage::user("hi"),
+            announcement(
+                LOADABLE_TOOLS_VARIANT,
+                "<tools_relevant>\nnew\n</tools_relevant>",
+            ),
+        ];
+        let shaped = shape_history(messages.clone(), true);
+        assert_eq!(shaped.len(), 2);
+        assert!(shaped.last().unwrap().content.contains("new"));
+
+        let stripped = shape_history(messages, false);
+        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped[0].content, "hi");
     }
 }

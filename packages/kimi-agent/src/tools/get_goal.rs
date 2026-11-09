@@ -1,13 +1,3 @@
-//! Native execution of the GetGoal tool (state bridge protocol, design doc
-//! milestone 7, batch 2).
-//!
-//! The engine reads the host's goal state through `host/state_read` and
-//! renders the v2 `GetGoal` output: a pretty-printed JSON document
-//! `{ "goal": <snapshot> | null }` with the internal `goalId` stripped (the
-//! model-facing shape, `goalResultForModel`). The host stays the goal
-//! authority; this module only parses the wire value and re-serializes it
-//! with the v2 field order.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -17,24 +7,14 @@ use crate::callbacks::HostCallbacks;
 use crate::rpc::types::StateReadRequest;
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// Failure message when the connected host does not implement the state
-/// bridge. The model must not retry the tool — the host cannot provide goal
-/// state for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot provide goal state.";
 
-/// Wire shape of the goal domain (`GoalToolResult`): the host returns the
-/// full `GoalSnapshot` (including `goalId`) or `null` when no goal exists.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalStateWire {
     goal: Option<GoalSnapshotWire>,
 }
 
-/// v2 `GoalSnapshot` minus `goalId` — the model-facing shape
-/// (`goalForModel`). Field order mirrors the v2 serializer so the rendered
-/// JSON matches `JSON.stringify(goalResultForModel(result), null, 2)`;
-/// optional fields are omitted when absent, like `JSON.stringify` drops
-/// `undefined` properties. The wire's `goalId` is ignored by serde.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalSnapshotWire {
@@ -54,7 +34,6 @@ struct GoalSnapshotWire {
     updated_at: u64,
 }
 
-/// v2 `GoalBudgetReport` — nullable budget fields serialize as JSON `null`.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalBudgetReportWire {
@@ -72,8 +51,6 @@ struct GoalBudgetReportWire {
     output_tokens_used: u64,
 }
 
-/// Execute the GetGoal tool natively: `state_read` the goal domain and
-/// render the v2-aligned JSON output.
 pub async fn execute_get_goal(
     callbacks: &dyn HostCallbacks,
     caller_agent_id: &str,
@@ -102,7 +79,6 @@ pub async fn execute_get_goal(
     }
 }
 
-/// Render the host's goal wire value as the v2 `GetGoal` output.
 fn render_goal(value: &Value) -> ExecutableToolResult {
     let wire: GoalStateWire = match serde_json::from_value(value.clone()) {
         Ok(wire) => wire,
@@ -118,9 +94,6 @@ fn render_goal(value: &Value) -> ExecutableToolResult {
     }
 }
 
-/// Map a state bridge error to a tool result: an unwired host (message
-/// carries the `does not support state bridge` phrase) gets the dedicated
-/// failure message; everything else is passed through verbatim.
 fn map_state_error(error: String) -> ExecutableToolResult {
     if error.contains("does not support state bridge") {
         err_result(STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE.into())
@@ -129,10 +102,6 @@ fn map_state_error(error: String) -> ExecutableToolResult {
     }
 }
 
-/// Engine tool definition for GetGoal, so the model can discover and call it
-/// (used by the standalone REPL and native tool listing). The description
-/// mirrors v2 `get-goal.md`; the schema mirrors `GetGoalToolInputSchema`
-/// (strict empty object).
 pub fn get_goal_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "GetGoal".into(),
@@ -154,8 +123,6 @@ mod tests {
     };
     use std::sync::Arc;
 
-    /// Scripted callbacks: records the received state requests and answers
-    /// with canned responses.
     struct ScriptedCallbacks {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,

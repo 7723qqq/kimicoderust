@@ -182,6 +182,9 @@ pub fn plugin_install(id: String) -> napi::Result<Option<String>> {
         let Some((id, _)) = installed else {
             return Ok(None);
         };
+        // v2 `AgentPluginService`: every live session learns the running
+        // session keeps its prompt and tools until /new or /reload.
+        crate::injection::plugin::publish_plugin_change_notice("install", &id);
         manager
             .list_plugins()
             .into_iter()
@@ -198,9 +201,16 @@ pub fn plugin_install(id: String) -> napi::Result<Option<String>> {
 #[napi]
 pub fn plugin_set_enabled(id: String, enabled: bool) -> napi::Result<bool> {
     guard_sync_panic(|| {
-        plugin_manager()?
+        let changed = plugin_manager()?
             .set_plugin_enabled(&id, enabled)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if changed {
+            crate::injection::plugin::publish_plugin_change_notice(
+                if enabled { "enable" } else { "disable" },
+                &id,
+            );
+        }
+        Ok(changed)
     })
 }
 
@@ -208,9 +218,13 @@ pub fn plugin_set_enabled(id: String, enabled: bool) -> napi::Result<bool> {
 #[napi]
 pub fn plugin_remove(id: String) -> napi::Result<bool> {
     guard_sync_panic(|| {
-        plugin_manager()?
+        let removed = plugin_manager()?
             .remove_plugin(&id)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if removed {
+            crate::injection::plugin::publish_plugin_change_notice("remove", &id);
+        }
+        Ok(removed)
     })
 }
 
@@ -250,9 +264,13 @@ pub fn plugin_set_mcp_server_enabled(
     enabled: bool,
 ) -> napi::Result<bool> {
     guard_sync_panic(|| {
-        plugin_manager()?
+        let changed = plugin_manager()?
             .set_mcp_server_enabled(&id, &server, enabled)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if changed {
+            crate::injection::plugin::publish_plugin_change_notice("mcp-server", &id);
+        }
+        Ok(changed)
     })
 }
 

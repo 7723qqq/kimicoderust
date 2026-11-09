@@ -1,13 +1,14 @@
 pub mod progress_track;
 pub mod retry;
 pub mod run_turn;
-pub mod tool_call_id;
+pub mod test_scope_guard;
+pub use kimi_core::tool_call_id;
 pub mod tool_result_render;
 pub mod tool_scheduler;
 pub mod turn_step;
 pub mod types;
 pub mod wall_time;
-pub mod watch;
+pub use kimi_core::watch;
 
 /// The numeric turn index behind a wire turn id (`turn-3`, `subturn-7`).
 ///

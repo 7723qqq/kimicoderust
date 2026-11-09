@@ -50,9 +50,9 @@ fn classify_llm_error(
     // classifier reads the fields). `retry_after_hint` stays as the fallback
     // for failures raised by paths that only have a string — the host proxy and
     // the racing multi-LLM build their own errors.
-    let typed = err.downcast_ref::<crate::llm::LlmError>();
-    let typed_retry_after = typed.and_then(crate::llm::LlmError::retry_after);
-    let typed_status = typed.and_then(crate::llm::LlmError::status_code);
+    let typed = err.downcast_ref::<kimi_core::error::LlmError>();
+    let typed_retry_after = typed.and_then(kimi_core::error::LlmError::retry_after);
+    let typed_status = typed.and_then(kimi_core::error::LlmError::status_code);
     let err_str = err.to_string();
     // `err` is dropped here (end of function scope for the parameter).
     if !llm.is_retryable_error(&err_str) {
@@ -60,8 +60,8 @@ fn classify_llm_error(
         // drops the status and the provider's request id, and they are the two
         // fields every consumer reads. Return a typed error when there is
         // anything typed to keep, the text alone otherwise.
-        let status_code = typed_status.or_else(|| crate::llm::http::llm_http_status(&err_str));
-        let trace_id = typed.and_then(crate::llm::LlmError::trace_id);
+        let status_code = typed_status.or_else(|| kimi_core::error::llm_http_status(&err_str));
+        let trace_id = typed.and_then(kimi_core::error::LlmError::trace_id);
         if status_code.is_none() && trace_id.is_none() {
             return Err(boxed_err(err_str));
         }
@@ -70,7 +70,7 @@ fn classify_llm_error(
         // paths in `run_turn` detect a specific provider rejection by matching
         // the message text, so a rewritten message silently disables them.
         return Err(Box::new(
-            crate::llm::LlmError::typed(&err_str, status_code).with_trace_id(trace_id),
+            kimi_core::error::LlmError::typed(&err_str, status_code).with_trace_id(trace_id),
         ));
     }
     // `KIMI_CODE_INFINITE_RETRY` retries every retryable LLM request without
@@ -81,14 +81,14 @@ fn classify_llm_error(
         // Keep the typed channel across the wrap: the status and the provider's
         // request id are what a consumer correlates on, and a plain text error
         // would drop both. The rendered text is unchanged.
-        let status_code = typed_status.or_else(|| crate::llm::http::llm_http_status(&err_str));
-        let trace_id = typed.and_then(crate::llm::LlmError::trace_id);
+        let status_code = typed_status.or_else(|| kimi_core::error::llm_http_status(&err_str));
+        let trace_id = typed.and_then(kimi_core::error::LlmError::trace_id);
         return Err(Box::new(
-            crate::llm::LlmError::attempts_exhausted(attempt, &err_str, status_code)
+            kimi_core::error::LlmError::attempts_exhausted(attempt, &err_str, status_code)
                 .with_trace_id(trace_id),
         ));
     }
-    let status_code = typed_status.or_else(|| crate::llm::http::llm_http_status(&err_str));
+    let status_code = typed_status.or_else(|| kimi_core::error::llm_http_status(&err_str));
     // v2's `errorName` is the JS error class name; the closest analogue here is
     // the failure family the transport already encodes in the text.
     let error_name = if crate::llm::http::is_cancelled_error(&err_str) {
@@ -221,7 +221,7 @@ fn empty_response_retryable(response: &LLMChatResponse, llm: &dyn LLM) -> Option
 /// A wait the provider asked for, recovered from the error text.
 ///
 /// **Fallback only.** A failure from the native HTTP transport carries the wait
-/// on [`crate::llm::LlmError`], which the caller reads first; this path exists
+/// on [`kimi_core::error::LlmError`], which the caller reads first; this path exists
 /// for errors that are still bare strings — the host proxy and the racing
 /// multi-LLM. Retrying sooner than the provider asked is wasted: the request
 /// will be throttled again, and one exhausted retry budget is spent on requests
@@ -297,34 +297,73 @@ pub fn execute_loop_step_with_retry<'a>(
     step: u32,
     llm: &'a dyn LLM,
     messages: &'a [LLMMessage],
+    tools: &'a [&'a dyn ExecutableTool],
+    tool_defs: &'a [ToolInfo],
+    retry_config: &RetryConfig,
+    cancel: Option<&'a tokio_util::sync::CancellationToken>,
+    telemetry: Option<&'a (dyn Fn(serde_json::Value) + Send + Sync)>,
+    used_context_tokens: Option<u32>,
+    max_context_tokens: Option<u32>,
+    turn_input_tokens: Option<u32>,
+) -> BoxFuture<'a, Result<StepResult, Box<dyn std::error::Error + Send + Sync>>> {
+    execute_loop_step_with_projection(
+        turn_id,
+        step,
+        llm,
+        messages,
+        tools,
+        tool_defs,
+        retry_config,
+        cancel,
+        telemetry,
+        used_context_tokens,
+        max_context_tokens,
+        turn_input_tokens,
+        false,
+    )
+}
+
+/// `execute_loop_step_with_retry` with an explicit projection policy.
+///
+/// v2 defaults to the lenient `project` and only switches to `projectStrict`
+/// after a provider rejects the request's structure
+/// (`contextProjectorService.ts:63`, `llmRequesterService.ts:594-601`): the
+/// strict pass drops duplicate tool calls and merges non-alternating roles, so
+/// applying it to every request would hide the very anomaly the rejection
+/// reports and change the request the provider saw first.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_loop_step_with_projection<'a>(
+    turn_id: &'a str,
+    step: u32,
+    llm: &'a dyn LLM,
+    messages: &'a [LLMMessage],
     _tools: &'a [&'a dyn ExecutableTool],
     tool_defs: &'a [ToolInfo],
     retry_config: &RetryConfig,
     cancel: Option<&'a tokio_util::sync::CancellationToken>,
-    // Optional telemetry sink: fires the v2 `TurnStepRetrying` event on every
-    // retry backoff (the activity phase machine folds it into the `retrying`
-    // phase; hosts forward it to their telemetry sink).
     telemetry: Option<&'a (dyn Fn(serde_json::Value) + Send + Sync)>,
-    // Prompt tokens this request is expected to carry and the model window
-    // they count against; the transport derives the completion budget from
-    // them (v2 `usedContextTokens` / `maxContextTokens`).
     used_context_tokens: Option<u32>,
     max_context_tokens: Option<u32>,
-    // v2 `ApiErrorEvent.input_tokens`: the turn's accumulated input tokens
-    // before this request. `run_turn` owns that accumulator, so it passes the
-    // running total in rather than the step re-deriving it.
     turn_input_tokens: Option<u32>,
+    structure_strict: bool,
 ) -> BoxFuture<'a, Result<StepResult, Box<dyn std::error::Error + Send + Sync>>> {
     let retry_config = retry_config.clone();
     let cancel_token = cancel.cloned();
     Box::pin(async move {
         // Snapshot the borrowed slice/tool table into shared buffers once, then
         // every attempt (success and retry alike) clones only the `Arc`.
-        // v2 `contextProjector`: the provider sees the messages minus vacuous
-        // content parts (and minus a message that held nothing else). The
-        // stored history keeps them — this projection exists only on the wire.
-        let messages: std::sync::Arc<[LLMMessage]> =
-            std::sync::Arc::from(crate::llm::wire::project_vacuous_messages(messages));
+        // v2 `contextProjectorService.project`: the default policy runs the
+        // lenient projection (vacuous parts removed). Only a provider that
+        // rejected the request's structure gets the strict projection, which
+        // also invents missing results, drops duplicate calls and merges
+        // non-alternating roles. The stored history keeps the anomalies; this
+        // exists only on the wire.
+        let projected = if structure_strict {
+            crate::llm::wire::project_strict(messages)
+        } else {
+            crate::llm::wire::project_messages(messages)
+        };
+        let messages: std::sync::Arc<[LLMMessage]> = std::sync::Arc::from(projected);
         let tools: std::sync::Arc<[ToolInfo]> = std::sync::Arc::from(tool_defs);
         let build_params = || LLMChatParams {
             messages: std::sync::Arc::clone(&messages),
@@ -411,13 +450,13 @@ pub fn execute_loop_step_with_retry<'a>(
                 // free-text property is what a consumer cannot group on.
                 if let Some(telemetry) = telemetry {
                     let text = e.to_string();
-                    let typed = e.downcast_ref::<crate::llm::LlmError>();
+                    let typed = e.downcast_ref::<kimi_core::error::LlmError>();
                     // Typed first: the retry-exhausted path wraps the message
                     // and `llm_http_status` only parses a leading
                     // `llm http status`, so the text alone loses the status.
                     let status_code = typed
-                        .and_then(crate::llm::LlmError::status_code)
-                        .or_else(|| crate::llm::http::llm_http_status(&text));
+                        .and_then(kimi_core::error::LlmError::status_code)
+                        .or_else(|| kimi_core::error::llm_http_status(&text));
                     // v2 `error_type`: the classified category. The mapping is
                     // the retry classifier's, so both layers group failures the
                     // same way.
@@ -462,7 +501,7 @@ pub fn execute_loop_step_with_retry<'a>(
                     if let Some(code) = status_code {
                         payload["status_code"] = serde_json::json!(code);
                     }
-                    if let Some(id) = typed.and_then(crate::llm::LlmError::trace_id) {
+                    if let Some(id) = typed.and_then(kimi_core::error::LlmError::trace_id) {
                         // v2's property name; `trace_id` was this engine's.
                         payload["request_id"] = serde_json::json!(id);
                     }
@@ -753,7 +792,7 @@ mod tests {
         }
         fn is_retryable_error(&self, error: &str) -> bool {
             // The production classifier's rule: 429 is retryable.
-            crate::llm::http::llm_http_status(error) == Some(429)
+            kimi_core::error::llm_http_status(error) == Some(429)
         }
         fn chat(
             &self,
@@ -769,7 +808,12 @@ mod tests {
     /// (`retryErrorFields`: errorName / errorMessage / statusCode), not just the
     /// fact that a retry happened — a consumer cannot tell a throttled request
     /// from a timed-out one without them.
-    #[tokio::test]
+    ///
+    /// The provider's `retry-after: 7s` is the wait the backoff honours, so the
+    /// test runs on a paused clock: the runtime advances the timer instantly
+    /// instead of the suite spending seven wall-clock seconds to observe a
+    /// number the event already carries.
+    #[tokio::test(start_paused = true)]
     async fn turn_step_retrying_carries_the_v2_error_fields() {
         let llm =
             StatusLlm::new("llm http status 429 Too Many Requests: slow down (retry-after 7s)");
@@ -1594,7 +1638,7 @@ mod tests {
     struct TypedErrorLlm {
         system_prompt: String,
         model_name: String,
-        error: crate::llm::LlmError,
+        error: kimi_core::error::LlmError,
     }
 
     impl LLM for TypedErrorLlm {
@@ -1630,7 +1674,7 @@ mod tests {
         let llm = TypedErrorLlm {
             system_prompt: "test".into(),
             model_name: "typed".into(),
-            error: crate::llm::LlmError::http(503, "upstream unavailable", None)
+            error: kimi_core::error::LlmError::http(503, "upstream unavailable", None)
                 .with_trace_id(Some("trace-42")),
         };
         let config = RetryConfig {

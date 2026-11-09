@@ -28,8 +28,7 @@ pub struct TowerRosterEntry {
     pub mission_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_target: Option<String>,
-    /// The mission a reviewer's target belongs to (v2 `reviewMissionId`).
-    /// Preserved so a v2-written state round-trips without dropping it.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_mission_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,17 +36,14 @@ pub struct TowerRosterEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     pub spawned_at: String,
-    /// v2's worker-death triple (`diedAt` / `deathStatus` / `deathReason`).
-    /// The fork collapses them into `status` below; these are preserved so a
-    /// v2-written roster is not silently rewritten without them.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub died_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub death_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub death_reason: Option<String>,
-    /// `dead` once a detached run finished with a failure outcome (failed,
-    /// timed out, killed, or lost); absent while the agent may still be alive.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
 }
@@ -120,8 +116,7 @@ impl TowerMissionKind {
 pub struct TowerMissionTask {
     pub text: String,
     pub done: bool,
-    /// Escape hatch for legitimately descoped work (upstream #3976): a
-    /// dropped task stays visible but no longer blocks completion.
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dropped: bool,
 }
@@ -137,8 +132,7 @@ pub struct TowerMission {
     pub scope: Vec<String>,
     pub branch: String,
     pub worktree: String,
-    /// The base commit/branch a worker's worktree starts from (v2
-    /// `spawnBase`). Preserved so a v2-written mission round-trips.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_base: Option<String>,
     #[serde(default)]
@@ -146,8 +140,7 @@ pub struct TowerMission {
     pub status: TowerMissionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// The mission's briefing for its workers (v2 `context`). Preserved so a
-    /// v2-written mission does not lose its instructions on the next save.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     #[serde(default)]
@@ -375,6 +368,10 @@ pub struct TowerSendOutcome {
     pub caller: String,
     pub session_id: Option<String>,
     pub recovered_at: Option<String>,
+
+    pub target_agent_id: Option<String>,
+
+    pub placeholder: bool,
     pub message: TowerInboxSent,
 }
 
@@ -390,11 +387,14 @@ pub struct TowerInitResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TowerPlanInput {
     pub title: String,
     pub scope: Vec<String>,
     #[serde(default)]
     pub tasks: Option<Vec<String>>,
+    #[serde(default)]
+    pub context: Option<String>,
     #[serde(default)]
     pub deps: Option<Vec<String>>,
     #[serde(default)]
@@ -402,6 +402,7 @@ pub struct TowerPlanInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TowerSendInput {
     pub to: String,
     pub subject: String,
@@ -412,6 +413,7 @@ pub struct TowerSendInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TowerFindingInput {
     pub r#type: TowerFindingType,
     pub title: String,
@@ -424,6 +426,7 @@ pub struct TowerFindingInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TowerReviewInput {
     pub target: String,
     pub status: String,
@@ -434,8 +437,6 @@ pub struct TowerReviewInput {
     pub decision: String,
 }
 
-/// The `task_drop` patch payload (upstream #3976): the task text to match
-/// and the mandatory reason recorded in the mission notes and activity log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TowerTaskDrop {
     pub text: String,
@@ -458,11 +459,6 @@ pub struct TowerMissionPatch {
 mod tests {
     use super::*;
 
-    /// The persisted state is v2's camelCase contract (`TowerState` in
-    /// `agent-core-v2/src/features/tower/protocol/types.ts`). The fork wrote
-    /// snake_case here, so a state file v2 produced read back as
-    /// "corrupted tower state: missing field `created_at`" and every tower
-    /// tool became unavailable.
     #[test]
     fn tower_state_reads_the_v2_camel_case_contract() {
         let raw = r#"{
@@ -520,7 +516,6 @@ mod tests {
         assert_eq!(state.missions[0].spawn_base.as_deref(), Some("abc123"));
         assert_eq!(state.missions[0].context.as_deref(), Some("briefing"));
 
-        // v2 marks these optional; a state that omits them must still load.
         let minimal: TowerState = serde_json::from_str(
             r#"{"version":1,"base":"main","mode":"branch","createdAt":"x",
                 "roster":{"agents":[{"name":"w","agentId":"a","kind":"worker","spawnedAt":"y"}]},
@@ -532,8 +527,6 @@ mod tests {
         assert!(minimal.roster.agents[0].mission_id.is_none());
     }
 
-    /// A save must write the same camelCase keys back, so a v2 reader keeps
-    /// working and the fields v2 owns are not dropped.
     #[test]
     fn tower_state_serializes_the_v2_camel_case_contract() {
         let state = TowerState {

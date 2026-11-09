@@ -21,7 +21,7 @@ pub const PERMISSION_MODE_REMINDER_ENV: &str = "KIMI_CODE_PERMISSION_MODE_REMIND
 pub const AUTO_ENTER_REMINDER: &str = r#"Auto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.
   - Continue normally without pausing for approval prompts.
   - Do NOT call AskUserQuestion while auto mode is active; decide and continue.
-  - ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed."#;
+  - Plan mode is the exception: ExitPlanMode still waits for the user to review the plan. Settle open questions yourself and list them under Assumptions in the plan."#;
 
 /// The reminder injected when auto mode ends (v2
 /// `permission-mode-auto-exit-reminder.md`).
@@ -94,7 +94,18 @@ fn permission_mode_provider(
     baseline: Option<PermissionMode>,
 ) -> impl FnMut(&InjectionContext) -> Option<String> {
     let mut tracker = PermissionModeTracker::with_last_mode(baseline);
-    move |_ctx: &InjectionContext| tracker.step(mode).map(str::to_string)
+    move |ctx: &InjectionContext| {
+        // v2 derives the variant's injected positions from the conversation
+        // history, so a compaction splice that drops the enter/exit reminder
+        // makes the next pass announce it again (the rearm re-runs providers
+        // with `isNewTurn = true`). Re-deriving on the rearm is that same rule;
+        // the constructor baseline covers the turn head.
+        if ctx.rearmed {
+            tracker =
+                PermissionModeTracker::with_last_mode(scan_permission_mode_baseline(ctx.history));
+        }
+        tracker.step(mode).map(str::to_string)
+    }
 }
 
 /// Scan prior conversation messages for the last permission-mode reminder and
@@ -179,10 +190,10 @@ mod tests {
         assert!(
             AUTO_ENTER_REMINDER.contains("Do NOT call AskUserQuestion while auto mode is active")
         );
-        assert!(AUTO_ENTER_REMINDER.contains("ExitPlanMode is also approved automatically"));
         assert!(
-            AUTO_ENTER_REMINDER.contains("An auto-approved plan is NOT a signal from the user")
+            AUTO_ENTER_REMINDER.contains("Plan mode is the exception: ExitPlanMode still waits")
         );
+        assert!(AUTO_ENTER_REMINDER.contains("list them under Assumptions in the plan"));
         assert!(AUTO_EXIT_REMINDER.starts_with("Auto permission mode is no longer active."));
         assert!(AUTO_EXIT_REMINDER.contains("expect approval prompts or denials"));
     }

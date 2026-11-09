@@ -462,6 +462,21 @@ fn infer_override_wire(npm: &str) -> Option<&'static str> {
     None
 }
 
+/// v2 has no `vertexai` wire: a Vertex provider id infers `google-genai`.
+/// The fork keeps `vertexai` as the provider type that maps onto the
+/// `google-genai` protocol (`config/mod.rs`), so the two spellings have to
+/// compare equal wherever v2 compares wires.
+fn same_wire(left: Option<&str>, right: Option<&str>) -> bool {
+    fn canonical(wire: &str) -> &str {
+        if wire == "vertexai" {
+            "google-genai"
+        } else {
+            wire
+        }
+    }
+    left.map(canonical) == right.map(canonical)
+}
+
 /// v2 `applyModelProviderOverride`.
 fn apply_provider_override(
     model: Option<DevModel>,
@@ -479,17 +494,21 @@ fn apply_provider_override(
     {
         return None;
     }
-    let override_wire = override_npm
-        .as_deref()
-        .and_then(infer_override_wire)
-        .or(provider_wire);
+    // v2 falls back to `openai` when the override names a package it does not
+    // know — not to the provider's own wire. A model whose provider package
+    // disagrees with its provider is therefore dropped instead of imported
+    // under the wrong protocol.
+    let override_wire = match override_npm.as_deref() {
+        Some(npm) => Some(infer_override_wire(npm).unwrap_or("openai")),
+        None => provider_wire,
+    };
     let Some(override_wire) = override_wire else {
         return Some(model);
     };
     let raw_api = override_spec.api.as_deref();
     let api = raw_api.or(entry.api.as_deref());
     let usable_api = api.filter(|api| !api.is_empty() && !api.contains("${"));
-    if Some(override_wire) == provider_wire {
+    if same_wire(Some(override_wire), provider_wire) {
         if raw_api.is_some_and(|api| api.contains("${")) {
             return None;
         }
@@ -732,6 +751,21 @@ impl CatalogCache {
         self
     }
 
+    /// Age the cached entry past the TTL (tests): the refresh path only runs
+    /// when the clock says the cache is stale, and `Instant` offers no way to
+    /// move the cached timestamp from outside.
+    #[cfg(test)]
+    pub fn expire(&self) {
+        if let Some(cached) = self
+            .cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            cached.fetched_at = Instant::now() - CACHE_TTL - Duration::from_secs(1);
+        }
+    }
+
     /// The catalog, fetching when the cache is stale (v2
     /// `getModelsDevCatalog`). A failed fetch falls back to the stale cache;
     /// with no cache at all the error reaches the caller, whose built-in
@@ -752,15 +786,16 @@ impl CatalogCache {
                 .clone()
         };
         let result = cell.get_or_init(|| self.fetch_and_cache()).await;
-        if result.is_err() {
-            // A failed fetch leaves no cache behind: drop the cell so the
-            // next request retries instead of re-reading a stored error.
-            let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(current) = in_flight.as_ref()
-                && Arc::ptr_eq(current, &cell)
-            {
-                *in_flight = None;
-            }
+        // v2 clears `inFlight` in a `finally`: this window's fetch is done, so
+        // the next stale window starts a new one. Keeping a completed cell
+        // would pin the first successful catalog forever — the TTL check would
+        // fall through to the cell and read its stored value instead of
+        // refetching. A failed fetch also clears (it stores no result).
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = in_flight.as_ref()
+            && Arc::ptr_eq(current, &cell)
+        {
+            *in_flight = None;
         }
         result.clone()
     }
@@ -1161,6 +1196,55 @@ mod tests {
     }
 
     #[test]
+    fn a_model_override_with_an_unknown_package_falls_back_to_openai() {
+        // v2 `applyModelProviderOverride`: an unrecognized override npm means
+        // `openai`, so an anthropic provider's model is dropped instead of
+        // imported under the anthropic wire.
+        let override_spec = json!({ "npm": "@acme/gateway", "api": "https://acme.test" });
+        let anthropic = entry(json!({
+            "type": "anthropic",
+            "api": "https://example.test",
+            "models": { "m": { "id": "m", "limit": { "context": 1000 }, "provider": override_spec } },
+        }));
+        assert!(provider_models(&anthropic).is_empty());
+
+        // Under an openai provider the fallback matches the provider wire, so
+        // the model survives with the override's endpoint.
+        let openai = entry(json!({
+            "api": "https://example.test",
+            "models": { "m": { "id": "m", "limit": { "context": 1000 }, "provider": override_spec.clone() } },
+        }));
+        let models = provider_models(&openai);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].base_url.as_deref(), Some("https://acme.test"));
+    }
+
+    #[test]
+    fn a_vertex_provider_keeps_a_model_overridden_to_the_google_package() {
+        // The fork's `vertexai` provider type is v2's `google-genai` wire, so a
+        // model whose override npm names the Google package is still on the
+        // same wire and survives with an unchanged endpoint.
+        let provider = entry(json!({
+            "id": "google-vertex",
+            "api": "https://vertex.test",
+            "models": {
+                "m": {
+                    "id": "m",
+                    "limit": { "context": 1000 },
+                    "provider": { "npm": "@ai-sdk/google", "api": "https://vertex.test" },
+                },
+            },
+        }));
+        let models = provider_models(&provider);
+        assert_eq!(
+            models.len(),
+            1,
+            "the override wire still matches the provider"
+        );
+        assert_eq!(models[0].base_url, None);
+    }
+
+    #[test]
     fn the_builtin_snapshot_maps_through_the_same_projection() {
         let items = builtin_items();
         let items = items["items"].as_array().unwrap();
@@ -1272,6 +1356,32 @@ mod tests {
         let second = cache.catalog().await.unwrap();
         assert_eq!(second["openai"]["name"], "Fresh");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_successful_fetch_is_refreshed_after_the_ttl() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cache = CatalogCache::new().with_fetcher(Arc::new({
+            let calls = calls.clone();
+            move || {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                Box::pin(
+                    async move { Ok(json!({ "openai": { "name": format!("Fresh {call}") } })) },
+                ) as BoxFuture<'static, Result<Value, String>>
+            }
+        }));
+
+        assert_eq!(cache.catalog().await.unwrap()["openai"]["name"], "Fresh 1");
+        // Inside the TTL the cache answers, so a completed in-flight cell must
+        // not be consulted.
+        assert_eq!(cache.catalog().await.unwrap()["openai"]["name"], "Fresh 1");
+        cache.expire();
+        assert_eq!(
+            cache.catalog().await.unwrap()["openai"]["name"],
+            "Fresh 2",
+            "the next stale window starts a new fetch"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -29,9 +29,23 @@ pub fn engine_state_dir(workspace_root: &Path) -> std::io::Result<PathBuf> {
                 "cannot resolve the home directory (USERPROFILE / HOME unset)",
             )
         })?;
-    let canonical = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let canonical = match workspace_root.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            // A root that does not exist yet has no canonical form; keying it
+            // as given is the only choice and stays stable until it is created.
+            // Any other failure (permissions, a link loop) means the same
+            // workspace can key differently between calls, which would split
+            // its state — so it is reported instead of swallowed.
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    workspace = %workspace_root.display(),
+                    "could not canonicalize the workspace path; engine state may be keyed by the path as given: {error}"
+                );
+            }
+            workspace_root.to_path_buf()
+        }
+    };
     Ok(home.join(ENGINE_STATE_ROOT).join(workspace_key(&canonical)))
 }
 

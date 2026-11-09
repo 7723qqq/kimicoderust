@@ -12,6 +12,7 @@
 //! (`inputOther`, `output`, `inputCacheRead`, `inputCacheCreation`).
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +22,31 @@ use crate::session::sqlite_store::SqliteSessionStore;
 
 /// The state domain the buckets live in (`agent_config` / `metadata` precedent).
 const USAGE_DOMAIN: &str = "usage";
+
+/// A persisted usage document that parses as JSON but not as this module's
+/// shape. Reported rather than defaulted: a default written back over the row
+/// would reset the session's cumulative counters.
+#[derive(Debug)]
+struct UsageShapeError {
+    session_id: String,
+    source: serde_json::Error,
+}
+
+impl fmt::Display for UsageShapeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the usage state of session {} does not have the expected shape: {}",
+            self.session_id, self.source
+        )
+    }
+}
+
+impl std::error::Error for UsageShapeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
 
 /// One model's (or the session's) four token counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +95,11 @@ struct PersistedUsage {
     by_model: BTreeMap<String, UsageCounters>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     current_turn: Option<UsageCounters>,
+    /// The slice of `by_model` spent on compaction requests. A separate bucket
+    /// keeps `byModel` billable in full while per-turn statistics can subtract
+    /// the compaction work instead of diluting it into chat turns.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    compaction_by_model: BTreeMap<String, UsageCounters>,
 }
 
 /// v2 `UsageStatus`: the model buckets, their sum, and the current turn.
@@ -77,6 +108,9 @@ pub struct UsageStatus {
     pub by_model: BTreeMap<String, UsageCounters>,
     pub total: UsageCounters,
     pub current_turn: Option<UsageCounters>,
+    /// The compaction share of [`Self::by_model`] / [`Self::total`].
+    pub compaction_by_model: BTreeMap<String, UsageCounters>,
+    pub compaction_total: UsageCounters,
 }
 
 impl UsageStatus {
@@ -85,27 +119,50 @@ impl UsageStatus {
         for counters in persisted.by_model.values() {
             total.add(*counters);
         }
+        let mut compaction_total = UsageCounters::default();
+        for counters in persisted.compaction_by_model.values() {
+            compaction_total.add(*counters);
+        }
         Self {
             by_model: persisted.by_model,
             total,
             current_turn: persisted.current_turn,
+            compaction_by_model: persisted.compaction_by_model,
+            compaction_total,
         }
     }
 
     /// Fold one finished turn into the model's bucket (v2
     /// `UsageAgentModel.record`): the bucket and the total grow, and the turn
-    /// becomes `currentTurn`. Zero-usage turns change nothing.
+    /// becomes `currentTurn`. v2 records every turn, including a zero-usage
+    /// one — the bucket entry and `currentTurn` must still be created, so a
+    /// caller can tell "a turn ran" from "no turn ran".
     pub fn record(&mut self, model: &str, usage: &TokenUsage) {
         let counters = UsageCounters::from_token_usage(usage);
-        if counters.is_zero() {
-            return;
-        }
         self.by_model
             .entry(model.to_string())
             .or_default()
             .add(counters);
         self.total.add(counters);
         self.current_turn = Some(counters);
+    }
+
+    /// Fold a compaction request into the model's bucket while tagging it as
+    /// compaction work. It counts toward `by_model` / `total` (v2 records every
+    /// request there), but not toward `currentTurn` — a compaction is not a
+    /// chat turn.
+    pub fn record_compaction(&mut self, model: &str, usage: &TokenUsage) {
+        let counters = UsageCounters::from_token_usage(usage);
+        self.by_model
+            .entry(model.to_string())
+            .or_default()
+            .add(counters);
+        self.total.add(counters);
+        self.compaction_by_model
+            .entry(model.to_string())
+            .or_default()
+            .add(counters);
+        self.compaction_total.add(counters);
     }
 
     /// Rebuild a status from the wire snapshot (`byModel` + `currentTurn`;
@@ -123,14 +180,27 @@ impl UsageStatus {
             .get("currentTurn")
             .cloned()
             .and_then(|current| serde_json::from_value::<UsageCounters>(current).ok());
+        let compaction_by_model = value
+            .get("compactionByModel")
+            .cloned()
+            .and_then(|by_model| {
+                serde_json::from_value::<BTreeMap<String, UsageCounters>>(by_model).ok()
+            })
+            .unwrap_or_default();
         let mut total = UsageCounters::default();
         for counters in by_model.values() {
             total.add(*counters);
+        }
+        let mut compaction_total = UsageCounters::default();
+        for counters in compaction_by_model.values() {
+            compaction_total.add(*counters);
         }
         Self {
             by_model,
             total,
             current_turn,
+            compaction_by_model,
+            compaction_total,
         }
     }
 
@@ -160,22 +230,43 @@ impl UsageStatus {
                 serde_json::to_value(current_turn).ok()?,
             );
         }
+        if !self.compaction_by_model.is_empty() {
+            object.insert(
+                "compactionByModel".into(),
+                serde_json::to_value(&self.compaction_by_model).ok()?,
+            );
+            object.insert(
+                "compactionTotal".into(),
+                serde_json::to_value(self.compaction_total).ok()?,
+            );
+        }
         Some(Value::Object(object))
     }
 }
 
-fn load(store: &SqliteSessionStore, session_id: &str) -> PersistedUsage {
-    store
-        .get_state(USAGE_DOMAIN, session_id)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+/// Read the persisted buckets. Only an absent row is empty (`None`); a failed
+/// read is returned to the caller, because a default here would be written back
+/// over the row and reset the session's cumulative counters.
+fn load(store: &SqliteSessionStore, session_id: &str) -> Result<PersistedUsage, rusqlite::Error> {
+    let Some(value) = store.get_state(USAGE_DOMAIN, session_id)? else {
+        return Ok(PersistedUsage::default());
+    };
+    serde_json::from_value(value).map_err(|source| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(UsageShapeError {
+                session_id: session_id.to_string(),
+                source,
+            }),
+        )
+    })
 }
 
 /// Fold one finished turn's usage into the session's model bucket and refresh
-/// `currentTurn`. A zero-usage turn is not recorded, so an untouched session
-/// keeps the empty status v2 reports.
+/// `currentTurn`. v2 records zero-usage turns too, so the bucket entry and
+/// `currentTurn` are created even when every counter is zero — "a turn ran"
+/// stays observable.
 pub fn record_turn(
     store: &SqliteSessionStore,
     session_id: &str,
@@ -183,17 +274,42 @@ pub fn record_turn(
     usage: &TokenUsage,
 ) -> Result<(), rusqlite::Error> {
     let counters = UsageCounters::from_token_usage(usage);
-    if counters.is_zero() {
-        return Ok(());
-    }
-    let mut persisted = load(store, session_id);
+    let mut persisted = load(store, session_id)?;
     persisted
         .by_model
         .entry(model.to_string())
         .or_default()
         .add(counters);
     persisted.current_turn = Some(counters);
-    let value = serde_json::to_value(&persisted).unwrap_or(Value::Null);
+    let value = serde_json::to_value(&persisted)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    store.put_state(USAGE_DOMAIN, session_id, &value)
+}
+
+/// Fold one compaction request's usage into the session's model bucket. It
+/// grows `byModel` / `total` (the billable totals) and the compaction slice,
+/// but leaves `currentTurn` alone — a compaction must not look like a chat
+/// turn to per-turn statistics.
+pub fn record_compaction(
+    store: &SqliteSessionStore,
+    session_id: &str,
+    model: &str,
+    usage: &TokenUsage,
+) -> Result<(), rusqlite::Error> {
+    let counters = UsageCounters::from_token_usage(usage);
+    let mut persisted = load(store, session_id)?;
+    persisted
+        .by_model
+        .entry(model.to_string())
+        .or_default()
+        .add(counters);
+    persisted
+        .compaction_by_model
+        .entry(model.to_string())
+        .or_default()
+        .add(counters);
+    let value = serde_json::to_value(&persisted)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     store.put_state(USAGE_DOMAIN, session_id, &value)
 }
 
@@ -202,7 +318,9 @@ pub fn record_turn(
 /// against `fallback_model` (the session's configured model) so an upgraded
 /// session does not report zero forever. The buckets win once they exist.
 pub fn status(store: &SqliteSessionStore, session_id: &str, fallback_model: &str) -> UsageStatus {
-    let persisted = load(store, session_id);
+    // Read-only path: a failed read must not rewrite anything, so falling back
+    // to the empty snapshot here loses nothing (unlike `record_turn`).
+    let persisted = load(store, session_id).unwrap_or_default();
     if !persisted.by_model.is_empty() || persisted.current_turn.is_some() {
         return UsageStatus::from_persisted(persisted);
     }
@@ -226,6 +344,8 @@ pub fn status(store: &SqliteSessionStore, session_id: &str, fallback_model: &str
         by_model,
         total,
         current_turn,
+        compaction_by_model: BTreeMap::new(),
+        compaction_total: UsageCounters::default(),
     }
 }
 
@@ -283,6 +403,61 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_usage_turn_still_creates_the_bucket_and_current_turn() {
+        // v2 `UsageAgentModel.record` runs for every turn, zero usage included:
+        // `byModel[model]` exists and `currentTurn` is set. Skipping zero hid
+        // "a turn ran with no billable usage" from the status readers.
+        let store = SqliteSessionStore::in_memory().unwrap();
+        store.create_session("sess-zero", None).unwrap();
+        record_turn(&store, "sess-zero", "model-a", &usage(0, 0)).unwrap();
+
+        let status = status(&store, "sess-zero", "fallback");
+        assert!(status.by_model.contains_key("model-a"));
+        assert_eq!(status.total, UsageCounters::default());
+        assert_eq!(status.current_turn, Some(UsageCounters::default()));
+
+        let mut in_memory = UsageStatus::default();
+        in_memory.record("model-a", &usage(0, 0));
+        assert_eq!(in_memory.current_turn, Some(UsageCounters::default()));
+        assert!(in_memory.by_model.contains_key("model-a"));
+    }
+
+    #[test]
+    fn compaction_usage_is_billed_but_kept_apart_from_the_turn() {
+        let store = SqliteSessionStore::in_memory().unwrap();
+        store.create_session("sess-compaction", None).unwrap();
+
+        record_turn(&store, "sess-compaction", "model-a", &usage(100, 10)).unwrap();
+        record_compaction(&store, "sess-compaction", "model-a", &usage(40, 4)).unwrap();
+
+        let status = status(&store, "sess-compaction", "fallback");
+        assert_eq!(
+            status.by_model["model-a"].input_other, 140,
+            "compaction is part of the billable model bucket"
+        );
+        assert_eq!(status.total.input_other, 140);
+        assert_eq!(status.total.output, 14);
+        assert_eq!(
+            status.compaction_by_model["model-a"].input_other, 40,
+            "the compaction slice is recorded separately"
+        );
+        assert_eq!(status.compaction_total.output, 4);
+        assert_eq!(
+            status.current_turn.map(|turn| turn.input_other),
+            Some(100),
+            "a compaction must not overwrite the current chat turn"
+        );
+
+        let value = status.to_json().expect("non-empty status");
+        assert_eq!(value["compactionByModel"]["model-a"]["inputOther"], 40);
+        assert_eq!(value["compactionTotal"]["output"], 4);
+
+        let round_trip = UsageStatus::from_json_str(&value.to_string());
+        assert_eq!(round_trip.compaction_total.input_other, 40);
+        assert_eq!(round_trip.total.input_other, 140);
+    }
+
+    #[test]
     fn from_json_rebuilds_the_buckets_and_ignores_a_stale_total() {
         let snapshot = serde_json::json!({
             "byModel": {
@@ -300,11 +475,83 @@ mod tests {
     }
 
     #[test]
-    fn zero_usage_turns_do_not_create_an_empty_status() {
-        let store = SqliteSessionStore::in_memory().unwrap();
-        store.create_session("sess-zero", None).unwrap();
-        record_turn(&store, "sess-zero", "model-a", &TokenUsage::default()).unwrap();
-        assert!(status(&store, "sess-zero", "model-a").to_json().is_none());
+    fn a_failed_read_is_not_written_back_and_keeps_the_accumulated_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("sessions.db");
+        let store = SqliteSessionStore::open(&db_path).unwrap();
+        store.create_session("sess-read-error", None).unwrap();
+        record_turn(&store, "sess-read-error", "model-a", &usage(100, 10)).unwrap();
+
+        let original = {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.query_row(
+                "SELECT value FROM state_entries WHERE domain = 'usage' AND key = 'sess-read-error'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+
+        // Blob storage makes the typed `value` read fail while the row stays
+        // writable — exactly the "read errors, write succeeds" case that used
+        // to reset the counters and overwrite the row.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE state_entries SET value = X'7B7D' WHERE domain = 'usage' AND key = 'sess-read-error'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let error = record_turn(&store, "sess-read-error", "model-a", &usage(5, 1))
+            .expect_err("a failed read must abort before the write-back");
+        assert!(
+            error.to_string().contains("Invalid column type"),
+            "the read error must surface unchanged: {error}"
+        );
+
+        let (kind, raw) = {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.query_row(
+                "SELECT typeof(value), hex(value) FROM state_entries WHERE domain = 'usage' AND key = 'sess-read-error'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            (kind.as_str(), raw.as_str()),
+            ("blob", "7B7D"),
+            "a failed read must not overwrite the row with a zeroed snapshot"
+        );
+
+        // Restoring the intact payload proves the counter survived the failed
+        // turn: the write-back never ran.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE state_entries SET value = ?1 WHERE domain = 'usage' AND key = 'sess-read-error'",
+                rusqlite::params![original],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            status(&store, "sess-read-error", "model-a")
+                .total
+                .input_other,
+            100,
+            "the failed turn must not reset the accumulated counters"
+        );
+
+        // A successful read resumes accumulation instead of starting over.
+        record_turn(&store, "sess-read-error", "model-a", &usage(5, 1)).unwrap();
+        assert_eq!(
+            status(&store, "sess-read-error", "model-a")
+                .total
+                .input_other,
+            105
+        );
     }
 
     #[test]

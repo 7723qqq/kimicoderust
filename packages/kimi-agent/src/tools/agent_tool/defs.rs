@@ -1,21 +1,39 @@
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// The v2 default profile name (`DEFAULT_PROFILE_NAME`).
 pub const DEFAULT_PROFILE_NAME: &str = "coder";
 
-/// The default foreground timeout (v2 `DEFAULT_SUBAGENT_TIMEOUT_MS`: 2h).
 pub const DEFAULT_SUBAGENT_TIMEOUT_MS: u64 = 2 * 60 * 60 * 1000;
 
-/// The tower worker profile (`tools/tower/mod.rs`'s `TOWER_WORKER_PROFILE`):
-/// the only profile `TowerSpawn` spawns, so it gates the tower resume check.
+pub fn subagent_timeout_ms() -> u64 {
+    if let Ok(raw) = std::env::var("KIMI_SUBAGENT_TIMEOUT_MS")
+        && let Ok(parsed) = raw.trim().parse::<u64>()
+        && parsed >= 1
+    {
+        return parsed;
+    }
+    let Ok((_config, path)) = crate::config::KimiConfig::discover() else {
+        return DEFAULT_SUBAGENT_TIMEOUT_MS;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return DEFAULT_SUBAGENT_TIMEOUT_MS;
+    };
+    let Ok(value) = text.parse::<toml::Value>() else {
+        return DEFAULT_SUBAGENT_TIMEOUT_MS;
+    };
+    value
+        .get("subagent")
+        .and_then(|section| section.get("timeout_ms"))
+        .and_then(toml::Value::as_integer)
+        .filter(|ms| *ms >= 1)
+        .map_or(DEFAULT_SUBAGENT_TIMEOUT_MS, |ms| ms as u64)
+}
+
 pub(super) const TOWER_WORKER_PROFILE: &str = "tower-worker";
 
-/// The v2 stopped messages (`agent/tools/agent/agent.ts`), byte-identical.
 pub(super) const SUBAGENT_STOPPED_MESSAGE: &str = "The subagent was stopped before it finished.";
 pub(super) const USER_INTERRUPTED_SUBAGENT_MESSAGE: &str =
     "The subagent was stopped before it finished by user.";
 
-/// The v2 timeout duration rendering (`formatSubagentTimeoutDescription`).
 pub fn format_timeout_description(ms: u64) -> String {
     const HOUR: u64 = 60 * 60 * 1000;
     const MINUTE: u64 = 60 * 1000;
@@ -42,21 +60,13 @@ pub(super) fn string_arg(args: &serde_json::Value, name: &str) -> Option<String>
         .map(str::to_string)
 }
 
-/// A required tool argument, validated instead of defaulted.
-///
-/// A missing `prompt` used to start a subagent with no task and report success,
-/// so the model's mistake was invisible and the turn — plus its tokens — was
-/// spent on nothing.
-///
-/// `description` is deliberately not validated here: the schema marks it
-/// required, but it only feeds the UI label, and callers in the wild omit it.
-/// Rejecting the call for a cosmetic field would break working clients for no
-/// gain, so it keeps a default.
 pub(super) fn required_string_arg(
     args: &serde_json::Value,
     name: &str,
 ) -> Result<String, ExecutableToolResult> {
     string_arg(args, name).ok_or_else(|| ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: format!(
@@ -77,8 +87,6 @@ pub(crate) fn background_agent_tools_available(is_available: &dyn Fn(&str) -> bo
         .all(|name| is_available(name))
 }
 
-/// Apply the caller's profile policy without leaking subagent types into the
-/// callbacks layer. `is_available` supplies the other half (live table).
 pub(crate) async fn background_agent_available_for_caller(
     manager: &std::sync::Arc<crate::subagent::SubagentManager>,
     caller_id: &str,
@@ -96,6 +104,8 @@ pub(crate) async fn background_agent_available_for_caller(
 
 pub(crate) fn background_agent_unavailable() -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: BACKGROUND_AGENT_UNAVAILABLE.into(),
@@ -108,9 +118,6 @@ pub(crate) fn background_agent_unavailable() -> ExecutableToolResult {
 const AGENT_BACKGROUND_ENABLED_DESCRIPTION: &str = "With `run_in_background=true`, the subagent runs detached and its result arrives automatically in a later turn as a synthetic user-role message — for an agent task it states that the subagent finished and points at the output file, so read that file to get the result. Continue with other work or respond to the user, and never fabricate or predict the result. Use it only when you have other work to do meanwhile. When your next step needs the result, run the subagent in the foreground instead of launching it in the background and waiting on it.";
 const AGENT_BACKGROUND_DISABLED_DESCRIPTION: &str = "Background agent execution is disabled for this agent. Do not set `run_in_background=true` — any call that sets it is rejected before the subagent launches. Run every subagent in the foreground and wait for its result.";
 
-/// The v2 `SubagentTool` description body (condensed from
-/// `agent-core-v2/src/agent/tools/agent/agent*.md`), with the profile list
-/// appended at definition time.
 pub(super) const AGENT_TOOL_DESCRIPTION: &str = "\
 Launch a subagent to handle a task in its own context.
 
@@ -131,20 +138,6 @@ When NOT to use Agent: skip delegation for trivial work you can do directly — 
 
 Once a subagent is running, leave that scope to it: do not redo its searches or reads in parallel, and do not abandon it midway and finish the job manually. Both undo the context savings the delegation was meant to buy.";
 
-/// The `Agent` tool definition (v2 `SubagentTool`): the subagent spawn /
-/// resume surface. The optional `model` parameter is added only when a
-/// `[secondary_model]` pool advertises a choice; without one the parameter is
-/// not advertised, matching v2's `stripSubagentModelParameter`.
-/// The v2 `resolveActiveToolNames` listing for one profile: `all` when no
-/// allowlist is declared, `none` when the allowlist admits nothing, else the
-/// comma-separated names (MCP globs included verbatim — `mcp__*` reads as
-/// "every MCP tool").
-///
-/// `is_available` is the runtime availability filter: when present, a
-/// declared pattern is listed only if it matches at least one tool in the
-/// session's live table. MCP globs stay globs in the output — the predicate
-/// answers "does any available tool match this pattern?", so `mcp__*`
-/// survives exactly when some MCP tool is actually connected.
 pub(super) fn profile_tools_listing(
     profile: &crate::prompt::profiles::AgentProfile,
     is_available: Option<&dyn Fn(&str) -> bool>,
@@ -171,10 +164,6 @@ pub(super) fn profile_tools_listing(
     }
 }
 
-/// The `Tools:` line for a discovered definition (v2
-/// `resolveActiveToolNames` over a file-declared allowlist): `all` when the
-/// profile declares no list, `none` when nothing survives the session's
-/// live table.
 pub(super) fn definition_tools_listing(
     def: &crate::subagent::types::SubagentDefinition,
     is_available: Option<&dyn Fn(&str) -> bool>,
@@ -205,17 +194,6 @@ pub fn agent_tool_def(
     agent_tool_def_impl(pool, None, None, true)
 }
 
-/// The runtime-filtered form of [`agent_tool_def`]: each profile's `Tools:`
-/// line drops the declared patterns that match nothing in the session's live
-/// tool table (a disconnected MCP server, a name the global `[tools]`
-/// switch disabled, GitHub tools with no token), so the model never picks a
-/// subagent for a capability it does not have right now.
-///
-/// `catalog` is the spawn gate's view (v2's allowlist-filtered profile
-/// listing): the listed types are exactly the ones the caller may spawn,
-/// including the discovered definitions. Absent, the static default
-/// profile's delegation set (`coder` / `explore` / `plan`) stands in — the
-/// builtin `agent` is not spawnable.
 pub fn agent_tool_def_filtered(
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
     is_available: &dyn Fn(&str) -> bool,
@@ -225,8 +203,6 @@ pub fn agent_tool_def_filtered(
     agent_tool_def_impl(pool, Some(is_available), catalog, background_available)
 }
 
-/// The caller-aware form: background availability also includes the caller's
-/// own profile policy, not just the live table used for the target listings.
 pub(crate) fn agent_tool_def_filtered_with_background(
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
     is_available: &dyn Fn(&str) -> bool,
@@ -236,8 +212,6 @@ pub(crate) fn agent_tool_def_filtered_with_background(
     agent_tool_def_impl(pool, Some(is_available), catalog, background_available)
 }
 
-/// v2 `buildProfileDescriptions`: join non-empty description and whenToUse
-/// with one space for both builtin and discovered profiles.
 fn profile_description_header(name: &str, description: &str, when_to_use: Option<&str>) -> String {
     let details: Vec<&str> = [Some(description), when_to_use]
         .into_iter()
@@ -284,16 +258,13 @@ pub(super) fn agent_tool_def_impl(
             profile.when_to_use.as_deref(),
         ));
         available.push('\n');
-        // v2 `buildSubagentTypeDescriptions` / `resolveActiveToolNames`: the
-        // listing advertises each type's tool scope so the model can pick a
-        // subagent by what it is actually allowed to do.
+
         available.push_str(&format!(
             "  Tools: {}\n",
             profile_tools_listing(profile, is_available)
         ));
     }
-    // The turn's discovered (host-pushed) types join the listing, filtered
-    // by the same allowlist and deduplicated against builtin overrides.
+
     if let Some(catalog) = catalog {
         for def in catalog
             .discovered
@@ -322,9 +293,7 @@ pub(super) fn agent_tool_def_impl(
         "{AGENT_TOOL_DESCRIPTION}\n\nAvailable agent types:\n{}",
         available.trim_end()
     );
-    // v2 renders the fork guidance from `agent-fork.md`, and only while the
-    // `subagent_fork` flag is on — the same gate the schema parameter uses
-    // (`stripSubagentForkParameter`). The sentence is v2's, verbatim.
+
     let mut extra = format!("\n\n{background_description}");
     if crate::subagent::fork::subagent_fork_enabled() {
         extra.push_str(
@@ -332,9 +301,7 @@ pub(super) fn agent_tool_def_impl(
         );
     }
     description.insert_str(AGENT_TOOL_DESCRIPTION.len(), &extra);
-    // v2 `buildSubagentModelDescriptions`: a pool with a single entry pins
-    // every spawn, so the listing and the `model` parameter appear only when
-    // a real choice exists (v2 `exposesSubagentModelChoice`).
+
     if let Some(pool) = pool
         && pool.exposes_choice()
     {
@@ -350,7 +317,7 @@ pub(super) fn agent_tool_def_impl(
             },
             "description": {
                 "type": "string",
-                "description": "Short task description (3-5 words) for UI display. Optional: only feeds the UI label, so omitting it never fails the call."
+                "description": "Short task description (3-5 words) for UI display"
             },
             "subagent_type": {
                 "type": "string",
@@ -369,12 +336,9 @@ pub(super) fn agent_tool_def_impl(
                 "description": "Start with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set."
             }
         },
-        // Only `prompt` is required: `description` is cosmetic (UI label)
-        // and real callers omit it, so the schema must not claim otherwise.
-        "required": ["prompt"]
+        "required": ["prompt", "description"]
     });
-    // v2 `stripSubagentForkParameter`: hide the parameter while the flag is
-    // off. On by default here, so only an explicit opt-out hits this.
+
     if !crate::subagent::fork::subagent_fork_enabled()
         && let Some(properties) = input_schema
             .get_mut("properties")

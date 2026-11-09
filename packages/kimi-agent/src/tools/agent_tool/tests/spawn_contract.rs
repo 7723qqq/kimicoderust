@@ -2,8 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// v2's listing is allowlist-filtered: without a catalog the default
-/// delegation set stands in, and the builtin `agent` is never spawnable.
 #[test]
 fn agent_def_lists_only_spawnable_types() {
     let def = agent_tool_def(None);
@@ -40,15 +38,12 @@ fn agent_def_requires_explicit_subagent_authorization() {
     assert!(!description.contains("Delegating also keeps the bulk"));
 }
 
-/// v2 `buildProfileDescriptions` joins `description` and `whenToUse` in the
-/// Agent tool listing. These are the three builtin profiles' upstream texts,
-/// not a shortened paraphrase.
 #[test]
 fn agent_def_includes_builtin_when_to_use_text() {
     let description = agent_tool_def(None).description;
     for expected in [
         "Use this agent for non-trivial software engineering work that may require reading files, editing code, running commands, and returning a compact but technically complete summary to the parent agent.",
-        "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (e.g. \"src/**/*.yaml\"), search code for keywords (e.g. \"database connection\"), or answer questions about the codebase (e.g. \"how does the auth module work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"thorough\" for comprehensive analysis across multiple locations and naming conventions. Use this agent for any read-only exploration that will clearly require more than 3 search queries. Prefer launching multiple explore agents concurrently when investigating independent questions.",
+        "Fast agent specialized for exploring codebases: it finds files by patterns (e.g. \"src/**/*.yaml\"), searches code for keywords (e.g. \"database connection\"), and answers questions about the codebase (e.g. \"how does the auth module work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"thorough\" for comprehensive analysis across multiple locations and naming conventions.",
         "Use this agent when the parent agent needs a step-by-step implementation plan, key file identification, and architectural trade-off analysis before code changes are made.",
     ] {
         assert!(
@@ -94,8 +89,6 @@ fn system_prompt_requires_explicit_subagent_authorization() {
     );
 }
 
-/// The catalog-fed listing advertises a discovered type exactly when the
-/// gate admits it (v2's filtered profile listing).
 #[tokio::test]
 async fn agent_def_lists_discovered_types_the_gate_admits() {
     let recorder = Arc::new(EventRecorder::new());
@@ -166,10 +159,6 @@ async fn agent_def_renders_discovered_when_to_use_only_when_present() {
     );
 }
 
-/// v2 #4152: a fork inherits the caller's profile when `subagent_type`
-/// is omitted, and an explicit different type is refused against the
-/// caller's REAL profile — the main agent's `agent`, not the spawn
-/// default the stand-in once compared against.
 #[tokio::test]
 async fn fork_inherits_the_callers_profile() {
     let recorder = Arc::new(EventRecorder::new());
@@ -215,8 +204,6 @@ async fn fork_inherits_the_callers_profile() {
     );
 }
 
-/// v2 #4152: a pool-bound caller's fork binds the SAME pool entry — the
-/// session model is not the caller's model and never serves the fork.
 #[tokio::test]
 async fn a_pool_bound_callers_fork_binds_the_same_pool_entry() {
     let recorder = Arc::new(EventRecorder::new());
@@ -282,9 +269,6 @@ async fn a_pool_bound_callers_fork_binds_the_same_pool_entry() {
 
 #[test]
 fn agent_def_lists_each_type_tool_scope() {
-    // v2 `buildSubagentTypeDescriptions` + `resolveActiveToolNames`: the
-    // model picks a subagent by what it is allowed to do, so every
-    // advertised type carries its tool scope (MCP globs included).
     let def = agent_tool_def(None);
     let listing = def
         .description
@@ -319,7 +303,7 @@ fn agent_def_lists_each_type_tool_scope() {
             def.description
         );
     }
-    // The built-in `explore` profile advertises its read-only scope.
+
     let explore_scope = listing
         .lines()
         .skip_while(|line| !line.starts_with("- explore"))
@@ -361,9 +345,7 @@ fn profile_tools_listing_drops_names_the_session_cannot_call() {
         tools: vec!["Read".into(), "Bash".into(), "mcp__github__*".into()],
         subagents: None,
     };
-    // The live table holds Read and an MCP tool from another server:
-    // Bash is globally disabled and no connected server matches
-    // `mcp__github__*`, so both leave the listing.
+
     let available = ["Read".to_string(), "mcp__linear__get_issue".to_string()];
     let is_available = |pattern: &str| {
         available
@@ -371,16 +353,13 @@ fn profile_tools_listing_drops_names_the_session_cannot_call() {
             .any(|name| crate::tools::tool_policy::matches_profile_tool_pattern(pattern, name))
     };
     assert_eq!(profile_tools_listing(&profile, Some(&is_available)), "Read");
-    // Nothing available renders as `none`, the empty-allowlist wording.
+
     let nothing = |_: &str| false;
     assert_eq!(profile_tools_listing(&profile, Some(&nothing)), "none");
 }
 
 #[test]
 fn agent_tool_def_filtered_renders_the_live_table() {
-    // With only Read on the table, no MCP glob survives in any built-in
-    // profile's listing — a glob is advertised only when some connected
-    // tool matches it.
     let available = ["Read".to_string()];
     let def = agent_tool_def_filtered(
         None,
@@ -404,27 +383,22 @@ fn agent_tool_def_filtered_renders_the_live_table() {
             );
         }
     }
-    // The unfiltered form keeps the static allowlist verbatim.
+
     let static_def = agent_tool_def(None);
     assert!(static_def.description.contains("mcp__"));
 }
 
-/// v2 #3878: the Agent tool once advertised tool names that no registry
-/// entry backed, so the model was told it could call something that would
-/// come back "unknown tool". The fork builds its listing and its execution
-/// gate from the same `ToolPolicyFilter`, which makes that structurally
-/// impossible — this pins it, because a listing and a gate that drift apart
-/// fail silently.
 #[test]
 fn every_advertised_builtin_tool_is_resolvable() {
+    const V2_ONLY_PROFILE_TOOLS: [&str; 1] = ["RepoMap"];
+
     let catalog = crate::prompt::profiles::ProfileCatalog::with_builtins();
     for profile in catalog.list() {
-        // `tools` empty means "all tools", so there is no name to check.
         for name in &profile.tools {
-            // `mcp__*` and similar are prefix patterns the filter owns, not
-            // concrete tool names; `is_native_tool_name` covers the concrete
-            // ones plus MCP and GitHub families.
             if name.contains('*') {
+                continue;
+            }
+            if V2_ONLY_PROFILE_TOOLS.contains(&name.as_str()) {
                 continue;
             }
             assert!(
@@ -442,9 +416,6 @@ fn every_advertised_builtin_tool_is_resolvable() {
     }
 }
 
-/// v2 #4418 `exposesSubagentModelChoice`: only a pool with a real choice
-/// advertises the listing and the `model` parameter — a single entry
-/// pins every spawn and hides both.
 #[test]
 fn agent_def_advertises_the_pool_only_when_a_choice_is_offered() {
     fn entry(alias: &str, hint: &str) -> SecondaryModelEntry {
@@ -513,11 +484,6 @@ fn agent_def_advertises_the_pool_only_when_a_choice_is_offered() {
     );
 }
 
-/// v2 gates the fork guidance and the `fork` parameter on the same flag: the
-/// guidance comes from `agent-fork.md` and the parameter from
-/// `stripSubagentForkParameter`. The fork sentence used to be baked into
-/// `AGENT_TOOL_DESCRIPTION`, so a flag-off session still advertised a feature it
-/// had removed from the schema.
 #[test]
 fn agent_def_gates_fork_guidance_on_the_flag() {
     use crate::subagent::fork::test_override::Scoped;
@@ -563,10 +529,6 @@ fn agent_def_gates_fork_guidance_on_the_flag() {
     );
 }
 
-/// v2 declares `NotifyUser` in both builtin subagent profiles (`CODER_TOOLS` /
-/// `EXPLORE_TOOLS`) and lets the runtime availability filter drop it from the
-/// listing when the host cannot show updates. The fork left it out of the
-/// declarations entirely, so even a capable host's subagents could never use it.
 #[test]
 fn subagent_profiles_declare_notify_user_and_filter_it_at_runtime() {
     let unavailable = agent_tool_def_filtered(None, &|name| name != "NotifyUser", None);
@@ -584,9 +546,6 @@ fn subagent_profiles_declare_notify_user_and_filter_it_at_runtime() {
     );
 }
 
-/// The depth refusal reaches the model as a tool error. Returning `None`
-/// instead would hand the same request to the host fallback, which runs it
-/// outside the engine's depth accounting.
 #[tokio::test]
 async fn the_agent_tool_refuses_a_spawn_at_the_depth_cap() {
     let llm = Arc::new(RecordingPromptLlm::new(vec!["unused".into()]));

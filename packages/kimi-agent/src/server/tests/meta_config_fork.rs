@@ -63,36 +63,7 @@ async fn test_http_meta_and_config_endpoints() {
     assert_eq!(val_post_cfg["default_model"], "test-custom-model");
     assert_eq!(val_post_cfg["yolo"], true);
 
-    // 4. Config Reload endpoint
-    let res_reload = server
-        .handle_request(&HttpRequest {
-            method: "POST".into(),
-            path: "/api/v1/config:reload".into(),
-            query: None,
-            headers: HashMap::new(),
-            body: Vec::new(),
-        })
-        .await;
-    assert_eq!(res_reload.status, 200);
-    let val_reload: Value = serde_json::from_slice(&res_reload.body).unwrap();
-    assert_eq!(val_reload["status"], "reloaded");
-
-    // 5. Runtime and info endpoints
-    let res_runtime = server
-        .handle_request(&HttpRequest {
-            method: "GET".into(),
-            path: "/api/v1/runtime".into(),
-            query: None,
-            headers: HashMap::new(),
-            body: Vec::new(),
-        })
-        .await;
-    assert_eq!(res_runtime.status, 200);
-    let val_runtime: Value = serde_json::from_slice(&res_runtime.body).unwrap();
-    assert_eq!(val_runtime["backend"], "rust");
-    assert!(val_runtime["version"].is_string());
-
-    // 6. Capabilities endpoint
+    // 4. Capabilities endpoint
     let res_cap = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -257,6 +228,31 @@ async fn test_http_meta_and_config_endpoints() {
         })
         .await;
     assert_eq!(res_clear.status, 200);
+}
+
+/// Once shutdown starts, the drain must not be extended by a prompt that
+/// arrives on an already-open connection: both prompt routes answer 503.
+#[tokio::test]
+async fn a_shutting_down_server_refuses_new_turns() {
+    let server = HttpServer::in_memory().unwrap();
+    server.request_shutdown();
+    for path in ["/api/v1/sessions/s1/prompt", "/api/v1/sessions/s1/prompts"] {
+        let res = server
+            .handle_request(&HttpRequest {
+                method: "POST".into(),
+                path: path.into(),
+                query: None,
+                headers: HashMap::new(),
+                body: Vec::new(),
+            })
+            .await;
+        assert_eq!(res.status, 503, "{path}");
+        let val: Value = serde_json::from_slice(&res.body).unwrap();
+        assert!(
+            val["error"].as_str().unwrap().contains("shutting down"),
+            "{path}: {val}"
+        );
+    }
 }
 
 /// The REST fork surface is where `turnIndex` (v2 `opts.turnIndex`) actually

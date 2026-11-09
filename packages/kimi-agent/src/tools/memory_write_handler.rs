@@ -1,23 +1,22 @@
-//! The `write` action wired to the memory store (v2
-//! `app/memory/tools/memoryTool.ts:236-293`, git memory off).
-//!
-//! v2 overwrites unconditionally. This engine's store has an `if_version`
-//! optimistic lock, so the handler supplies it internally: `"new"` when the
-//! path is unused, otherwise the current content's version token. The model
-//! never sees a parameter v2 does not declare.
-
 use std::path::Path;
 
 use serde_json::Value;
 
+use crate::tools::memory_lock::MemoryLock;
 use crate::tools::memory_paths::{MemoryScope, content_version};
+use crate::tools::memory_repo::{MemoryRepo, git_memory_enabled, has_git_reference, lock_path};
 use crate::tools::memory_store;
 use crate::tools::memory_tool::MemoryContext;
-use crate::tools::memory_write::{prepare_write, written_message};
+use crate::tools::memory_write::{
+    prepare_write, write_needs_reference_message, written_committed_message,
+    written_committed_unknown_sha_message, written_message, written_not_committed_message,
+};
 use crate::turn_loop::types::ExecutableToolResult;
 
 fn error_result(text: String) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: text,
@@ -29,6 +28,8 @@ fn error_result(text: String) -> ExecutableToolResult {
 
 fn ok_result(text: String) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: text,
@@ -51,17 +52,24 @@ fn scope_id(scope: MemoryScope, context: &MemoryContext) -> String {
     match scope {
         MemoryScope::Global => String::new(),
         MemoryScope::Project => context.project_id.clone(),
-        // The session-scoped id is not carried by MemoryContext; the caller
-        // passes it through `session_id` when it has one.
+
         MemoryScope::Session => String::new(),
     }
 }
 
-/// Run `Memory({ action: "write", path, content, scope? })`.
 pub fn write_action(
     context: &MemoryContext,
     args: &Value,
     session_id: &str,
+) -> ExecutableToolResult {
+    write_action_with_git_memory(context, args, session_id, git_memory_enabled())
+}
+
+pub fn write_action_with_git_memory(
+    context: &MemoryContext,
+    args: &Value,
+    session_id: &str,
+    git_memory: bool,
 ) -> ExecutableToolResult {
     let path = args.get("path").and_then(Value::as_str);
     let content = args.get("content").and_then(Value::as_str);
@@ -78,17 +86,25 @@ pub fn write_action(
         Err(refusal) => return error_result(refusal.message()),
     };
 
-    // v2 overwrites unconditionally; the store's optimistic lock is supplied
-    // internally. Resolve once here so a path-policy error is not mistaken for
-    // a missing file and turned into `"new"`.
-    let if_version = match memory_store::resolve_read_path(&context.base, &request.rel_path) {
-        Ok((_, full_path)) => match std::fs::read_to_string(&full_path) {
-            Ok(current) => content_version(&current),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "new".to_string(),
-            Err(error) => return error_result(error.to_string()),
-        },
-        Err(error) => return error_result(error),
-    };
+    if git_memory && !has_git_reference(&context.workspace_root, &context.base, &request.content) {
+        return error_result(write_needs_reference_message(&request));
+    }
+
+    let (if_version, existing) =
+        match memory_store::resolve_read_path(&context.base, &request.rel_path) {
+            Ok((_, full_path)) => match std::fs::read_to_string(&full_path) {
+                Ok(current) => (content_version(&current), true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    ("new".to_string(), false)
+                }
+                Err(error) => return error_result(error.to_string()),
+            },
+            Err(error) => return error_result(error),
+        };
+
+    let lock = lock_path(&context.base).and_then(|path| MemoryLock::acquire(&path));
+    let commit_allowed = lock.is_some();
+
     if let Err(error) = memory_store::write(
         &context.base,
         &request.rel_path,
@@ -97,10 +113,28 @@ pub fn write_action(
     ) {
         return error_result(error);
     }
-    ok_result(written_message(&request))
+    if !git_memory {
+        return ok_result(written_message(&request));
+    }
+    if !commit_allowed {
+        return ok_result(written_not_committed_message(&request));
+    }
+    let repo = MemoryRepo::new(context.base.clone());
+    let verb = if existing { "update" } else { "remember" };
+    if !repo.commit(&format!("{verb}: {}", request.title)) {
+        return ok_result(written_not_committed_message(&request));
+    }
+    let sha = repo
+        .log_commits(1)
+        .first()
+        .map(|commit| commit.sha.clone())
+        .unwrap_or_default();
+    if sha.is_empty() {
+        return ok_result(written_committed_unknown_sha_message(&request));
+    }
+    ok_result(written_committed_message(&request, &sha))
 }
 
-/// Convenience entry matching the six existing tool functions' signature.
 pub fn execute_write(workspace_root: &Path, args: &Value) -> ExecutableToolResult {
     match MemoryContext::resolve(workspace_root) {
         Ok(context) => write_action(&context, args, ""),
@@ -115,6 +149,23 @@ mod tests {
 
     fn context(dir: &Path) -> MemoryContext {
         MemoryContext::new(dir.join("memory"), dir)
+    }
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn workspace_commit(dir: &Path) -> String {
+        let repo = MemoryRepo::new(dir.to_path_buf());
+        fs::write(dir.join("seed.txt"), "seed").unwrap();
+        assert!(repo.commit("seed"));
+        repo.log_commits(1)[0].sha.clone()
     }
 
     #[test]
@@ -182,5 +233,64 @@ mod tests {
         );
         assert!(!result.is_error, "{}", result.content);
         assert!(context.base.join("global/std.md").exists());
+    }
+
+    #[test]
+    fn git_memory_refuses_content_without_a_resolvable_commit() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let context = context(dir.path());
+        let result = write_action_with_git_memory(
+            &context,
+            &serde_json::json!({ "path": "note", "content": "# Note\n\nno sha" }),
+            "",
+            true,
+        );
+        assert!(result.is_error, "{}", result.content);
+        assert!(!context.base.exists());
+    }
+
+    #[test]
+    fn git_memory_commits_the_write_and_reports_the_commit() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let context = context(dir.path());
+        let sha = workspace_commit(dir.path());
+        let result = write_action_with_git_memory(
+            &context,
+            &serde_json::json!({
+                "path": "note",
+                "content": format!("# Note\n\nsee {sha}")
+            }),
+            "",
+            true,
+        );
+        assert!(!result.is_error, "{}", result.content);
+
+        let commits = MemoryRepo::new(context.base.clone()).log_commits(1);
+        assert_eq!(commits[0].message, "remember: Note");
+        assert!(
+            result.content.contains(&commits[0].sha),
+            "{}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn git_memory_off_writes_without_creating_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = context(dir.path());
+        let result = write_action_with_git_memory(
+            &context,
+            &serde_json::json!({ "path": "note", "content": "# Note" }),
+            "",
+            false,
+        );
+        assert!(!result.is_error, "{}", result.content);
+        assert!(!context.base.join(".git").exists());
     }
 }

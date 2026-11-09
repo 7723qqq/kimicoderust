@@ -1415,8 +1415,9 @@ impl PluginManager {
     /// plugin contributes one (v2 `resolvePluginSections`): each contribution
     /// under a `<!-- From: plugin id -->` header, joined by a blank line within
     /// [`PLUGIN_SECTIONS_MAX_BYTES`]. A contribution that does not fit is
-    /// skipped whole and logged — v2 reports the same skip as a warning event.
-    pub fn plugin_system_prompt_block(&self) -> Option<String> {
+    /// skipped whole; v2 reports the skip as a `plugin-sections-oversized`
+    /// warning event, so the caller receives the ids and can publish it.
+    pub fn plugin_system_prompt_block_with_skipped(&self) -> (Option<String>, Vec<String>) {
         let mut parts: Vec<String> = Vec::new();
         let mut total = 0usize;
         let mut skipped: Vec<String> = Vec::new();
@@ -1435,12 +1436,17 @@ impl PluginManager {
                 "plugin system-prompt contributions skipped: the aggregate budget is exhausted"
             );
         }
-        (!parts.is_empty()).then(|| {
+        let block = (!parts.is_empty()).then(|| {
             format!(
                 "\n\n# Plugin Instructions\n\n{PLUGIN_SECTIONS_PROSE}\n\n{}\n\n",
                 parts.join("\n\n")
             )
-        })
+        });
+        (block, skipped)
+    }
+
+    pub fn plugin_system_prompt_block(&self) -> Option<String> {
+        self.plugin_system_prompt_block_with_skipped().0
     }
 
     /// Every enabled plugin's external hooks (v2 `enabledHooks`): the manifest
@@ -2023,6 +2029,10 @@ impl PluginManager {
                     dir: PathBuf::from(dir),
                     plugin_id: id.clone(),
                     instructions: instructions.clone(),
+                    session_start: manifest
+                        .session_start
+                        .as_ref()
+                        .map(|start| start.skill.clone()),
                 });
             }
         }

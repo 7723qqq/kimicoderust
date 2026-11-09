@@ -1,18 +1,16 @@
 use super::*;
 
+const RETRIEVAL_MIN_TOOLS: usize = 20;
+
+const RETRIEVAL_TOP_K: usize = 10;
+
 impl NativeToolset {
-    /// Build a toolset rooted at `workspace_root`. Returns `None` when the
-    /// root does not exist or cannot be canonicalized (no sandbox — no
-    /// native execution).
     pub fn new(workspace_root: &str, shell_path: Option<&str>) -> Option<Self> {
         let root = std::fs::canonicalize(workspace_root).ok()?;
         if !root.is_dir() {
             return None;
         }
         let shell = if cfg!(windows) {
-            // Windows without an explicit shell path resolves the `[shell]`
-            // preference / auto-detected shell (pwsh → powershell → Git Bash →
-            // cmd), mirroring the v2 native bash engine.
             shell_path
                 .map(str::to_string)
                 .filter(|s| !s.trim().is_empty())
@@ -51,16 +49,12 @@ impl NativeToolset {
             task_runner: None,
             tower_wake_runtime: Arc::new(std::sync::Mutex::new(None)),
             file_history: Arc::new(std::sync::Mutex::new(None)),
+            session_store: Arc::new(std::sync::Mutex::new(None)),
             turn_id: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             loaded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            announced_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            tool_select_state: Arc::new(std::sync::Mutex::new(
-                crate::tools::tool_select_state::ToolSelectState::new(),
-            )),
-            announcement_revision: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            empty_disclosure_announced: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             selection_failures: Arc::new(std::sync::Mutex::new(Default::default())),
             wait_tally: Arc::new(std::sync::Mutex::new(Default::default())),
+            progress_tracker: Arc::new(std::sync::Mutex::new(Default::default())),
             tools_filter: None,
             secondary_model: None,
             image_read_byte_budget: None,
@@ -75,12 +69,6 @@ impl NativeToolset {
         })
     }
 
-    /// Host-authorized extra roots (`additionalDirs`): directories outside the
-    /// workspace root that this session may still read and write natively.
-    /// Bind the skill scan: the extra roots the `Skill` tool scans **and** the
-    /// `merge_all_available_skills` policy — both must match what the system
-    /// prompt's skills section was rendered from, or the tool and the prompt
-    /// advertise different skills.
     pub fn with_skill_scan(
         mut self,
         dirs: impl IntoIterator<Item = PathBuf>,
@@ -91,6 +79,20 @@ impl NativeToolset {
         self.plugin_skill_dirs = plugin_dirs;
         self.merge_all_available_skills = merge_all_available_skills;
         self
+    }
+
+    /// The plugin-contributed skill roots this toolset scans (v2
+    /// `manager.pluginSkillRoots`), carrying each plugin's `sessionStart`
+    /// declaration. The turn loop reads the session-start skills from here so
+    /// the prompt, the `Skill` tool and the injection agree on one catalog.
+    pub fn plugin_skill_dirs(&self) -> &[crate::skills::PluginSkillDir] {
+        &self.plugin_skill_dirs
+    }
+
+    /// The session this toolset serves, when the host bound one (v2
+    /// `ISessionContext.sessionId`).
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 
     pub fn with_extra_roots(mut self, extra: Vec<String>) -> Self {
@@ -106,30 +108,44 @@ impl NativeToolset {
         self
     }
 
-    /// The sandbox this toolset executes inside. Roots were canonicalized when
-    /// [`Self::with_extra_roots`] ran, so this is a cheap clone per call.
     pub(super) fn sandbox(&self) -> Sandbox {
-        Sandbox {
-            primary: self.root.clone(),
-            extra: self.extra_roots.clone(),
+        let primary = self.execution_root();
+        let mut extra = self.extra_roots.clone();
+        if primary != self.root && !extra.contains(&self.root) {
+            extra.insert(0, self.root.clone());
         }
+        Sandbox { primary, extra }
     }
 
-    /// The shell path bridge this toolset resolves arguments through. Shared
-    /// with the stale-write gate so both agree on what a path names — the
-    /// gate's map key and the writer's target must be the same file.
+    pub(super) fn caller_environment(&self) -> Option<crate::environment::AgentEnvironment> {
+        let manager = self.subagent_manager.as_ref()?;
+        manager.agent_environment_sync(&self.effective_caller_agent_id())
+    }
+
+    pub fn execution_root(&self) -> PathBuf {
+        self.caller_environment()
+            .map(|environment| environment.cwd().to_path_buf())
+            .unwrap_or_else(|| self.root.clone())
+    }
+
+    pub(super) fn execution_environment(&self) -> std::collections::BTreeMap<String, String> {
+        self.caller_environment()
+            .map(|environment| environment.env().clone())
+            .unwrap_or_default()
+    }
+
     pub fn shell_bridge(&self) -> Arc<ShellPathBridge> {
         self.shell_bridge.clone()
     }
 
-    /// The execution root used to locate the tower protocol state for the
-    /// native Bash guard. Worktree callers re-anchor it to the main checkout.
     pub fn tower_root(&self) -> &std::path::Path {
         &self.root
     }
 
-    /// Apply the host-resolved `[image]` limits for model-initiated reads
-    /// (v2 `resolveReadImageByteBudget` / `resolveMaxImageEdgePx`).
+    pub fn workspace_root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     pub fn with_image_limits(
         mut self,
         read_byte_budget: Option<u64>,
@@ -140,39 +156,27 @@ impl NativeToolset {
         self
     }
 
-    /// Apply the session model's declared capabilities (v2 model catalog
-    /// `capabilities`); an empty/`None` set stays unknown.
     pub fn with_model_capabilities(mut self, capabilities: Option<Vec<String>>) -> Self {
         self.model_capabilities = capabilities.filter(|caps| !caps.is_empty());
         self
     }
 
-    /// Progressive tool disclosure switch (v2 `toolSelectService.enabled()`:
-    /// the `tool_select` experimental flag). When on, the advertised tool
-    /// table drops this toolset's deferred MCP tools and offers
-    /// `select_tools` instead.
     #[must_use]
     pub fn with_tool_select_enabled(mut self, enabled: bool) -> Self {
         self.tool_select_enabled = enabled;
         self
     }
 
-    /// Whether progressive tool disclosure is active for this toolset.
     pub fn tool_select_enabled(&self) -> bool {
         self.tool_select_enabled
     }
 
-    /// v2 `toolSelectService.enabled()`: the flag and the model capability
-    /// must both hold. A history recorded under a capable model is reshaped
-    /// when this is false (v2 `shapeUnsupportedDynamicToolContext`).
     pub fn supports_dynamic_tool_loading(&self) -> bool {
-        self.tool_select_enabled && self.declares_capability("dynamically_loaded_tools")
+        self.tool_select_enabled
+            && self.declares_capability("dynamically_loaded_tools")
+            && self.declares_capability("tool_use")
     }
 
-    /// Record the initial tool-name snapshot once, before any runtime MCP
-    /// discovery can change the table. v2 keeps one immutable snapshot per
-    /// session and reconciles later requests into it; without disclosure, a
-    /// runtime-only addition must not become an advertised top-level tool.
     pub fn record_initial_tool_table_ref(&self, tools: &[crate::turn_loop::types::ToolInfo]) {
         let mut snapshot = self
             .initial_tool_names
@@ -183,100 +187,125 @@ impl NativeToolset {
         }
     }
 
-    /// The turn-start disclosure announcement (v2
-    /// `toolSelectAnnouncementsService`): reconcile the live registry into the
-    /// session's revision ledger, then walk changes since the last announced
-    /// revision and render the first delta that carries a loadable tool.
-    /// `None` when disclosure is off or nothing changed.
-    pub fn take_disclosure_announcement(&self) -> Option<String> {
-        if !self.tool_select_enabled || !self.declares_capability("dynamically_loaded_tools") {
+    pub fn seed_loaded_tools_from_history(&self, history: &[crate::turn_loop::types::LLMMessage]) {
+        if !self.supports_dynamic_tool_loading() {
+            return;
+        }
+        let announced = crate::tools::tool_select_state::fold_announced_tool_names(history);
+        if announced.is_empty() {
+            return;
+        }
+        let mut loaded = self
+            .loaded_tools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        loaded.extend(announced);
+    }
+
+    pub fn is_dynamic_tool_loaded(&self, name: &str) -> bool {
+        self.loaded_tools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(name)
+    }
+
+    pub fn take_disclosure_announcement(
+        &self,
+        history: &[crate::turn_loop::types::LLMMessage],
+    ) -> Option<String> {
+        if !self.supports_dynamic_tool_loading() {
             return None;
         }
-        let loadable = self
+
+        let entries: Vec<crate::tools::tool_retriever::ToolSearchEntry> = self
             .mcp_manager
             .as_ref()
-            .map(|mcp| mcp.deferred_tool_names_blocking())
-            .unwrap_or_default();
-        let live = self
-            .mcp_manager
-            .as_ref()
-            .map(|mcp| mcp.live_definitions_blocking())
-            .unwrap_or_default();
-        let active = self
-            .mcp_manager
-            .as_ref()
-            .map(|mcp| mcp.active_definitions_blocking())
-            .unwrap_or_default();
-        let last_revision = self
-            .announcement_revision
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let announcement = {
-            let mut state = self
-                .tool_select_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            state.observe_live_updates(&active, &live);
-            if state.initial().is_none() {
-                // v2 `ToolSelectInitialized`: the first turn announces the
-                // whole loadable set as a snapshot, not a delta from an
-                // empty revision ledger.
-                state.initialize(live);
-                let added: Vec<String> = state
-                    .current()
-                    .iter()
-                    .filter(|tool| {
-                        tool.disclosure == crate::tools::registry::ToolDisclosure::Deferred
-                    })
-                    .map(|tool| tool.name.clone())
-                    .collect();
-                self.announcement_revision
-                    .store(0, std::sync::atomic::Ordering::SeqCst);
-                if added.is_empty() {
-                    None
-                } else {
-                    Some((added, Vec::new()))
+            .map(|mcp| mcp.deferred_tool_infos_blocking())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(name, _, _)| {
+                self.tools_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.allows(name))
+            })
+            .map(|(name, description, schema)| {
+                let parameter_names = schema
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|properties| properties.keys().cloned().collect())
+                    .unwrap_or_default();
+                crate::tools::tool_retriever::ToolSearchEntry {
+                    name,
+                    description,
+                    source: "mcp".into(),
+                    parameter_names,
                 }
-            } else {
-                state.reconcile(live);
-                state
-                    .announcement_since(last_revision)
-                    .map(|(revision, added, removed)| {
-                        self.announcement_revision
-                            .store(revision, std::sync::atomic::Ordering::SeqCst);
-                        (added, removed)
+            })
+            .collect();
+        if entries.is_empty() {
+            return self.empty_disclosure_announcement(history);
+        }
+
+        let loaded = self.active_loaded_tool_names();
+        let candidates: Vec<crate::tools::tool_retriever::ToolSearchEntry> = entries
+            .iter()
+            .filter(|entry| !loaded.contains(&entry.name))
+            .cloned()
+            .collect();
+
+        if entries.len() >= RETRIEVAL_MIN_TOOLS {
+            if candidates.is_empty() {
+                return None;
+            }
+            let query =
+                crate::tools::tool_select_state::latest_user_query(history).unwrap_or_default();
+            let ranked = crate::tools::tool_retriever::rank_tools_by_query(
+                &candidates,
+                &query,
+                RETRIEVAL_TOP_K,
+            );
+
+            let selected: Vec<crate::tools::tool_retriever::ToolSearchHit> = if ranked.is_empty() {
+                candidates
+                    .iter()
+                    .take(RETRIEVAL_TOP_K)
+                    .map(|entry| crate::tools::tool_retriever::ToolSearchHit {
+                        name: entry.name.clone(),
+                        description: entry.description.clone(),
+                        score: 0.0,
                     })
-            }
-        };
-        let Some((added, removed)) = announcement else {
-            // Upstream #4190: when nothing can be loaded at all, say so once
-            // (replacing the usage trailer), then stay silent until a real
-            // delta resets the state.
-            if !loadable.is_empty() {
+                    .collect()
+            } else {
+                ranked
+            };
+            let announcement = crate::tools::tool_select_state::render_retrieved_tools_announcement(
+                &selected,
+                candidates.len(),
+            );
+            let previous =
+                crate::tools::tool_select_state::last_retrieved_announcement_text(history);
+            if previous.as_deref() == Some(announcement.as_str()) {
                 return None;
             }
-            if self
-                .empty_disclosure_announced
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
-            {
-                return None;
-            }
-            return crate::tools::select_tools::render_loadable_tools_announcement(&[], &[], false);
-        };
-        self.empty_disclosure_announced
-            .store(loadable.is_empty(), std::sync::atomic::Ordering::SeqCst);
-        let mut announced = self
-            .announced_tools
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for name in &added {
-            announced.insert(name.clone());
+            return Some(announcement);
         }
-        for name in &removed {
-            announced.remove(name);
-        }
-        // A delta that drained the last loadable tools carries the empty-state
-        // text instead of the usage trailer (upstream #4190's
-        // `hasLoadableTools = loadable.length > 0`).
+
+        let mut loadable: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+        loadable.sort();
+        let loadable_set: std::collections::HashSet<&str> =
+            loadable.iter().map(String::as_str).collect();
+        let announced = crate::tools::tool_select_state::fold_announced_tool_names(history);
+        let added: Vec<String> = loadable
+            .iter()
+            .filter(|name| !announced.contains(*name))
+            .cloned()
+            .collect();
+        let mut removed: Vec<String> = announced
+            .iter()
+            .filter(|name| !loadable_set.contains(name.as_str()))
+            .cloned()
+            .collect();
+        removed.sort();
         crate::tools::select_tools::render_loadable_tools_announcement(
             &added,
             &removed,
@@ -284,33 +313,56 @@ impl NativeToolset {
         )
     }
 
-    /// v2 `notifyUpdatedTools`: the next turn's one-shot reminder that a
-    /// same-name tool update is pinned but not applied in this session.
-    pub fn take_pending_update_notice(&self) -> Option<String> {
-        self.tool_select_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take_pending_notice()
+    fn empty_disclosure_announcement(
+        &self,
+        history: &[crate::turn_loop::types::LLMMessage],
+    ) -> Option<String> {
+        let empty =
+            crate::tools::select_tools::render_loadable_tools_announcement(&[], &[], false)?;
+        let last = history.iter().rev().find(|message| {
+            crate::tools::tool_select_state::is_loadable_tools_announcement(message)
+        });
+        if last.is_some_and(|message| message.content.contains(&empty)) {
+            return None;
+        }
+        Some(empty)
     }
 
-    /// The model-declared capability probe shared by the media and
-    /// disclosure gates.
+    fn active_loaded_tool_names(&self) -> std::collections::HashSet<String> {
+        let loadable = self
+            .mcp_manager
+            .as_ref()
+            .map(|mcp| mcp.deferred_tool_names_blocking())
+            .unwrap_or_default();
+        self.loaded_tools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|name| loadable.contains(*name))
+            .filter(|name| {
+                self.tools_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.allows(name))
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn observe_progress(&self, receipt: &crate::turn_loop::progress_track::ToolReceipt) -> u32 {
+        self.progress_tracker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .observe(receipt)
+    }
+
     pub(super) fn declares_capability(&self, name: &str) -> bool {
         self.model_capabilities
             .as_deref()
             .is_some_and(|caps| caps.iter().any(|cap| cap == name))
     }
 
-    /// v2 #4364: the first turn's `<tools_added>` announcement must not run
-    /// ahead of the MCP servers' first discovery — otherwise it announces a
-    /// partial (often empty) set and the model is told nothing is loadable
-    /// until the next turn's delta. Await the initial load before the
-    /// announcement is computed; `wait_for_initial_load` settles when every
-    /// connect does (success or failure, each bounded by its own connect
-    /// timeout), so this cannot park a turn forever. No-op when disclosure
-    /// is off or no MCP manager is wired.
     pub async fn wait_for_mcp_discovery_before_disclosure(&self) {
-        if !self.tool_select_enabled || !self.declares_capability("dynamically_loaded_tools") {
+        if !self.supports_dynamic_tool_loading() {
             return;
         }
         if let Some(mcp) = &self.mcp_manager {
@@ -318,36 +370,24 @@ impl NativeToolset {
         }
     }
 
-    /// `[background].bash_auto_background_on_timeout`: whether a timed-out
-    /// foreground Bash call migrates to the background. `None` keeps the
-    /// default (`true`).
     #[must_use]
     pub fn with_bash_auto_background(mut self, auto_background: Option<bool>) -> Self {
         self.bash_auto_background = auto_background.unwrap_or(true);
         self
     }
 
-    /// `[background].bash_task_timeout_s`: the default timeout for background
-    /// Bash tasks. `None` keeps the built-in 600s; `Some(0)` means "no
-    /// timeout".
     #[must_use]
     pub fn with_bash_task_timeout(mut self, timeout_s: Option<u64>) -> Self {
         self.bash_task_timeout_s = timeout_s;
         self
     }
 
-    /// Set the configured Tower spawn budget ceiling. The adaptive governor
-    /// may lower it further after provider 429 responses.
     #[must_use]
     pub fn with_tower_max_running_tasks(mut self, max_running_tasks: Option<u32>) -> Self {
         self.tower_max_running_tasks = max_running_tasks.filter(|value| *value > 0);
         self
     }
 
-    /// The effective bound for a background Bash task: the call's own
-    /// `timeout` wins over `[background].bash_task_timeout_s`, which wins over
-    /// the built-in 600s. `disable_timeout` and a resolved `0` mean "no
-    /// timeout"; anything else is clamped to 24h.
     pub(super) fn background_bash_timeout(&self, args: &Value) -> Option<Duration> {
         if args
             .get("disable_timeout")
@@ -382,20 +422,16 @@ impl NativeToolset {
         }
     }
 
-    /// Set the bound provider type (e.g. "kimi").
     pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
         self.provider = Some(provider.into());
         self
     }
 
-    /// Attach a TaskRunner for native background tasks and inspection.
     pub fn with_task_runner(mut self, runner: std::sync::Arc<crate::storage::TaskRunner>) -> Self {
         self.task_runner = Some(runner);
         self
     }
 
-    /// Inject the shared runtime and return the handler the concrete session
-    /// or server must register for `tower_inbox` replay.
     pub fn bind_tower_wake_runtime(
         &self,
         runtime: Arc<crate::tools::tower::wake::TowerWakeRuntime>,
@@ -411,7 +447,6 @@ impl NativeToolset {
         )
     }
 
-    /// Convenience for a composition root that has a concrete wake driver.
     pub fn bind_tower_wake_driver(
         &self,
         driver: Arc<dyn crate::session::wake::TowerWakeDriver>,
@@ -428,14 +463,6 @@ impl NativeToolset {
             .clone()
     }
 
-    /// The previous-session reminder for tasks the last process left behind,
-    /// taken once so a turn only ever announces it a single time.
-    ///
-    /// The caller is the turn-level injection registry, which asks on every
-    /// new turn; two gates keep it silent afterwards: the runner's persisted
-    /// `resumeReminded` marker (so a later process does not repeat it
-    /// either), and `already` — the ids an earlier reminder in this
-    /// conversation already named (v2 `hasPreviousSessionReminder`).
     pub(crate) fn take_previous_session_reminder(
         &self,
         already: &HashSet<String>,
@@ -449,14 +476,6 @@ impl NativeToolset {
         self
     }
 
-    /// The session's *live* permission mode, as the host resolved it for this
-    /// turn (`/permissions` can change it mid-session, and it is deliberately
-    /// not the same thing as the mode in `config.toml`).
-    ///
-    /// `ExitPlanMode` needs it: an auto-mode session exits plan mode without
-    /// asking, and reading `config.toml` instead would let a session the user
-    /// set to `manual` auto-exit — silently, with no approval. `None` means
-    /// "not wired", and the tool falls back to asking.
     pub fn with_permission_mode(mut self, mode: crate::permission::PermissionMode) -> Self {
         self.permission_mode = Some(mode);
         self
@@ -467,15 +486,6 @@ impl NativeToolset {
         self
     }
 
-    /// Enable native file-history capture for mutating file tools (`write` /
-    /// `edit`). Each successful mutation records a `session_file_history`
-    /// row (v2 `fileHistoryService.onWillExecuteTool` capture, plus the
-    /// post-image diff) so `undo {revert_files:true}` and the
-    /// `/file-history/*` endpoints have real data.
-    ///
-    /// `turn_id` is attributed on the toolset ([`Self::with_turn_id`], default
-    /// 0) and installed alongside the recorder inside the blocking call, so it
-    /// is visible to the tool regardless of which pool thread runs it.
     pub fn with_file_history(
         self,
         store: std::sync::Arc<crate::session::sqlite_store::SqliteSessionStore>,
@@ -485,16 +495,12 @@ impl NativeToolset {
         self
     }
 
-    /// Turn number attributed to file-history rows recorded by this toolset.
     #[must_use]
     pub fn with_turn_id(self, turn_id: usize) -> Self {
         self.set_turn_id(turn_id);
         self
     }
 
-    /// Install/refresh the file-history recorder. Takes `&self` so a host can
-    /// arm capture on a toolset already moved into the callbacks wrapper — the
-    /// reason this is not builder-only.
     pub fn set_file_history(
         &self,
         store: std::sync::Arc<crate::session::sqlite_store::SqliteSessionStore>,
@@ -508,21 +514,40 @@ impl NativeToolset {
         self.set_turn_id(turn_id);
     }
 
-    /// Refresh only the turn number (the recorder stays as installed).
     pub fn set_turn_id(&self, turn_id: usize) {
         self.turn_id
             .store(turn_id, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[must_use]
+    pub fn with_session_store(
+        self,
+        store: std::sync::Arc<crate::session::sqlite_store::SqliteSessionStore>,
+    ) -> Self {
+        self.set_session_store(store);
+        self
+    }
+
+    pub fn set_session_store(
+        &self,
+        store: std::sync::Arc<crate::session::sqlite_store::SqliteSessionStore>,
+    ) {
+        *self.session_store.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
+    }
+
+    pub(super) fn session_store(
+        &self,
+    ) -> Option<std::sync::Arc<crate::session::sqlite_store::SqliteSessionStore>> {
+        self.session_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub(super) fn effective_turn_id(&self) -> usize {
         self.turn_id.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The agent id executing the current turn: the [`CALLER_AGENT_ID`]
-    /// task-local when the turn runner scoped one (a subagent's id), else the
-    /// construction-time `caller_agent_id`, else `"main"`. The tower tools use
-    /// this so a worker's calls are attributed to the worker rather than to the
-    /// main agent, and the main-agent-only gate actually denies workers.
     pub(super) fn effective_caller_agent_id(&self) -> String {
         CALLER_AGENT_ID
             .try_with(|id| id.clone())
@@ -533,7 +558,6 @@ impl NativeToolset {
             })
     }
 
-    /// Attach a SubagentManager for in-process multi-agent collaboration.
     pub fn with_subagents(
         mut self,
         manager: std::sync::Arc<crate::subagent::SubagentManager>,
@@ -542,34 +566,20 @@ impl NativeToolset {
         self
     }
 
-    /// Attach an McpManager for external MCP server tools.
     pub fn with_mcp(mut self, manager: std::sync::Arc<crate::mcp::McpManager>) -> Self {
         self.mcp_manager = Some(manager);
         self
     }
 
-    /// Get the attached McpManager if any.
     pub fn mcp_manager(&self) -> Option<&std::sync::Arc<crate::mcp::McpManager>> {
         self.mcp_manager.as_ref()
     }
 
-    /// Shape the advertised tool table for progressive tool disclosure (v2
-    /// `toolSelectService.shapeTools`): when the disclosure switch is on and
-    /// the model declares `dynamically_loaded_tools`, the deferred MCP tools
-    /// come out of the table and the `select_tools` loader is advertised in
-    /// their place; when it is off, the table passes through unchanged
-    /// (`select_tools` stays unadvertised — the model cannot see or call it).
-    ///
-    /// A deferred tool that the session already loaded goes back in. v2 hands
-    /// the loaded schema to the model as a system message carrying `tools`
-    /// (`selectToolsTool.ts` `ctx.remind`); this engine's equivalent channel
-    /// is the per-step table, so the definition — not only the
-    /// `<tools_added>` text — must reach the next request.
     pub fn shape_tool_table(
         &self,
         mut tools: Vec<crate::turn_loop::types::ToolInfo>,
     ) -> Vec<crate::turn_loop::types::ToolInfo> {
-        if !self.tool_select_enabled || !self.declares_capability("dynamically_loaded_tools") {
+        if !self.supports_dynamic_tool_loading() {
             let snapshot = self
                 .initial_tool_names
                 .lock()
@@ -587,9 +597,7 @@ impl NativeToolset {
             .as_ref()
             .map(|mcp| mcp.deferred_tool_names_blocking())
             .unwrap_or_default();
-        // Nothing is deferred: disclosure has nothing to fold, so the
-        // loader is not advertised either (v2 keeps `select_tools` out of
-        // the table whenever there are no dynamically loadable tools).
+
         if deferred.is_empty() {
             tools.retain(|tool| tool.name != crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME);
             return tools;
@@ -616,10 +624,6 @@ impl NativeToolset {
         tools
     }
 
-    /// The full catalogue a `select_tools` call may load from: every
-    /// advertised tool **plus** the deferred ones the table hides (v2
-    /// `loadableToolNames`). Execution stays refused until the model loads a
-    /// deferred name, so this set describes availability, not advertisement.
     pub async fn full_tool_catalogue(&self) -> std::collections::HashSet<String> {
         let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(mcp) = &self.mcp_manager {
@@ -638,9 +642,7 @@ impl NativeToolset {
             .into_iter()
             .map(|tool| tool.name),
         );
-        // Host-registered tools join too: the shaped table filters them only
-        // when their names collide with the toolset's, so the loader must
-        // accept them as available.
+
         if let Some(callbacks) = &self.callbacks
             && let Ok(response) = callbacks.list_tools().await
         {
@@ -649,9 +651,6 @@ impl NativeToolset {
         names
     }
 
-    /// Attach the foreground `Agent` tool's turn context (P46): the host's
-    /// resolved subagent timeout and the parent turn's cancellation signal
-    /// (P51: flag + notify, so the subagent abort is event-driven).
     pub fn with_agent_context(
         mut self,
         timeout_ms: Option<u64>,
@@ -662,7 +661,6 @@ impl NativeToolset {
         self
     }
 
-    /// Attach the P55 session-wide cancel slot (session-built toolsets).
     pub fn with_parent_cancel_slot(
         mut self,
         slot: Arc<std::sync::Mutex<Option<crate::subagent::types::ParentCancel>>>,
@@ -671,7 +669,6 @@ impl NativeToolset {
         self
     }
 
-    /// [`Self::with_parent_cancel_slot`] for optional slots.
     pub fn with_parent_cancel_slot_if(
         mut self,
         slot: Option<Arc<std::sync::Mutex<Option<crate::subagent::types::ParentCancel>>>>,
@@ -680,8 +677,6 @@ impl NativeToolset {
         self
     }
 
-    /// Attach the session-wide steer slot (#3697): the per-turn signal a
-    /// steering message fires to end a blocking `WaitFor` early.
     pub fn with_steer_slot_if(
         mut self,
         slot: Option<Arc<std::sync::Mutex<Option<crate::subagent::types::ParentCancel>>>>,
@@ -690,8 +685,6 @@ impl NativeToolset {
         self
     }
 
-    /// The live parent cancel signal: the session slot wins (per-turn
-    /// refresh), the static value is the per-turn-wired fallback.
     pub(super) fn effective_parent_cancel(&self) -> Option<crate::subagent::types::ParentCancel> {
         if let Some(slot) = &self.parent_cancel_slot {
             let guard = slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -702,15 +695,12 @@ impl NativeToolset {
         self.parent_cancel.clone()
     }
 
-    /// The live steer signal for this turn, when a steering-capable session
-    /// wired one.
     pub(super) fn effective_steer(&self) -> Option<crate::subagent::types::ParentCancel> {
         let slot = self.steer_slot.as_ref()?;
         let guard = slot.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     }
 
-    /// Attach the host callbacks for interactive tools (AskUserQuestion).
     pub fn with_callbacks(
         mut self,
         callbacks: std::sync::Arc<dyn crate::callbacks::HostCallbacks>,
@@ -719,31 +709,24 @@ impl NativeToolset {
         self
     }
 
-    /// Attach host-resolved `[github]` config credentials for the native
-    /// GitHub tools.
     pub fn with_github_credentials(mut self, credentials: github::GitHubCredentials) -> Self {
         self.github_credentials = Some(credentials);
         self
     }
 
-    /// Attach the user's global `[tools]` switch; every native call must
-    /// survive it even when the model calls a disabled tool from memory.
     pub fn with_tools_filter(mut self, filter: Option<tool_policy::ToolsFilter>) -> Self {
         self.tools_filter = filter;
         self
     }
 
-    /// The user's global `[tools]` switch, if configured.
     pub fn tools_filter(&self) -> Option<&tool_policy::ToolsFilter> {
         self.tools_filter.as_ref()
     }
 
-    /// Host-resolved `[github]` credentials, when the session has any.
     pub fn github_credentials(&self) -> Option<&github::GitHubCredentials> {
         self.github_credentials.as_ref()
     }
 
-    /// Attach the `[secondary_model]` subagent model pool.
     pub fn with_secondary_model(
         mut self,
         pool: Option<std::sync::Arc<crate::subagent::secondary::SecondaryModelRuntime>>,
@@ -752,16 +735,12 @@ impl NativeToolset {
         self
     }
 
-    /// The subagent model pool, when `[secondary_model]` is configured.
     pub fn secondary_model(
         &self,
     ) -> Option<&std::sync::Arc<crate::subagent::secondary::SecondaryModelRuntime>> {
         self.secondary_model.as_ref()
     }
 
-    /// The attached SubagentManager, when the pipeline wired one
-    /// (`with_subagents`) — the spawn gate's catalog source for the `Agent`
-    /// description's type listing.
     pub fn subagent_manager(&self) -> Option<&std::sync::Arc<crate::subagent::SubagentManager>> {
         self.subagent_manager.as_ref()
     }

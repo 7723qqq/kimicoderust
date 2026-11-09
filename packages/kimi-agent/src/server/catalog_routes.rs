@@ -355,16 +355,16 @@ pub(super) fn format_wire_session(
     );
 
     // Derive `pending_interaction` from the engine's InteractionManager
-    // when an engine is attached: v2 surfaced a real value here instead of
-    // the "none" stub the engine previously hardcoded, and the TUI status
-    // panel relies on it to render the question / approval state.
+    // when an engine is attached. v2 (sessionInteractionService) settles
+    // approvals ahead of questions, so a session that needs an approval while a
+    // question is also parked reports `approval`.
     let pending_interaction = engine
         .and_then(|e| e.interaction_manager())
         .map(|mgr| {
-            if !mgr.list_questions(session_id).is_empty() {
-                "question"
-            } else if !mgr.list_approvals(session_id).is_empty() {
+            if !mgr.list_approvals(session_id).is_empty() {
                 "approval"
+            } else if !mgr.list_questions(session_id).is_empty() {
+                "question"
             } else {
                 "none"
             }
@@ -390,10 +390,44 @@ pub(super) fn format_wire_session(
         .and_then(|m| m.as_object().cloned())
         .unwrap_or_default();
 
-    let cwd = metadata_obj
-        .get("cwd")
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
+    // v2 `normalizeSessionMeta` (sessionMetadataService.ts:285-312): legacy
+    // hosts wrote `workDir` and `isCustomTitle` / `customTitle`. Map them onto
+    // the canonical `cwd` and `titleKind` on read so both shapes agree without
+    // a destructive rewrite.
+    if !metadata_obj.contains_key("cwd")
+        && let Some(work_dir) = metadata_obj.get("workDir").and_then(|v| v.as_str())
+    {
+        metadata_obj.insert("cwd".to_string(), json!(work_dir));
+    }
+    let legacy_custom = metadata_obj
+        .get("isCustomTitle")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || metadata_obj
+            .get("customTitle")
+            .is_some_and(|v| !v.is_null());
+    let title_kind = session
+        .normalized_title_kind()
+        .map(str::to_string)
+        .or_else(|| {
+            metadata_obj
+                .get("titleKind")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| legacy_custom.then(|| "custom".to_string()));
+
+    // v2 `SessionMeta.cwd` is fixed at creation, so the session column wins over
+    // anything a legacy host left in the metadata bag.
+    let cwd = session
+        .cwd
+        .clone()
+        .or_else(|| {
+            metadata_obj
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| {
             std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
@@ -406,6 +440,44 @@ pub(super) fn format_wire_session(
     metadata_obj
         .entry("session_id".to_string())
         .or_insert_with(|| json!(session_id));
+    // Mirror the canonical session fields into the metadata bag: the wire
+    // schema carries them in both places and older clients read the bag.
+    if let Some(kind) = &title_kind {
+        metadata_obj.insert("titleKind".to_string(), json!(kind));
+    }
+    metadata_obj.insert(
+        "isCustomTitle".to_string(),
+        json!(title_kind.as_deref() == Some("custom")),
+    );
+    if let Some(prompt) = &session.last_prompt {
+        metadata_obj.insert("lastPrompt".to_string(), json!(prompt));
+    }
+    if let Some(archived_at) = session.archived_at {
+        metadata_obj.insert("archivedAt".to_string(), json!(archived_at));
+    }
+    if let Some(forked_from) = &session.forked_from {
+        metadata_obj.insert("forkedFrom".to_string(), json!(forked_from));
+    }
+    if let Some(agents) = &session.agents {
+        metadata_obj.insert("agents".to_string(), agents.clone());
+    }
+    if let Some(custom) = &session.custom {
+        metadata_obj.insert("custom".to_string(), custom.clone());
+    }
+    if let Some(environment_id) = &session.environment_id {
+        metadata_obj.insert("environmentId".to_string(), json!(environment_id));
+    }
+    if let Some(environment_cwd) = &session.environment_cwd {
+        metadata_obj.insert("environmentCwd".to_string(), json!(environment_cwd));
+    }
+    metadata_obj.insert(
+        "version".to_string(),
+        json!(
+            session
+                .version
+                .unwrap_or(crate::session::sqlite_store::SESSION_META_VERSION)
+        ),
+    );
 
     let mut config_obj = store
         .get_state("agent_config", session_id)
@@ -447,12 +519,43 @@ pub(super) fn format_wire_session(
         })
         .unwrap_or(false);
 
+    // v2 `sessionOutcomeMirrorService.reconcileAfterRestore`: when a restored
+    // session has turns but no recorded outcome (a row written before the
+    // column existed, or an interrupted write), adopt the newest turn's status.
+    // Only pay for the correction when the cheap read finds nothing.
+    let mut last_turn_reason = store.last_turn_reason(session_id);
+    if last_turn_reason.is_none() && message_count > 0 {
+        last_turn_reason = store.reconcile_last_turn_reason(session_id).ok().flatten();
+    }
+
     json!({
         "id": session_id,
         "session_id": session_id,
         "workspace_id": ws_id,
         "is_default": is_default,
-        "title": session.title.as_deref().unwrap_or(""),
+        "title": session
+            .title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(crate::session::sqlite_store::DEFAULT_SESSION_TITLE),
+        "title_kind": title_kind,
+        "titleKind": title_kind,
+        "is_custom_title": title_kind.as_deref() == Some("custom"),
+        "isCustomTitle": title_kind.as_deref() == Some("custom"),
+        "last_prompt": session.last_prompt,
+        "lastPrompt": session.last_prompt,
+        "archived_at": session.archived_at,
+        "archivedAt": session.archived_at,
+        "forked_from": session.forked_from,
+        "forkedFrom": session.forked_from,
+        "version": session.version.unwrap_or(crate::session::sqlite_store::SESSION_META_VERSION),
+        "cwd": cwd,
+        "environment_id": session.environment_id,
+        "environmentId": session.environment_id,
+        "environment_cwd": session.environment_cwd,
+        "environmentCwd": session.environment_cwd,
+        "agents": session.agents,
+        "custom": session.custom,
         "created_at": created_iso,
         "updated_at": updated_iso,
         "busy": busy,
@@ -480,7 +583,7 @@ pub(super) fn format_wire_session(
         // after a restart) still see the last outcome. Absent, not null, when a
         // turn has not ended since activation — the wire schema marks it
         // optional and its own doc says it is "when the session is live".
-        "last_turn_reason": store.last_turn_reason(session_id)
+        "last_turn_reason": last_turn_reason
     })
 }
 

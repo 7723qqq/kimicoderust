@@ -385,18 +385,6 @@ max_context_size = 128000
     assert_eq!(model["display_name"], "kimi-latest");
     assert_eq!(model["max_context_size"], 262144);
 
-    // Alternate /model-catalog endpoint also returns 200
-    let res_catalog = server
-        .handle_request(&HttpRequest {
-            method: "GET".into(),
-            path: "/api/v1/model-catalog".into(),
-            query: None,
-            headers: HashMap::new(),
-            body: Vec::new(),
-        })
-        .await;
-    assert_eq!(res_catalog.status, 200);
-
     // 2. Session export
     server
         .store_arc()

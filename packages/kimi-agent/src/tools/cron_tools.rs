@@ -1,15 +1,3 @@
-//! Native execution of the cron tool family (CronList / CronCreate /
-//! CronDelete) over the state bridge protocol (design doc milestone 7,
-//! batch 7).
-//!
-//! The host stays the cron authority: it owns the task registry, the
-//! scheduler, jitter, and the local timezone. The engine reads the task
-//! list through `host/state_read {domain: "cron"}` and submits
-//! action-shaped writes (`{action: "create" | "delete", ...}`) through
-//! `host/state_write`. Rendering mirrors the v2 tools; timezone-dependent
-//! values (`nextFireAt`) arrive pre-formatted from the host, which owns
-//! the local-time ISO rendering and the post-jitter fire time.
-
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -18,21 +6,12 @@ use crate::callbacks::HostCallbacks;
 use crate::rpc::types::{StateReadRequest, StateWriteRequest};
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// v2 `PROMPT_PREVIEW_BYTES`: CronList truncates long prompts to 200 UTF-8
-/// bytes (at a character boundary) before JSON-encoding them.
 const PROMPT_PREVIEW_BYTES: usize = 200;
-/// v2 `MS_PER_DAY`, used for the `ageDays` rendering.
+
 const MS_PER_DAY: f64 = 24.0 * 60.0 * 60.0 * 1000.0;
 
-/// Failure message when the connected host does not implement the state
-/// bridge. The model must not retry the tool — the host cannot manage cron
-/// jobs for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot manage cron jobs.";
 
-/// Wire shape of one cron task as returned by the host (v2 `CronTask` plus
-/// the host-computed rendering fields). `nextFireAt` is a pre-formatted
-/// local ISO string or `null` — the host owns the timezone and jitter;
-/// `stale` is the host's staleness verdict (it owns the `noStale` config).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CronTaskWire {
@@ -52,9 +31,6 @@ fn default_true() -> bool {
     true
 }
 
-/// Execute the CronList tool natively: `state_read` the cron domain and
-/// render the v2-aligned list (header, `---`-separated records, empty
-/// message).
 pub async fn execute_cron_list(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -79,9 +55,6 @@ pub async fn execute_cron_list(
     }
 }
 
-/// Render the host's cron wire value (an array of tasks) as the v2
-/// `CronList` output: `cron_jobs: N` header, records joined by a lone
-/// `---` line, and the dedicated empty message.
 fn render_cron_list(value: &Value, now_ms: i64) -> ExecutableToolResult {
     let tasks: Vec<CronTaskWire> = match serde_json::from_value(value.clone()) {
         Ok(tasks) => tasks,
@@ -99,10 +72,6 @@ fn render_cron_list(value: &Value, now_ms: i64) -> ExecutableToolResult {
     ok_result(format!("{header}\n{}", records.join("\n---\n")))
 }
 
-/// Render one task record, mirroring v2 `CronListTool.renderRecord`: the
-/// human schedule is computed from the expression (falling back to the raw
-/// expression on parse failure, like the v2 try/catch), the prompt preview
-/// is JSON-encoded, and `nextFireAt` passes through from the host.
 fn render_record(task: &CronTaskWire, now_ms: i64) -> String {
     let human_schedule = match crate::cron::parse(&task.cron) {
         Ok(parsed) => crate::cron::to_human(&parsed),
@@ -123,10 +92,6 @@ fn render_record(task: &CronTaskWire, now_ms: i64) -> String {
     )
 }
 
-/// Execute the CronCreate tool natively: validate the arguments with the
-/// ported cron pure functions, then `state_write` an action-shaped create
-/// and render the v2-aligned output (id, cron, humanSchedule, recurring,
-/// nextFireAt).
 pub async fn execute_cron_create(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -153,7 +118,7 @@ pub async fn execute_cron_create(
             }
         },
     };
-    // v2 normalizes the expression: trim + collapse internal whitespace.
+
     let normalized = cron.split_whitespace().collect::<Vec<_>>().join(" ");
     if let Err(message) = validate_create(&normalized, prompt, recurring, now_ms()) {
         return err_result(message);
@@ -185,10 +150,6 @@ pub async fn execute_cron_create(
     }
 }
 
-/// v2 `CronCreateTool` validation, in order: expression parse, 5-year fire
-/// window, prompt byte cap, and the one-shot cap. The timezone offset is
-/// unknown to the engine, so the time-dependent checks run in UTC — the
-/// host re-validates authoritatively and may reject with its own message.
 fn validate_create(
     normalized: &str,
     prompt: &str,
@@ -214,8 +175,6 @@ fn validate_create(
     Ok(())
 }
 
-/// Render the host's create response (the created task) as the v2
-/// `CronCreate` output.
 fn render_cron_create(value: &Value) -> ExecutableToolResult {
     let task: CronTaskWire = match serde_json::from_value(value.clone()) {
         Ok(task) => task,
@@ -236,10 +195,6 @@ fn render_cron_create(value: &Value) -> ExecutableToolResult {
     ))
 }
 
-/// Execute the CronDelete tool natively: validate the id shape, then
-/// `state_write` an action-shaped delete and render the v2 output. A
-/// not-found id is the host's rejection (it owns the registry) and its
-/// error passes through.
 pub async fn execute_cron_delete(
     callbacks: &dyn HostCallbacks,
     args: &Value,
@@ -275,8 +230,6 @@ pub async fn execute_cron_delete(
     }
 }
 
-/// v2 `ID_PATTERN`: an 8-hex-digit id or a 26-character Crockford base32
-/// ULID (case-insensitive; Crockford excludes I, L, O, U).
 fn is_valid_cron_id(id: &str) -> bool {
     let is_hex8 = id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit());
     let is_ulid26 = id.len() == 26
@@ -286,8 +239,6 @@ fn is_valid_cron_id(id: &str) -> bool {
     is_hex8 || is_ulid26
 }
 
-/// v2 `previewPrompt`: truncate to 200 UTF-8 bytes at a character boundary,
-/// appending `…(truncated)`.
 fn preview_prompt(prompt: &str) -> String {
     if prompt.len() <= PROMPT_PREVIEW_BYTES {
         return prompt.to_string();
@@ -300,16 +251,10 @@ fn preview_prompt(prompt: &str) -> String {
     format!("{}…(truncated)", &prompt[..end])
 }
 
-/// JSON-encode a string like `JSON.stringify` (used for the prompt preview
-/// and for quoting values in error messages).
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
 }
 
-/// Map a state bridge error to a tool result: an unwired host (message
-/// carries the `does not support state bridge` phrase) gets the dedicated
-/// failure message; everything else is passed through verbatim — the engine
-/// never retries a failed state write.
 fn map_state_error(error: String) -> ExecutableToolResult {
     if error.contains("does not support state bridge") {
         err_result(STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE.into())
@@ -325,9 +270,6 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Engine tool definition for CronList, so the model can discover and call
-/// it (used by the standalone REPL and native tool listing). The schema
-/// mirrors v2 `CronListInputSchema` (strict empty object).
 pub fn cron_list_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "CronList".into(),
@@ -394,8 +336,6 @@ Guidelines:
     }
 }
 
-/// Engine tool definition for CronCreate, mirroring v2 `CronCreateTool` and
-/// `CronCreateInputSchema`.
 pub fn cron_create_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "CronCreate".into(),
@@ -514,8 +454,6 @@ After successfully creating a task, proactively tell the user how they can cance
     }
 }
 
-/// Engine tool definition for CronDelete, mirroring v2 `CronDeleteTool` and
-/// `CronDeleteInputSchema`.
 pub fn cron_delete_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "CronDelete".into(),
@@ -583,8 +521,6 @@ mod tests {
     use crate::rpc::types::{BoxFuture, PermissionDecision, StateReadResponse, StateWriteResponse};
     use std::sync::Arc;
 
-    /// Scripted callbacks: records the received state requests and answers
-    /// with canned responses.
     struct ScriptedCallbacks {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,
@@ -697,8 +633,7 @@ mod tests {
         assert!(!result.is_error);
         let lines: Vec<&str> = result.content.lines().collect();
         assert_eq!(lines[0], "cron_jobs: 2");
-        // Records are joined by a lone `---` line; the header is followed
-        // directly by the first record.
+
         assert!(lines[1].starts_with("id: "));
         assert!(lines.contains(&"---"));
         assert!(result.content.contains("id: 01H0Z8X7YJ3K5Q9R2T4V6W8XAZ"));
@@ -736,7 +671,7 @@ mod tests {
 
     #[test]
     fn test_render_record_age_days_and_preview() {
-        let now = 1_700_172_800_000i64; // 2 days after createdAt 1700000000000
+        let now = 1_700_172_800_000i64;
         let task: CronTaskWire = serde_json::from_value(sample_task()).unwrap();
         let rendered = render_record(&task, now);
         assert!(rendered.contains("ageDays: 2.00"), "rendered: {rendered}");
@@ -756,14 +691,13 @@ mod tests {
         assert_eq!(preview_prompt("short"), "short");
         let long = "x".repeat(200);
         assert_eq!(preview_prompt(&long), long);
-        // 201 ASCII bytes: truncated to 200 + marker.
+
         let over = "x".repeat(201);
         assert_eq!(
             preview_prompt(&over),
             format!("{}…(truncated)", "x".repeat(200))
         );
-        // Multi-byte boundary: 199 ASCII bytes + a 3-byte char = 202 bytes;
-        // the cut at 200 lands inside the char and must back up to 199.
+
         let mixed = format!("{}你", "x".repeat(199));
         assert_eq!(
             preview_prompt(&mixed),
@@ -868,7 +802,7 @@ mod tests {
         assert_eq!(request.domain, "cron");
         assert_eq!(request.key, "cron");
         assert!(!request.undoable);
-        // The expression is normalized and `recurring` defaults to true.
+
         assert_eq!(request.value["action"], "create");
         assert_eq!(request.value["cron"], "*/5 * * * *");
         assert_eq!(request.value["prompt"], "check the deploy");
@@ -930,12 +864,11 @@ mod tests {
 
     #[test]
     fn test_validate_create_rejects_far_one_shot() {
-        // From 2024-01-01 the next Jan 1 is 366 days out (> 350): refused.
         let err = validate_create("0 0 1 1 *", "p", false, 1_704_067_200_000).unwrap_err();
         assert!(err.starts_with(
             "One-shot cron \"0 0 1 1 *\" would not fire until 2025-01-01T00:00:00.000+00:00"
         ));
-        // Recurring jobs are not subject to the one-shot cap.
+
         assert!(validate_create("0 0 1 1 *", "p", true, 1_704_067_200_000).is_ok());
     }
 
@@ -1038,8 +971,8 @@ mod tests {
         assert!(is_valid_cron_id("01h0z8x7yj3k5q9r2t4v6w8xaz"));
         assert!(is_valid_cron_id("01234567"));
         assert!(is_valid_cron_id("abcdefAB"));
-        assert!(!is_valid_cron_id("01H123456789ABCDEFGHIJKLMNO")); // I and O excluded
-        assert!(!is_valid_cron_id("01H123456789ABCDEFGHJKLMN")); // too short
+        assert!(!is_valid_cron_id("01H123456789ABCDEFGHIJKLMNO"));
+        assert!(!is_valid_cron_id("01H123456789ABCDEFGHJKLMN"));
         assert!(!is_valid_cron_id(""));
     }
 

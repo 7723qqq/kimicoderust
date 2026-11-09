@@ -780,6 +780,8 @@ async fn test_turn_result_llm_retry_counter() {
     };
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
+    let (capturing, events) = EventCapturingCallbacks::new(callbacks);
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -813,6 +815,28 @@ async fn test_turn_result_llm_retry_counter() {
     assert_eq!(
         result.events_emitted, 0,
         "event counting lives at the composition root"
+    );
+    let captured = events.lock().unwrap();
+    let retrying: Vec<&serde_json::Value> = captured
+        .iter()
+        .filter(|event| event.get("type").and_then(|v| v.as_str()) == Some("llm.step.retrying"))
+        .collect();
+    assert_eq!(retrying.len(), 1, "one retry is one retrying event");
+    assert_eq!(retrying[0]["turn_id"], "test-retry-counter");
+    assert_eq!(retrying[0]["failed_attempt"], 1);
+    assert_eq!(retrying[0]["next_attempt"], 2);
+    assert!(retrying[0]["step"].is_number());
+    assert!(
+        retrying[0]["step_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("test-retry-counter-step-")),
+        "the event closes the step it belongs to: {}",
+        retrying[0]
+    );
+    assert!(
+        retrying[0]["error_name"].is_string(),
+        "the failure itself rides along: {}",
+        retrying[0]
     );
 }
 

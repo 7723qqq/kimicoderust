@@ -48,6 +48,7 @@ pub mod fs_routes;
 pub mod host_guard;
 pub mod http;
 pub mod hub;
+pub mod idle_sessions;
 pub mod interaction;
 pub mod media;
 pub mod message_events;
@@ -94,6 +95,10 @@ pub fn is_loopback_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") || host.starts_with("127.")
 }
 
+/// A pre-delete cleanup hook (v2 `onWillDeleteSession`). Returning `Err`
+/// aborts the deletion, leaving the session intact.
+pub type SessionCleanupHook = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 pub struct HttpServer {
     store: Arc<SqliteSessionStore>,
     hub: Arc<EventHub>,
@@ -123,6 +128,14 @@ pub struct HttpServer {
     /// `/sessions/{id}/prompts`.
     prompt_queue: Arc<prompt_queue::PromptQueue>,
     config_override: Arc<Mutex<Option<crate::config::KimiConfig>>>,
+    /// Serializes provider-model refreshes end to end (v2 `refreshChain`).
+    /// `config_override` only guards each individual read/write, so without
+    /// this two concurrent refreshes would both fetch and race their writes.
+    model_refresh_chain: tokio::sync::Mutex<()>,
+    /// The reloadable `[hooks]` set (v2 `externalHooksRunnerService`): turns
+    /// read it per build, and a config reload replaces it only after the new
+    /// section loaded. A failed reload leaves the previous guards in force.
+    hooks_source: crate::tools::external_hooks::HooksSource,
     /// The models.dev catalog proxy cache (v2 `getModelsDevCatalog`): TTL,
     /// in-flight dedup, stale fallback; the built-in list ends the chain.
     models_dev_cache: Arc<models_dev::CatalogCache>,
@@ -169,6 +182,211 @@ pub struct HttpServer {
     /// point — the transitions are recorded where they happen, and wiring a
     /// real sink lands with the next host integration.
     telemetry_sink: Option<crate::tools::external_hooks::TelemetrySink>,
+    /// Sessions the idle reaper closed (v2 `sessionManagerService.closeIfIdle`).
+    /// A resume consumes the marker and reports `'reclaimed'`.
+    reclaimed: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Per-session resume serialization (v2 `sessionManagerService.resume`
+    /// funnels every resume of the same id through one lifecycle chain).
+    resume_slots:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Pre-delete cleanup hooks (v2 `onWillDeleteSession`), run in
+    /// registration order; the first failure aborts the deletion.
+    session_cleanup_hooks: Arc<std::sync::Mutex<Vec<SessionCleanupHook>>>,
+    /// The idle sweeper. Built on first use because it needs the engine, which
+    /// `with_engine` installs after construction.
+    idle_reaper: std::sync::OnceLock<
+        Arc<crate::session::idle_reclaim::SessionIdleReaper<idle_sessions::ServerIdleControl>>,
+    >,
+}
+
+/// v2 `LoopSnapshot` (`agent-core-v2/src/agent/loop/loop.ts:35-45`): the one
+/// read model a host would otherwise have to stitch from three sources — the
+/// prompt queue, the activity phase machine and the interaction manager.
+///
+/// `paused` is permanently `false`: this engine has no pause/resume machine,
+/// and a loop that cannot pause is reported as not paused rather than given a
+/// fake pause state.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopSnapshot {
+    /// `running` while a main turn is active, `idle` otherwise.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<u32>,
+    /// The active prompt's id; absent for an untracked notification turn,
+    /// matching v2's `active.prompt.tracked` guard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_prompt_id: Option<String>,
+    /// Ids of queued prompts a client can address (v2 `queue[].meta.promptId`).
+    pub queued_prompt_ids: Vec<String>,
+    /// Queued task notifications / wakes (v2 `notificationCount`).
+    pub notification_count: usize,
+    pub paused: bool,
+    /// Whether an approval or question is blocking the loop.
+    pub has_pending_requests: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn: Option<LoopTurnSnapshot>,
+}
+
+/// The running turn's slice of [`LoopSnapshot`] (v2
+/// `AgentActivityTurnSnapshot`). `phase` is the machine's three-value view;
+/// the finer `streaming` / `awaiting_approval` grains stay on the activity
+/// phase event.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopTurnSnapshot {
+    pub turn_id: u32,
+    /// `running` / `tool_call` / `retrying`.
+    pub phase: &'static str,
+    pub step: u32,
+    pub ending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ending_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<LoopRetrySnapshot>,
+    pub active_tool_calls: Vec<LoopToolCallSnapshot>,
+    /// Epoch millis when the turn started (v2 `turn.since`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// v2 `MachineEngineRetrySnapshot`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopRetrySnapshot {
+    pub failed_attempt: u32,
+    pub next_attempt: u32,
+    pub max_attempts: u32,
+    pub delay_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u32>,
+}
+
+/// v2 `MachineEngineToolCallSnapshot`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopToolCallSnapshot {
+    pub tool_call_id: String,
+    pub name: String,
+}
+
+impl LoopTurnSnapshot {
+    fn from_phase(
+        turn_id: Option<u64>,
+        phase: &activity::AgentPhase,
+        step: u32,
+        ending: bool,
+        since: Option<u64>,
+    ) -> Option<Self> {
+        let turn_id = u32::try_from(turn_id?).ok()?;
+        let (phase, retry, active_tool_calls) = match phase {
+            activity::AgentPhase::ToolCall {
+                tool_call_id, name, ..
+            } => (
+                "tool_call",
+                None,
+                vec![LoopToolCallSnapshot {
+                    tool_call_id: tool_call_id.clone(),
+                    name: name.clone(),
+                }],
+            ),
+            activity::AgentPhase::Retrying {
+                failed_attempt,
+                next_attempt,
+                max_attempts,
+                delay_ms,
+                error_name,
+                status_code,
+                ..
+            } => (
+                "retrying",
+                Some(LoopRetrySnapshot {
+                    failed_attempt: *failed_attempt,
+                    next_attempt: *next_attempt,
+                    max_attempts: *max_attempts,
+                    delay_ms: *delay_ms,
+                    error_name: error_name.clone(),
+                    status_code: *status_code,
+                }),
+                Vec::new(),
+            ),
+            // `streaming` and `awaiting_approval` both sit inside the
+            // machine's `running`; `idle`/`ended`/`interrupted` only reach
+            // here on a race with the turn's own teardown.
+            _ => ("running", None, Vec::new()),
+        };
+        Some(Self {
+            turn_id,
+            phase,
+            step,
+            ending,
+            ending_reason: ending.then_some("aborted"),
+            retry,
+            active_tool_calls,
+            since,
+        })
+    }
+}
+
+impl HttpServer {
+    /// The session's unified loop state — v2 `loop.snapshot()`.
+    ///
+    /// Folds [`prompt_queue::PromptQueue`], the activity phase machine and the
+    /// interaction manager into one read. Each source takes its own lock, so
+    /// callers must not hold another server lock while calling.
+    pub fn loop_snapshot(&self, session_id: &str) -> LoopSnapshot {
+        let active_prompt_id = self.prompt_queue.active_tracked_prompt_id(session_id);
+        let queued_prompt_ids = self.prompt_queue.queued_tracked_prompt_ids(session_id);
+        let notification_count = self.prompt_queue.queued_notification_count(session_id);
+        let Some(engine) = self.engine.as_ref() else {
+            return LoopSnapshot {
+                state: "idle",
+                active_turn_id: None,
+                active_prompt_id,
+                queued_prompt_ids,
+                notification_count,
+                paused: false,
+                has_pending_requests: self
+                    .interaction_manager
+                    .pending_interaction_kind(session_id)
+                    .is_some(),
+                turn: None,
+            };
+        };
+        let phase = engine.activity_phase(session_id);
+        let running = engine.is_turn_active(session_id);
+        let active_turn_id = engine.active_turn_number(session_id);
+        let turn = running
+            .then(|| {
+                let tracker = engine.activity_tracker(session_id);
+                LoopTurnSnapshot::from_phase(
+                    active_turn_id
+                        .map(u64::from)
+                        .or_else(|| activity::phase_turn_id(&phase)),
+                    &phase,
+                    tracker.turn_step(),
+                    engine.is_turn_ending(session_id),
+                    tracker.turn_started_ms(),
+                )
+            })
+            .flatten();
+        LoopSnapshot {
+            state: if running { "running" } else { "idle" },
+            active_turn_id,
+            active_prompt_id,
+            queued_prompt_ids,
+            notification_count,
+            paused: false,
+            has_pending_requests: self
+                .interaction_manager
+                .pending_interaction_kind(session_id)
+                .is_some()
+                || activity::phase_has_pending_requests(&phase),
+            turn,
+        }
+    }
 }
 
 /// The holder of the local start slot, mirrored onto the status wire while a
@@ -425,7 +643,20 @@ fn apply_prompt_submission_options(
             config.insert("swarm_mode".to_string(), json!(swarm_mode));
         }
         if let Some(disabled) = body.get("disabled_tools").and_then(|v| v.as_array()) {
-            config.insert("disabled_tools".to_string(), Value::Array(disabled.clone()));
+            // v2 `setSessionDisabledTools` normalizes to `[...new Set(names)]`
+            // (sessionToolPolicyService.ts): order-preserving, duplicates
+            // collapsed, non-strings dropped.
+            let mut seen = std::collections::HashSet::new();
+            let names: Vec<Value> = disabled
+                .iter()
+                .filter(|value| {
+                    value
+                        .as_str()
+                        .is_some_and(|name| seen.insert(name.to_string()))
+                })
+                .cloned()
+                .collect();
+            config.insert("disabled_tools".to_string(), Value::Array(names));
         }
     }
     // A dropped write here means the turn runs with the previous
@@ -460,10 +691,7 @@ fn apply_prompt_submission_options(
             meta.insert("permission_mode".to_string(), json!(mode));
         }
     }
-    if let Err(e) = server
-        .store()
-        .put_session_state("metadata", session_id, session_id, &metadata)
-    {
+    if let Err(e) = server.store().put_session_metadata(session_id, &metadata) {
         return Err(format!("failed to persist session metadata: {e}"));
     }
 
@@ -591,6 +819,7 @@ fn terminal_dimension(value: Option<&Value>, label: &str) -> Result<Option<u32>,
 fn prompt_content_to_blocks(
     content: &[Value],
     files: &crate::server::files::FileStore,
+    provider: Option<&str>,
 ) -> Result<(String, Vec<crate::rpc::types::ContentBlock>), String> {
     use crate::rpc::types::ContentBlock;
     let mut texts: Vec<String> = Vec::new();
@@ -634,13 +863,15 @@ fn prompt_content_to_blocks(
                                     file_id: file_id.to_string(),
                                     kind: media_kind_of(kind),
                                 });
+                            } else if kind == "image" {
+                                blocks.extend(crate::llm::prompt_media::image_blocks_from_url(
+                                    files,
+                                    provider,
+                                    url,
+                                    name.as_deref(),
+                                ));
                             } else {
                                 blocks.push(match kind {
-                                    "image" => ContentBlock::ImageUrl {
-                                        url: url.to_string(),
-                                        id: None,
-                                        name,
-                                    },
                                     "audio" => ContentBlock::AudioUrl {
                                         url: url.to_string(),
                                         id: None,
@@ -665,25 +896,13 @@ fn prompt_content_to_blocks(
                             .and_then(|value| value.as_str())
                             .unwrap_or("");
                         if kind == "image" {
-                            // v2 `resolvePromptMediaFiles`: an inline image
-                            // over the model's pixel/byte budget is compressed
-                            // at intake, the original is persisted, and a
-                            // caption naming both precedes the image (ROADMAP
-                            // #3747b — the TUI path does this host-side; this
-                            // is the HTTP path's half).
-                            let (caption, block) = crate::llm::prompt_media::prepare_inline_image(
+                            blocks.extend(crate::llm::prompt_media::image_blocks_from_base64(
                                 files,
+                                provider,
                                 media_type,
                                 data,
                                 name.as_deref(),
-                            );
-                            if let Some(caption) = caption {
-                                blocks.push(ContentBlock::Text {
-                                    text: caption,
-                                    meta: None,
-                                });
-                            }
-                            blocks.push(block);
+                            ));
                         } else {
                             let url = format!("data:{media_type};base64,{data}");
                             blocks.push(if kind == "audio" {
@@ -982,6 +1201,22 @@ fn collect_global_log_members() -> Vec<(String, Vec<u8>)> {
 /// The same collection against an explicit directory, so the selection and the
 /// member naming are testable without an environment.
 fn global_log_members_in(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    log_members_in(dir, "logs/global")
+}
+
+/// v2 `SESSION_LOG_REL` (`logs/kimi-code.log`): a session's own log and its
+/// rotated siblings, which v2 picks up as ordinary session-directory files and
+/// this exporter names the same way. Absent files contribute nothing.
+fn collect_session_log_members(session_log: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let Some(dir) = session_log.parent() else {
+        return Vec::new();
+    };
+    log_members_in(dir, "logs")
+}
+
+/// Read `kimi-code.log*` from `dir`, sorted, as ZIP members under
+/// `member_prefix`.
+fn log_members_in(dir: &std::path::Path, member_prefix: &str) -> Vec<(String, Vec<u8>)> {
     let entries = std::fs::read_dir(dir);
     let Ok(entries) = entries else {
         return Vec::new();
@@ -998,7 +1233,7 @@ fn global_log_members_in(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
         .filter_map(|name| {
             std::fs::read(dir.join(&name))
                 .ok()
-                .map(|body| (format!("logs/{name}"), body))
+                .map(|body| (format!("{member_prefix}/{name}"), body))
         })
         .collect()
 }
@@ -1014,19 +1249,26 @@ fn global_log_members_in(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
 fn build_session_export_zip(
     export: &crate::session::sqlite_store::SessionExport,
     options: &SessionExportOptions,
+    session_log: Option<&std::path::Path>,
 ) -> Result<Vec<u8>, String> {
+    // v2 bundles the session log whenever it exists, independently of the
+    // global-log request (`sessionExportService.ts:189`).
+    let session_logs = session_log
+        .map(collect_session_log_members)
+        .unwrap_or_default();
     let global_logs = if options.include_global_log {
         collect_global_log_members()
     } else {
         Vec::new()
     };
-    build_session_export_zip_with(export, global_logs)
+    build_session_export_zip_with(export, session_logs, global_logs)
 }
 
 /// The archive layout with the log members already resolved, so it can be
 /// tested without a home directory or an environment.
 fn build_session_export_zip_with(
     export: &crate::session::sqlite_store::SessionExport,
+    session_logs: Vec<(String, Vec<u8>)>,
     global_logs: Vec<(String, Vec<u8>)>,
 ) -> Result<Vec<u8>, String> {
     use std::io::Write;
@@ -1053,13 +1295,45 @@ fn build_session_export_zip_with(
     manifest.insert("sessionId".into(), json!(export.session.session_id));
     manifest.insert("exportedAt".into(), json!(export.exported_at));
     manifest.insert("kimiCodeVersion".into(), json!(env!("CARGO_PKG_VERSION")));
-    manifest.insert("os".into(), json!(std::env::consts::OS));
-    // The host names the primary entry and omits the key entirely when the log
-    // is not bundled — its e2e pins that absence, so never write a null here.
+    // v2 `buildExportManifest` names the wire protocol the export was taken
+    // with, so a bundle can be read by a matching engine version.
+    manifest.insert(
+        "wireProtocolVersion".into(),
+        json!(crate::native::event_store::WIRE_PROTOCOL_VERSION),
+    );
+    manifest.insert(
+        "os".into(),
+        json!(format!(
+            "{} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )),
+    );
+    if let Some(title) = &export.session.title {
+        manifest.insert("title".into(), json!(title));
+    }
+    if let Some(dir) = &export.session.cwd {
+        manifest.insert("workspaceDir".into(), json!(dir));
+    }
+    if let Some(first) = &export.first_activity_at {
+        manifest.insert("sessionFirstActivity".into(), json!(first));
+    }
+    if let Some(last) = &export.last_activity_at {
+        manifest.insert("sessionLastActivity".into(), json!(last));
+    }
+    // v2 `buildExportManifest`: `sessionLogPath` names the session's own log
+    // inside the bundle and is omitted when nothing was bundled; the global log
+    // lives under `logs/global/` and follows the same rule.
+    if session_logs
+        .iter()
+        .any(|(name, _)| name == "logs/kimi-code.log")
+    {
+        manifest.insert("sessionLogPath".into(), json!("logs/kimi-code.log"));
+    }
     if let Some(primary) = global_logs
         .iter()
         .map(|(name, _)| name.clone())
-        .find(|name| *name == "logs/kimi-code.log")
+        .find(|name| *name == "logs/global/kimi-code.log")
         .or_else(|| global_logs.first().map(|(name, _)| name.clone()))
     {
         manifest.insert("globalLogPath".into(), json!(primary));
@@ -1086,7 +1360,20 @@ fn build_session_export_zip_with(
         writer
             .write_all(markdown.as_bytes())
             .map_err(|e| e.to_string())?;
-        for (name, body) in &global_logs {
+        // v2 exports the session directory as-is, whose raw journal is
+        // `agents/<id>/wire.jsonl`; this engine bundles the same view of the
+        // authoritative `wire_events` rows so a bundle can be read at the wire
+        // level, not only through the rendered transcript.
+        writer
+            .start_file("agents/main/wire.jsonl", zip_options)
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(export.wire_jsonl.join("\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        if !export.wire_jsonl.is_empty() {
+            writer.write_all(b"\n").map_err(|e| e.to_string())?;
+        }
+        for (name, body) in session_logs.iter().chain(global_logs.iter()) {
             writer
                 .start_file(name, zip_options)
                 .map_err(|e| e.to_string())?;

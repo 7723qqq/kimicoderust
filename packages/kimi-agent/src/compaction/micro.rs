@@ -117,12 +117,12 @@ impl DetectOutcome {
 /// The persisted cutoff (v2 `microCompaction.cutoff`, agent state): messages
 /// at index `i < cutoff` are truncated in the outgoing request.
 ///
-/// v2 advances it **only** on a detected prompt-cache miss, so a warm cache
-/// keeps sending the same truncated prefix; recomputing the cutoff from the
-/// history on every request would blank more results as the transcript grows
-/// and re-break the cache each time. It shrinks only through
-/// [`Self::clamp`] (undo) and [`Self::reset`] (clear / compaction), so an
-/// index never outlives the messages it describes.
+/// v2 recomputes it on every prompt-cache miss as `max(0, len - keep)`
+/// (`microCompactionService.ts:114-115`), so it tracks the history length in
+/// both directions; a warm cache leaves the stored value alone. [`Self::clamp`]
+/// (undo) keeps it inside the surviving history and [`Self::reset`]
+/// (clear / compaction) drops it, so it never outlives the messages it
+/// describes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MicroCompactionState {
     #[serde(default)]
@@ -130,12 +130,12 @@ pub struct MicroCompactionState {
 }
 
 impl MicroCompactionState {
-    /// v2 `advance`: on a cache miss the cutoff becomes
-    /// `len - keep_recent_messages`. Returns whether it moved; a warm pass
-    /// leaves the stored value alone.
+    /// v2 `detect`: on a cache miss the cutoff becomes
+    /// `max(0, len - keep_recent_messages)`. Returns whether it moved; a warm
+    /// pass leaves the stored value alone.
     pub fn advance(&mut self, history_len: usize, keep_recent_messages: usize) -> bool {
         let next = history_len.saturating_sub(keep_recent_messages);
-        if next <= self.cutoff {
+        if next == self.cutoff {
             return false;
         }
         self.cutoff = next;
@@ -293,7 +293,9 @@ pub fn apply_micro_compaction_at(
                 // keeps its identity (a steered user prompt stays the same
                 // prompt for the projection).
                 prompt_id: msg.prompt_id.clone(),
-                origin: None,
+                // v2 `replaceMessageText` spreads the original message, so the
+                // truncated result keeps the origin that marks it an injection.
+                origin: msg.origin.clone(),
             });
         } else {
             out.push(msg.clone());
@@ -325,7 +327,13 @@ fn message_content_tokens(msg: &LLMMessage) -> usize {
 fn block_tokens(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text, .. } => estimate_tokens(text),
-        ContentBlock::Think { think, .. } => estimate_tokens(think),
+        // The summary is request-visible (replayed through `reasoning_details`),
+        // so it counts just like v2's summary-in-`think` representation.
+        ContentBlock::Think {
+            think,
+            details_summary,
+            ..
+        } => estimate_tokens(think) + details_summary.as_deref().map_or(0, estimate_tokens),
         _ => 0,
     }
 }
@@ -561,17 +569,21 @@ mod tests {
         assert_eq!(out.replaced.len(), 0);
     }
 
-    /// v2 `advance`: the cutoff only moves forward, and a short history never
-    /// rewinds it.
+    /// v2 `detect` (`microCompactionService.ts:114-115`): the cutoff is
+    /// recomputed as `max(0, len - keep)` on every cache miss, so a history
+    /// that got shorter (undo / truncation) also rewinds it.
     #[test]
-    fn the_cutoff_advances_only_forward() {
+    fn the_cutoff_tracks_len_minus_keep() {
         let mut state = MicroCompactionState::default();
         assert!(state.advance(40, 20), "the first miss sets len - keep");
         assert_eq!(state.cutoff, 20);
-        assert!(!state.advance(30, 20), "a shorter history never rewinds it");
-        assert_eq!(state.cutoff, 20);
+        assert!(state.advance(30, 20), "a shorter history rewinds it");
+        assert_eq!(state.cutoff, 10);
+        assert!(!state.advance(30, 20), "an unchanged cutoff is a no-op");
         assert!(state.advance(45, 20));
         assert_eq!(state.cutoff, 25);
+        assert!(state.advance(5, 20), "a history below `keep` floors at 0");
+        assert_eq!(state.cutoff, 0);
     }
 
     /// Undo clamps the stored cutoff to the surviving length; clear and

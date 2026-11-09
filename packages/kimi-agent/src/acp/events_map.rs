@@ -323,6 +323,12 @@ fn tool_call_id(event: &Value) -> &str {
 /// `tool.call.completed` (a bare outcome) for the same call; an update is a
 /// partial record, so the bare one keeps the status while leaving the content
 /// the earlier event installed in place instead of blanking the card.
+///
+/// `note` is the model-facing prose the tool appended after its output (v2
+/// `ToolResult.note`). It rides the terminal event as its own optional field
+/// (`tool.native`), so it is projected under the same name here; when the
+/// event carries none — or an empty string — the field is omitted, matching
+/// the TS event's optional `note?: string` default.
 fn tool_call_result(session_id: &str, event: &Value) -> Value {
     // `tool.call.failed` carries no `is_error` — its name is the signal.
     let is_error = event
@@ -349,6 +355,11 @@ fn tool_call_result(session_id: &str, event: &Value) -> Value {
             "content": { "type": "text", "text": text },
         }]);
         update["rawOutput"] = output;
+    }
+    if let Some(note) = event.get("note").and_then(Value::as_str)
+        && !note.is_empty()
+    {
+        update["note"] = json!(note);
     }
     json!({ "sessionId": session_id, "update": update })
 }
@@ -526,6 +537,28 @@ mod tests {
             "1\tfile body\n"
         );
         assert_eq!(native["update"]["rawOutput"], "1\tfile body\n");
+        // No note on the event → no `note` key, the TS optional field default.
+        assert!(native["update"].get("note").is_none());
+
+        // A terminal event that carries the model-facing note projects it
+        // under the same name, apart from the output.
+        let noted = session_update_for(
+            "sess-1",
+            "tool.native",
+            &json!({
+                "type": "tool.native",
+                "turn_id": "turn-1",
+                "tool_call_id": "call_1",
+                "tool_name": "Read",
+                "arguments": { "path": "a.txt" },
+                "content": "1\tfile body\n",
+                "is_error": false,
+                "note": "<system>1 line read.</system>",
+            }),
+        )
+        .expect("a note-bearing tool.native must map");
+        assert_eq!(noted["update"]["toolCallId"], "turn-1:call_1");
+        assert_eq!(noted["update"]["note"], "<system>1 line read.</system>");
 
         // The loop's own lifecycle event, carrying the same terminal outcome.
         let completed = session_update_for(

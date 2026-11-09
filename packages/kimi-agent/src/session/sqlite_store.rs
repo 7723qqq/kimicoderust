@@ -3,26 +3,267 @@
 //! Provides zero-dependency standalone persistence for sessions, turns,
 //! messages, checkpoints, and arbitrary state domains using embedded SQLite (WAL mode).
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::native::event_store::{
     EventStore, EventStoreError, Message, RawWireEvent, WIRE_MIN_READER_VERSION,
-    WIRE_PROTOCOL_VERSION, fold_wire_events, read_fold_rows, refuse_newer_wire_version,
+    WIRE_PROTOCOL_VERSION, fold_wire_events, read_fold_rows_with_repair, refuse_newer_wire_version,
+    wire_backup_path,
 };
 use crate::rpc::types::TokenUsage;
 use crate::turn_loop::types::LLMMessage;
+
+/// A stored JSON column that cannot be decoded.
+///
+/// These columns used to be read with `unwrap_or(Value::Null)` / `.ok()`: a
+/// truncated or hand-edited row became "no value", which the next write then
+/// overwrote and an undo then deleted. Naming the row turns the corruption into
+/// a reportable failure instead of data loss.
+#[derive(Debug)]
+struct StoredJsonDecodeError {
+    what: String,
+    source: serde_json::Error,
+}
+
+impl fmt::Display for StoredJsonDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} is not valid JSON: {}", self.what, self.source)
+    }
+}
+
+impl std::error::Error for StoredJsonDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// A value that cannot be encoded for storage. Writing an empty string instead
+/// (the old `unwrap_or_default()`) produced a row that every reader then had to
+/// treat as corrupt.
+#[derive(Debug)]
+struct StoredJsonEncodeError {
+    what: String,
+    source: serde_json::Error,
+}
+
+impl fmt::Display for StoredJsonEncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} could not be encoded: {}", self.what, self.source)
+    }
+}
+
+impl std::error::Error for StoredJsonEncodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Encode one JSON column, failing with the column's name instead of storing an
+/// empty string when serialization fails.
+fn encode_stored_json<T: Serialize>(
+    value: &T,
+    what: impl Into<String>,
+) -> rusqlite::Result<String> {
+    serde_json::to_string(value).map_err(|source| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(StoredJsonEncodeError {
+            what: what.into(),
+            source,
+        }))
+    })
+}
+
+/// Dehydrate a state document before it is encoded (v2 `StateBlobCodec`):
+/// large inline media becomes a `blobref:` URL in the same `wire_blobs`
+/// table the wire uses, so a state entry does not carry the same bytes twice.
+fn dehydrate_state_value<'a>(
+    value: &'a Value,
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<std::borrow::Cow<'a, Value>> {
+    // Media-free documents — the overwhelming majority — are encoded straight
+    // from the caller's borrow.
+    if !crate::native::event_store::blobs::has_inline_data_uri(value) {
+        return Ok(std::borrow::Cow::Borrowed(value));
+    }
+    let mut owned = value.clone();
+    crate::native::event_store::blobs::offload_data_uris(&mut owned, conn)?;
+    Ok(std::borrow::Cow::Owned(owned))
+}
+
+/// Expand the `blobref:` URLs a state document was written with.
+fn rehydrate_state_value(value: &mut Value, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    crate::native::event_store::blobs::rehydrate_blob_refs(value, conn)?;
+    Ok(())
+}
+
+/// Read one state entry, decoding and rehydrating it.
+///
+/// A row that exists but does not parse is an error, not `null`: reporting
+/// `null` let the next write overwrite the only copy.
+fn read_state_entry(conn: &Connection, domain: &str, key: &str) -> rusqlite::Result<Option<Value>> {
+    let raw = {
+        let mut stmt =
+            conn.prepare("SELECT value FROM state_entries WHERE domain = ?1 AND key = ?2")?;
+        let mut rows = stmt.query(params![domain, key])?;
+        match rows.next()? {
+            Some(row) => {
+                let s: String = row.get(0)?;
+                Some(decode_stored_json(
+                    &s,
+                    format!("state entry {domain}/{key}"),
+                )?)
+            }
+            None => None,
+        }
+    };
+    match raw {
+        Some(mut value) => {
+            rehydrate_state_value(&mut value, conn)?;
+            Ok(Some(value))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Write one state entry, offloading inline media and committing the blob
+/// bytes with the row.
+fn write_state_entry(
+    conn: &Connection,
+    domain: &str,
+    key: &str,
+    value: &Value,
+) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().timestamp_millis();
+    // The offloaded blob bytes and the state row commit together, so a failed
+    // write cannot leave media in `wire_blobs` that no row references.
+    let tx = conn.unchecked_transaction()?;
+    let value = dehydrate_state_value(value, &tx)?;
+    let val_str = encode_stored_json(value.as_ref(), format!("state entry {domain}/{key}"))?;
+    tx.execute(
+        "INSERT INTO state_entries (domain, key, value, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(domain, key) DO UPDATE SET
+            value = ?3,
+            updated_at = ?4",
+        params![domain, key, val_str, now],
+    )?;
+    tx.commit()
+}
+
+/// Decode one nullable JSON column into its typed value.
+///
+/// `None` is a genuinely absent column. An empty string is what older builds
+/// wrote when serialization failed (`unwrap_or_default`), so it keeps reading
+/// as absent; anything else that fails to parse is reported with the column's
+/// name instead of being flattened into an empty list or `None`.
+fn decode_json_column<T: serde::de::DeserializeOwned>(
+    raw: Option<String>,
+    what: String,
+) -> rusqlite::Result<Option<T>> {
+    match raw {
+        None => Ok(None),
+        Some(raw) if raw.is_empty() => Ok(None),
+        Some(raw) => {
+            let value = decode_stored_json(&raw, what.clone())?;
+            serde_json::from_value(value).map(Some).map_err(|source| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(StoredJsonDecodeError { what, source }),
+                )
+            })
+        }
+    }
+}
+
+/// Decode one JSON column, failing with the column's name instead of yielding
+/// `Value::Null`.
+fn decode_stored_json(raw: &str, what: impl Into<String>) -> rusqlite::Result<Value> {
+    serde_json::from_str(raw).map_err(|source| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(StoredJsonDecodeError {
+                what: what.into(),
+                source,
+            }),
+        )
+    })
+}
+
+/// The columns one table currently has, for the additive schema upgrades the
+/// store runs on open.
+fn table_columns(
+    conn: &Connection,
+    table: &str,
+) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(names.filter_map(std::result::Result::ok).collect())
+}
+
+/// Add one column a database created by an older build may not have.
+///
+/// Only `duplicate column name` is benign. Every other failure is a migration
+/// that did not run, and the caller (`init`) must abort the open instead of
+/// continuing with a schema the rest of the store assumes is current.
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    columns: &std::collections::HashSet<String>,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    if columns.contains(column) {
+        return Ok(());
+    }
+    match conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) if error.to_string().contains("duplicate column name") => Ok(()),
+        Err(error) => Err(error),
+    }
+}
 
 /// Format a millisecond timestamp as an ISO-8601 string.
 fn format_iso(millis: i64) -> String {
     chrono::DateTime::from_timestamp_millis(millis)
         .unwrap_or_default()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Render one `wire_events` row as a v2 journal line: the record type plus its
+/// payload fields, with dehydrated media restored so the exported bundle is
+/// readable without the blob table.
+fn wire_export_line(
+    event_type: &str,
+    payload: &str,
+    conn: &Connection,
+) -> rusqlite::Result<String> {
+    // A corrupt payload must not be exported as `"payload": null`: the bundle
+    // would look complete while missing the record's content.
+    let mut value: Value = serde_json::from_str(payload).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    crate::native::event_store::blobs::rehydrate_blob_refs(&mut value, conn)?;
+    let mut record = match value {
+        Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("payload".to_string(), other);
+            map
+        }
+    };
+    record.insert("type".to_string(), Value::String(event_type.to_string()));
+    Ok(Value::Object(record).to_string())
 }
 
 /// Compute standard deterministic workspace ID `wd_<slug>_<hash12>`.
@@ -101,6 +342,101 @@ fn is_windows_shaped(slashed: &str) -> bool {
     drive || slashed.starts_with("//")
 }
 
+/// Upper bound on the blobs one [`SqliteSessionStore::blob_usage`] audit probes.
+pub const BLOB_AUDIT_MAX_ROWS: u64 = 10_000;
+
+/// Result of [`SqliteSessionStore::blob_usage`]: a read-only view of the
+/// content-addressed blob store, including the bytes no row references.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobUsage {
+    /// Rows in `wire_blobs`.
+    pub stored: u64,
+    /// Total stored payload bytes.
+    pub bytes: u64,
+    /// Of the scanned blobs, the ones no wire payload or state value mentions.
+    pub unreferenced: u64,
+    /// Blobs actually probed (capped at [`BLOB_AUDIT_MAX_ROWS`]).
+    pub scanned: u64,
+    /// Whether `stored` exceeds `scanned`.
+    pub truncated: bool,
+}
+
+/// Decode one row selected in `WIRE_EVENT_COLUMNS` order.
+///
+/// A payload that is not valid JSON yields `None` instead of failing the read:
+/// v2's reader reports the line through `onTruncate` and keeps collecting the
+/// records that follow, and one bad row must not make a session's whole
+/// transcript unreadable. The drop is logged with the row's `seq`, and the
+/// fold path repairs the row away.
+fn wire_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<WireEventRecord>> {
+    let seq: u64 = row.get(0)?;
+    let payload_str: String = row.get(4)?;
+    let payload = match decode_stored_json(&payload_str, format!("wire event seq {seq}")) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(
+                code = "wire.malformed_record",
+                seq,
+                %error,
+                "skipping a wire event whose payload is not valid JSON"
+            );
+            return Ok(None);
+        }
+    };
+    Ok(Some(WireEventRecord {
+        seq,
+        id: row.get(1)?,
+        session_id: row.get(2)?,
+        event_type: row.get(3)?,
+        payload,
+        is_checkpoint: row.get(5)?,
+        is_compaction: row.get(6)?,
+        created_at: row.get(7)?,
+    }))
+}
+
+/// Collect the rows a wire read decoded, dropping the ones whose payload did
+/// not parse and reporting how many were dropped.
+fn collect_wire_rows<I>(rows: I) -> rusqlite::Result<(Vec<WireEventRecord>, usize)>
+where
+    I: Iterator<Item = rusqlite::Result<Option<WireEventRecord>>>,
+{
+    let mut records = Vec::new();
+    let mut dropped = 0usize;
+    for row in rows {
+        match row? {
+            Some(record) => records.push(record),
+            None => dropped += 1,
+        }
+    }
+    Ok((records, dropped))
+}
+
+/// Collect every row of an unpaged wire read.
+///
+/// No row cap: v2's reader assigns `this.lines = records.length` over the whole
+/// collected journal (`wire/wireService.ts:475`, `:526`) without a limit.
+fn collect_logged_wire_rows<I>(
+    rows: I,
+    session_id: &str,
+    slice: &str,
+) -> Result<Vec<WireEventRecord>, EventStoreError>
+where
+    I: Iterator<Item = rusqlite::Result<Option<WireEventRecord>>>,
+{
+    let (records, dropped) = collect_wire_rows(rows)?;
+    if dropped > 0 {
+        tracing::warn!(
+            code = "wire.malformed_record",
+            %session_id,
+            slice,
+            dropped,
+            "wire read skipped records whose payload did not parse"
+        );
+    }
+    Ok(records)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireEventRecord {
     pub seq: u64,
@@ -111,6 +447,22 @@ pub struct WireEventRecord {
     pub is_checkpoint: bool,
     pub is_compaction: bool,
     pub created_at: i64,
+}
+
+/// v2 `SESSION_META_VERSION`: the schema version of the session metadata
+/// document. Rows written by earlier builds are normalized on read.
+pub const SESSION_META_VERSION: u32 = 2;
+
+/// v2 `DEFAULT_SESSION_TITLE` (v2 `sessionMetadata/promptMetadata.ts:7`).
+pub const DEFAULT_SESSION_TITLE: &str = "New Session";
+
+/// v2 `isUntitled`: absent, blank, or the default title means "no title yet",
+/// so an automatically derived title may replace it.
+pub fn is_untitled(title: Option<&str>) -> bool {
+    match title {
+        None => true,
+        Some(title) => title.trim().is_empty() || title == DEFAULT_SESSION_TITLE,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +477,59 @@ pub struct SessionSummary {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// v2 `titleKind`: `replaceable` / `generated` / `custom`. `None` on rows
+    /// written before the column existed; the read path normalizes those to
+    /// `replaceable` (see [`SessionSummary::normalized_title_kind`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+    /// v2 `forkedFrom`: the session this one was forked from. Distinct from
+    /// `parent_session_id`, which records child-session parentage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_cwd: Option<String>,
+    /// v2 `agents`: the session's agent roster, keyed by agent id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Value>,
+    /// v2 `custom`: free-form host metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_reason: Option<String>,
+}
+
+impl SessionSummary {
+    /// v2 `normalizeSessionTitle`: an absent `titleKind` on a row with a title
+    /// reads as `replaceable`; a row with no title has no kind.
+    pub fn normalized_title_kind(&self) -> Option<&'static str> {
+        match self.title_kind.as_deref() {
+            Some("custom") => Some("custom"),
+            Some("generated") => Some("generated"),
+            Some("replaceable") => Some("replaceable"),
+            _ => {
+                if self.title.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                    Some("replaceable")
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// v2 `isCustomTitle` compatibility encoding for the wire.
+    pub fn is_custom_title(&self) -> bool {
+        self.normalized_title_kind() == Some("custom")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +538,18 @@ pub struct SessionExport {
     pub messages: Vec<LLMMessage>,
     pub turns_count: usize,
     pub exported_at: String,
+    /// v2 `sessionFirstActivity` / `sessionLastActivity` (the wire scan's
+    /// min/max record time), falling back to the session row's own times when
+    /// the session has no wire rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_activity_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
+    /// The raw journal view v2 bundles as `agents/<id>/wire.jsonl`, rendered
+    /// from `wire_events` with dehydrated media restored. Kept out of
+    /// `session.json` so the document does not duplicate the bundle member.
+    #[serde(default, skip_serializing)]
+    pub wire_jsonl: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +595,12 @@ pub struct FileHistoryChange {
 /// row count (`LIMIT 500`), so without a byte cap one 20 MB `Write` leaves two
 /// 20 MB blobs per row in the table and in the WAL.
 pub const FILE_HISTORY_MAX_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+
+/// How many recent turns keep their file snapshots, matching v2
+/// `CHECKPOINT_MAX_TURNS` (`agent/checkpoint/checkpointService.ts:20`). Undo
+/// can restore files only within this window; older turns are pruned whenever
+/// a new snapshot is recorded.
+const CHECKPOINT_MAX_TURNS: i64 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileHistoryContent {
@@ -283,11 +706,24 @@ fn reclaim_file_history_space(conn: &Connection) -> Result<(), rusqlite::Error> 
     // SQLite happens to checkpoint on its own schedule.
     //
     // A busy result is not an error — another reader holding the log is normal
-    // and the space is reclaimed by the next prune. Only a hard failure
-    // (a closed or corrupt database) is worth surfacing, and even that must
-    // not undo a prune that already succeeded, so it is tolerated here rather
-    // than propagated.
-    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    // and the space is reclaimed by the next prune. It must not be silent,
+    // though: answering `busy = 0`-style success while the log still holds the
+    // pruned content is exactly what leaves the disk dirty while the caller
+    // believes it was reclaimed. A hard failure is warned for the same reason
+    // and still does not undo a prune that already succeeded.
+    match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    }) {
+        Ok(0) => {}
+        Ok(busy) => tracing::warn!(
+            busy,
+            "file history rows were pruned but another reader held the WAL; the freed space stays on disk until the next checkpoint"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            "file history rows were pruned but the WAL could not be checkpointed; the freed space may remain on disk until SQLite checkpoints it"
+        ),
+    }
     Ok(())
 }
 
@@ -319,6 +755,34 @@ pub enum ForkError {
 impl From<rusqlite::Error> for ForkError {
     fn from(e: rusqlite::Error) -> Self {
         Self::Store(e)
+    }
+}
+
+/// Why a session could not be removed or archived.
+///
+/// These are destructive writes, so they follow the same rule as the wire write
+/// guard: a session held by another live process is refused instead of being
+/// deleted underneath it.
+#[derive(Debug)]
+pub enum SessionRemovalError {
+    /// Another process holds the session; the text names the holder.
+    Occupied { message: String },
+    /// The store failed.
+    Store(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for SessionRemovalError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl std::fmt::Display for SessionRemovalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Occupied { message } => write!(f, "{message}"),
+            Self::Store(error) => write!(f, "{error}"),
+        }
     }
 }
 
@@ -430,6 +894,24 @@ fn turn_origin_is_undo_anchor(origin: Option<&Value>) -> bool {
         None | Some("user") => true,
         Some("skill_activation") | Some("plugin_command") => {
             origin.get("trigger").and_then(Value::as_str) == Some("user-slash")
+        }
+        _ => false,
+    }
+}
+
+/// Whether one wire row starts a turn for a sliced fork.
+///
+/// `turn.prompt` is this ledger's user-prompt record and `message.user` is the
+/// native loop's user message; both mean "a new user turn starts here". A
+/// `context.append_message` row is read the way v2 reads it, with the role and
+/// origin on the message itself.
+fn wire_row_is_fork_anchor(event_type: &str, payload: &Value) -> bool {
+    match event_type {
+        "turn.prompt" => turn_origin_is_undo_anchor(payload.get("origin")),
+        "context.append_message" => {
+            let message = payload.get("message").unwrap_or(payload);
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && turn_origin_is_undo_anchor(message.get("origin"))
         }
         _ => false,
     }
@@ -552,6 +1034,39 @@ impl std::fmt::Display for FileRevertError {
 
 impl std::error::Error for FileRevertError {}
 
+/// Decode one row selected with
+/// [`SqliteSessionStore::SESSION_SUMMARY_COLUMNS`] into a [`SessionSummary`].
+fn session_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary> {
+    let session_id: String = row.get(0)?;
+    let mut summary = SessionSummary {
+        session_id: session_id.clone(),
+        title: row.get(1)?,
+        created_at: row.get(2)?,
+        updated_at: row.get(3)?,
+        workspace_id: row.get(4)?,
+        archived: row.get::<_, i64>(5)? != 0,
+        parent_session_id: row.get(6)?,
+        title_kind: row.get(7)?,
+        last_prompt: row.get(8)?,
+        archived_at: row.get(9)?,
+        forked_from: row.get(10)?,
+        version: row.get::<_, Option<i64>>(11)?.map(|v| v.max(0) as u32),
+        cwd: row.get(12)?,
+        environment_id: row.get(13)?,
+        environment_cwd: row.get(14)?,
+        agents: decode_json_column(row.get(15)?, format!("session {session_id} agents"))?,
+        custom: decode_json_column(row.get(16)?, format!("session {session_id} custom"))?,
+        last_turn_reason: row.get(17)?,
+    };
+    // Normalize on read too: a row written by an older build before the
+    // migration ran still answers the derived kind, so every consumer sees the
+    // same value without a write.
+    if summary.title_kind.is_none() {
+        summary.title_kind = summary.normalized_title_kind().map(str::to_string);
+    }
+    Ok(summary)
+}
+
 impl SqliteSessionStore {
     /// Open or create a SQLite database file at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, rusqlite::Error> {
@@ -572,6 +1087,10 @@ impl SqliteSessionStore {
     }
 
     fn init(conn: Connection, path: Option<PathBuf>) -> Result<Self, rusqlite::Error> {
+        // Bounded wait when another connection holds the write lock. Without
+        // it SQLite fails `SQLITE_BUSY` immediately, so two stores open on the
+        // same file turn a normal write race into a lost append.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -585,7 +1104,17 @@ impl SqliteSessionStore {
                 updated_at INTEGER NOT NULL,
                 archived INTEGER NOT NULL DEFAULT 0,
                 parent_session_id TEXT,
-                last_turn_reason TEXT
+                last_turn_reason TEXT,
+                title_kind TEXT,
+                last_prompt TEXT,
+                archived_at INTEGER,
+                forked_from TEXT,
+                version INTEGER,
+                cwd TEXT,
+                environment_id TEXT,
+                environment_cwd TEXT,
+                agents TEXT,
+                custom TEXT
             );
 
             CREATE TABLE IF NOT EXISTS turns (
@@ -671,94 +1200,106 @@ impl SqliteSessionStore {
             );
             CREATE INDEX IF NOT EXISTS idx_wire_session_seq ON wire_events(session_id, seq);
             CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
+            CREATE TABLE IF NOT EXISTS wire_blobs (
+                hash TEXT PRIMARY KEY,
+                mime TEXT NOT NULL,
+                bytes BLOB NOT NULL
+            );
             ",
         )?;
 
-        // Ensure columns exist if table was created by older schema
-        let columns: std::collections::HashSet<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
-            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            names.filter_map(std::result::Result::ok).collect()
-        };
-        if !columns.contains("tool_calls") {
-            let _ = conn.execute(
-                "ALTER TABLE wire_events ADD COLUMN protocol_version TEXT",
-                [],
-            );
-            let _ = conn.execute(
-                "ALTER TABLE wire_events ADD COLUMN min_protocol_version TEXT",
-                [],
-            );
-            let _ = conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_reason TEXT", []);
-            let _ = conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT", []);
-        }
-        if !columns.contains("tool_call_id") {
-            let _ = conn.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT", []);
-        }
-        if !columns.contains("blocks") {
-            let _ = conn.execute("ALTER TABLE messages ADD COLUMN blocks TEXT", []);
-        }
-        if !columns.contains("prompt_id") {
-            let _ = conn.execute("ALTER TABLE messages ADD COLUMN prompt_id TEXT", []);
+        // Column upgrades for databases created by older builds. Each table's
+        // upgrades read that table's own column list: the wire version columns
+        // used to be gated on `messages.tool_calls`, so a database that already
+        // had `tool_calls` never got the wire columns and every later append
+        // failed on a column that was never added.
+        //
+        // `ensure_column` tolerates only "duplicate column"; every other ALTER
+        // failure (read-only database, disk error) aborts the open. A migration
+        // that silently did not run leaves a half-upgraded database that fails
+        // much later, where the cause is no longer visible.
+        let messages = table_columns(&conn, "messages")?;
+        for column in ["tool_calls", "tool_call_id", "blocks", "prompt_id"] {
+            ensure_column(&conn, "messages", &messages, column, "TEXT")?;
         }
 
-        let session_columns: std::collections::HashSet<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
-            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            names.filter_map(std::result::Result::ok).collect()
-        };
-        if !session_columns.contains("workspace_id") {
-            let _ = conn.execute("ALTER TABLE sessions ADD COLUMN workspace_id TEXT", []);
-        }
-        if !session_columns.contains("archived") {
-            let _ = conn.execute(
-                "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
-                [],
-            );
-        }
-        if !session_columns.contains("parent_session_id") {
-            let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", []);
+        let sessions = table_columns(&conn, "sessions")?;
+        ensure_column(&conn, "sessions", &sessions, "workspace_id", "TEXT")?;
+        ensure_column(
+            &conn,
+            "sessions",
+            &sessions,
+            "archived",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(&conn, "sessions", &sessions, "parent_session_id", "TEXT")?;
+        ensure_column(&conn, "sessions", &sessions, "last_turn_reason", "TEXT")?;
+        // The v2 `SessionMeta` fields that the structured columns did not carry
+        // before (sessionMetadata.ts:17-34). Each is nullable; older rows read
+        // as absent and are normalized on read.
+        for (column, definition) in [
+            ("title_kind", "TEXT"),
+            ("last_prompt", "TEXT"),
+            ("archived_at", "INTEGER"),
+            ("forked_from", "TEXT"),
+            ("version", "INTEGER"),
+            ("cwd", "TEXT"),
+            ("environment_id", "TEXT"),
+            ("environment_cwd", "TEXT"),
+            ("agents", "TEXT"),
+            ("custom", "TEXT"),
+        ] {
+            ensure_column(&conn, "sessions", &sessions, column, definition)?;
         }
 
-        let turn_columns: std::collections::HashSet<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(turns)")?;
-            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            names.filter_map(std::result::Result::ok).collect()
-        };
-        if !turn_columns.contains("origin") {
-            let _ = conn.execute("ALTER TABLE turns ADD COLUMN origin TEXT", []);
-        }
+        let turns = table_columns(&conn, "turns")?;
+        ensure_column(&conn, "turns", &turns, "origin", "TEXT")?;
+
+        let wire = table_columns(&conn, "wire_events")?;
+        ensure_column(&conn, "wire_events", &wire, "protocol_version", "TEXT")?;
+        ensure_column(&conn, "wire_events", &wire, "min_protocol_version", "TEXT")?;
+
+        // One-time normalization of rows written before the metadata columns
+        // existed (v2 `normalizeSessionMeta`, sessionMetadataService.ts:285-312):
+        // a non-empty title with no recorded kind is `replaceable`, and the
+        // document version is stamped so a later write keeps it current.
+        conn.execute(
+            "UPDATE sessions
+                SET title_kind = CASE
+                    WHEN title IS NULL OR trim(title) = '' THEN NULL
+                    ELSE 'replaceable'
+                END
+              WHERE title_kind IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE sessions SET version = ?1 WHERE version IS NULL",
+            params![SESSION_META_VERSION],
+        )?;
 
         // The `oversize` marker for a file-history row whose content was too
         // large to store (see `FILE_HISTORY_MAX_CONTENT_BYTES`). Rows written
         // before the column existed keep 0.
-        let file_history_columns: std::collections::HashSet<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(session_file_history)")?;
-            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            names.filter_map(std::result::Result::ok).collect()
-        };
-        if !file_history_columns.contains("oversize") {
-            let _ = conn.execute(
-                "ALTER TABLE session_file_history ADD COLUMN oversize INTEGER NOT NULL DEFAULT 0",
-                [],
-            );
-        }
+        let file_history = table_columns(&conn, "session_file_history")?;
+        ensure_column(
+            &conn,
+            "session_file_history",
+            &file_history,
+            "oversize",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
 
         // Session-scoped state (ROADMAP §6.1 item 4's P2 decision): the
         // column names the owning session so a delete cascades to the
         // session's entries. Rows written before it existed keep NULL and
         // are cascaded by their key pattern instead (see `delete_session`).
-        let state_columns: std::collections::HashSet<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(state_entries)")?;
-            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            names.filter_map(std::result::Result::ok).collect()
-        };
-        if !state_columns.contains("session_id") {
-            let _ = conn.execute("ALTER TABLE state_entries ADD COLUMN session_id TEXT", []);
-            let _ = conn.execute(
+        let state = table_columns(&conn, "state_entries")?;
+        if !state.contains("session_id") {
+            ensure_column(&conn, "state_entries", &state, "session_id", "TEXT")?;
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_state_entries_session ON state_entries(session_id)",
                 [],
-            );
+            )?;
         }
 
         Ok(Self {
@@ -766,6 +1307,10 @@ impl SqliteSessionStore {
             path,
         })
     }
+
+    /// The column list every session summary read uses, in
+    /// [`session_summary_from_row`]'s order.
+    const SESSION_SUMMARY_COLUMNS: &'static str = "session_id, title, created_at, updated_at, workspace_id, archived, parent_session_id, title_kind, last_prompt, archived_at, forked_from, version, cwd, environment_id, environment_cwd, agents, custom, last_turn_reason";
 
     /// Create or update a session header.
     pub fn create_session(
@@ -784,15 +1329,37 @@ impl SqliteSessionStore {
         workspace_id: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock();
+        Self::insert_session_row(&conn, session_id, title, workspace_id)
+    }
+
+    /// Insert (or revive) one session row on the given connection.
+    ///
+    /// Taking a `&Connection` rather than locking the store is what lets the
+    /// fork create the session and copy its rows in one transaction: a copy
+    /// that fails must roll the session row back with it.
+    fn insert_session_row(
+        conn: &Connection,
+        session_id: &str,
+        title: Option<&str>,
+        workspace_id: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
         let now = chrono::Utc::now().timestamp_millis();
+        // v2 `load()` seeds `agents` / `custom` with empty objects and stamps
+        // the document version, so a freshly created session has the same shape
+        // as a persisted one.
         conn.execute(
-            "INSERT INTO sessions (session_id, title, created_at, updated_at, workspace_id)
-             VALUES (?1, ?2, ?3, ?3, ?4)
+            "INSERT INTO sessions
+                (session_id, title, created_at, updated_at, workspace_id, cwd, version, agents, custom)
+             VALUES (?1, ?2, ?3, ?3, ?4,
+                (SELECT root FROM workspaces WHERE workspace_id = ?4),
+                ?5, '{}', '{}')
              ON CONFLICT(session_id) DO UPDATE SET
                 title = coalesce(?2, title),
                 updated_at = ?3,
-                workspace_id = coalesce(?4, workspace_id)",
-            params![session_id, title, now, workspace_id],
+                workspace_id = coalesce(?4, workspace_id),
+                cwd = coalesce(cwd, (SELECT root FROM workspaces WHERE workspace_id = ?4)),
+                version = coalesce(?5, version)",
+            params![session_id, title, now, workspace_id, SESSION_META_VERSION],
         )?;
         Ok(())
     }
@@ -807,7 +1374,14 @@ impl SqliteSessionStore {
     ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock();
         conn.execute(
-            "UPDATE sessions SET workspace_id = ?2, updated_at = updated_at WHERE session_id = ?1",
+            "UPDATE sessions SET
+                workspace_id = ?2,
+                -- v2 `SessionMeta.cwd` is the workspace root at creation, not
+                -- whatever directory the daemon happened to start in.
+                cwd = coalesce(
+                    (SELECT root FROM workspaces WHERE workspace_id = ?2), cwd),
+                updated_at = updated_at
+             WHERE session_id = ?1",
             params![session_id, workspace_id],
         )?;
         Ok(())
@@ -816,20 +1390,11 @@ impl SqliteSessionStore {
     /// List all persisted sessions ordered by last updated time.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT session_id, title, created_at, updated_at, workspace_id, archived, parent_session_id FROM sessions ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(SessionSummary {
-                session_id: row.get(0)?,
-                title: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-                workspace_id: row.get(4)?,
-                archived: row.get::<_, i64>(5)? != 0,
-                parent_session_id: row.get(6)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM sessions ORDER BY updated_at DESC",
+            Self::SESSION_SUMMARY_COLUMNS
+        ))?;
+        let rows = stmt.query_map([], session_summary_from_row)?;
 
         let mut out = Vec::new();
         for r in rows {
@@ -841,20 +1406,13 @@ impl SqliteSessionStore {
     /// Get summary for a specific session by ID.
     pub fn get_session(&self, session_id: &str) -> Result<Option<SessionSummary>, rusqlite::Error> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT session_id, title, created_at, updated_at, workspace_id, archived, parent_session_id FROM sessions WHERE session_id = ?1",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM sessions WHERE session_id = ?1",
+            Self::SESSION_SUMMARY_COLUMNS
+        ))?;
         let mut rows = stmt.query(params![session_id])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(SessionSummary {
-                session_id: row.get(0)?,
-                title: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-                workspace_id: row.get(4)?,
-                archived: row.get::<_, i64>(5)? != 0,
-                parent_session_id: row.get(6)?,
-            }))
+            Ok(Some(session_summary_from_row(row)?))
         } else {
             Ok(None)
         }
@@ -870,21 +1428,56 @@ impl SqliteSessionStore {
             None => return Ok(None),
         };
         let messages = self.load_session_history(session_id)?;
+        // Aggregates are reported, not defaulted: an export that silently says
+        // "0 turns / no activity" because the query failed is a wrong artifact
+        // that looks complete.
         let turns_count: usize = {
             let conn = self.conn.lock();
             conn.query_row(
                 "SELECT COUNT(*) FROM turns WHERE session_id = ?1",
                 params![session_id],
                 |r| r.get(0),
-            )
-            .unwrap_or(0)
+            )?
+        };
+        // v2 `scanSessionWire` reports the first and last activity as the
+        // min/max record timestamp. The wire is a table here, so the scan is
+        // one aggregate; a session with no wire rows falls back to its row.
+        let (first_activity, last_activity): (Option<i64>, Option<i64>) = {
+            let conn = self.conn.lock();
+            conn.query_row(
+                "SELECT MIN(created_at), MAX(created_at) FROM wire_events WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
         };
         let now_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // The raw journal member (v2 `wire.jsonl`): one line per record, in
+        // sequence order, with dehydrated media restored so the bundle stands
+        // on its own without the blob table.
+        let wire_jsonl = {
+            let conn = self.conn.lock();
+            let records: Vec<(String, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT event_type, payload FROM wire_events WHERE session_id = ?1 ORDER BY seq ASC",
+                )?;
+                let rows = stmt.query_map(params![session_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            records
+                .into_iter()
+                .map(|(event_type, payload)| wire_export_line(&event_type, &payload, &conn))
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         Ok(Some(SessionExport {
+            first_activity_at: first_activity.or(Some(session.created_at)).map(format_iso),
+            last_activity_at: last_activity.or(Some(session.updated_at)).map(format_iso),
             session,
             messages,
             turns_count,
             exported_at: now_iso,
+            wire_jsonl,
         }))
     }
 
@@ -1084,14 +1677,79 @@ impl SqliteSessionStore {
         Ok(affected > 0)
     }
 
+    /// Read-only blob audit: how much the content-addressed store holds and how
+    /// much of it no row references.
+    ///
+    /// v2 has no blob garbage collector (its blob store is put/get/delete with
+    /// no refcounts), so unreferenced blobs are not reclaimed here either. This
+    /// is the observability that decides whether a future GC is worth building:
+    /// an unreferenced count that keeps growing across deletes/undos is the
+    /// signal. One `LIKE` per blob, capped at [`BLOB_AUDIT_MAX_ROWS`]; the scan
+    /// reports whether it was cut short.
+    pub fn blob_usage(&self) -> Result<BlobUsage, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let stored: u64 =
+            conn.query_row("SELECT COUNT(*) FROM wire_blobs", [], |row| row.get(0))?;
+        let bytes: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(LENGTH(bytes)), 0) FROM wire_blobs",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut unreferenced = 0u64;
+        let mut scanned = 0u64;
+        {
+            let mut blobs =
+                conn.prepare("SELECT hash FROM wire_blobs ORDER BY hash ASC LIMIT ?1")?;
+            let hashes = blobs.query_map(params![BLOB_AUDIT_MAX_ROWS as i64], |row| {
+                row.get::<_, String>(0)
+            })?;
+            let mut referenced = conn.prepare(
+                "SELECT EXISTS(SELECT 1 FROM wire_events WHERE payload LIKE '%' || ?1 || '%')
+                     OR EXISTS(SELECT 1 FROM state_entries WHERE value LIKE '%' || ?1 || '%')",
+            )?;
+            for hash in hashes {
+                let hash = hash?;
+                scanned += 1;
+                let used: bool = referenced.query_row(params![hash], |row| row.get(0))?;
+                if !used {
+                    unreferenced += 1;
+                }
+            }
+        }
+        Ok(BlobUsage {
+            stored,
+            bytes: u64::try_from(bytes).unwrap_or(0),
+            unreferenced,
+            scanned,
+            truncated: stored > scanned,
+        })
+    }
+
+    /// Refuse a destructive session operation while another process holds the
+    /// session (v2's session lock; see `session::lock`).
+    fn ensure_not_occupied(session_id: &str) -> Result<(), SessionRemovalError> {
+        match crate::session::lock::SESSION_LOCKS.occupied_by_other(session_id) {
+            Some(holder) => Err(SessionRemovalError::Occupied {
+                message: crate::session::lock::session_occupied_message(Some(&holder)),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Delete a session and all its cascading turns, messages, and checkpoints.
-    pub fn delete_session(&self, session_id: &str) -> Result<bool, rusqlite::Error> {
+    pub fn delete_session(&self, session_id: &str) -> Result<bool, SessionRemovalError> {
+        Self::ensure_not_occupied(session_id)?;
         let conn = self.conn.lock();
         // The state entries the session owns: the column-named ones, plus the
         // legacy key-encoded domains whose key *is* the session id
         // (`agent_config` / `metadata`, written before the column existed).
         // The turns / messages / wire_events / file-history rows go with the
         // session through their foreign keys.
+        let file_history_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_file_history WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
         conn.execute(
             "DELETE FROM state_entries
              WHERE session_id = ?1
@@ -1102,6 +1760,16 @@ impl SqliteSessionStore {
             "DELETE FROM sessions WHERE session_id = ?1",
             params![session_id],
         )?;
+        // File-history rows carry the file contents themselves, so deleting the
+        // session only moves them to SQLite's freelist: the bytes keep
+        // occupying the database and the WAL. v2 deletes the session's blob
+        // directory outright (`sessionLifecycleService.ts:580`); reclaim the
+        // same space here, and report it when that cannot happen — a delete
+        // that answers `deleted: true` while the content survives is the
+        // silent-failure mode this guards against.
+        if affected > 0 && file_history_rows > 0 {
+            reclaim_file_history_space(&conn)?;
+        }
         Ok(affected > 0)
     }
 
@@ -1127,6 +1795,25 @@ impl SqliteSessionStore {
         new_session_id: &str,
         title: Option<&str>,
         turn_index: Option<u64>,
+    ) -> Result<bool, ForkError> {
+        self.fork_session_with_metadata(source_session_id, new_session_id, title, turn_index, None)
+    }
+
+    /// Fork with additional host metadata merged into the copy's `custom`
+    /// document (v2 `forkSession({ metadata })`).
+    ///
+    /// The fork copies the v2 `fullCopy` metadata — `title`, `titleKind`,
+    /// `agents`, `custom`, `cwd`, `environmentId`, `environmentCwd` — records
+    /// `forkedFrom`, and derives `lastPrompt` from the selected historical
+    /// turn. Nothing is inherited by accident: every field is an explicit copy
+    /// from the source row.
+    pub fn fork_session_with_metadata(
+        &self,
+        source_session_id: &str,
+        new_session_id: &str,
+        title: Option<&str>,
+        turn_index: Option<u64>,
+        metadata: Option<&Value>,
     ) -> Result<bool, ForkError> {
         let source = self.get_session(source_session_id)?;
         let Some(source) = source else {
@@ -1187,16 +1874,101 @@ impl SqliteSessionStore {
             .filter(|(_, msgs)| !msgs.is_empty())
             .collect();
 
-        // Validation is already done, so creating the child now cannot leave an
-        // orphan session behind on a rejected `turnIndex`.
+        // Validation is already done, so the writes below cannot be interrupted
+        // by a rejected `turnIndex`.
         let effective_title = title.or(source.title.as_deref());
-        self.create_session_with_workspace(
+        // v2 derives `lastPrompt` from the selected historical turn: the newest
+        // user message inside the retained slice.
+        let last_prompt = retained
+            .iter()
+            .rev()
+            .flat_map(|(_, msgs)| msgs.iter().rev())
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .filter(|text| !text.trim().is_empty());
+        // `fullCopy` metadata (v2 `forkSession`): the title kind travels with
+        // the title, the roster and free-form custom document are copied, and
+        // the environment binding is preserved. An explicit fork title is
+        // user-authored, so it must not be replaced by a later generated one.
+        let title_kind = if title.is_some() {
+            Some("custom")
+        } else {
+            source.normalized_title_kind()
+        };
+        let mut custom = source
+            .custom
+            .clone()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        if let Some(extra) = metadata.and_then(Value::as_object)
+            && let Some(object) = custom.as_object_mut()
+        {
+            for (key, value) in extra {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+
+        // Everything the fork creates commits together. v2 rewrites the child
+        // journal with one atomic file write; the equivalent here is a single
+        // SQLite transaction, so a failed copy cannot leave behind the empty
+        // child session that creating it separately used to commit.
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        // A sliced fork cuts the journal at a wire position, the way v2's
+        // `computeForkLine` does: a line is the record's ordinal in the source
+        // journal ordered by `seq` (v2 numbers records `index + 1`), never the
+        // `seq` value itself — `seq` is an AUTOINCREMENT primary key and undo
+        // deletes rows, so the numbers have gaps. `turn.prompt` rows are this
+        // ledger's user-prompt anchors (v2 `isUndoAnchor`); the native loop
+        // writes `message.user` instead. The cut is the anchor of the first
+        // turn the fork drops, counted from the end of the journal, and with no
+        // anchor to drop the whole journal is copied. Because the position is
+        // journal order, two records written in the same millisecond are
+        // ordered rather than ambiguous.
+        let cut_line = match turn_index {
+            None => None,
+            Some(index) => {
+                let keep = usize::try_from(index)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1);
+                let anchors = Self::fork_anchor_lines(&tx, source_session_id)?;
+                if keep < anchors.len() {
+                    Some(anchors[keep])
+                } else {
+                    None
+                }
+            }
+        };
+        Self::insert_session_row(
+            &tx,
             new_session_id,
             effective_title,
             source.workspace_id.as_deref(),
         )?;
-        // Children are queryable via /sessions/{id}/children.
-        self.link_to_parent(source_session_id, new_session_id)?;
+        tx.execute(
+            "UPDATE sessions
+                SET title_kind = ?2, last_prompt = ?3, forked_from = ?4,
+                    version = ?5, cwd = ?6, environment_id = ?7,
+                    environment_cwd = ?8, agents = ?9, custom = ?10,
+                    parent_session_id = ?4
+              WHERE session_id = ?1",
+            params![
+                new_session_id,
+                title_kind,
+                last_prompt,
+                source_session_id,
+                SESSION_META_VERSION,
+                source.cwd,
+                source.environment_id,
+                source.environment_cwd,
+                source
+                    .agents
+                    .as_ref()
+                    .map(|agents| encode_stored_json(agents, "fork agents"))
+                    .transpose()?,
+                encode_stored_json(&custom, "fork custom")?,
+            ],
+        )?;
         // One `save_turn` per retained source turn, each re-stamped with its own
         // number so the fork's `next_turn_number` continues the sequence instead
         // of restarting it. The compaction summary turn is a real row in the
@@ -1205,7 +1977,8 @@ impl SqliteSessionStore {
         // A session with no turns still gets its child, matching the old
         // whole-session path.
         for (number, (turn, turn_messages)) in retained.iter().enumerate() {
-            self.save_turn(
+            Self::save_turn_in(
+                &tx,
                 new_session_id,
                 &forked_turn_id(&turn.turn_id, new_session_id, number as u32 + 1),
                 number as u32 + 1,
@@ -1214,62 +1987,124 @@ impl SqliteSessionStore {
                 turn.origin.as_ref(),
             )?;
         }
+        // v2 `forkSession`'s full copy carries the source's file history: the
+        // fork continues the same work, and without these rows its undo could
+        // not restore the files the copied turns changed. A sliced fork
+        // (`turn_index.is_some()`) keeps none — v2's `pruneTruncatedForkFiles`
+        // deletes the history when the turn sequence is cut. Rows are copied
+        // per retained turn so `turn_id` (a turn *number*) points at the same
+        // turn after the fork renumbers its sequence.
+        if turn_index.is_none() {
+            let mut copy = tx.prepare(
+                "INSERT INTO session_file_history
+                     (session_id, turn_id, path, status, content_before, content_after,
+                      additions, deletions, oversize, created_at)
+                 SELECT ?2, ?3, path, status, content_before, content_after,
+                        additions, deletions, oversize, created_at
+                   FROM session_file_history
+                  WHERE session_id = ?1 AND turn_id = ?4
+                  ORDER BY id ASC",
+            )?;
+            for (number, (turn, _)) in retained.iter().enumerate() {
+                copy.execute(params![
+                    source_session_id,
+                    new_session_id,
+                    number as i64 + 1,
+                    i64::from(turn.turn_number)
+                ])?;
+            }
+        }
+        // The fork's engine context is built by `fold_projection` over the wire
+        // journal, so an empty journal means a fork with no history at all.
+        //
+        // `seq` is the table's global primary key, so the source's numbers
+        // cannot be reused: the destination assigns fresh ones, and because the
+        // copy runs in source-`seq` order the fold and the paged readers see the
+        // same order they saw in the source. Ids are namespaced for the same
+        // reason (`wire_events.id` is globally UNIQUE). Blob bytes are not
+        // copied: `wire_blobs` is content-addressed and shared.
+        //
+        // The window is selected by line — `ROW_NUMBER()` over the source rows
+        // in `seq` order — not by the `seq` value, so a cut keeps its meaning
+        // after undo deletes leave gaps. `line < cut_line` keeps everything
+        // before the anchor of the first dropped turn.
+        tx.execute(
+            "INSERT INTO wire_events
+                 (id, session_id, event_type, payload, is_checkpoint, is_compaction,
+                  created_at, protocol_version, min_protocol_version)
+             SELECT ?2 || ':' || id, ?2, event_type, payload, is_checkpoint, is_compaction,
+                    created_at, protocol_version, min_protocol_version
+               FROM (
+                     SELECT seq, id, event_type, payload, is_checkpoint, is_compaction,
+                            created_at, protocol_version, min_protocol_version,
+                            ROW_NUMBER() OVER (ORDER BY seq ASC) AS line
+                       FROM wire_events
+                      WHERE session_id = ?1
+               )
+              WHERE ?3 IS NULL OR line < ?3
+              ORDER BY seq ASC",
+            params![source_session_id, new_session_id, cut_line],
+        )?;
+        tx.commit()?;
         Ok(true)
     }
 
-    /// Point `new_session_id` at `parent_session_id`, which is what makes the
-    /// fork queryable through `/sessions/{id}/children`.
-    fn link_to_parent(
-        &self,
-        source_session_id: &str,
-        new_session_id: &str,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE sessions SET parent_session_id = ?1 WHERE session_id = ?2",
-            params![source_session_id, new_session_id],
+    /// Lines (1-based journal ordinals, v2's wire `line`) of the user-prompt
+    /// anchors a sliced fork cuts on.
+    ///
+    /// v2 counts undo anchors on `context.append_message` records
+    /// (`conversationTime.ts` `isUndoAnchor`). This ledger's journal has no such
+    /// record in either vocabulary and no turn id on the rows, so the prompt
+    /// records are the only positional turn boundary: the engine journal writes
+    /// one `turn.prompt` per turn (v2's own prompt record) and the native loop
+    /// writes `message.user`. A session uses one of the two; prompt records win
+    /// if both ever appear so a turn is not counted twice.
+    fn fork_anchor_lines(conn: &Connection, session_id: &str) -> rusqlite::Result<Vec<i64>> {
+        let mut stmt = conn.prepare(
+            "SELECT event_type, payload, ROW_NUMBER() OVER (ORDER BY seq ASC)
+               FROM wire_events
+              WHERE session_id = ?1
+              ORDER BY seq ASC",
         )?;
-        Ok(())
+        let mut rows = stmt.query(params![session_id])?;
+        let mut prompts = Vec::new();
+        let mut native = Vec::new();
+        while let Some(row) = rows.next()? {
+            let event_type: String = row.get(0)?;
+            let payload = decode_stored_json(&row.get::<_, String>(1)?, "wire payload")?;
+            let line: i64 = row.get(2)?;
+            if event_type == "message.user" {
+                native.push(line);
+            } else if wire_row_is_fork_anchor(&event_type, &payload) {
+                prompts.push(line);
+            }
+        }
+        Ok(if prompts.is_empty() { native } else { prompts })
     }
 
     /// Archive a session (v2 `archive` action): hidden from the default
-    /// session list until restored.
-    pub fn archive_session(&self, session_id: &str) -> Result<bool, rusqlite::Error> {
-        let conn = self.conn.lock();
-        let changed = conn.execute(
-            "UPDATE sessions SET archived = 1, updated_at = ?2 WHERE session_id = ?1",
-            params![session_id, chrono::Utc::now().timestamp_millis()],
-        )?;
-        Ok(changed > 0)
+    /// session list until restored. Stamps `archived_at` and leaves
+    /// `updated_at` alone, matching v2 `setArchived`.
+    pub fn archive_session(&self, session_id: &str) -> Result<bool, SessionRemovalError> {
+        Self::ensure_not_occupied(session_id)?;
+        Ok(self.set_session_archived(session_id, true)?)
     }
 
-    /// Restore a previously archived session (v2 `restore` action).
-    pub fn restore_session(&self, session_id: &str) -> Result<bool, rusqlite::Error> {
-        let conn = self.conn.lock();
-        let changed = conn.execute(
-            "UPDATE sessions SET archived = 0, updated_at = ?2 WHERE session_id = ?1",
-            params![session_id, chrono::Utc::now().timestamp_millis()],
-        )?;
-        Ok(changed > 0)
+    /// Restore a previously archived session (v2 `restore` action). Clears
+    /// `archived_at` and leaves `updated_at` alone.
+    pub fn restore_session(&self, session_id: &str) -> Result<bool, SessionRemovalError> {
+        Self::ensure_not_occupied(session_id)?;
+        Ok(self.set_session_archived(session_id, false)?)
     }
 
     /// Sessions forked from the given session (v2 `/sessions/{id}/children`).
     pub fn list_children(&self, session_id: &str) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT session_id, title, created_at, updated_at, workspace_id, archived, parent_session_id FROM sessions WHERE parent_session_id = ?1 ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            Ok(SessionSummary {
-                session_id: row.get(0)?,
-                title: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-                workspace_id: row.get(4)?,
-                archived: row.get::<_, i64>(5)? != 0,
-                parent_session_id: row.get(6)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM sessions WHERE parent_session_id = ?1 ORDER BY updated_at DESC",
+            Self::SESSION_SUMMARY_COLUMNS
+        ))?;
+        let rows = stmt.query_map(params![session_id], session_summary_from_row)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1391,21 +2226,31 @@ impl SqliteSessionStore {
     }
 
     pub fn undo_turns(&self, session_id: &str, count: usize) -> Result<usize, String> {
-        let conn = self.conn.lock();
-        let selected = Self::select_undo_turns(&conn, session_id, count)?;
+        let mut conn = self.conn.lock();
+        // v2 `switchBranch` + `assertSwitchTripleAppended`: the switch re-reads
+        // the log *after* writing and refuses when it changed mid-flight. One
+        // immediate transaction gives the same guarantee in this ledger: the
+        // selection is evaluated while the write lock is held (a concurrent
+        // writer either finished before it or is refused with SQLITE_BUSY), and
+        // a failure at any DELETE rolls the earlier ones back instead of
+        // leaving a half-undone session.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let selected = Self::select_undo_turns(&tx, session_id, count)?;
 
         for (turn_id, turn_number) in &selected {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM session_file_history WHERE session_id = ?1 AND turn_id = ?2",
                 params![session_id, turn_number],
             )
             .map_err(|e| e.to_string())?;
-            conn.execute(
+            tx.execute(
                 "DELETE FROM messages WHERE session_id = ?1 AND turn_id = ?2",
                 params![session_id, turn_id],
             )
             .map_err(|e| e.to_string())?;
-            conn.execute(
+            tx.execute(
                 "DELETE FROM turns WHERE turn_id = ?1 AND session_id = ?2",
                 params![turn_id, session_id],
             )
@@ -1413,11 +2258,12 @@ impl SqliteSessionStore {
         }
 
         let now = chrono::Utc::now().timestamp_millis();
-        conn.execute(
+        tx.execute(
             "UPDATE sessions SET updated_at = ?2 WHERE session_id = ?1",
             params![session_id, now],
         )
         .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
 
         Ok(selected.len())
     }
@@ -1579,7 +2425,8 @@ impl SqliteSessionStore {
         let summary = summary
             .filter(|text| !text.trim().is_empty())
             .ok_or_else(|| crate::compaction::CompactionError::EmptySummary.to_string())?;
-        let compacted = crate::compaction::apply_compaction_with_summary(&history, count, summary);
+        let compacted =
+            crate::compaction::apply_compaction_with_summary(&history, count, summary, false);
         if compacted.len() >= history.len() {
             return Ok(CompactionReport::skipped());
         }
@@ -1624,19 +2471,513 @@ impl SqliteSessionStore {
         Ok(report)
     }
 
-    /// Update the session title and refresh updated_at timestamp.
+    /// Set the session title as a **user-authored** title (v2 `setTitle`,
+    /// sessionMetadataService.ts:135-137): `titleKind` becomes `custom`, and
+    /// `updated_at` is deliberately left untouched (`touchUpdatedAt: false`).
+    /// Renaming a session is not activity, and refreshing the timestamp would
+    /// reorder the session list.
     pub fn update_session_title(
         &self,
         session_id: &str,
         title: Option<&str>,
     ) -> Result<bool, rusqlite::Error> {
         let conn = self.conn.lock();
-        let now = chrono::Utc::now().timestamp_millis();
         let affected = conn.execute(
-            "UPDATE sessions SET title = ?2, updated_at = ?3 WHERE session_id = ?1",
-            params![session_id, title, now],
+            "UPDATE sessions SET title = ?2, title_kind = 'custom', version = ?3 WHERE session_id = ?1",
+            params![session_id, title, SESSION_META_VERSION],
         )?;
         Ok(affected > 0)
+    }
+
+    /// Apply a generated title only when the existing title is not custom
+    /// (v2 `setGeneratedTitleIfUncustomized`, sessionMetadataService.ts:139-148).
+    ///
+    /// `force` bypasses the custom guard, which is what a host-forced
+    /// regeneration means. Returns whether the title was written; `false` means
+    /// the custom title was preserved. Does not touch `updated_at`.
+    pub fn set_generated_title_if_uncustomized(
+        &self,
+        session_id: &str,
+        title: &str,
+        force: bool,
+    ) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let affected = if force {
+            conn.execute(
+                "UPDATE sessions SET title = ?2, title_kind = 'generated', version = ?3 WHERE session_id = ?1",
+                params![session_id, title, SESSION_META_VERSION],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE sessions
+                    SET title = ?2, title_kind = 'generated', version = ?3
+                  WHERE session_id = ?1
+                    AND (title_kind IS NULL OR title_kind <> 'custom')",
+                params![session_id, title, SESSION_META_VERSION],
+            )?
+        };
+        Ok(affected > 0)
+    }
+
+    /// Record the first-prompt metadata (v2 `applyPromptMetadata`,
+    /// sessionMetadataService.ts:150-159).
+    ///
+    /// `last_prompt` is always written. The derived `title` replaces the
+    /// current one only while it is still untitled and not custom, in which
+    /// case the kind becomes `replaceable`. Returns whether the title was
+    /// applied. Unlike the title setters, this is ordinary activity and does
+    /// refresh `updated_at`.
+    pub fn apply_prompt_metadata(
+        &self,
+        session_id: &str,
+        last_prompt: &str,
+        title: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let now = chrono::Utc::now().timestamp_millis();
+        let current: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT title, title_kind FROM sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((current_title, current_kind)) = current else {
+            return Ok(false);
+        };
+        let apply_title =
+            current_kind.as_deref() != Some("custom") && is_untitled(current_title.as_deref());
+        if apply_title {
+            conn.execute(
+                "UPDATE sessions
+                    SET last_prompt = ?2, title = ?3, title_kind = 'replaceable',
+                        version = ?4, updated_at = ?5
+                  WHERE session_id = ?1",
+                params![session_id, last_prompt, title, SESSION_META_VERSION, now],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE sessions SET last_prompt = ?2, updated_at = ?3 WHERE session_id = ?1",
+                params![session_id, last_prompt, now],
+            )?;
+        }
+        Ok(apply_title)
+    }
+
+    /// Archive or restore a session (v2 `setArchived`,
+    /// sessionMetadataService.ts:161-168): archive stamps `archived_at`,
+    /// restore clears it, and neither touches `updated_at`.
+    pub fn set_session_archived(
+        &self,
+        session_id: &str,
+        archived: bool,
+    ) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let now = chrono::Utc::now().timestamp_millis();
+        let affected = if archived {
+            conn.execute(
+                "UPDATE sessions SET archived = 1, archived_at = ?2, version = ?3 WHERE session_id = ?1",
+                params![session_id, now, SESSION_META_VERSION],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE sessions SET archived = 0, archived_at = NULL, version = ?2 WHERE session_id = ?1",
+                params![session_id, SESSION_META_VERSION],
+            )?
+        };
+        Ok(affected > 0)
+    }
+
+    /// Import a session metadata document written by an earlier build
+    /// (v2 `normalizeSessionMeta` + `sessionMetaTitleNeedsMigration`, then
+    /// `encodeSessionMeta`'s write-back in `sessionMetadataService.load`).
+    ///
+    /// Legacy `state.json` documents carry `workDir`, `customTitle`,
+    /// `isCustomTitle` and `titleSource` alongside the normalized fields. The
+    /// import folds them into this store's columns (`title`, `title_kind`,
+    /// `cwd`) and rewrites the metadata bag without the legacy keys. The
+    /// columns win when they already hold a value: they are written by this
+    /// build's own setters, so a stale legacy `isCustomTitle` must not undo a
+    /// newer rename.
+    ///
+    /// Returns whether anything was written. A missing session is `Ok(false)`,
+    /// like a load of a session that no longer exists.
+    pub fn migrate_legacy_session_metadata(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let current: Option<(Option<String>, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT title, title_kind, cwd FROM sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((title, title_kind, cwd)) = current else {
+            return Ok(false);
+        };
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM state_entries WHERE domain = 'metadata' AND key = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut metadata =
+            match decode_json_column::<Value>(stored, format!("session {session_id} metadata"))? {
+                Some(Value::Object(map)) => map,
+                _ => serde_json::Map::new(),
+            };
+
+        // v2: `cwd = clean.cwd ?? workDir` — the column is this build's `cwd`.
+        let mut next_cwd = cwd.clone();
+        if next_cwd.is_none()
+            && let Some(work_dir) = metadata
+                .get("workDir")
+                .and_then(Value::as_str)
+                .filter(|dir| !dir.trim().is_empty())
+        {
+            next_cwd = Some(work_dir.to_string());
+        }
+
+        // v2's precedence over the legacy title fields, applied only while the
+        // column has no kind of its own.
+        let mut next_title = title.clone();
+        let mut next_kind: Option<String> = match title_kind.as_deref() {
+            Some("custom") => Some("custom".into()),
+            Some("generated") => Some("generated".into()),
+            Some("replaceable") => Some("replaceable".into()),
+            _ => None,
+        };
+        if next_kind.is_none() {
+            let legacy_custom = metadata.get("isCustomTitle").and_then(Value::as_bool);
+            let legacy_kind: Option<String> = metadata
+                .get("titleKind")
+                .and_then(Value::as_str)
+                .filter(|kind| matches!(*kind, "custom" | "generated" | "replaceable"))
+                .map(str::to_string);
+            if title.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                next_kind = Some(match legacy_custom {
+                    Some(true) => "custom".to_string(),
+                    _ if legacy_kind.is_some() => legacy_kind.unwrap_or_default(),
+                    _ => "replaceable".to_string(),
+                });
+            } else if let Some(custom_title) = metadata.get("customTitle").and_then(Value::as_str) {
+                next_title = Some(custom_title.to_string());
+                next_kind = Some("custom".to_string());
+            } else if legacy_kind.is_some() {
+                next_kind = legacy_kind;
+            }
+        }
+
+        // v2 `encodeSessionMeta`: the normalized title kind is persisted and
+        // its `isCustomTitle` compatibility bit is written alongside it.
+        let next_custom = next_kind.as_deref() == Some("custom");
+        let legacy_present = ["workDir", "customTitle", "titleSource"]
+            .iter()
+            .any(|key| metadata.contains_key(*key));
+        metadata.remove("workDir");
+        metadata.remove("customTitle");
+        metadata.remove("titleSource");
+        let metadata_changed = legacy_present
+            || metadata.get("isCustomTitle").and_then(Value::as_bool) != Some(next_custom)
+            || metadata.get("titleKind").and_then(Value::as_str) != next_kind.as_deref();
+        metadata.insert("isCustomTitle".into(), Value::Bool(next_custom));
+        match next_kind.as_deref() {
+            Some(kind) => {
+                metadata.insert("titleKind".into(), Value::String(kind.to_string()));
+            }
+            None => {
+                metadata.remove("titleKind");
+            }
+        }
+
+        let title_changed = next_title != title || next_kind != title_kind;
+        let cwd_changed = next_cwd != cwd;
+        if !title_changed && !cwd_changed && !metadata_changed {
+            return Ok(false);
+        }
+        if title_changed || cwd_changed {
+            conn.execute(
+                "UPDATE sessions
+                    SET title = ?2, title_kind = ?3, cwd = ?4, version = ?5
+                  WHERE session_id = ?1",
+                params![
+                    session_id,
+                    next_title,
+                    next_kind,
+                    next_cwd,
+                    SESSION_META_VERSION
+                ],
+            )?;
+        }
+        let encoded = encode_stored_json(
+            &Value::Object(metadata),
+            format!("session {session_id} metadata"),
+        )?;
+        conn.execute(
+            "INSERT INTO state_entries (domain, key, value, updated_at, session_id)
+             VALUES ('metadata', ?1, ?2, ?3, ?1)
+             ON CONFLICT(domain, key) DO UPDATE SET
+                value = ?2,
+                updated_at = ?3,
+                session_id = ?1",
+            params![session_id, encoded, chrono::Utc::now().timestamp_millis()],
+        )?;
+        Ok(true)
+    }
+
+    /// Persist a session's metadata bag with the `isCustomTitle`
+    /// compatibility field every earlier build reads (`encodeSessionMeta`).
+    ///
+    /// The bit comes from the session's own `title_kind`, so a bag assembled
+    /// before a rename cannot carry a stale flag.
+    pub fn put_session_metadata(
+        &self,
+        session_id: &str,
+        metadata: &Value,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock();
+        let kind: Option<Option<String>> = conn
+            .query_row(
+                "SELECT title_kind FROM sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut metadata = metadata.clone();
+        if let Some(kind) = kind
+            && let Some(map) = metadata.as_object_mut()
+        {
+            let custom = matches!(kind.as_deref(), Some("custom"))
+                || (kind.is_none()
+                    && map.get("isCustomTitle").and_then(Value::as_bool) == Some(true));
+            map.insert("isCustomTitle".into(), Value::Bool(custom));
+        }
+        let value = dehydrate_state_value(&metadata, &conn)?;
+        let encoded =
+            encode_stored_json(value.as_ref(), format!("state entry metadata/{session_id}"))?;
+        conn.execute(
+            "INSERT INTO state_entries (domain, key, value, updated_at, session_id)
+             VALUES ('metadata', ?1, ?2, ?3, ?1)
+             ON CONFLICT(domain, key) DO UPDATE SET
+                value = ?2,
+                updated_at = ?3,
+                session_id = ?1",
+            params![session_id, encoded, chrono::Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Register one agent in the session's roster (v2 `registerAgent`,
+    /// sessionMetadataService.ts:170-188).
+    ///
+    /// An identical entry is a no-op. `updated_at` is not touched. Returns
+    /// whether the roster changed.
+    pub fn register_session_agent(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        meta: &Value,
+    ) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let current: Option<Option<String>> = conn
+            .query_row(
+                "SELECT agents FROM sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(raw) = current else {
+            return Ok(false);
+        };
+        let mut agents = decode_json_column::<Value>(raw, format!("session {session_id} agents"))?
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        let Some(object) = agents.as_object_mut() else {
+            return Ok(false);
+        };
+        if object.get(agent_id) == Some(meta) {
+            return Ok(false);
+        }
+        object.insert(agent_id.to_string(), meta.clone());
+        let encoded = encode_stored_json(&agents, format!("session {session_id} agents"))?;
+        conn.execute(
+            "UPDATE sessions SET agents = ?2, version = ?3 WHERE session_id = ?1",
+            params![session_id, encoded, SESSION_META_VERSION],
+        )?;
+        Ok(true)
+    }
+
+    /// Write the free-form `custom` metadata document (v2 `custom`) without
+    /// touching `updated_at`.
+    pub fn set_session_custom(
+        &self,
+        session_id: &str,
+        custom: &Value,
+    ) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let encoded = encode_stored_json(custom, format!("session {session_id} custom"))?;
+        let affected = conn.execute(
+            "UPDATE sessions SET custom = ?2, version = ?3 WHERE session_id = ?1",
+            params![session_id, encoded, SESSION_META_VERSION],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Point a session at its execution environment (v2 `environmentId` /
+    /// `environmentCwd`).
+    pub fn set_session_environment(
+        &self,
+        session_id: &str,
+        environment_id: Option<&str>,
+        environment_cwd: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let affected = conn.execute(
+            "UPDATE sessions
+                SET environment_id = ?2, environment_cwd = ?3, version = ?4
+              WHERE session_id = ?1",
+            params![
+                session_id,
+                environment_id,
+                environment_cwd,
+                SESSION_META_VERSION
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Freeze a session's environment at creation (v2 `createSession` persists
+    /// `environmentId` + `environmentCwd` on the session document).
+    ///
+    /// The variables live in `state_entries` under the `environment` domain so
+    /// an existing database needs no new column; the binding also lands on the
+    /// session row, where [`SessionSummary`] already surfaces it.
+    pub fn set_session_environment_snapshot(
+        &self,
+        session_id: &str,
+        environment_id: &str,
+        environment_cwd: Option<&str>,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<bool, rusqlite::Error> {
+        let updated =
+            self.set_session_environment(session_id, Some(environment_id), environment_cwd)?;
+        let value = serde_json::json!({
+            "environmentId": environment_id,
+            "cwd": environment_cwd,
+            "env": env,
+        });
+        let encoded = encode_stored_json(&value, format!("environment/{session_id}"))?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO state_entries (domain, key, value, updated_at, session_id)
+             VALUES ('environment', ?1, ?2, ?3, ?1)
+             ON CONFLICT(domain, key) DO UPDATE SET
+                value = ?2,
+                updated_at = ?3,
+                session_id = ?1",
+            params![session_id, encoded, chrono::Utc::now().timestamp_millis()],
+        )?;
+        Ok(updated)
+    }
+
+    /// Read the frozen environment back for a resume.
+    ///
+    /// `None` means the session has no binding (a row written before the
+    /// columns existed, or a chat-only session). A row that exists but cannot
+    /// be decoded is an error, never `None`: a corrupt snapshot must not make
+    /// the next turn silently rebind to the current defaults.
+    pub fn get_session_environment_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::environment::StoredEnvironmentSnapshot>, rusqlite::Error> {
+        let Some(session) = self.get_session(session_id)? else {
+            return Ok(None);
+        };
+        let Some(environment_id) = session.environment_id else {
+            return Ok(None);
+        };
+        // A row that predates `environment_cwd` still knows its creation cwd
+        // (`sessions.cwd` is written from the workspace root), so use it.
+        let cwd = session.environment_cwd.or(session.cwd);
+        let env = match self.get_state("environment", session_id)? {
+            Some(value) => value
+                .get("env")
+                .and_then(serde_json::Value::as_object)
+                .map(|object| {
+                    object
+                        .iter()
+                        .filter_map(|(key, value)| {
+                            value.as_str().map(|value| (key.clone(), value.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None => std::collections::BTreeMap::new(),
+        };
+        Ok(Some(crate::environment::StoredEnvironmentSnapshot {
+            binding: crate::environment::EnvironmentBinding {
+                environment_id,
+                cwd: cwd.map(std::path::PathBuf::from),
+            },
+            env,
+        }))
+    }
+
+    /// Reconcile the persisted turn outcome against the turns the store
+    /// actually holds (v2 `reconcileAfterRestore`,
+    /// sessionOutcomeMirrorService.ts:131-145): no turn means no outcome; a
+    /// turn present with no recorded outcome adopts its persisted status.
+    /// Never touches `updated_at`.
+    pub fn reconcile_last_turn_reason(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let current: Option<Option<String>> = conn
+            .query_row(
+                "SELECT last_turn_reason FROM sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(persisted) = current.clone() else {
+            return Ok(None);
+        };
+        let turn_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM turns WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        let reconciled = if turn_count == 0 {
+            None
+        } else if persisted.is_some() {
+            persisted
+        } else {
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM turns WHERE session_id = ?1 ORDER BY turn_number DESC LIMIT 1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            // Adopt the persisted turn status verbatim, except for a turn that
+            // is still running: that outcome is not final, so there is nothing
+            // to mirror yet.
+            status.filter(|status| {
+                let status = status.as_str();
+                !status.is_empty() && status != "running" && status != "in_progress"
+            })
+        };
+        if reconciled != current.flatten() {
+            conn.execute(
+                "UPDATE sessions SET last_turn_reason = ?2 WHERE session_id = ?1",
+                params![session_id, reconciled],
+            )?;
+        }
+        Ok(reconciled)
     }
 
     /// The turn number a new turn for this session should take, derived from
@@ -1666,14 +3007,16 @@ impl SqliteSessionStore {
                 message: LLMMessage {
                     role: row.get(0)?,
                     content: row.get(1)?,
-                    blocks: row
-                        .get::<_, Option<String>>(4)?
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or_default(),
-                    tool_calls: row
-                        .get::<_, Option<String>>(2)?
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or_default(),
+                    blocks: decode_json_column(
+                        row.get::<_, Option<String>>(4)?,
+                        format!("message blocks in session {session_id}"),
+                    )?
+                    .unwrap_or_default(),
+                    tool_calls: decode_json_column(
+                        row.get::<_, Option<String>>(2)?,
+                        format!("message tool_calls in session {session_id}"),
+                    )?
+                    .unwrap_or_default(),
                     tool_call_id: row.get(3)?,
                     prompt_id: row.get(5)?,
                     origin: None,
@@ -1698,17 +3041,17 @@ impl SqliteSessionStore {
              FROM turns WHERE session_id = ?1 ORDER BY turn_number ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
+            let turn_id: String = row.get(0)?;
             let usage: Option<String> = row.get(5)?;
+            let origin: Option<String> = row.get(6)?;
             Ok(TurnRecord {
-                turn_id: row.get(0)?,
+                turn_id: turn_id.clone(),
                 turn_number: row.get::<_, i64>(1)?.max(0) as u32,
                 status: row.get(2)?,
                 started_at: row.get(3)?,
                 completed_at: row.get(4)?,
-                usage: usage.and_then(|s| serde_json::from_str(&s).ok()),
-                origin: row
-                    .get::<_, Option<String>>(6)?
-                    .and_then(|s| serde_json::from_str(&s).ok()),
+                usage: decode_json_column(usage, format!("turn {turn_id} usage"))?,
+                origin: decode_json_column(origin, format!("turn {turn_id} origin"))?,
             })
         })?;
 
@@ -1730,8 +3073,34 @@ impl SqliteSessionStore {
         origin: Option<&Value>,
     ) -> Result<(), rusqlite::Error> {
         let mut conn = self.conn.lock();
-        let now = chrono::Utc::now().timestamp_millis();
         let tx = conn.transaction()?;
+        Self::save_turn_in(
+            &tx,
+            session_id,
+            turn_id,
+            turn_number,
+            messages,
+            usage,
+            origin,
+        )?;
+        tx.commit()
+    }
+
+    /// Write one turn, its messages, and its session header on an existing
+    /// transaction.
+    ///
+    /// The fork calls this inside its own transaction: creating the child and
+    /// copying its turns either both commit or neither does.
+    fn save_turn_in(
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        turn_id: &str,
+        turn_number: u32,
+        messages: &[LLMMessage],
+        usage: Option<&TokenUsage>,
+        origin: Option<&Value>,
+    ) -> Result<(), rusqlite::Error> {
+        let now = chrono::Utc::now().timestamp_millis();
 
         tx.execute(
             "INSERT INTO sessions (session_id, title, created_at, updated_at)
@@ -1740,9 +3109,13 @@ impl SqliteSessionStore {
             params![session_id, now],
         )?;
 
-        let usage_json = usage.map(|u| serde_json::to_string(u).unwrap_or_default());
+        let usage_json = usage
+            .map(|u| encode_stored_json(u, format!("turn {turn_id} usage")))
+            .transpose()?;
 
-        let origin_json = origin.map(|o| serde_json::to_string(o).unwrap_or_default());
+        let origin_json = origin
+            .map(|o| encode_stored_json(o, format!("turn {turn_id} origin")))
+            .transpose()?;
         tx.execute(
             "INSERT INTO turns (turn_id, session_id, turn_number, status, started_at, completed_at, usage, origin)
              VALUES (?1, ?2, ?3, 'completed', ?4, ?4, ?5, ?6)
@@ -1762,12 +3135,18 @@ impl SqliteSessionStore {
                 let tool_calls_json = if m.tool_calls.is_empty() {
                     None
                 } else {
-                    serde_json::to_string(&m.tool_calls).ok()
+                    Some(encode_stored_json(
+                        &m.tool_calls,
+                        format!("turn {turn_id} tool_calls"),
+                    )?)
                 };
                 let blocks_json = if m.blocks.is_empty() {
                     None
                 } else {
-                    serde_json::to_string(&m.blocks).ok()
+                    Some(encode_stored_json(
+                        &m.blocks,
+                        format!("turn {turn_id} blocks"),
+                    )?)
                 };
                 insert_message.execute(params![
                     session_id,
@@ -1783,7 +3162,6 @@ impl SqliteSessionStore {
             }
         }
 
-        tx.commit()?;
         Ok(())
     }
 
@@ -1806,17 +3184,7 @@ impl SqliteSessionStore {
     /// Put a key-value pair in a state domain (state bridge storage).
     pub fn put_state(&self, domain: &str, key: &str, value: &Value) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock();
-        let now = chrono::Utc::now().timestamp_millis();
-        let val_str = serde_json::to_string(value).unwrap_or_default();
-        conn.execute(
-            "INSERT INTO state_entries (domain, key, value, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(domain, key) DO UPDATE SET
-                value = ?3,
-                updated_at = ?4",
-            params![domain, key, val_str, now],
-        )?;
-        Ok(())
+        write_state_entry(&conn, domain, key, value)
     }
 
     /// Put a session-scoped state entry: the `session_id` column names the
@@ -1833,8 +3201,10 @@ impl SqliteSessionStore {
     ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock();
         let now = chrono::Utc::now().timestamp_millis();
-        let val_str = serde_json::to_string(value).unwrap_or_default();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        let value = dehydrate_state_value(value, &tx)?;
+        let val_str = encode_stored_json(value.as_ref(), format!("state entry {domain}/{key}"))?;
+        tx.execute(
             "INSERT INTO state_entries (domain, key, value, updated_at, session_id)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(domain, key) DO UPDATE SET
@@ -1843,6 +3213,7 @@ impl SqliteSessionStore {
                 session_id = ?5",
             params![domain, key, val_str, now, session_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1863,45 +3234,44 @@ impl SqliteSessionStore {
             let key: String = row.get(1)?;
             let raw: String = row.get(2)?;
             Ok((
-                domain,
-                key,
-                serde_json::from_str(&raw).unwrap_or(Value::Null),
+                domain.clone(),
+                key.clone(),
+                decode_stored_json(&raw, format!("state entry {domain}/{key}"))?,
             ))
         })?;
-        rows.collect()
+        let mut entries = rows.collect::<Result<Vec<_>, rusqlite::Error>>()?;
+        for (_, _, value) in &mut entries {
+            rehydrate_state_value(value, &conn)?;
+        }
+        Ok(entries)
     }
 
     /// Get a value from a state domain.
     pub fn get_state(&self, domain: &str, key: &str) -> Result<Option<Value>, rusqlite::Error> {
         let conn = self.conn.lock();
-        let mut stmt =
-            conn.prepare("SELECT value FROM state_entries WHERE domain = ?1 AND key = ?2")?;
-        let mut rows = stmt.query(params![domain, key])?;
-        if let Some(row) = rows.next()? {
-            let s: String = row.get(0)?;
-            let val: Value = serde_json::from_str(&s).unwrap_or(Value::Null);
-            Ok(Some(val))
-        } else {
-            Ok(None)
-        }
+        read_state_entry(&conn, domain, key)
     }
 
     /// Apply an RFC 6902 JSON patch to a state entry.
     /// Returns the updated value and the inverse patch for undo.
+    ///
+    /// The read, the patch and the write all run under the store's one
+    /// connection lock. Splitting them across `get_state` + `put_state` left a
+    /// window where a concurrent writer's change was read, overwritten with
+    /// this patch's base, and lost.
     pub fn patch_state(
         &self,
         domain: &str,
         key: &str,
         patch: &crate::session::patch::JsonPatchSet,
     ) -> Result<(Value, crate::session::patch::JsonPatchSet), String> {
-        let mut val = self
-            .get_state(domain, key)
+        let conn = self.conn.lock();
+        let mut val = read_state_entry(&conn, domain, key)
             .map_err(|e| e.to_string())?
             .unwrap_or(Value::Null);
         let inverse = crate::session::patch::apply_patch(&mut val, patch)
             .map_err(|e| format!("failed to apply patch to {domain}/{key}: {e}"))?;
-        self.put_state(domain, key, &val)
-            .map_err(|e| e.to_string())?;
+        write_state_entry(&conn, domain, key, &val).map_err(|e| e.to_string())?;
         Ok((val, inverse))
     }
 
@@ -1932,13 +3302,25 @@ impl SqliteSessionStore {
             // (insertion order) or "latest" resolves to an arbitrary row.
             "SELECT data FROM checkpoints WHERE session_id = ?1 AND name = ?2 ORDER BY created_at DESC, rowid DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query(params![session_id, name])?;
-        if let Some(row) = rows.next()? {
-            let data_str: String = row.get(0)?;
-            let val: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
-            Ok(Some(val))
-        } else {
-            Ok(None)
+        let raw = {
+            let mut rows = stmt.query(params![session_id, name])?;
+            match rows.next()? {
+                Some(row) => {
+                    let data_str: String = row.get(0)?;
+                    Some(decode_stored_json(
+                        &data_str,
+                        format!("checkpoint {session_id}/{name}"),
+                    )?)
+                }
+                None => None,
+            }
+        };
+        match raw {
+            Some(mut value) => {
+                rehydrate_state_value(&mut value, &conn)?;
+                Ok(Some(value))
+            }
+            None => Ok(None),
         }
     }
 
@@ -1952,7 +3334,9 @@ impl SqliteSessionStore {
     ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock();
         let now = chrono::Utc::now().timestamp_millis();
-        let data_str = serde_json::to_string(data).unwrap_or_default();
+        let data = dehydrate_state_value(data, &conn)?;
+        let data_str =
+            encode_stored_json(data.as_ref(), format!("checkpoint {session_id}/{name}"))?;
         conn.execute(
             "INSERT INTO checkpoints (id, session_id, name, data, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -2161,6 +3545,19 @@ impl SqliteSessionStore {
              )",
             params![session_id],
         )?;
+        // v2 `checkpointService.ts:20` retains the last `CHECKPOINT_MAX_TURNS`
+        // turns of snapshots; the row cap above bounds bytes, this bounds how
+        // far back an undo can restore files.
+        conn.execute(
+            "DELETE FROM session_file_history
+             WHERE session_id = ?1 AND turn_id NOT IN (
+                 SELECT DISTINCT turn_id FROM session_file_history
+                 WHERE session_id = ?1
+                 ORDER BY turn_id DESC
+                 LIMIT ?2
+             )",
+            params![session_id, CHECKPOINT_MAX_TURNS],
+        )?;
         Ok(())
     }
 
@@ -2302,7 +3699,26 @@ impl SqliteSessionStore {
             ));
         }
         let conn = self.conn.lock();
-        conn.execute(
+        // Dehydrate before the row is written (v2 `appendRecord` →
+        // `RecordDehydrator`): a large inline media part becomes a `blobref:`
+        // URL and its bytes live once in `wire_blobs`.
+        //
+        // Blob bytes and the event row commit together: a row insert that fails
+        // after the offload must not leave bytes in `wire_blobs` that no row
+        // references (content without a reference is unreachable, and nothing
+        // in this store reclaims it).
+        let tx = conn.unchecked_transaction()?;
+        let payload_json = if payload_json.contains("data:") {
+            let mut payload: serde_json::Value = serde_json::from_str(payload_json)?;
+            if crate::native::event_store::blobs::offload_data_uris(&mut payload, &tx)? {
+                serde_json::to_string(&payload)?
+            } else {
+                payload_json.to_string()
+            }
+        } else {
+            payload_json.to_string()
+        };
+        tx.execute(
             "INSERT INTO wire_events (id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at, protocol_version, min_protocol_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -2317,7 +3733,9 @@ impl SqliteSessionStore {
                 WIRE_MIN_READER_VERSION,
             ],
         )?;
-        Ok(conn.last_insert_rowid() as u64)
+        let seq = tx.last_insert_rowid() as u64;
+        tx.commit()?;
+        Ok(seq)
     }
 
     /// Query recorded wire events for a session strictly after `since_seq` up to `limit`.
@@ -2336,11 +3754,58 @@ impl SqliteSessionStore {
              ORDER BY seq ASC
              LIMIT ?3",
         )?;
+        let rows = stmt.query_map(
+            params![session_id, since_seq, limit as i64],
+            wire_record_from_row,
+        )?;
+        let (mut records, dropped) = collect_wire_rows(rows)?;
+        if dropped > 0 {
+            tracing::warn!(
+                code = "wire.malformed_record",
+                %session_id,
+                dropped,
+                "wire read skipped records whose payload did not parse"
+            );
+        }
+        // Expand the media the write dehydrated, so a reader receives the same
+        // content the model saw (v2 `rehydrateStates` → `loadParts`).
+        for record in &mut records {
+            crate::native::event_store::blobs::rehydrate_blob_refs(&mut record.payload, &conn)?;
+        }
+        Ok(records)
+    }
+
+    /// Paged journal rows for read-only full-text search (`session_query`).
+    ///
+    /// Same journal and ordering as [`Self::get_wire_events`], but without
+    /// expanding `blobref:` media: a search reads only the textual fields, and
+    /// rehydrating every image in a session would pull the whole media payload
+    /// into memory for a query that never shows it.
+    pub fn search_wire_events(
+        &self,
+        session_id: &str,
+        since_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<WireEventRecord>, EventStoreError> {
+        let conn = self.conn.lock();
+        refuse_newer_wire_version(&conn, session_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT seq, id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at
+             FROM wire_events
+             WHERE session_id = ?1 AND seq > ?2
+             ORDER BY seq ASC
+             LIMIT ?3",
+        )?;
+        // Unlike the replay readers, search keeps a corrupt row a hard error:
+        // its caller (`session_query`) tells the user the journal is corrupt
+        // rather than answering "no matches", which would read as a legitimate
+        // empty result.
         let rows = stmt.query_map(params![session_id, since_seq, limit as i64], |row| {
             let payload_str: String = row.get(4)?;
-            let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
+            let seq: u64 = row.get(0)?;
+            let payload = decode_stored_json(&payload_str, format!("wire event seq {seq}"))?;
             Ok(WireEventRecord {
-                seq: row.get(0)?,
+                seq,
                 id: row.get(1)?,
                 session_id: row.get(2)?,
                 event_type: row.get(3)?,
@@ -2350,8 +3815,7 @@ impl SqliteSessionStore {
                 created_at: row.get(7)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
-            .map_err(EventStoreError::from)
+        Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
 
     /// The session's interaction lifecycle events (`event.approval.*` /
@@ -2385,23 +3849,9 @@ impl SqliteSessionStore {
             params![
                 session_id, TYPES[0], TYPES[1], TYPES[2], TYPES[3], TYPES[4], TYPES[5]
             ],
-            |row| {
-                let payload_str: String = row.get(4)?;
-                let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
-                Ok(WireEventRecord {
-                    seq: row.get(0)?,
-                    id: row.get(1)?,
-                    session_id: row.get(2)?,
-                    event_type: row.get(3)?,
-                    payload,
-                    is_checkpoint: row.get(5)?,
-                    is_compaction: row.get(6)?,
-                    created_at: row.get(7)?,
-                })
-            },
+            wire_record_from_row,
         )?;
-        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
-            .map_err(EventStoreError::from)
+        collect_logged_wire_rows(rows, session_id, "interaction")
     }
 
     /// The session's prompt-lifecycle events (`prompt.submitted` /
@@ -2432,23 +3882,9 @@ impl SqliteSessionStore {
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
             params![session_id, TYPES[0], TYPES[1], TYPES[2], TYPES[3]],
-            |row| {
-                let payload_str: String = row.get(4)?;
-                let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
-                Ok(WireEventRecord {
-                    seq: row.get(0)?,
-                    id: row.get(1)?,
-                    session_id: row.get(2)?,
-                    event_type: row.get(3)?,
-                    payload,
-                    is_checkpoint: row.get(5)?,
-                    is_compaction: row.get(6)?,
-                    created_at: row.get(7)?,
-                })
-            },
+            wire_record_from_row,
         )?;
-        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
-            .map_err(EventStoreError::from)
+        collect_logged_wire_rows(rows, session_id, "prompt")
     }
 
     /// The session's `turn.prompt` records, oldest first — the wire turn id
@@ -2467,22 +3903,8 @@ impl SqliteSessionStore {
              WHERE session_id = ?1 AND event_type = 'turn.prompt'
              ORDER BY seq ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            let payload_str: String = row.get(4)?;
-            let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
-            Ok(WireEventRecord {
-                seq: row.get(0)?,
-                id: row.get(1)?,
-                session_id: row.get(2)?,
-                event_type: row.get(3)?,
-                payload,
-                is_checkpoint: row.get(5)?,
-                is_compaction: row.get(6)?,
-                created_at: row.get(7)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
-            .map_err(EventStoreError::from)
+        let rows = stmt.query_map(params![session_id], wire_record_from_row)?;
+        collect_logged_wire_rows(rows, session_id, "turn.prompt")
     }
 
     /// The session's task-relevant events (subagent lifecycle, task
@@ -2516,22 +3938,8 @@ impl SqliteSessionStore {
         let mut stmt = conn.prepare(&sql)?;
         let mut params: Vec<&dyn rusqlite::types::ToSql> = vec![&session_id];
         params.extend(TYPES.iter().map(|t| t as &dyn rusqlite::types::ToSql));
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            let payload_str: String = row.get(4)?;
-            let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
-            Ok(WireEventRecord {
-                seq: row.get(0)?,
-                id: row.get(1)?,
-                session_id: row.get(2)?,
-                event_type: row.get(3)?,
-                payload,
-                is_checkpoint: row.get(5)?,
-                is_compaction: row.get(6)?,
-                created_at: row.get(7)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
-            .map_err(EventStoreError::from)
+        let rows = stmt.query_map(params.as_slice(), wire_record_from_row)?;
+        collect_logged_wire_rows(rows, session_id, "task")
     }
 
     /// Count total wire events recorded for a session.
@@ -2570,8 +3978,12 @@ impl SqliteSessionStore {
         reason: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock();
+        // v2 `setLastTurnReason` returns early when the reason is unchanged, so
+        // a cleared-at-start turn does not rewrite the row every time. `IS NOT`
+        // (not `!=`) so the NULL → NULL case is the no-op too.
         conn.execute(
-            "UPDATE sessions SET last_turn_reason = ?2 WHERE session_id = ?1",
+            "UPDATE sessions SET last_turn_reason = ?2
+             WHERE session_id = ?1 AND last_turn_reason IS NOT ?2",
             params![session_id, reason],
         )?;
         Ok(())
@@ -2598,10 +4010,29 @@ impl SqliteSessionStore {
     ///
     /// Rows whose payload is not valid JSON are skipped and counted, not
     /// propagated: one bad payload must not make the whole session unopenable.
+    /// The same read repairs the log (v2 `readEntries` → `repairWireJournal`):
+    /// the original is preserved once beside the database and the undecodable
+    /// rows are dropped, so the next open does not hit them again.
     pub fn fold_projection(&self, session_id: &str) -> Result<Vec<Message>, EventStoreError> {
+        let backup = self.path().map(|path| wire_backup_path(path, session_id));
+        // The repair is a write to the journal. While another process holds the
+        // session, this read must not delete rows that holder may be appending
+        // to: v2's rewrite goes through the append log's write guard, which is
+        // the same rule. The projection is still built from every row that
+        // decodes; only the rewrite is deferred to the next exclusive open.
+        let occupied = crate::session::lock::SESSION_LOCKS.occupied_by_other(session_id);
         let raw_rows = {
             let conn = self.conn.lock();
-            read_fold_rows(&conn, session_id)?.0
+            if occupied.is_some() {
+                tracing::warn!(
+                    code = "wire.repair_deferred",
+                    %session_id,
+                    "session is held by another process; skipping wire repair on this read"
+                );
+                crate::native::event_store::read_fold_rows(&conn, session_id)?.0
+            } else {
+                read_fold_rows_with_repair(&conn, session_id, backup.as_deref())?.0
+            }
         };
 
         fold_wire_events(raw_rows.iter().map(|(t, p, c)| (t.as_str(), p, *c)))
@@ -2632,6 +4063,14 @@ impl SqliteSessionStore {
 
     /// Undo events backward to the most recent checkpoint. Refuses across compaction boundaries.
     pub fn undo_to_last_checkpoint(&self, session_id: &str) -> Result<usize, EventStoreError> {
+        // Undo deletes journal rows, so it is a write: the same occupancy
+        // refusal [`Self::append_wire_event`] applies (v2's write guard covers
+        // the rewrite/undo path too, not only appends).
+        if let Some(holder) = crate::session::lock::SESSION_LOCKS.occupied_by_other(session_id) {
+            return Err(EventStoreError::SessionOccupied(
+                crate::session::lock::session_occupied_message(Some(&holder)),
+            ));
+        }
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
 
@@ -2682,7 +4121,9 @@ impl EventStore for SqliteSessionStore {
 
 /// Deterministic title derivation from a conversation's user prompts (v2
 /// `title/generate` source=first_turn|user_prompts): the first non-empty
-/// user message, whitespace-normalized, truncated to 60 chars. The `digest`
+/// user message, run through the same secret-redaction / whitespace pipeline
+/// as v2's `promptMetadataTextFromText`, then capped at 200 characters
+/// (`titleFromPromptMetadataText`, `promptMetadataText.ts:4-9`). The `digest`
 /// source is the managed `chat_title` call and lives in
 /// [`crate::session::title::generate_session_title`]; it is rejected here so a
 /// caller reaching this function directly cannot silently get the
@@ -2693,6 +4134,8 @@ pub fn derive_session_title(
     history: &[LLMMessage],
     source: Option<&str>,
 ) -> Result<Option<String>, String> {
+    /// v2 `MAX_TITLE_LENGTH` (`titleFromPromptMetadataText`).
+    const MAX_TITLE_LENGTH: usize = 200;
     match source.unwrap_or("user_prompts") {
         // Digest needs the managed `chat_title` call, which is async and needs
         // the session's LLM — neither is available here. Route the caller to
@@ -2717,14 +4160,10 @@ pub fn derive_session_title(
     let Some(prompt) = prompt else {
         return Ok(None);
     };
-    let title: String = prompt
-        .chars()
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .collect();
-    let title = title.trim();
     // Character-wise: `String::truncate` counts bytes and panics when the cut
     // lands inside a code point, which a CJK prompt reaches immediately.
-    Ok(Some(title.chars().take(60).collect()))
+    Ok(crate::session::title::prompt_metadata_text(prompt)
+        .map(|text| text.chars().take(MAX_TITLE_LENGTH).collect()))
 }
 
 #[cfg(test)]

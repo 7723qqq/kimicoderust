@@ -1,34 +1,18 @@
-//! Native execution of the goal write tools (UpdateGoal / SetGoalBudget)
-//! over the state bridge protocol (design doc milestone 7, batch 7).
-//!
-//! The host stays the goal authority: it applies the lifecycle and budget
-//! semantics and returns the post-write goal snapshot in the response value
-//! (`{goal: <snapshot> | null}`, the same shape as the goal read domain).
-//! This module validates the tool arguments with the ported goal pure
-//! functions and renders the v2-aligned output from the host's snapshot.
-
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{arg_error, err_result, ok_result};
 use crate::callbacks::HostCallbacks;
-use crate::goal::{BudgetUnit, format_budget, format_elapsed, normalize_budget_input};
-use crate::rpc::types::StateWriteRequest;
+use crate::goal::{
+    BudgetUnit, budget_limits_from_input, format_budget, format_elapsed, normalize_budget_input,
+};
+use crate::rpc::types::{StateReadRequest, StateWriteRequest};
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// Failure message when the connected host does not implement the state
-/// bridge. The model must not retry the tool — the host cannot update goal
-/// state for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot update goal state.";
 
-/// v2 `GOAL_MAIN_AGENT_ONLY` (`agent/tools/mainAgentOnly.ts:7`), verbatim.
 pub const GOAL_MAIN_AGENT_ONLY: &str = "Goal tools are only supported by the main agent.";
 
-/// v2 `mainAgentOnlyExecution` (`mainAgentOnly.ts:9-15`): every goal tool
-/// refuses a non-main caller before it does anything else. The goal is
-/// session-scoped state, so a subagent driving it would mutate the parent's
-/// goal — the same shape as `TOWER_MAIN_AGENT_ONLY`, and checked the same way
-/// (literal `"main"`, like the tower tools).
 pub fn main_agent_only_refusal(caller_agent_id: &str) -> Option<ExecutableToolResult> {
     if caller_agent_id == "main" {
         return None;
@@ -36,19 +20,17 @@ pub fn main_agent_only_refusal(caller_agent_id: &str) -> Option<ExecutableToolRe
     Some(err_result(GOAL_MAIN_AGENT_ONLY.to_string()))
 }
 
-/// Wire shape of the goal domain (`GoalToolResult`): the host returns the
-/// full `GoalSnapshot` (including `goalId`) or `null` when no goal exists.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalStateWire {
     goal: Option<GoalSnapshotWire>,
 }
 
-/// The goal snapshot fields the v2 write outputs render; unknown fields are
-/// ignored by serde.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalSnapshotWire {
+    #[serde(default)]
+    status: Option<String>,
     turns_used: u64,
     tokens_used: u64,
     wall_clock_ms: u64,
@@ -60,12 +42,15 @@ struct GoalSnapshotWire {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalBudgetReportWire {
+    #[serde(default)]
+    token_budget: Option<u64>,
+    #[serde(default)]
+    turn_budget: Option<u64>,
+    #[serde(default)]
+    wall_clock_budget_ms: Option<u64>,
     over_budget: bool,
 }
 
-/// Execute the UpdateGoal tool natively: validate the status, `state_write`
-/// an action-shaped update, and render the v2 output from the host's
-/// post-write goal snapshot.
 pub async fn execute_update_goal(
     callbacks: &dyn HostCallbacks,
     caller_agent_id: &str,
@@ -102,9 +87,6 @@ pub async fn execute_update_goal(
     }
 }
 
-/// Render the host's post-write goal state as the v2 `UpdateGoal` output: a
-/// `null` goal means the operation had nothing to act on (v2
-/// `missingGoalOutput`), a present goal means it succeeded.
 fn render_update_goal(value: &Value, status: &str) -> ExecutableToolResult {
     let wire: GoalStateWire = match serde_json::from_value(value.clone()) {
         Ok(wire) => wire,
@@ -126,8 +108,7 @@ fn render_update_goal(value: &Value, status: &str) -> ExecutableToolResult {
     };
     match status {
         "active" => ok_result("Goal resumed.".into()),
-        // v2 updateGoalTool.ts:63-75 — markComplete/markBlocked success sets
-        // stopTurn: true so the engine ends the turn as completed.
+
         "complete" => ExecutableToolResult {
             delivery: None,
             stop_turn: true,
@@ -141,10 +122,6 @@ fn render_update_goal(value: &Value, status: &str) -> ExecutableToolResult {
     }
 }
 
-/// Execute the SetGoalBudget tool natively: normalize and validate the
-/// budget input with the ported goal pure functions, `state_write` an
-/// action-shaped set_budget, and render the v2 output from the host's
-/// post-write goal snapshot.
 pub async fn execute_set_goal_budget(
     callbacks: &dyn HostCallbacks,
     caller_agent_id: &str,
@@ -168,9 +145,7 @@ pub async fn execute_set_goal_budget(
         return err_result("Invalid SetGoalBudget arguments: `value` must be positive.".into());
     }
     let normalized = normalize_budget_input(value, unit);
-    // v2 `budgetLimitsFromInput`: a time budget below the 1s floor (or not
-    // finite) is not reasonable and the tool refuses before writing. There is
-    // no upper bound.
+
     let Some(_) = crate::goal::budget_limits_from_input(normalized, unit) else {
         return err_result(format!(
             "Goal budget not set: {} is not a reasonable goal budget.",
@@ -203,7 +178,6 @@ pub async fn execute_set_goal_budget(
     }
 }
 
-/// Render the host's post-write goal state as the v2 `SetGoalBudget` output.
 fn render_set_goal_budget(
     value: &Value,
     normalized: f64,
@@ -222,8 +196,6 @@ fn render_set_goal_budget(
     };
     let set_message = format!("Goal budget set: {}.", format_budget(normalized, unit));
     if goal.budget.over_budget {
-        // v2 setGoalBudgetTool.ts:65-73 — stopTurn only when the snapshot
-        // reports overBudget after the write.
         ExecutableToolResult {
             delivery: None,
             stop_turn: true,
@@ -236,7 +208,90 @@ fn render_set_goal_budget(
     }
 }
 
-/// v2 `buildGoalCompletionSummaryPrompt`.
+pub async fn predicted_stop_batch(
+    callbacks: &dyn HostCallbacks,
+    caller_agent_id: &str,
+    tool_name: &str,
+    args: &Value,
+) -> bool {
+    if caller_agent_id != "main" {
+        return false;
+    }
+    let update_status = match tool_name {
+        "UpdateGoal" => {
+            let Some(status) = args.get("status").and_then(|value| value.as_str()) else {
+                return false;
+            };
+            if !matches!(status, "active" | "complete" | "blocked") {
+                return false;
+            }
+            Some(status)
+        }
+        "SetGoalBudget" => None,
+        _ => return false,
+    };
+    let new_limits = if update_status.is_none() {
+        let Some(value) = args.get("value").and_then(|value| value.as_f64()) else {
+            return false;
+        };
+        let Some(unit) = args
+            .get("unit")
+            .and_then(|unit| unit.as_str())
+            .and_then(BudgetUnit::parse_unit)
+        else {
+            return false;
+        };
+        if value <= 0.0 {
+            return false;
+        }
+        match budget_limits_from_input(normalize_budget_input(value, unit), unit) {
+            Some(limits) => Some(limits),
+            None => return false,
+        }
+    } else {
+        None
+    };
+
+    let request = StateReadRequest {
+        domain: "goal".into(),
+        key: "goal".into(),
+        turn_id: args
+            .get("turn_id")
+            .and_then(|turn| turn.as_str())
+            .unwrap_or("")
+            .to_string(),
+        tool_call_id: args
+            .get("tool_call_id")
+            .and_then(|call| call.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    let Ok(response) = callbacks.state_read(request).await else {
+        return false;
+    };
+    let Ok(wire) = serde_json::from_value::<GoalStateWire>(response.value) else {
+        return false;
+    };
+    let Some(goal) = wire.goal else {
+        return false;
+    };
+
+    if let Some(status) = update_status {
+        return status != "active" && goal.status.as_deref() == Some("active");
+    }
+    let Some(limits) = new_limits else {
+        return false;
+    };
+    let turn_budget = limits.turn_budget.or(goal.budget.turn_budget);
+    let token_budget = limits.token_budget.or(goal.budget.token_budget);
+    let wall_clock_budget = limits
+        .wall_clock_budget_ms
+        .or(goal.budget.wall_clock_budget_ms);
+    turn_budget.is_some_and(|budget| goal.turns_used >= budget)
+        || token_budget.is_some_and(|budget| goal.tokens_used >= budget)
+        || wall_clock_budget.is_some_and(|budget| goal.wall_clock_ms >= budget)
+}
+
 fn goal_completion_summary_prompt(goal: &GoalSnapshotWire) -> String {
     let head = match goal.terminal_reason.as_deref() {
         Some(reason) => format!("Goal completed successfully: {reason}."),
@@ -248,7 +303,6 @@ fn goal_completion_summary_prompt(goal: &GoalSnapshotWire) -> String {
     )
 }
 
-/// v2 `buildGoalBlockedReasonPrompt`.
 fn goal_blocked_reason_prompt(goal: &GoalSnapshotWire) -> String {
     format!(
         "Goal blocked.\n{}\n\nWrite a concise final message for the user. State that the goal is blocked, explain the concrete blocker, and say what input or change is needed before work can continue. Do not call more goal tools.",
@@ -256,7 +310,6 @@ fn goal_blocked_reason_prompt(goal: &GoalSnapshotWire) -> String {
     )
 }
 
-/// v2 `Worked N turns over <elapsed>, using <tokens> tokens.`
 fn goal_stats(goal: &GoalSnapshotWire) -> String {
     let turns = if goal.turns_used == 1 {
         "1 turn".to_string()
@@ -270,7 +323,6 @@ fn goal_stats(goal: &GoalSnapshotWire) -> String {
     )
 }
 
-/// v2 `formatTokens`: `999` → `999`, `1234` → `1.2k`, `1234567` → `1.2M`.
 fn format_tokens(tokens: u64) -> String {
     if tokens < 1000 {
         tokens.to_string()
@@ -281,10 +333,6 @@ fn format_tokens(tokens: u64) -> String {
     }
 }
 
-/// Map a state bridge error to a tool result: an unwired host (message
-/// carries the `does not support state bridge` phrase) gets the dedicated
-/// failure message; everything else is passed through verbatim — the engine
-/// never retries a failed state write.
 fn map_state_error(error: String) -> ExecutableToolResult {
     if error.contains("does not support state bridge") {
         err_result(STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE.into())
@@ -293,9 +341,6 @@ fn map_state_error(error: String) -> ExecutableToolResult {
     }
 }
 
-/// Engine tool definition for UpdateGoal, so the model can discover and call
-/// it (used by the standalone REPL and native tool listing). The schema
-/// mirrors v2 `UpdateGoalToolInputSchema` (strict).
 pub fn update_goal_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "UpdateGoal".into(),
@@ -322,9 +367,6 @@ Most active goal turns should not call this tool. If you complete one useful sli
     }
 }
 
-/// Engine tool definition for SetGoalBudget, so the model can discover and
-/// call it (used by the standalone REPL and native tool listing). The schema
-/// mirrors v2 `SetGoalBudgetToolInputSchema` (strict).
 pub fn set_goal_budget_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "SetGoalBudget".into(),
@@ -380,8 +422,6 @@ mod tests {
     use crate::rpc::types::{BoxFuture, PermissionDecision, StateReadResponse, StateWriteResponse};
     use std::sync::Arc;
 
-    /// Scripted callbacks: records the received state requests and answers
-    /// with canned responses.
     struct ScriptedCallbacks {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,
@@ -748,8 +788,6 @@ mod tests {
         assert_eq!(result.content, "Goal budget set: 30 seconds.");
     }
 
-    /// Upstream removed the former 24h ceiling on wall-clock budgets, so any
-    /// finite duration at or above the 1s floor must reach the host.
     #[tokio::test]
     async fn test_set_budget_accepts_durations_above_the_former_24h_ceiling() {
         for (value, unit, expected) in [
@@ -909,12 +947,8 @@ mod tests {
         );
     }
 
-    // ── main-agent-only gate (v2 `agent/tools/mainAgentOnly.ts`) ──────────
-
     #[test]
     fn test_main_agent_only_refusal_matches_v2() {
-        // v2 `mainAgentOnlyExecution` returns `undefined` for the main agent
-        // and an `isError` execution carrying `GOAL_MAIN_AGENT_ONLY` otherwise.
         assert!(main_agent_only_refusal("main").is_none());
         for caller in ["subagent-1", "agent-7", "main2", "", "MAIN"] {
             let refusal =
@@ -930,10 +964,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_every_goal_tool_refuses_a_subagent_before_touching_the_host() {
-        // v2 puts the check first in each tool's `resolveExecution`, so a
-        // subagent never reaches the goal service. These callbacks answer
-        // `Err`; if the gate let anything through, the assertions would see a
-        // state-bridge error instead of the gate's message.
         let (callbacks, _, _) = scripted(Err("not used".into()), Err("not used".into()));
         for caller in ["subagent-1", "agent-7"] {
             let create = crate::tools::create_goal::execute_create_goal(
@@ -976,9 +1006,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_the_main_agent_still_reaches_the_goal_tools() {
-        // Control for the test above: the gate is the only thing refusing, so
-        // "main" must get past it and reach the host. A gate that refused
-        // everyone would otherwise pass.
         let (callbacks, _, _) =
             scripted(Err("not used".into()), write_ok(goal_wire("active", false)));
         let update = execute_update_goal(
@@ -989,5 +1016,104 @@ mod tests {
         .await;
         assert!(!update.is_error);
         assert_ne!(update.content, GOAL_MAIN_AGENT_ONLY);
+    }
+
+    #[tokio::test]
+    async fn test_stop_batch_prediction_matches_v2s_resolve_execution() {
+        let read_active = StateReadResponse {
+            value: goal_wire("active", false),
+        };
+        let (callbacks, _, _) = scripted(Ok(read_active), Err("not used".into()));
+        for status in ["complete", "blocked"] {
+            assert!(
+                predicted_stop_batch(
+                    &callbacks,
+                    "main",
+                    "UpdateGoal",
+                    &serde_json::json!({ "status": status }),
+                )
+                .await,
+                "UpdateGoal {status} must stop the batch"
+            );
+        }
+        for status in ["active", "bogus"] {
+            assert!(
+                !predicted_stop_batch(
+                    &callbacks,
+                    "main",
+                    "UpdateGoal",
+                    &serde_json::json!({ "status": status }),
+                )
+                .await,
+                "UpdateGoal {status} must not stop the batch"
+            );
+        }
+
+        assert!(
+            !predicted_stop_batch(
+                &callbacks,
+                "subagent-1",
+                "UpdateGoal",
+                &serde_json::json!({ "status": "complete" }),
+            )
+            .await
+        );
+        assert!(
+            !predicted_stop_batch(
+                &callbacks,
+                "main",
+                "Read",
+                &serde_json::json!({ "path": "x" }),
+            )
+            .await
+        );
+
+        for (value, unit, expected) in [
+            (3, "turns", true),
+            (4, "turns", false),
+            (1234, "tokens", true),
+            (1235, "tokens", false),
+            (185, "seconds", true),
+            (186, "seconds", false),
+        ] {
+            assert_eq!(
+                predicted_stop_batch(
+                    &callbacks,
+                    "main",
+                    "SetGoalBudget",
+                    &serde_json::json!({ "value": value, "unit": unit }),
+                )
+                .await,
+                expected,
+                "SetGoalBudget {value} {unit}"
+            );
+        }
+
+        for args in [
+            serde_json::json!({ "value": 0, "unit": "turns" }),
+            serde_json::json!({ "value": 1, "unit": "fortnights" }),
+            serde_json::json!({ "value": 0, "unit": "seconds" }),
+        ] {
+            assert!(
+                !predicted_stop_batch(&callbacks, "main", "SetGoalBudget", &args).await,
+                "invalid budget {args} must not stop the batch"
+            );
+        }
+
+        let (empty, _, _) = scripted(
+            Ok(StateReadResponse {
+                value: serde_json::json!({ "goal": null }),
+            }),
+            Err("not used".into()),
+        );
+        assert!(
+            !predicted_stop_batch(
+                &empty,
+                "main",
+                "UpdateGoal",
+                &serde_json::json!({ "status": "complete" }),
+            )
+            .await
+        );
     }
 }

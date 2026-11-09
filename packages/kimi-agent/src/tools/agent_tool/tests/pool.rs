@@ -2,8 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-// ── [secondary_model] pool ─────────────────────────────────────────────
-
 #[tokio::test]
 async fn agent_with_a_pool_alias_runs_on_the_pool_llm() {
     let recorder = Arc::new(EventRecorder::new());
@@ -33,9 +31,6 @@ async fn agent_with_a_pool_alias_runs_on_the_pool_llm() {
     assert_eq!(session_llm.call_count(), 0, "the session model stayed idle");
 }
 
-/// v2 #4418: `primary` is no longer an implicit choice — on the Agent
-/// path it is an invalid alias and the available list names pool entries
-/// only.
 #[tokio::test]
 async fn agent_primary_is_an_invalid_alias_now() {
     let recorder = Arc::new(EventRecorder::new());
@@ -103,8 +98,7 @@ async fn agent_invalid_pool_alias_lists_the_choices() {
         "{}",
         result.content
     );
-    // v2 #4418: the available list names pool entries only — no implicit
-    // `primary` choice.
+
     assert!(
         result.content.contains("Available models: strong."),
         "{}",
@@ -113,9 +107,6 @@ async fn agent_invalid_pool_alias_lists_the_choices() {
     assert_eq!(session_llm.call_count(), 0, "no turn ran");
 }
 
-/// v2 #4418: a single-entry pool pins every spawn — an omitted `model`
-/// binds the default alias (the tool schema hides the parameter, but the
-/// engine still resolves an explicit one).
 #[tokio::test]
 async fn agent_single_entry_pool_binds_the_default_when_model_is_omitted() {
     let recorder = Arc::new(EventRecorder::new());
@@ -181,8 +172,6 @@ async fn agent_without_a_pool_rejects_an_explicit_model() {
     assert_eq!(session_llm.call_count(), 0, "no turn ran");
 }
 
-/// v2 #4418's no-pool arm: `primary` is rejected like any other value —
-/// omitting `model` is the only way to inherit.
 #[tokio::test]
 async fn agent_without_a_pool_rejects_primary_too() {
     let recorder = Arc::new(EventRecorder::new());
@@ -216,16 +205,12 @@ async fn agent_without_a_pool_rejects_primary_too() {
     assert_eq!(session_llm.call_count(), 0, "no turn ran");
 }
 
-/// v2 `planSpawn`: a profile outside the caller's allowlist is refused
-/// with the guidance text; a discovered profile joins the extras and
-/// spawns; the caller profile's own declaration narrows the set.
 #[tokio::test]
 async fn the_spawn_gate_enforces_the_callers_allowlist() {
     let recorder = Arc::new(EventRecorder::new());
     let llm = Arc::new(RecordingPromptLlm::new(vec!["gate ok".into()]));
     let manager = manager_with_callbacks(llm.clone(), recorder.clone()).await;
 
-    // The engine-builtin `research` is not in the default delegation set.
     let refused = execute_agent(
         &manager,
         None,
@@ -243,7 +228,6 @@ async fn the_spawn_gate_enforces_the_callers_allowlist() {
         "Subagent type \"research\" is not allowed for this agent. Allowed subagent types: coder, explore, plan."
     );
 
-    // Recursive delegation is refused by the same list.
     let refused = execute_agent(
         &manager,
         None,
@@ -261,7 +245,6 @@ async fn the_spawn_gate_enforces_the_callers_allowlist() {
         refused.content
     );
 
-    // A discovered profile joins the extras and spawns.
     manager
         .register_discovered_definition(crate::subagent::types::SubagentDefinition {
             name: "reviewer".into(),
@@ -289,9 +272,6 @@ async fn the_spawn_gate_enforces_the_callers_allowlist() {
     .expect("a discovered profile spawns natively");
     assert!(!spawned.is_error, "{}", spawned.content);
 
-    // The caller profile's own declaration narrows the set: a main
-    // profile declaring only `coder` loses `explore` (discovered extras
-    // still merge, the way v2's rootDelegationExtras works).
     manager
         .register_profile_snapshot(&[crate::rpc::types::SubagentProfileWire {
             name: "agent".into(),

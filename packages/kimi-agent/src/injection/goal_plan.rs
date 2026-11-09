@@ -24,6 +24,33 @@ use crate::goal::{
     format_budgets, format_elapsed, is_nearing_budget, reason_suffix,
 };
 use crate::injection::state::DomainValueSource;
+use crate::primitives::read::ReadOutcome;
+use crate::turn_loop::types::LLMMessage;
+
+/// The first sentence every active plan-mode reminder starts with. The exit
+/// reminder uses a different one, which is what lets a later turn reconstruct
+/// whether plan mode was last announced as active (v2's agent-level
+/// `wasActive`).
+const PLAN_MODE_ACTIVE_PREFIX: &str = "Plan mode is active.";
+
+/// The last plan-mode reminder in the conversation, if any, with the
+/// `<system-reminder>` envelope removed so callers can match on the reminder's
+/// own first sentence. Injection messages carry their variant in `origin`, so
+/// this never matches a user message that merely quotes the reminder.
+fn last_plan_mode_injection(messages: &[LLMMessage]) -> Option<&str> {
+    messages.iter().rev().find_map(|message| {
+        let variant = message.origin.as_ref()?.get("variant")?.as_str()?;
+        if variant != "plan_mode" || !crate::injection::is_system_reminder(&message.content) {
+            return None;
+        }
+        Some(
+            message
+                .content
+                .trim_start_matches(crate::injection::SYSTEM_REMINDER_PREFIX)
+                .trim_end_matches(crate::injection::SYSTEM_REMINDER_SUFFIX),
+        )
+    })
+}
 
 /// WaitFor guidance appended to the active-goal reminder when the runtime
 /// supports waiting inside a turn (v2 `GOAL_WAIT_FOR_GUIDANCE`).
@@ -175,6 +202,106 @@ fn render_template(template: &str, pairs: &[(&str, &str)]) -> String {
     out
 }
 
+/// The threshold between goal tail-contract re-anchors (v2
+/// `GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS`, `features/goal/injection/goalInjection.ts`).
+pub const GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS: u64 = 20_000;
+
+/// v2 `TAIL_CONTRACT_MAX_CHARS`: the tail contract is capped so a long
+/// objective cannot crowd the context it is meant to anchor.
+pub const TAIL_CONTRACT_MAX_CHARS: usize = 1200;
+
+/// v2 `shouldReanchorTail`: a non-positive threshold never re-anchors; the
+/// anchor is due once the estimate has grown by the threshold since the last
+/// injection.
+pub fn should_reanchor_tail(
+    estimated_tokens: u64,
+    threshold: u64,
+    last_anchor_tokens: Option<u64>,
+) -> bool {
+    if threshold == 0 {
+        return false;
+    }
+    estimated_tokens.saturating_sub(last_anchor_tokens.unwrap_or(0)) >= threshold
+}
+
+/// v2 `renderTailContract`: `Objective:` plus optional `Hard constraints:`,
+/// trimmed and capped at [`TAIL_CONTRACT_MAX_CHARS`]. The objective is
+/// deliberately **not** escaped here — v2 renders the raw text in the tail
+/// anchor, unlike the reminder's `<untrusted_objective>` block.
+pub fn render_tail_contract(goal: &str, constraints: &[String]) -> String {
+    let mut lines = vec![format!("Objective: {}", goal.trim())];
+    if !constraints.is_empty() {
+        lines.push("Hard constraints:".to_string());
+        for constraint in constraints {
+            lines.push(format!("- {}", constraint.trim()));
+        }
+    }
+    let text = lines.join("\n").trim().to_string();
+    if text.chars().count() > TAIL_CONTRACT_MAX_CHARS {
+        text.chars()
+            .take(TAIL_CONTRACT_MAX_CHARS)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    } else {
+        text
+    }
+}
+
+/// v2 `planTailContract`: render only when the anchor is due.
+pub fn plan_tail_contract(
+    estimated_tokens: u64,
+    threshold: u64,
+    last_anchor_tokens: Option<u64>,
+    goal: &str,
+    constraints: &[String],
+) -> Option<String> {
+    should_reanchor_tail(estimated_tokens, threshold, last_anchor_tokens)
+        .then(|| render_tail_contract(goal, constraints))
+}
+
+/// Parse the durable goal domain value into a snapshot (the nested
+/// `{ "goal": … }` wire shape, or a bare `GoalState`).
+fn goal_snapshot_of(goal_value: &Value) -> Option<GoalSnapshot> {
+    let nested = goal_value.get("goal");
+    let value = nested.unwrap_or(goal_value);
+    if value.is_null() {
+        return None;
+    }
+    if nested.is_some() {
+        serde_json::from_value::<GoalSnapshot>(value.clone())
+            .ok()
+            .or_else(|| {
+                serde_json::from_value::<GoalState>(value.clone())
+                    .ok()
+                    .map(|state| state.snapshot_now())
+            })
+    } else {
+        serde_json::from_value::<GoalState>(value.clone())
+            .ok()
+            .map(|state| state.snapshot_now())
+    }
+}
+
+/// The estimate recorded by the newest `goal_tail` injection, if the block is
+/// still in history: the size of the context right before it was appended
+/// (v2 tracks the same figure in `GoalInjection.anchorTokens`). Reconstructing
+/// it from the conversation keeps the re-anchor cadence across turns without
+/// engine-held agent state.
+fn last_goal_tail_anchor_tokens(history: &[LLMMessage]) -> Option<u64> {
+    let index = history.iter().rposition(|message| {
+        message
+            .origin
+            .as_ref()
+            .and_then(|origin| origin.get("variant"))
+            .and_then(Value::as_str)
+            == Some("goal_tail")
+    })?;
+    Some(crate::session::token_counting::estimate_messages(
+        &history[..index],
+    ))
+}
+
 /// Render the goal injection text from the durable goal domain value,
 /// mirroring v2 `GoalInjection.reminder`: active goals get the full
 /// reminder, blocked/paused goals get their status note, and every other
@@ -192,20 +319,14 @@ pub fn goal_injection_text(goal_value: &Value) -> String {
     if value.is_null() {
         return String::new();
     }
-    let snapshot = if nested.is_some() {
-        serde_json::from_value::<GoalSnapshot>(value.clone())
-            .ok()
-            .or_else(|| {
-                serde_json::from_value::<GoalState>(value.clone())
-                    .ok()
-                    .map(|state| state.snapshot_now())
-            })
-    } else {
-        serde_json::from_value::<GoalState>(value.clone())
-            .ok()
-            .map(|state| state.snapshot_now())
-    };
-    let Some(snapshot) = snapshot else {
+    let Some(snapshot) = goal_snapshot_of(goal_value) else {
+        // A non-null goal that parses as neither shape is a read/shape
+        // failure, not "there is no goal". Saying nothing is right (the goal
+        // may well exist), but the failure must be reported somewhere.
+        tracing::warn!(
+            goal = %value,
+            "goal state has an unexpected shape; skipping the goal injection"
+        );
         return String::new();
     };
     match snapshot.status {
@@ -424,10 +545,51 @@ pub fn register_goal_plan_injections<S>(
             if !ctx.is_new_turn {
                 return None;
             }
-            goal_store
-                .read_domain("goal")
-                .map(|value| goal_injection_text(&value))
-                .filter(|text| !text.trim().is_empty())
+            match goal_store.read_domain_state("goal") {
+                ReadOutcome::Found(value) => {
+                    let text = goal_injection_text(&value);
+                    (!text.trim().is_empty()).then_some(text)
+                }
+                ReadOutcome::Absent => None,
+                // Saying nothing is better than saying "no goal": the goal may
+                // exist and simply be unreadable this turn.
+                ReadOutcome::Unreadable(cause) => {
+                    tracing::warn!(%cause, "goal state is unreadable; skipping the goal injection");
+                    None
+                }
+            }
+        }),
+    );
+
+    // v2 `GoalInjection.tailContract` (`goal_tail` variant): while a goal is
+    // active, re-anchor the objective and completion criterion in the tail of
+    // the context every `GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS` of growth. New
+    // turns only; the previous anchor's size is reconstructed from the
+    // conversation, so the cadence survives across turns without agent state.
+    let tail_store = Arc::clone(&state_store);
+    registry.register(
+        "goal_tail",
+        Box::new(move |ctx: &crate::injection::InjectionContext| {
+            if !ctx.is_new_turn {
+                return None;
+            }
+            let ReadOutcome::Found(value) = tail_store.read_domain_state("goal") else {
+                return None;
+            };
+            let snapshot = goal_snapshot_of(&value)?;
+            if snapshot.status != GoalStatus::Active {
+                return None;
+            }
+            let estimated = crate::session::token_counting::estimate_messages(ctx.history);
+            let last_anchor = last_goal_tail_anchor_tokens(ctx.history);
+            let constraints: Vec<String> = snapshot.completion_criterion.iter().cloned().collect();
+            plan_tail_contract(
+                estimated,
+                GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS,
+                last_anchor,
+                &snapshot.objective,
+                &constraints,
+            )
         }),
     );
 
@@ -435,21 +597,56 @@ pub fn register_goal_plan_injections<S>(
         was_active: bool,
         injected_at: Option<usize>,
         turns_since: usize,
+        /// Whether this turn's provider has reconstructed `was_active` from
+        /// the conversation yet.
+        seeded: bool,
+        /// A compaction splice dropped the reminder; the next active pass must
+        /// render the full variant even if the dedup window would be silent.
+        rearm_full: bool,
     }
     let tracker = Arc::new(std::sync::Mutex::new(PlanCadence {
         was_active: false,
         injected_at: None,
         turns_since: 0,
+        seeded: false,
+        rearm_full: false,
     }));
     let plan_store = Arc::clone(&state_store);
     registry.register(
         "plan_mode",
-        Box::new(move |_ctx: &crate::injection::InjectionContext| {
+        Box::new(move |ctx: &crate::injection::InjectionContext| {
             let mut state = tracker.lock().unwrap();
-            let plan_val = plan_store.read_domain("plan");
+            // v2 keeps `wasActive` on the agent, so a plan mode the user
+            // turned off between turns still earns its exit reminder. This
+            // tracker is rebuilt every turn; reconstructing it from the last
+            // plan-mode injection in the conversation gives the same answer
+            // without an engine-held agent object. Only the first pass of the
+            // turn does this — later passes rely on the state they advanced.
+            if !state.seeded {
+                state.seeded = true;
+                state.was_active = last_plan_mode_injection(ctx.history)
+                    .is_some_and(|text| text.starts_with(PLAN_MODE_ACTIVE_PREFIX));
+                state.injected_at = None;
+                state.turns_since = 0;
+            }
+            if ctx.rearmed {
+                // v2's `lastInjectedAt` comes from the conversation; a splice
+                // that drops the reminder makes it null, which selects the
+                // full variant again on the next active pass.
+                state.rearm_full = true;
+            }
+            let plan_val = match plan_store.read_domain_state("plan") {
+                ReadOutcome::Found(value) => Some(value),
+                ReadOutcome::Absent => None,
+                ReadOutcome::Unreadable(cause) => {
+                    tracing::warn!(%cause, "plan state is unreadable; skipping the plan-mode injection");
+                    return None;
+                }
+            };
             let is_active = plan_val.as_ref().map(plan_is_active).unwrap_or(false);
 
             let text = if !is_active {
+                state.rearm_full = false;
                 if state.was_active {
                     state.was_active = false;
                     state.injected_at = None;
@@ -460,8 +657,12 @@ pub fn register_goal_plan_injections<S>(
                 }
             } else if let Some(val) = plan_val {
                 if !state.was_active {
+                    state.rearm_full = false;
                     state.was_active = true;
                     state.injected_at = Some(0);
+                    state.turns_since = 0;
+                    plan_mode_injection_text(&val)
+                } else if std::mem::take(&mut state.rearm_full) {
                     state.turns_since = 0;
                     plan_mode_injection_text(&val)
                 } else {
@@ -817,11 +1018,17 @@ Plan file: PLAN.md"#
     }
 
     impl DomainValueSource for FakeStore {
-        fn read_domain(&self, domain: &str) -> Option<Value> {
+        fn read_domain_state(&self, domain: &str) -> ReadOutcome<Value> {
             match domain {
-                "goal" => self.goal.clone(),
-                "plan" => self.plan.clone(),
-                _ => None,
+                "goal" => self
+                    .goal
+                    .clone()
+                    .map_or(ReadOutcome::Absent, ReadOutcome::Found),
+                "plan" => self
+                    .plan
+                    .clone()
+                    .map_or(ReadOutcome::Absent, ReadOutcome::Found),
+                _ => ReadOutcome::Absent,
             }
         }
     }
@@ -836,7 +1043,7 @@ Plan file: PLAN.md"#
             plan: Some(plan_val.clone()),
         };
         register_goal_plan_injections(&mut registry, Arc::new(store));
-        assert_eq!(registry.names(), vec!["goal", "plan_mode"]);
+        assert_eq!(registry.names(), vec!["goal", "goal_tail", "plan_mode"]);
 
         let texts = registry.build_injections(true);
         assert_eq!(
@@ -846,6 +1053,39 @@ Plan file: PLAN.md"#
                 crate::injection::wrap_system_reminder(&plan_mode_injection_text(&plan_val)),
             ]
         );
+    }
+
+    #[test]
+    fn plan_mode_exit_survives_a_turn_boundary() {
+        // The previous turn announced plan mode as active; this turn it is
+        // off. v2 keeps `wasActive` on the agent, so the exit reminder still
+        // fires — the tracker here has to rebuild that bit from the
+        // conversation instead of resetting to "never was active".
+        let mut registry = crate::injection::InjectionRegistry::new();
+        let store = FakeStore {
+            goal: None,
+            plan: None,
+        };
+        register_goal_plan_injections(&mut registry, Arc::new(store));
+        let previous = LLMMessage {
+            role: "user".into(),
+            content: crate::injection::wrap_system_reminder(&plan_mode_full_text(
+                &json!({ "path": "PLAN.md" }),
+            )),
+            origin: Some(json!({ "kind": "injection", "variant": "plan_mode" })),
+            ..Default::default()
+        };
+        let texts = registry.build_injections_with_history_named(
+            true,
+            &crate::injection::StepAccess::default(),
+            &[previous.clone()],
+        );
+        assert!(
+            last_plan_mode_injection(&[previous]).is_some(),
+            "the history scan must recognise the injected plan reminder"
+        );
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].1.contains("Plan mode is no longer active"));
     }
 
     #[test]
@@ -867,11 +1107,14 @@ Plan file: PLAN.md"#
             plan: std::sync::Mutex<Option<Value>>,
         }
         impl DomainValueSource for DynamicStore {
-            fn read_domain(&self, domain: &str) -> Option<Value> {
+            fn read_domain_state(&self, domain: &str) -> ReadOutcome<Value> {
                 if domain == "plan" {
-                    self.plan.lock().unwrap().clone()
+                    match self.plan.lock().unwrap().clone() {
+                        Some(value) => ReadOutcome::Found(value),
+                        None => ReadOutcome::Absent,
+                    }
                 } else {
-                    None
+                    ReadOutcome::Absent
                 }
             }
         }
@@ -909,5 +1152,131 @@ Plan file: PLAN.md"#
         // Subsequent turns after exit -> nothing injected
         let t_after = registry.build_injections(true);
         assert!(t_after.is_empty());
+    }
+
+    #[test]
+    fn plan_reminder_is_reinjected_after_a_compaction_rearm() {
+        struct DynamicStore {
+            plan: std::sync::Mutex<Option<Value>>,
+        }
+        impl DomainValueSource for DynamicStore {
+            fn read_domain_state(&self, domain: &str) -> ReadOutcome<Value> {
+                if domain == "plan" {
+                    match self.plan.lock().unwrap().clone() {
+                        Some(value) => ReadOutcome::Found(value),
+                        None => ReadOutcome::Absent,
+                    }
+                } else {
+                    ReadOutcome::Absent
+                }
+            }
+        }
+
+        let store = Arc::new(DynamicStore {
+            plan: std::sync::Mutex::new(Some(json!({ "active": true, "path": "PLAN.md" }))),
+        });
+        let mut registry = crate::injection::InjectionRegistry::new();
+        register_goal_plan_injections(&mut registry, Arc::clone(&store));
+        let access = crate::injection::StepAccess::default();
+
+        let first = registry.build_injections_with_history_named(true, &access, &[]);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(first[0].1.contains("Plan mode is active."));
+
+        // The splice dropped that reminder. v2's `lastInjectedAt` is read off
+        // the conversation, so it is null again and the full variant returns;
+        // the rearm pass must do the same instead of staying inside the dedup
+        // window.
+        let rearmed = registry.build_injections_rearmed(true, true, &access, &[]);
+        assert_eq!(rearmed.len(), 1, "{rearmed:?}");
+        assert!(rearmed[0].1.contains("Plan mode is active."));
+
+        // The dedup window resumes from the re-injected reminder.
+        let next = registry.build_injections_with_history_named(true, &access, &[]);
+        assert!(next.is_empty(), "{next:?}");
+    }
+
+    /// v2 `tailAnchor.ts`: the contract names the objective and hard
+    /// constraints, and an over-long objective is capped.
+    #[test]
+    fn tail_contract_renders_and_caps() {
+        assert_eq!(render_tail_contract("  do it  ", &[]), "Objective: do it");
+        assert_eq!(
+            render_tail_contract("do it", &["pass tests".into()]),
+            "Objective: do it\nHard constraints:\n- pass tests"
+        );
+        let capped = render_tail_contract(&"x".repeat(2_000), &[]);
+        assert_eq!(capped.chars().count(), TAIL_CONTRACT_MAX_CHARS);
+        assert!(!capped.ends_with(' '));
+    }
+
+    /// v2 `shouldReanchorTail`: the anchor is due only after the threshold of
+    /// growth since the previous one; a zero threshold never fires.
+    #[test]
+    fn tail_reanchor_cadence() {
+        assert!(!should_reanchor_tail(
+            19_999,
+            GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS,
+            None
+        ));
+        assert!(should_reanchor_tail(
+            20_000,
+            GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS,
+            None
+        ));
+        assert!(!should_reanchor_tail(
+            30_000,
+            GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS,
+            Some(15_000)
+        ));
+        assert!(should_reanchor_tail(
+            35_000,
+            GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS,
+            Some(15_000)
+        ));
+        assert!(!should_reanchor_tail(100_000, 0, None));
+        assert_eq!(
+            plan_tail_contract(20_000, GOAL_TAIL_ANCHOR_THRESHOLD_TOKENS, None, "x", &[])
+                .as_deref(),
+            Some("Objective: x")
+        );
+    }
+
+    /// The `goal_tail` provider injects on a new turn once the context has
+    /// grown past the threshold, and stays silent while its own previous block
+    /// still anchors the conversation.
+    #[test]
+    fn goal_tail_reanchors_only_after_the_threshold() {
+        let mut registry = crate::injection::InjectionRegistry::new();
+        let store = FakeStore {
+            goal: Some(wrapped_goal_value(&sample_state())),
+            plan: None,
+        };
+        register_goal_plan_injections(&mut registry, Arc::new(store));
+        let access = crate::injection::StepAccess::default();
+
+        let long = LLMMessage::user(&"a".repeat(80_000));
+        let texts = registry.build_injections_with_history_named(true, &access, &[long.clone()]);
+        let tail = texts
+            .iter()
+            .find(|(variant, _)| variant == "goal_tail")
+            .expect("the tail contract is due");
+        assert!(tail.1.contains("Objective: Ship the feature"), "{tail:?}");
+        assert!(
+            tail.1.contains("Hard constraints:\n- Tests pass"),
+            "{tail:?}"
+        );
+
+        // The injected block is now the newest anchor: its own size is the
+        // baseline, so growth since then is far below the threshold.
+        let history = vec![
+            long,
+            crate::injection::injection_message_named(tail.1.clone(), "goal_tail"),
+        ];
+        let again = registry.build_injections_with_history_named(true, &access, &history);
+        assert!(
+            !again.iter().any(|(variant, _)| variant == "goal_tail"),
+            "{again:?}"
+        );
     }
 }

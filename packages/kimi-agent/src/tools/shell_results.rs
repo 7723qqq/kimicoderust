@@ -1,18 +1,3 @@
-//! v2 `agent/tools/os/shell/shellToolResults.ts`: the contract both shell tools
-//! share — request validation, the timeout label, the foreground description and
-//! the next-step lines a background result ends with.
-//!
-//! v2 puts these in one class because `Bash` and `PowerShell` must answer the
-//! same way; the port keeps the pure parts here so both tools can call them.
-//!
-//! **Not ported:** `backgroundStartedResult`'s `pid` and `output_path` fields.
-//! This engine's task records carry neither — `TaskRunner` hands back an id and
-//! streams output into the task's own store — so emitting those keys would mean
-//! inventing values. `status` and `automatic_notification` are emitted because
-//! both are known.
-
-/// v2 `formatTimeoutLabel`: a whole number of seconds keeps the `s` spelling,
-/// anything else is milliseconds.
 pub fn format_timeout_label(timeout_ms: u64) -> String {
     if timeout_ms.is_multiple_of(1000) {
         format!("{}s", timeout_ms / 1000)
@@ -21,8 +6,6 @@ pub fn format_timeout_label(timeout_ms: u64) -> String {
     }
 }
 
-/// v2 `foregroundDescription`: an explicit description wins, otherwise the
-/// caller's label plus a 60-character preview of the command.
 pub fn foreground_description(label: &str, command: &str, description: Option<&str>) -> String {
     if let Some(explicit) = description.map(str::trim).filter(|text| !text.is_empty()) {
         return explicit.to_string();
@@ -36,14 +19,6 @@ pub fn foreground_description(label: &str, command: &str, description: Option<&s
     format!("{label}: {preview}")
 }
 
-/// Why a shell request cannot start, or `None` when it can.
-///
-/// v2 `validateRunRequest` checks four things in order: the turn was already
-/// cancelled, the command is empty, background execution is unavailable to this
-/// agent, and a background call carries no `description`. The cancellation arm
-/// stays with the caller here (it owns the abort flag), and the
-/// background-unavailable arm stays with the caller too, because this engine
-/// answers that case by handing the call to the host rather than failing it.
 pub fn validate_run_request(
     command: &str,
     run_in_background: bool,
@@ -58,22 +33,15 @@ pub fn validate_run_request(
     None
 }
 
-/// Why a foreground shell call ended up in the background, in v2's vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundStart {
-    /// The call asked for background execution.
     Started,
-    /// The foreground call hit its timeout and was re-homed.
+
     DetachedOnTimeout,
-    /// The user moved it to the background.
+
     DetachedByUser,
 }
 
-/// v2 `nextStepLines`: what the model is told to do after a background result.
-///
-/// The two lines are load-bearing: they are the only place a background result
-/// says "do not wait on this", and the automatic notification is what makes that
-/// promise keepable.
 pub fn next_step_lines(allow_background: bool, start: BackgroundStart) -> String {
     match start {
         BackgroundStart::DetachedOnTimeout | BackgroundStart::DetachedByUser => {

@@ -49,7 +49,7 @@ async fn bench_concurrent_rest_throughput() {
             let mut ok_count = 0;
             for i in 0..requests_per_task {
                 let url = if i % 2 == 0 {
-                    format!("{base_url}/api/v1/health")
+                    format!("{base_url}/api/v1/healthz")
                 } else {
                     format!("{base_url}/api/v1/meta")
                 };

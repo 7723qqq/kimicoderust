@@ -37,8 +37,8 @@ fn a_panic_under_the_connection_guard_does_not_poison_the_store() {
 }
 
 /// One unparseable `wire_events` payload must not decide the whole cold
-/// rebuild: the session still opens from the rows around it, and the bad
-/// row is left on disk rather than repaired behind the user's back.
+/// rebuild: the session still opens from the rows around it, and the read
+/// repairs the log so the next open does not hit the same row again.
 #[test]
 fn test_fold_projection_skips_a_corrupt_wire_event_row() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -77,19 +77,22 @@ fn test_fold_projection_skips_a_corrupt_wire_event_row() {
         .fold_projection("sess-fold")
         .expect("one corrupt row must not fail the whole fold");
     let contents: Vec<&str> = projected.iter().map(|m| m.content.as_str()).collect();
-    assert_eq!(contents, vec!["first", "third"]);
+    // The two surviving user messages are consecutive once the corrupt
+    // assistant is gone, and v2 merges consecutive real user input.
+    assert_eq!(contents, vec!["first\n\nthird"]);
 
-    // The row is still there, unrepaired: a repair entry point stays a
-    // decision for the caller, not something a read may do.
+    // The read repairs the log (v2 `readEntries` → `repairWireJournal`): the
+    // undecodable row is removed so the next open does not hit it again. An
+    // in-memory store has no durable place for the original, so no backup.
     let conn = store.conn.lock();
-    let payload: String = conn
+    let remaining: i64 = conn
         .query_row(
-            "SELECT payload FROM wire_events WHERE id = 'evt_2'",
+            "SELECT COUNT(*) FROM wire_events WHERE session_id = 'sess-fold'",
             [],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(payload, truncated);
+    assert_eq!(remaining, 2, "the corrupt row was dropped");
 }
 
 /// A file over the byte cap is recorded as change metadata plus the
@@ -146,6 +149,73 @@ fn test_file_history_caps_content_bytes() {
         .unwrap();
     assert_eq!(small_end.oversize, None, "no marker key for stored content");
     assert_eq!(small_end.content.as_deref(), Some("b"));
+}
+
+/// v2 `checkpointService.ts:20` keeps snapshots for the last 20 turns only:
+/// recording turn 21 makes turn 1 unrestorable, and a turn's whole row set
+/// goes together (the undo path restores per turn, not per file).
+#[test]
+fn test_file_history_keeps_only_the_last_twenty_turns() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-window", None).unwrap();
+
+    // Turn 1 holds two files, so dropping it must drop both rows.
+    store
+        .record_file_change("sess-window", 1, "a.txt", None, Some("a"))
+        .unwrap();
+    store
+        .record_file_change("sess-window", 1, "b.txt", None, Some("b"))
+        .unwrap();
+    for turn in 2..=21usize {
+        store
+            .record_file_change("sess-window", turn, "f.txt", None, Some("x"))
+            .unwrap();
+    }
+
+    let turn_ids: Vec<i64> = {
+        let conn = store.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT turn_id FROM session_file_history WHERE session_id = 'sess-window'")
+            .unwrap();
+        let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    };
+    // 20 retained turns × one row each: turn 1's two rows are the first to go.
+    assert_eq!(turn_ids.len(), 20);
+    assert!(!turn_ids.contains(&1), "turn 1 fell outside the window");
+    assert!(turn_ids.contains(&2) && turn_ids.contains(&21));
+}
+
+/// The retention window is per session: pruning one session's old turns
+/// must not touch another session's snapshots.
+#[test]
+fn test_file_history_window_is_per_session() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    for session in ["sess-old", "sess-new"] {
+        store.create_session(session, None).unwrap();
+        store
+            .record_file_change(session, 1, "keep.txt", None, Some("keep"))
+            .unwrap();
+    }
+    for turn in 2..=21usize {
+        store
+            .record_file_change("sess-new", turn, "f.txt", None, Some("x"))
+            .unwrap();
+    }
+
+    let old_turns: Vec<i64> = {
+        let conn = store.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT turn_id FROM session_file_history WHERE session_id = 'sess-old'")
+            .unwrap();
+        let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(
+        old_turns,
+        vec![1],
+        "another session's snapshots were pruned"
+    );
 }
 
 /// Pruning has to give the WAL back: a `DELETE` on its own leaves the
@@ -1022,6 +1092,47 @@ fn test_export_session_full_snapshot() {
     assert!(store.export_session("sess-missing").unwrap().is_none());
 }
 
+/// v2 bundles the session directory, whose `agents/<id>/wire.jsonl` is the raw
+/// journal. The export carries the same view over `wire_events`, with
+/// dehydrated media restored so the bundle stands on its own.
+#[test]
+fn test_export_session_bundles_the_raw_wire_journal() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-wire-exp", None).unwrap();
+    let data_uri = format!("data:image/png;base64,{}", "QUJD".repeat(2048));
+    store
+        .append_wire_event(&RawWireEvent {
+            id: "evt_1".into(),
+            session_id: "sess-wire-exp".into(),
+            event_type: "context.append_message".into(),
+            payload: json!({
+                "message": {
+                    "role": "user",
+                    "content": "",
+                    "blocks": [{ "type": "image_url", "image_url": { "url": data_uri } }]
+                },
+                "time": 1,
+            }),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .unwrap();
+
+    let export = store.export_session("sess-wire-exp").unwrap().unwrap();
+    assert_eq!(export.wire_jsonl.len(), 1);
+    let line: Value = serde_json::from_str(&export.wire_jsonl[0]).unwrap();
+    assert_eq!(line["type"], "context.append_message");
+    assert_eq!(line["time"], 1);
+    assert!(
+        line["message"]["blocks"][0]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"),
+        "the bundle restores media instead of leaving blobref handles dangling"
+    );
+}
+
 #[test]
 fn test_update_session_title() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -1045,6 +1156,138 @@ fn test_update_session_title() {
         .update_session_title("sess-non-existent", Some("Nope"))
         .unwrap();
     assert!(!missing);
+}
+
+/// v2 `normalizeSessionMeta` + `sessionMetaTitleNeedsMigration`: a document
+/// written by an earlier build folds `customTitle` / `isCustomTitle` /
+/// `workDir` / `titleSource` into the normalized columns and is written back
+/// without the legacy keys. A second import is a no-op.
+#[test]
+fn test_legacy_session_metadata_is_imported_and_written_back() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-legacy-meta", None).unwrap();
+    store
+        .put_state(
+            "metadata",
+            "sess-legacy-meta",
+            &json!({
+                "workDir": "/tmp/legacy-workspace",
+                "customTitle": "Renamed on the old build",
+                "isCustomTitle": true,
+                "titleSource": "user",
+                "permission_mode": "auto",
+            }),
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .migrate_legacy_session_metadata("sess-legacy-meta")
+            .unwrap()
+    );
+    let session = store.get_session("sess-legacy-meta").unwrap().unwrap();
+    assert_eq!(session.title.as_deref(), Some("Renamed on the old build"));
+    assert_eq!(session.title_kind.as_deref(), Some("custom"));
+    assert_eq!(session.cwd.as_deref(), Some("/tmp/legacy-workspace"));
+    let metadata = store
+        .get_state("metadata", "sess-legacy-meta")
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata["isCustomTitle"], json!(true));
+    assert_eq!(metadata["titleKind"], json!("custom"));
+    assert_eq!(metadata["permission_mode"], json!("auto"));
+    for legacy in ["workDir", "customTitle", "titleSource"] {
+        assert!(
+            metadata.get(legacy).is_none(),
+            "legacy key {legacy} is folded away"
+        );
+    }
+
+    assert!(
+        !store
+            .migrate_legacy_session_metadata("sess-legacy-meta")
+            .unwrap(),
+        "a normalized document needs no second write"
+    );
+}
+
+/// A normalized column wins over a stale legacy flag: an old document whose
+/// bag still says `isCustomTitle: false` must not undo a newer rename.
+#[test]
+fn test_legacy_metadata_does_not_override_a_normalized_title() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-legacy-stale", None).unwrap();
+    store
+        .update_session_title("sess-legacy-stale", Some("Renamed here"))
+        .unwrap();
+    store
+        .put_state(
+            "metadata",
+            "sess-legacy-stale",
+            &json!({ "isCustomTitle": false, "workDir": "/tmp/old" }),
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .migrate_legacy_session_metadata("sess-legacy-stale")
+            .unwrap()
+    );
+    let session = store.get_session("sess-legacy-stale").unwrap().unwrap();
+    assert_eq!(session.title.as_deref(), Some("Renamed here"));
+    assert_eq!(session.title_kind.as_deref(), Some("custom"));
+    assert_eq!(session.cwd.as_deref(), Some("/tmp/old"));
+    let metadata = store
+        .get_state("metadata", "sess-legacy-stale")
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata["isCustomTitle"], json!(true));
+}
+
+/// v2 `encodeSessionMeta`: every persisted metadata document carries the
+/// `isCustomTitle` bit derived from the session's own title kind, so a bag
+/// assembled before a rename cannot carry a stale flag.
+#[test]
+fn test_persisted_session_metadata_carries_the_compat_bit() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-meta-bit", None).unwrap();
+
+    store
+        .put_session_metadata("sess-meta-bit", &json!({ "permission_mode": "auto" }))
+        .unwrap();
+    let metadata = store
+        .get_state("metadata", "sess-meta-bit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata["isCustomTitle"], json!(false));
+
+    store
+        .update_session_title("sess-meta-bit", Some("Mine"))
+        .unwrap();
+    store
+        .put_session_metadata("sess-meta-bit", &json!({ "permission_mode": "auto" }))
+        .unwrap();
+    let metadata = store
+        .get_state("metadata", "sess-meta-bit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata["isCustomTitle"], json!(true));
+
+    store
+        .set_generated_title_if_uncustomized("sess-meta-bit", "Generated", true)
+        .unwrap();
+    store
+        .put_session_metadata("sess-meta-bit", &json!({ "permission_mode": "auto" }))
+        .unwrap();
+    let metadata = store
+        .get_state("metadata", "sess-meta-bit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        metadata["isCustomTitle"],
+        json!(false),
+        "a generated title is not a custom one"
+    );
 }
 
 #[test]
@@ -1648,11 +1891,20 @@ fn test_compact_session() {
     let post_history = store.load_session_history("sess-compact").unwrap();
     assert_eq!(post_history.len(), pre_len - removed);
     assert!(post_history.len() < pre_len);
-    // `compacted_count` is the first kept index: everything beyond the
-    // summary block is `pre_history[count..]`, untouched.
+    // v2's compaction shape replaces the whole history: the real user input
+    // survives verbatim and completed-turn assistant messages are covered by
+    // the summary, so no old assistant message rides the tail.
     assert!(
-        post_history.ends_with(&pre_history[report.compacted_count as usize..]),
-        "the kept tail starts exactly at compacted_count"
+        post_history
+            .iter()
+            .all(|message| message.role != "assistant"),
+        "completed-turn assistant messages are summarized away"
+    );
+    assert!(
+        post_history
+            .iter()
+            .any(|message| message.content == "Trailing question"),
+        "the trailing real user input survives verbatim"
     );
     assert_eq!(
         report.kept_user_message_count,
@@ -1747,8 +1999,12 @@ fn test_compact_session_with_summary_writes_the_summary() {
     assert!(
         summary_message
             .content
-            .ends_with("The user asked for fifteen numbered messages."),
+            .contains("The user asked for fifteen numbered messages."),
         "the caller's summary replaces the omitted prefix"
+    );
+    assert!(
+        summary_message.content.ends_with("</system-reminder>"),
+        "v2 wraps the summary in a system-reminder"
     );
     assert!(
         !summary_message
@@ -1914,6 +2170,56 @@ fn test_undo_turns_transactional_integrity() {
     let history_empty = store.load_session_history("sess-undo").unwrap();
     assert_eq!(history_empty.len(), 0);
     assert_eq!(store.next_turn_number("sess-undo").unwrap(), 1);
+}
+
+/// A failure part-way through an undo must leave the session untouched: v2
+/// rechecks the switch after writing and refuses on a changed journal, while
+/// this engine runs the select/delete/update as one immediate transaction.
+#[test]
+fn test_undo_turns_rolls_back_when_a_delete_fails() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-undo-atomic", None).unwrap();
+    store
+        .save_turn(
+            "sess-undo-atomic",
+            "t1",
+            1,
+            &[LLMMessage::user("1"), LLMMessage::assistant("a1")],
+            None,
+            None,
+        )
+        .unwrap();
+
+    // Make the last DELETE of the transaction fail after messages and file
+    // history have already been removed.
+    store
+        .conn
+        .lock()
+        .execute_batch(
+            "CREATE TRIGGER undo_fail BEFORE DELETE ON turns
+             WHEN OLD.turn_id = 't1'
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+
+    let error = store.undo_turns("sess-undo-atomic", 1).unwrap_err();
+    assert!(
+        error.contains("injected failure"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        store
+            .load_session_history("sess-undo-atomic")
+            .unwrap()
+            .len(),
+        2,
+        "a failed undo must not leave the messages deleted"
+    );
+    assert_eq!(
+        store.next_turn_number("sess-undo-atomic").unwrap(),
+        2,
+        "the turn row must survive a failed undo"
+    );
 }
 
 #[test]
@@ -2666,4 +2972,996 @@ fn the_wire_write_guard_refuses_a_foreign_held_session() {
     crate::session::lock::SESSION_LOCKS.takeover("sess-wire-guard");
     assert!(!lock_path.exists());
     store.append_wire_event(&event("evt-after")).unwrap();
+}
+
+/// A `state_entries` row that exists but does not parse must be an error naming
+/// the entry. Reading it as `null` let the next patch overwrite the only copy.
+#[test]
+fn a_corrupt_state_entry_is_reported_instead_of_reading_as_null() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-state", None).unwrap();
+    store
+        .put_state("todo", "list", &json!({ "items": [] }))
+        .unwrap();
+    {
+        let conn = store.conn.lock();
+        conn.execute(
+            "UPDATE state_entries SET value = ?1 WHERE domain = 'todo' AND key = 'list'",
+            params!["{\"items\": ["],
+        )
+        .unwrap();
+    }
+
+    let error = store
+        .get_state("todo", "list")
+        .expect_err("a corrupt row must not read as a value");
+    assert!(
+        error.to_string().contains("todo/list"),
+        "the error names the entry: {error}"
+    );
+
+    // The diff path goes through the same read, so a patch built on top of the
+    // corrupt row fails instead of overwriting it with `null` + patch.
+    let error = store
+        .diff_state("todo", "list", &json!([]))
+        .expect_err("diffing on top of a corrupt row must fail");
+    assert!(
+        error.contains("todo/list"),
+        "the diff error names the entry: {error}"
+    );
+}
+
+/// A message row whose `blocks` column is unparseable must be reported, not
+/// silently decoded as "this message has no blocks".
+#[test]
+fn a_corrupt_blocks_column_is_reported_instead_of_reading_as_empty() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-blocks", None).unwrap();
+    {
+        let conn = store.conn.lock();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, blocks, created_at, turn_id)
+             VALUES ('sess-blocks', 'assistant', 'hello', ?1, 1, 'turn-1')",
+            params!["{\"kind\":"],
+        )
+        .unwrap();
+    }
+
+    let error = store
+        .load_session_messages("sess-blocks")
+        .expect_err("a corrupt blocks column must not read as an empty list");
+    assert!(
+        error.to_string().contains("blocks"),
+        "the error names the column: {error}"
+    );
+}
+
+/// A `wire_events` payload that does not parse is skipped with a logged error
+/// (the row's `seq` is in the log line), not folded into the read as
+/// `Value::Null` and not allowed to fail the whole read: v2's reader reports
+/// the line through `onTruncate` and keeps the records that follow, and one bad
+/// row must not make a session's transcript unreadable.
+#[test]
+fn a_corrupt_wire_payload_is_skipped_and_the_rest_is_returned() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-wire-payload", None).unwrap();
+    for (id, content) in [
+        ("evt-1", "first"),
+        ("evt-corrupt", "bad"),
+        ("evt-3", "third"),
+    ] {
+        store
+            .append_wire_event(&RawWireEvent {
+                id: id.into(),
+                session_id: "sess-wire-payload".into(),
+                event_type: "message.user".into(),
+                payload: json!({ "content": content }),
+                is_checkpoint: false,
+                is_compaction: false,
+                created_at: 1,
+            })
+            .unwrap();
+    }
+    {
+        let conn = store.conn.lock();
+        conn.execute(
+            "UPDATE wire_events SET payload = ?1 WHERE id = 'evt-corrupt'",
+            params!["{\"content\": \"bad"],
+        )
+        .unwrap();
+    }
+
+    let records = store
+        .get_wire_events("sess-wire-payload", 0, 10)
+        .expect("one corrupt row must not fail the read");
+    assert_eq!(
+        records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["evt-1", "evt-3"],
+        "the corrupt row is dropped and the rest is returned in order"
+    );
+}
+
+/// A database created before the wire version columns existed must get them on
+/// open even when `messages` already has `tool_calls`. The upgrade used to be
+/// nested under that unrelated column's check, so this database never got the
+/// wire columns and every append failed on a missing column.
+#[test]
+fn a_legacy_database_gets_the_wire_version_columns_on_open() {
+    let dir = std::env::temp_dir().join(format!(
+        "kimi-legacy-wire-{}-{}",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("sessions.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                role TEXT,
+                content TEXT,
+                created_at INTEGER,
+                tool_calls TEXT
+             );
+             CREATE TABLE wire_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                is_checkpoint INTEGER NOT NULL DEFAULT 0,
+                is_compaction INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .unwrap();
+    }
+
+    let store = SqliteSessionStore::open(&db).unwrap();
+    let columns = {
+        let conn = store.conn.lock();
+        table_columns(&conn, "wire_events").unwrap()
+    };
+    assert!(
+        columns.contains("protocol_version"),
+        "the wire version column must be added; got {columns:?}"
+    );
+    assert!(
+        columns.contains("min_protocol_version"),
+        "the reader-minimum column must be added; got {columns:?}"
+    );
+
+    // The upgraded database is usable: the old append path would have failed
+    // on the column that was never added.
+    store.create_session("sess-legacy", None).unwrap();
+    store
+        .append_wire_event(&RawWireEvent {
+            id: "evt-legacy".into(),
+            session_id: "sess-legacy".into(),
+            event_type: "message.user".into(),
+            payload: json!({ "content": "hi" }),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .expect("a migrated database must accept appends");
+
+    drop(store);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Two writers patching the same entry must not lose each other's keys: the
+/// read, the patch and the write run under one lock. The old split
+/// (`get_state` then `put_state`) let the second writer base its write on a
+/// snapshot taken before the first writer's key existed.
+#[test]
+fn concurrent_patches_to_one_entry_do_not_lose_a_key() {
+    use crate::session::patch::{JsonPatchSet, PatchOp};
+
+    let store = std::sync::Arc::new(SqliteSessionStore::in_memory().unwrap());
+    store.put_state("metadata", "shared", &json!({})).unwrap();
+
+    let mut handles = Vec::new();
+    for key in ["alpha", "beta"] {
+        let store = store.clone();
+        handles.push(std::thread::spawn(move || {
+            let patch = JsonPatchSet::new(vec![PatchOp::Add {
+                path: format!("/{key}"),
+                value: json!(1),
+            }]);
+            for _ in 0..50 {
+                store.patch_state("metadata", "shared", &patch).unwrap();
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let value = store.get_state("metadata", "shared").unwrap().unwrap();
+    assert_eq!(value["alpha"], json!(1), "the first writer's key survives");
+    assert_eq!(value["beta"], json!(1), "the second writer's key survives");
+}
+
+/// Two stores on the same file, appending concurrently: every row gets a
+/// distinct sequence and the per-session order is strictly increasing. A
+/// writer that loses the SQLite write race waits its bounded `busy_timeout`
+/// instead of dropping the event with `SQLITE_BUSY`.
+#[test]
+fn concurrent_appends_to_one_file_keep_sequences_strictly_increasing() {
+    let dir = std::env::temp_dir().join(format!(
+        "kimi-seq-race-{}-{}",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("sessions.db");
+    let first = std::sync::Arc::new(SqliteSessionStore::open(&db).unwrap());
+    let second = std::sync::Arc::new(SqliteSessionStore::open(&db).unwrap());
+    first.create_session("sess-seq", None).unwrap();
+
+    let mut handles = Vec::new();
+    for (writer, store) in ["a", "b"].into_iter().zip([first.clone(), second.clone()]) {
+        handles.push(std::thread::spawn(move || {
+            for index in 0..25 {
+                store
+                    .append_wire_event(&RawWireEvent {
+                        id: format!("{writer}-{index}"),
+                        session_id: "sess-seq".into(),
+                        event_type: "message.user".into(),
+                        payload: json!({ "content": format!("{writer}{index}") }),
+                        is_checkpoint: false,
+                        is_compaction: false,
+                        created_at: 1,
+                    })
+                    .unwrap();
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let records = first.get_wire_events("sess-seq", 0, 1000).unwrap();
+    assert_eq!(records.len(), 50, "no append is lost or duplicated");
+    let seqs: Vec<u64> = records.iter().map(|record| record.seq).collect();
+    assert!(
+        seqs.windows(2).all(|pair| pair[0] < pair[1]),
+        "the sequence order is strictly increasing: {seqs:?}"
+    );
+
+    drop((first, second));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An empty database file is a new, empty session store — not a read failure,
+/// and not a session whose history happens to be missing.
+#[test]
+fn an_empty_database_file_opens_as_an_empty_store() {
+    let dir = std::env::temp_dir().join(format!(
+        "kimi-empty-db-{}-{}",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("sessions.db");
+    std::fs::write(&db, b"").unwrap();
+
+    let store = SqliteSessionStore::open(&db).expect("a zero-byte database is a new store");
+    assert!(store.list_sessions().unwrap().is_empty());
+    assert!(
+        store
+            .fold_projection("no-such-session")
+            .expect("an unknown session folds to nothing, not an error")
+            .is_empty()
+    );
+
+    drop(store);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn generated_titles_never_replace_a_custom_title() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-title", None).unwrap();
+
+    // The first prompt seeds a replaceable title and always records lastPrompt.
+    assert!(
+        store
+            .apply_prompt_metadata("sess-title", "hello", "hello")
+            .unwrap()
+    );
+    let seeded = store.get_session("sess-title").unwrap().unwrap();
+    assert_eq!(seeded.title.as_deref(), Some("hello"));
+    assert_eq!(seeded.normalized_title_kind(), Some("replaceable"));
+    assert_eq!(seeded.last_prompt.as_deref(), Some("hello"));
+
+    // A user rename freezes the title.
+    assert!(
+        store
+            .update_session_title("sess-title", Some("Mine"))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .set_generated_title_if_uncustomized("sess-title", "Model title", false)
+            .unwrap(),
+        "an automatic title must not overwrite a custom one"
+    );
+    let renamed = store.get_session("sess-title").unwrap().unwrap();
+    assert_eq!(renamed.title.as_deref(), Some("Mine"));
+    assert_eq!(renamed.normalized_title_kind(), Some("custom"));
+    assert_eq!(
+        renamed.last_prompt.as_deref(),
+        Some("hello"),
+        "a title change must not disturb the recorded prompt"
+    );
+
+    // `force` is the host explicitly asking for regeneration.
+    assert!(
+        store
+            .set_generated_title_if_uncustomized("sess-title", "Forced", true)
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .get_session("sess-title")
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Forced")
+    );
+}
+
+#[test]
+fn archiving_stamps_archived_at_without_reordering_the_session() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-archive", Some("T"), None)
+        .unwrap();
+    let before = store
+        .get_session("sess-archive")
+        .unwrap()
+        .unwrap()
+        .updated_at;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    assert!(store.archive_session("sess-archive").unwrap());
+    let archived = store.get_session("sess-archive").unwrap().unwrap();
+    assert!(archived.archived);
+    assert!(archived.archived_at.is_some(), "v2 stamps archivedAt");
+    assert_eq!(
+        archived.updated_at, before,
+        "archiving is not activity; updated_at must not move"
+    );
+
+    assert!(store.restore_session("sess-archive").unwrap());
+    let restored = store.get_session("sess-archive").unwrap().unwrap();
+    assert!(!restored.archived);
+    assert!(restored.archived_at.is_none());
+    assert_eq!(restored.updated_at, before);
+}
+
+#[test]
+fn fork_copies_metadata_and_records_forked_from() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session("sess-meta-src", Some("Source title"))
+        .unwrap();
+    store
+        .apply_prompt_metadata("sess-meta-src", "first ask", "first ask")
+        .unwrap();
+    store
+        .update_session_title("sess-meta-src", Some("Custom source"))
+        .unwrap();
+    store
+        .set_session_custom("sess-meta-src", &json!({ "source": "vscode" }))
+        .unwrap();
+    store
+        .register_session_agent("sess-meta-src", "main", &json!({ "model": "m" }))
+        .unwrap();
+    store
+        .save_turn(
+            "sess-meta-src",
+            "t1",
+            1,
+            &[LLMMessage::user("branch here"), LLMMessage::assistant("ok")],
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .fork_session_with_metadata(
+                "sess-meta-src",
+                "sess-meta-fork",
+                None,
+                None,
+                Some(&json!({ "branch": "historical" })),
+            )
+            .unwrap()
+    );
+    let forked = store.get_session("sess-meta-fork").unwrap().unwrap();
+    assert_eq!(forked.title.as_deref(), Some("Custom source"));
+    assert_eq!(forked.normalized_title_kind(), Some("custom"));
+    assert_eq!(forked.forked_from.as_deref(), Some("sess-meta-src"));
+    assert_eq!(
+        forked.last_prompt.as_deref(),
+        Some("branch here"),
+        "lastPrompt is derived from the retained turn"
+    );
+    let custom = forked.custom.as_ref().expect("custom is copied");
+    assert_eq!(custom["source"], "vscode");
+    assert_eq!(custom["branch"], "historical");
+    assert_eq!(
+        forked.agents.as_ref().expect("agents are copied")["main"]["model"],
+        "m"
+    );
+}
+
+#[test]
+fn a_frozen_environment_round_trips_and_an_unbound_session_reports_none() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-env", Some("Env"), None)
+        .unwrap();
+
+    assert!(
+        store
+            .get_session_environment_snapshot("sess-env")
+            .unwrap()
+            .is_none(),
+        "a row that never froze an environment is unbound, not an error"
+    );
+
+    let env =
+        std::collections::BTreeMap::from([("KIMI_ENV_TEST".to_string(), "frozen".to_string())]);
+    assert!(
+        store
+            .set_session_environment_snapshot("sess-env", "local", Some("/work/repo"), &env)
+            .unwrap()
+    );
+
+    let frozen = store
+        .get_session_environment_snapshot("sess-env")
+        .unwrap()
+        .expect("the binding is readable");
+    assert_eq!(frozen.binding.environment_id, "local");
+    assert_eq!(
+        frozen.binding.cwd.as_deref(),
+        Some(std::path::Path::new("/work/repo"))
+    );
+    assert_eq!(frozen.env, env);
+
+    let row = store.get_session("sess-env").unwrap().unwrap();
+    assert_eq!(row.environment_id.as_deref(), Some("local"));
+    assert_eq!(row.environment_cwd.as_deref(), Some("/work/repo"));
+}
+
+/// v2 `forkSession`'s full copy carries the source's file history, while the
+/// sliced fork drops it (`pruneTruncatedForkFiles`). The fork renumbers its
+/// turns, so the copied rows must follow the new numbers rather than point at
+/// turn ids the fork does not have.
+#[test]
+fn a_full_fork_copies_file_history_and_a_slice_keeps_none() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-src", Some("Src"), Some("wd_fork_fh"))
+        .unwrap();
+    store
+        .save_turn(
+            "sess-src",
+            "turn-a",
+            1,
+            &[LLMMessage::user("u1")],
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .save_turn(
+            "sess-src",
+            "turn-b",
+            2,
+            &[LLMMessage::user("u2")],
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .record_file_change("sess-src", 1, "a.txt", None, Some("a"))
+        .unwrap();
+    store
+        .record_file_change("sess-src", 2, "b.txt", None, Some("b"))
+        .unwrap();
+
+    store
+        .fork_session("sess-src", "sess-full", None, None)
+        .unwrap();
+    let (full_one, _) = store
+        .get_file_history_changes("sess-full", Some(1))
+        .unwrap();
+    let (full_two, _) = store
+        .get_file_history_changes("sess-full", Some(2))
+        .unwrap();
+    assert_eq!(full_one.len(), 1, "turn 1's history must reach the fork");
+    assert_eq!(full_one[0].path, "a.txt");
+    assert_eq!(full_two.len(), 1, "turn 2's history must reach the fork");
+    assert_eq!(full_two[0].path, "b.txt");
+
+    store
+        .fork_session("sess-src", "sess-cut", None, Some(0))
+        .unwrap();
+    let (cut, _) = store.get_file_history_changes("sess-cut", None).unwrap();
+    assert!(
+        cut.is_empty(),
+        "a sliced fork must not carry history for turns it does not have"
+    );
+
+    let (source, _) = store.get_file_history_changes("sess-src", None).unwrap();
+    assert_eq!(source.len(), 2, "the source keeps its own history");
+}
+
+/// Deleting a session drops its file-history rows *and* asks SQLite to give
+/// the freed pages back. The rows carry whole file contents, so a delete that
+/// only unlinks them leaves the bytes in the database and WAL while reporting
+/// success.
+#[test]
+fn deleting_a_session_reclaims_its_file_history_content() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-gone", Some("Gone"), Some("wd_del_fh"))
+        .unwrap();
+    store
+        .save_turn(
+            "sess-gone",
+            "turn-a",
+            1,
+            &[LLMMessage::user("u")],
+            None,
+            None,
+        )
+        .unwrap();
+    let big = "x".repeat(64 * 1024);
+    store
+        .record_file_change("sess-gone", 1, "big.bin", None, Some(&big))
+        .unwrap();
+    assert!(
+        store
+            .get_file_history_content("sess-gone", 1, "big.bin", "end")
+            .unwrap()
+            .is_some()
+    );
+
+    assert!(store.delete_session("sess-gone").unwrap());
+    let (changes, _) = store.get_file_history_changes("sess-gone", None).unwrap();
+    assert!(changes.is_empty());
+    assert!(
+        store
+            .get_file_history_content("sess-gone", 1, "big.bin", "end")
+            .unwrap()
+            .is_none(),
+        "the content must be gone with the session"
+    );
+    assert!(
+        !store.delete_session("sess-gone").unwrap(),
+        "a second delete reports it found nothing"
+    );
+}
+
+/// The fork's engine context is folded from the wire journal, so a fork that
+/// copies only the `messages`/`turns` tables opens with no history at all. The
+/// full copy has to carry every journal row, and the copy has to fold to the
+/// same projection as the source.
+#[test]
+fn a_full_fork_carries_the_wire_journal_and_folds_to_the_same_history() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-wire-src", Some("Src"), Some("wd_wire_fork"))
+        .unwrap();
+    store
+        .save_turn(
+            "sess-wire-src",
+            "turn-a",
+            1,
+            &[LLMMessage::user("hello"), LLMMessage::assistant("hi")],
+            None,
+            None,
+        )
+        .unwrap();
+    for (id, event_type, content) in [
+        ("evt_1", "message.user", "hello"),
+        ("evt_2", "message.assistant", "hi"),
+        ("evt_3", "message.user", "again"),
+    ] {
+        store
+            .append_wire_event(&RawWireEvent {
+                id: id.into(),
+                session_id: "sess-wire-src".into(),
+                event_type: event_type.into(),
+                payload: json!({ "content": content }),
+                is_checkpoint: false,
+                is_compaction: false,
+                created_at: 1_000,
+            })
+            .unwrap();
+    }
+
+    store
+        .fork_session("sess-wire-src", "sess-wire-fork", None, None)
+        .unwrap();
+
+    let source_rows = store.get_wire_events("sess-wire-src", 0, 100).unwrap();
+    let fork_rows = store.get_wire_events("sess-wire-fork", 0, 100).unwrap();
+    assert_eq!(
+        fork_rows.len(),
+        source_rows.len(),
+        "the full fork must copy every journal row"
+    );
+    assert_eq!(
+        fork_rows
+            .iter()
+            .map(|r| (r.event_type.as_str(), r.payload["content"].as_str()))
+            .collect::<Vec<_>>(),
+        source_rows
+            .iter()
+            .map(|r| (r.event_type.as_str(), r.payload["content"].as_str()))
+            .collect::<Vec<_>>(),
+        "the copy keeps the source order"
+    );
+    // `seq` is the table's global key, so the fork gets fresh numbers; they
+    // still have to be strictly increasing in copied order for the fold and the
+    // paged readers.
+    let fork_seqs: Vec<u64> = fork_rows.iter().map(|r| r.seq).collect();
+    assert!(
+        fork_seqs.windows(2).all(|pair| pair[0] < pair[1]),
+        "the fork's seq numbers must be strictly increasing: {fork_seqs:?}"
+    );
+    // `wire_events.id` is globally UNIQUE, so ids are namespaced to the fork.
+    assert!(
+        fork_rows
+            .iter()
+            .all(|r| r.id.starts_with("sess-wire-fork:"))
+    );
+
+    let source_fold = store.fold_projection("sess-wire-src").unwrap();
+    let fork_fold = store.fold_projection("sess-wire-fork").unwrap();
+    assert_eq!(
+        fork_fold, source_fold,
+        "the fork's projection must equal the source's"
+    );
+    assert!(!fork_fold.is_empty(), "the fork must not open empty");
+}
+
+/// A sliced fork keeps only the journal rows that belong to the retained
+/// turns. Wire rows carry no `turn_id`, so the cut is the start of the first
+/// dropped turn, and rows before it belong to the slice.
+#[test]
+fn a_sliced_fork_copies_only_the_wire_rows_before_the_cut() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-slice-src", Some("Src"), Some("wd_slice_fork"))
+        .unwrap();
+    for (id, number) in [("turn-a", 1u32), ("turn-b", 2)] {
+        store
+            .save_turn(
+                "sess-slice-src",
+                id,
+                number,
+                &[LLMMessage::user(id), LLMMessage::assistant("reply")],
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    // Fixed timestamps: turn A runs 1000..1500 ms, turn B starts at 3000 ms.
+    {
+        let conn = store.conn.lock();
+        for (turn_id, start, end) in [("turn-a", 1_000i64, 1_500i64), ("turn-b", 3_000, 3_500)] {
+            conn.execute(
+                "UPDATE turns SET started_at = ?2, completed_at = ?3 WHERE turn_id = ?1",
+                params![turn_id, start, end],
+            )
+            .unwrap();
+        }
+    }
+    for (id, content, created_at) in [
+        ("evt_in_a", "in turn a", 1_100i64),
+        ("evt_in_b", "in turn b", 3_100),
+    ] {
+        store
+            .append_wire_event(&RawWireEvent {
+                id: id.into(),
+                session_id: "sess-slice-src".into(),
+                event_type: "message.user".into(),
+                payload: json!({ "content": content }),
+                is_checkpoint: false,
+                is_compaction: false,
+                created_at,
+            })
+            .unwrap();
+    }
+
+    store
+        .fork_session("sess-slice-src", "sess-slice-fork", None, Some(0))
+        .unwrap();
+
+    let rows = store.get_wire_events("sess-slice-fork", 0, 100).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the retained turn's journal row is kept"
+    );
+    assert_eq!(rows[0].payload["content"], "in turn a");
+    assert_eq!(store.list_turns("sess-slice-fork").unwrap().len(), 1);
+}
+
+/// A sliced fork cuts by journal position, not by time: two rows written in the
+/// same millisecond are ordered by `seq`, so the cut is deterministic. v2 has
+/// only `compaction_boundary` / `insufficient` as slice failures, and this
+/// ledger's cut cannot hit either.
+#[test]
+fn a_sliced_fork_cuts_by_wire_order_not_time() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-cut-src", Some("Src"), Some("wd_cut_fork"))
+        .unwrap();
+    for (id, number) in [("turn-a", 1u32), ("turn-b", 2)] {
+        store
+            .save_turn(
+                "sess-cut-src",
+                id,
+                number,
+                &[LLMMessage::user(id), LLMMessage::assistant("reply")],
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    // Both rows carry the same timestamp: the journal order already decides.
+    for (id, content) in [("evt_in_a", "in turn a"), ("evt_in_b", "in turn b")] {
+        store
+            .append_wire_event(&RawWireEvent {
+                id: id.into(),
+                session_id: "sess-cut-src".into(),
+                event_type: "message.user".into(),
+                payload: json!({ "content": content }),
+                is_checkpoint: false,
+                is_compaction: false,
+                created_at: 3_000,
+            })
+            .unwrap();
+    }
+
+    store
+        .fork_session("sess-cut-src", "sess-cut-fork", None, Some(0))
+        .unwrap();
+
+    let rows = store.get_wire_events("sess-cut-fork", 0, 100).unwrap();
+    assert_eq!(rows.len(), 1, "the cut is the second user prompt");
+    assert_eq!(rows[0].payload["content"], "in turn a");
+}
+
+/// The engine journal marks turns with `turn.prompt`, not `message.user`; a
+/// background prompt (`origin.kind = task`) is not a user turn and must not
+/// move the cut.
+#[test]
+fn a_sliced_fork_counts_turn_prompt_anchors() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-prompt-src", Some("Src"), Some("wd_prompt_fork"))
+        .unwrap();
+    for (id, number) in [("turn-a", 1u32), ("turn-b", 2)] {
+        store
+            .save_turn(
+                "sess-prompt-src",
+                id,
+                number,
+                &[LLMMessage::user(id)],
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    for (id, event_type, payload) in [
+        (
+            "evt-prompt-a",
+            "turn.prompt",
+            json!({"origin": {"kind": "user"}}),
+        ),
+        ("evt-step-a", "step.begin", json!({})),
+        (
+            "evt-prompt-bg",
+            "turn.prompt",
+            json!({"origin": {"kind": "task"}}),
+        ),
+        (
+            "evt-prompt-b",
+            "turn.prompt",
+            json!({"origin": {"kind": "user"}}),
+        ),
+    ] {
+        store
+            .append_wire_event(&RawWireEvent {
+                id: id.into(),
+                session_id: "sess-prompt-src".into(),
+                event_type: event_type.into(),
+                payload,
+                is_checkpoint: false,
+                is_compaction: false,
+                created_at: 1_000,
+            })
+            .unwrap();
+    }
+
+    store
+        .fork_session("sess-prompt-src", "sess-prompt-fork", None, Some(0))
+        .unwrap();
+
+    let rows = store.get_wire_events("sess-prompt-fork", 0, 100).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        [
+            "sess-prompt-fork:evt-prompt-a",
+            "sess-prompt-fork:evt-step-a",
+            "sess-prompt-fork:evt-prompt-bg",
+        ],
+        "all rows before the dropped turn's anchor are kept, background prompts excluded"
+    );
+}
+
+/// v2 replaces the child journal with one atomic file write. A copy that fails
+/// here must roll the session row back instead of leaving an empty fork.
+#[test]
+fn a_failed_wire_copy_leaves_no_fork_session() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store
+        .create_session_with_workspace("sess-atomic-src", Some("Src"), Some("wd_atomic"))
+        .unwrap();
+    for (id, number) in [("turn-a", 1u32), ("turn-b", 2)] {
+        store
+            .save_turn(
+                "sess-atomic-src",
+                id,
+                number,
+                &[LLMMessage::user(id)],
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    store
+        .append_wire_event(&RawWireEvent {
+            id: "evt-atomic".into(),
+            session_id: "sess-atomic-src".into(),
+            event_type: "message.user".into(),
+            payload: json!({ "content": "hello" }),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1_000,
+        })
+        .unwrap();
+    {
+        let conn = store.conn.lock();
+        conn.execute_batch(
+            "CREATE TRIGGER refuse_fork_wire BEFORE INSERT ON wire_events
+                 WHEN NEW.session_id = 'sess-atomic-fork'
+             BEGIN SELECT RAISE(ABORT, 'fork copy refused'); END;",
+        )
+        .unwrap();
+    }
+
+    let error = store
+        .fork_session("sess-atomic-src", "sess-atomic-fork", None, None)
+        .unwrap_err();
+    assert!(matches!(error, ForkError::Store(_)), "{error:?}");
+    assert!(
+        store.get_session("sess-atomic-fork").unwrap().is_none(),
+        "a failed copy must not leave the empty child behind"
+    );
+    assert!(
+        store.list_turns("sess-atomic-fork").unwrap().is_empty(),
+        "nor its turns"
+    );
+}
+
+/// The blob audit is the observability that decides whether a real GC is
+/// worth building: it counts stored bytes and the blobs no row references.
+#[test]
+fn blob_usage_reports_stored_bytes_and_unreferenced_blobs() {
+    use base64::Engine as _;
+
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-blob-audit", None).unwrap();
+    let inline = base64::engine::general_purpose::STANDARD.encode(vec![3u8; 8_192]);
+    store
+        .append_wire_event(&RawWireEvent {
+            id: "evt_media".into(),
+            session_id: "sess-blob-audit".into(),
+            event_type: "message.user".into(),
+            payload: json!({
+                "content": "look",
+                "blocks": [{
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:image/png;base64,{inline}") }
+                }]
+            }),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .unwrap();
+    // A blob no row mentions stands in for the ones a delete/undo leaves
+    // behind: v2 has no refcount, so nothing reclaims it.
+    {
+        let conn = store.conn.lock();
+        conn.execute(
+            "INSERT INTO wire_blobs (hash, mime, bytes) VALUES ('orphan', 'image/png', x'00')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let usage = store.blob_usage().unwrap();
+    assert_eq!(usage.stored, 2);
+    assert_eq!(usage.unreferenced, 1, "the orphan is the unreferenced one");
+    assert_eq!(usage.scanned, 2);
+    assert!(!usage.truncated);
+    assert_eq!(
+        usage.bytes,
+        8_192 + 1,
+        "the audit sums the stored payload bytes"
+    );
+}
+
+/// Deleting or archiving is a destructive write: a session another live
+/// process holds is refused instead of being removed underneath it.
+#[test]
+fn deleting_or_archiving_a_session_refuses_a_live_foreign_holder() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    let session = "sess-held-by-other";
+    store.create_session(session, None).unwrap();
+
+    // Plant a live foreign holder in the process-wide lock directory. A
+    // foreign hostname is what makes the holder read as alive without a second
+    // process (see `session::lock` tests).
+    let lock_path = crate::session::lock::SESSION_LOCKS
+        .lock_dir()
+        .join(format!("{session}.lock"));
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let holder = json!({
+        "version": 1,
+        "token": "999999999:other",
+        "pid": 999_999_999,
+        "hostname": "other-host",
+        "startedAt": chrono::Utc::now().timestamp_millis(),
+        "clientIdentity": "kimi_code",
+        "clientDisplayName": null,
+    });
+    std::fs::write(&lock_path, holder.to_string()).unwrap();
+
+    let delete_error = store.delete_session(session).unwrap_err();
+    assert!(
+        matches!(delete_error, SessionRemovalError::Occupied { .. }),
+        "delete must refuse: {delete_error:?}"
+    );
+    assert!(
+        store.get_session(session).unwrap().is_some(),
+        "the refused delete must not have removed the row"
+    );
+    let archive_error = store.archive_session(session).unwrap_err();
+    assert!(
+        matches!(archive_error, SessionRemovalError::Occupied { .. }),
+        "archive must refuse: {archive_error:?}"
+    );
+
+    // Once the holder is gone the same calls succeed, so the guard refuses the
+    // holder rather than the operation.
+    std::fs::remove_file(&lock_path).unwrap();
+    assert!(store.archive_session(session).unwrap());
+    assert!(store.delete_session(session).unwrap());
 }

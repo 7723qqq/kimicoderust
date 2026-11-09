@@ -1,14 +1,6 @@
-//! The `list` action's filtering and rendering, from v2
-//! `app/memory/tools/memoryTool.ts:411-440`.
-//!
-//! Pure layer only: the caller supplies the store's paths plus an optional
-//! per-path entry (title and type). `memory_list_handler` supplies them from
-//! `memory_store::list_entries_for`.
-
 use crate::i18n::{LocalizedText, i18n_params};
 use crate::tools::memory_paths::MemoryScope;
 
-/// One path's optional metadata, the Rust shape of v2's `store.get(p)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListEntry {
     pub path: String,
@@ -16,8 +8,6 @@ pub struct ListEntry {
     pub memory_type: Option<String>,
 }
 
-/// v2's scope prefix (`:414-421`). `None` means no filter — every scope of
-/// every project and session is listed.
 pub fn scope_prefix(
     scope: Option<MemoryScope>,
     project_id: &str,
@@ -31,13 +21,10 @@ pub fn scope_prefix(
     }
 }
 
-/// v2 `toolsV2.memory.noFilesFound`.
 pub fn no_files_found() -> String {
     LocalizedText::new("engine.tools.memory.noFilesFound").render()
 }
 
-/// The result body: a header with a trailing newline, then one sorted line
-/// per path. A path with no entry renders as just `  <path>` (`:436`).
 pub fn render_list(entries: &[ListEntry], prefix: Option<&str>) -> String {
     let mut paths: Vec<&ListEntry> = entries.iter().collect();
     if let Some(prefix) = prefix {

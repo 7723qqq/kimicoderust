@@ -23,7 +23,7 @@ fn prompt_content_maps_uploaded_files_to_media_blocks() {
             "size": 8,
         }),
     ];
-    let (prompt, blocks) = prompt_content_to_blocks(&content, &files).unwrap();
+    let (prompt, blocks) = prompt_content_to_blocks(&content, &files, None).unwrap();
     assert_eq!(prompt, "look at this");
     assert_eq!(blocks.len(), 2);
     // The bytes stay in the store: the engine's resolver reads them once
@@ -70,7 +70,7 @@ fn prompt_content_compresses_an_over_budget_inline_image_with_a_caption() {
             "source": { "kind": "base64", "media_type": "image/png", "data": data },
         }),
     ];
-    let (prompt, blocks) = prompt_content_to_blocks(&content, &files).unwrap();
+    let (prompt, blocks) = prompt_content_to_blocks(&content, &files, None).unwrap();
     assert_eq!(prompt, "look at this");
     assert_eq!(blocks.len(), 2, "the caption precedes the compressed image");
 
@@ -105,7 +105,7 @@ fn prompt_content_rejects_an_unknown_file_id() {
     let files = crate::server::files::FileStore::with_root(dir.path().to_path_buf());
     let content =
         vec![json!({ "type": "image", "source": { "kind": "file", "file_id": "f_missing" } })];
-    assert!(prompt_content_to_blocks(&content, &files).is_err());
+    assert!(prompt_content_to_blocks(&content, &files, None).is_err());
 }
 
 /// `POST /api/v1/prompts` used to mint an id and answer

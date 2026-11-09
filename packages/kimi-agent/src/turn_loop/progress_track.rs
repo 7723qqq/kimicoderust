@@ -33,11 +33,10 @@ pub struct ToolReceipt {
 ///
 /// v2 keeps one of these on the Agent-scoped `ProgressTrackerService`, so its
 /// counters (`mutatedBases`, `debt`, `blind`) survive across turns; only the
-/// once-per-turn *reminder* flag is reset by `turn.started`. This engine's
-/// `run_turn` is stateless, so the tracker is constructed per turn and the
-/// counters restart with it. That is a recorded divergence, not a claim about
-/// v2: a turn that leaves two unverified writes behind does not arm the
-/// reminder in the next turn, where v2 would.
+/// once-per-turn *reminder* flag is reset by `turn.started`. The engine stores
+/// the tracker on the toolset ([`crate::tools::NativeToolset::observe_progress`])
+/// for the same lifetime; `run_turn` keeps a local one only when no toolset is
+/// wired (host-proxy tests).
 #[derive(Debug, Default)]
 pub struct ProgressTracker {
     /// Basenames of the files written since the last verification (v2

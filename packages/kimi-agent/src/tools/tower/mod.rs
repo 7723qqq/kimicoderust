@@ -11,8 +11,9 @@ pub mod types;
 pub mod wake;
 
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use crate::subagent::SubagentManager;
 use crate::subagent::secondary::TowerModelBinding;
@@ -34,6 +35,8 @@ pub const TOWER_USER_CANCELLATION_REASON: &str = "user cancelled";
 
 fn err_result(msg: impl Into<String>) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: msg.into(),
@@ -45,6 +48,8 @@ fn err_result(msg: impl Into<String>) -> ExecutableToolResult {
 
 fn ok_result(msg: impl Into<String>) -> ExecutableToolResult {
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: msg.into(),
@@ -56,14 +61,35 @@ fn ok_result(msg: impl Into<String>) -> ExecutableToolResult {
 
 const TOWER_WORKER_PROFILE: &str = "tower-worker";
 
-/// Resolve a resume id against the tower roster (v2 `towerService` Agent
-/// veto's `store.resolveAgent`): `Ok(Some(entry))` when the id sits in the
-/// roster, `Ok(None)` when the tower state is readable but the id is not a
-/// member, `Err(())` when there is no tower to consult (missing cwd, missing
-/// or unreadable state.json) — the caller silently lets the resume through
-/// instead of failing a call the tower cannot vouch for. The last
-/// registration wins (agent ids restart per session, so a stale entry can
-/// share a live id).
+static BRANCH_LEASES: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
+
+#[derive(Debug)]
+struct BranchLease {
+    key: String,
+}
+
+impl Drop for BranchLease {
+    fn drop(&mut self) {
+        let leases = BRANCH_LEASES.get_or_init(|| StdMutex::new(HashSet::new()));
+        leases
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.key);
+    }
+}
+
+fn acquire_branch_lease(repo_root: &Path, branch: &str) -> Result<BranchLease, String> {
+    let key = format!("{}\u{0}{branch}", repo_root.display());
+    let leases = BRANCH_LEASES.get_or_init(|| StdMutex::new(HashSet::new()));
+    let mut held = leases.lock().unwrap_or_else(|error| error.into_inner());
+    if !held.insert(key.clone()) {
+        return Err(format!(
+            "branch \"{branch}\" is leased by another tower merge/rebase/spawn — not waiting; retry after that operation finishes"
+        ));
+    }
+    Ok(BranchLease { key })
+}
+
 pub async fn tower_resume_target(
     cwd: Option<std::path::PathBuf>,
     agent_id: &str,
@@ -109,12 +135,6 @@ fn spawn_detached_run(
     let session = session_id.to_string();
     let prompt = prompt.to_string();
     tokio::spawn(async move {
-        // Mirror the swarm launcher's terminal handling: pass the parent cancel
-        // so a detached worker stops when the user cancels or the session ends
-        // (run_foreground_turn aborts the turn and kills the instance), and emit
-        // a terminal event for *every* outcome so the worker's card never sticks
-        // in "running" — the previous `let _ = …map(…)` swallowed the error and
-        // cancelled arms and only ever reported a clean completion.
         let outcome = manager
             .run_foreground_turn(&agent, &prompt, parent_cancel.as_ref())
             .await;
@@ -133,8 +153,7 @@ fn spawn_detached_run(
                         TOWER_WORKER_PROFILE,
                         "The tower worker was stopped before it finished.",
                     );
-                    // Record the death in the tower protocol so TowerStatus can
-                    // flag the orphaned mission and suggest the resume hint.
+
                     if let Err(e) = store
                         .mark_agent_dead(
                             &agent,
@@ -205,19 +224,23 @@ pub async fn execute_tower_init(
         return err_result(TOWER_MAIN_AGENT_ONLY);
     }
 
-    #[derive(Deserialize, Default)]
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct InitArgs {
         base: Option<String>,
     }
-    let args: InitArgs = serde_json::from_str(raw_args).unwrap_or_default();
+    let args: InitArgs = match serde_json::from_str(raw_args) {
+        Ok(a) => a,
+        Err(e) => return err_result(format!("failed to parse TowerInit input: {e}")),
+    };
 
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(repo_root));
-    // Serialize this repo's tower state against concurrent workers: hold the
-    // per-repo lock across the whole operation so its load→mutate→save cannot
-    // interleave with another agent's and lose an update.
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
 
     match store.init(Some(session_id.to_string()), args.base).await {
         Ok(res) => {
@@ -306,6 +329,7 @@ pub async fn execute_tower_plan(
     }
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct PlanArgs {
         missions: Vec<TowerPlanInput>,
     }
@@ -316,11 +340,11 @@ pub async fn execute_tower_plan(
 
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(repo_root));
-    // Serialize this repo's tower state against concurrent workers: hold the
-    // per-repo lock across the whole operation so its load→mutate→save cannot
-    // interleave with another agent's and lose an update.
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
 
     match store.plan(&args.missions).await {
         Ok(missions) => {
@@ -430,6 +454,7 @@ pub async fn execute_tower_spawn(
     };
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct SpawnArgs {
         name: String,
         kind: String,
@@ -503,8 +528,12 @@ pub async fn execute_tower_spawn(
             let Some(ref mid) = args.mission_id else {
                 return Some(err_result("worker spawns require mission_id"));
             };
-            let Some(mission) = state.missions.iter().find(|m| &m.id == mid).cloned() else {
+            let Some(mut mission) = state.missions.iter().find(|m| &m.id == mid).cloned() else {
                 return Some(err_result(format!("unknown mission \"{mid}\"")));
+            };
+            let _branch_lease = match acquire_branch_lease(&store.repo_root, &mission.branch) {
+                Ok(lease) => lease,
+                Err(e) => return Some(err_result(e)),
             };
             if !mission.status.is_open() {
                 return Some(err_result(format!(
@@ -523,8 +552,7 @@ pub async fn execute_tower_spawn(
                     "mission {mid} owner was stopped by the user — never resume, reassign, or replace it unless the human explicitly asks"
                 )));
             }
-            // Mode mutex: a mission paused by plan/swarm entry refuses new
-            // workers until resumed (v2 gated the tower toolset once exited).
+
             if let Some(refusal) = crate::tools::mode_mutex::refuse_paused_mission(&mission) {
                 return Some(err_result(refusal));
             }
@@ -542,11 +570,23 @@ pub async fn execute_tower_spawn(
                 Err(error) => return Some(err_result(error)),
             };
 
-            if let Err(e) = store
+            let added = match store
                 .add_worktree(&mission.worktree, &mission.branch, &state.base)
                 .await
             {
-                return Some(err_result(format!("failed to create worktree: {e}")));
+                Ok(added) => added,
+                Err(e) => return Some(err_result(format!("failed to create worktree: {e}"))),
+            };
+            if let Some(ref spawn_base) = added.spawn_base {
+                if let Err(e) = store
+                    .set_mission_spawn_base(&mission.worktree, &mission.branch, spawn_base)
+                    .await
+                {
+                    return Some(err_result(format!(
+                        "failed to record the base snapshot on mission {mid}: {e}"
+                    )));
+                }
+                mission.spawn_base = Some(spawn_base.clone());
             }
 
             let worktree_abs = store.abs(&format!("{WORKTREES_DIR}/{}", mission.worktree));
@@ -557,11 +597,23 @@ pub async fn execute_tower_spawn(
                 &state.base,
                 args.instructions.as_deref(),
             );
-            let agent_id = match manager.spawn(TOWER_WORKER_PROFILE, &args.name).await {
+            let agent_id = match manager
+                .spawn_in_environment(
+                    TOWER_WORKER_PROFILE,
+                    &args.name,
+                    crate::environment::AgentEnvironmentRequest {
+                        cwd: Some(worktree_abs.clone()),
+                        env: std::collections::BTreeMap::new(),
+                    },
+                )
+                .await
+            {
                 Ok(id) => id,
                 Err(e) => return Some(err_result(format!("failed to spawn worker: {e}"))),
             };
             manager.set_instance_llm(&agent_id, model.llm.clone()).await;
+
+            manager.bind_permission_mode(&agent_id, crate::permission::PermissionMode::Auto);
 
             let entry = TowerRosterEntry {
                 name: args.name.clone(),
@@ -634,6 +686,14 @@ pub async fn execute_tower_spawn(
                 format!("mission: {} — {}", mission.id, mission.title),
                 format!("branch: {}", mission.branch),
                 format!("worktree: {}", worktree_abs.to_string_lossy()),
+            ]);
+            if let Some(ref spawn_base) = mission.spawn_base {
+                let short = &spawn_base[..spawn_base.len().min(7)];
+                lines.push(format!(
+                    "base snapshot: {short} — the base checkout had uncommitted changes; they are committed as the branch's first commit (the checkout itself was left untouched)"
+                ));
+            }
+            lines.extend([
                 String::new(),
                 "The worker runs detached in the background; its completion arrives as a notification. Track progress with TowerStatus / TowerInbox. If it dies, diagnose the death status/reason and task state first. Resume or reassign only for transient causes (lost contact, timeout, OOM); fix or escalate systematic defects first. A user-stopped worker is never resumed, reassigned, or replaced.".to_string(),
             ]);
@@ -644,8 +704,16 @@ pub async fn execute_tower_spawn(
             let Some(ref target) = args.review_target else {
                 return Some(err_result("reviewer spawns require review_target"));
             };
-            if !git::branch_exists(&store.repo_root, target).await {
-                return Some(err_result(format!("branch \"{target}\" does not exist")));
+            match git::branch_exists(&store.repo_root, target).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Some(err_result(format!("branch \"{target}\" does not exist")));
+                }
+                Err(error) => {
+                    return Some(err_result(format!(
+                        "cannot determine whether branch \"{target}\" exists: {error}"
+                    )));
+                }
             }
             let review_mission = state
                 .missions
@@ -693,6 +761,8 @@ pub async fn execute_tower_spawn(
                 Err(e) => return Some(err_result(format!("failed to spawn reviewer: {e}"))),
             };
             manager.set_instance_llm(&agent_id, model.llm.clone()).await;
+
+            manager.bind_permission_mode(&agent_id, crate::permission::PermissionMode::Auto);
 
             let entry = TowerRosterEntry {
                 name: args.name.clone(),
@@ -785,10 +855,18 @@ fn build_worker_prompt(
         .unwrap_or_default();
 
     let workplace = format!(
-        "# Your workplace\n- Your private git worktree: {}\n- Your branch: {} (base: {})\n- Address the worktree explicitly for code operations.\n- Scope: {}\n\n",
+        "# Your workplace\n- Your private git worktree: {}\n- Your branch: {} (base: {})\n{}- Address the worktree explicitly for code operations.\n- Scope: {}\n\n",
         worktree.to_string_lossy(),
         mission.branch,
         base,
+        mission
+            .spawn_base
+            .as_ref()
+            .map(|spawn_base| {
+                let short = &spawn_base[..spawn_base.len().min(7)];
+                format!("- Your branch starts from snapshot commit {short}: the base checkout's uncommitted changes (WIP), captured at spawn so you can build on them. That commit is your foundation — never revert, amend, or claim it as your own work; your own commits go on top of it.\n")
+            })
+            .unwrap_or_default(),
         mission.scope.join(", ")
     );
 
@@ -893,6 +971,7 @@ pub async fn execute_tower_rebase(
         return err_result(TOWER_MAIN_AGENT_ONLY);
     }
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct RebaseArgs {
         mission: String,
     }
@@ -902,8 +981,27 @@ pub async fn execute_tower_rebase(
     };
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(repo_root));
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
+
+    let lease_branch = store.load().await.ok().and_then(|state| {
+        state
+            .missions
+            .iter()
+            .find(|mission| mission.id == args.mission)
+            .map(|mission| mission.branch.clone())
+    });
+    let _branch_lease = match lease_branch
+        .as_deref()
+        .map(|branch| acquire_branch_lease(&store.repo_root, branch))
+    {
+        Some(Ok(lease)) => Some(lease),
+        Some(Err(error)) => return err_result(error),
+        None => None,
+    };
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
     match store
         .rebase_with_workers(
             TOWER_NAME,
@@ -948,6 +1046,7 @@ pub async fn execute_tower_merge(
     }
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct MergeArgs {
         branch: String,
     }
@@ -958,14 +1057,17 @@ pub async fn execute_tower_merge(
 
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(repo_root));
-    // Serialize this repo's tower state against concurrent workers: hold the
-    // per-repo lock across the whole operation so its load→mutate→save cannot
-    // interleave with another agent's and lose an update.
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
 
-    // Mode mutex: merging a paused mission's branch would apply worker output
-    // while another mode owns the tree — refuse until resumed.
+    let _branch_lease = match acquire_branch_lease(&store.repo_root, &args.branch) {
+        Ok(lease) => lease,
+        Err(error) => return err_result(error),
+    };
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
+
     match store.load().await {
         Ok(state) => {
             if let Some(mission) = state.missions.iter().find(|m| m.branch == args.branch)
@@ -1045,6 +1147,7 @@ pub async fn execute_tower_teardown(
     }
 
     #[derive(Deserialize, Default)]
+    #[serde(deny_unknown_fields)]
     struct TeardownArgs {
         #[serde(default)]
         force: Option<bool>,
@@ -1053,15 +1156,18 @@ pub async fn execute_tower_teardown(
         #[serde(default)]
         dry_run: Option<bool>,
     }
-    let args: TeardownArgs = serde_json::from_str(raw_args).unwrap_or_default();
+    let args: TeardownArgs = match serde_json::from_str(raw_args) {
+        Ok(a) => a,
+        Err(e) => return err_result(format!("failed to parse TowerTeardown input: {e}")),
+    };
 
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(repo_root));
-    // Serialize this repo's tower state against concurrent workers: hold the
-    // per-repo lock across the whole operation so its load→mutate→save cannot
-    // interleave with another agent's and lose an update.
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
 
     let live_agent_ids = task_runner
         .map(|runner| {
@@ -1089,10 +1195,14 @@ pub async fn execute_tower_teardown(
     };
     match store.teardown(options).await {
         Ok(report) => {
-            if !dry_run && let Some(runtime) = wake_runtime {
-                let _ = runtime
-                    .clear(session_id, wake::TOWER_INBOX_WAKE_VARIANT)
-                    .await;
+            if !dry_run {
+                if let Some(runtime) = wake_runtime {
+                    let _ = runtime
+                        .clear(session_id, wake::TOWER_INBOX_WAKE_VARIANT)
+                        .await;
+                }
+
+                let _ = store.release(session_id).await;
             }
             let mut lines = vec!["tower teardown:".to_string()];
             for item in report {
@@ -1106,8 +1216,6 @@ pub async fn execute_tower_teardown(
     }
 }
 
-/// Legacy task-notification id still recognized by the session's persisted
-/// notification drain. New tower wakes use `wake::TOWER_INBOX_WAKE_VARIANT`.
 pub const TOWER_WAKE_TASK_ID: &str = "tower-inbox-wake";
 
 async fn enqueue_tower_inbox_wake(
@@ -1143,9 +1251,6 @@ pub async fn execute_tower_send(
     let to = input.to.clone();
     match store.send_agent(caller_agent_id, input).await {
         Ok(outcome) => {
-            // A worker's message only writes an inbox file; the rich wake
-            // carries its references and fresh gate digests to the session
-            // that ran TowerInit. Main's own sends never wake it.
             if outcome.caller != TOWER_NAME && (to == TOWER_NAME || to == BROADCAST_NAME) {
                 enqueue_tower_inbox_wake(
                     wake_runtime,
@@ -1156,10 +1261,47 @@ pub async fn execute_tower_send(
                 )
                 .await;
             }
-            ok_result(format!(
-                "message sent to {to}\nfile: {}",
+
+            let delivery = if outcome.caller == TOWER_NAME
+                && let Some(agent_id) = outcome.target_agent_id.as_deref()
+                && task_runner.is_some_and(|runner| {
+                    !runner.list().into_iter().any(|task| {
+                        matches!(
+                            task.get("kind").and_then(serde_json::Value::as_str),
+                            Some("subagent" | "agent")
+                        ) && task.get("status").and_then(serde_json::Value::as_str)
+                            == Some("running")
+                            && task.get("agentId").and_then(serde_json::Value::as_str)
+                                == Some(agent_id)
+                    })
+                }) {
+                format!(
+                    "\nnote: {to} has no running task in this session — the message sits in its inbox until you deliver it with Agent(resume=\"{agent_id}\", run_in_background=true, prompt=\"...\")"
+                )
+            } else {
+                String::new()
+            };
+            let mut lines = vec![format!(
+                "message sent to {to}\nfile: {}{delivery}",
                 outcome.message.item.file
-            ))
+            )];
+            if outcome.placeholder {
+                lines.push(format!(
+                    "note: the tower state was recovered after a loss, so your roster entry was reconstructed as placeholder \"{}\" — your original name and mission assignment are gone; the recovered state's recoveredAt marker reminds the tower to report the history loss to the user",
+                    outcome.caller
+                ));
+            }
+            let activity_log_error = outcome.message.activity_log_error.as_deref();
+            if let Some(error) = activity_log_error {
+                lines.push(format!("activity log error: {error}"));
+            }
+            let content = lines.join("\n");
+
+            if activity_log_error.is_some() {
+                err_result(content)
+            } else {
+                ok_result(content)
+            }
         }
         Err(e) => err_result(e),
     }
@@ -1173,6 +1315,7 @@ pub async fn execute_tower_complete(
     wake_runtime: Option<&Arc<wake::TowerWakeRuntime>>,
 ) -> ExecutableToolResult {
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct CompleteArgs {
         report: String,
     }
@@ -1218,13 +1361,21 @@ pub async fn execute_tower_complete(
                     "notification: reused the stored message; no duplicate was written".to_string(),
                 );
             }
+            let has_error =
+                result.notification_error.is_some() || result.activity_log_error.is_some();
             if let Some(error) = result.notification_error {
                 lines.push(format!("notification error: {error}"));
             }
             if let Some(error) = result.activity_log_error {
                 lines.push(format!("activity log error: {error}"));
             }
-            ok_result(lines.join("\n"))
+            let content = lines.join("\n");
+
+            if has_error {
+                err_result(content)
+            } else {
+                ok_result(content)
+            }
         }
         Err(error) => err_result(error),
     }
@@ -1237,11 +1388,11 @@ pub async fn execute_tower_inbox(
 ) -> ExecutableToolResult {
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(repo_root));
-    // Serialize this repo's tower state against concurrent workers: hold the
-    // per-repo lock across the whole operation so its load→mutate→save cannot
-    // interleave with another agent's and lose an update.
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
 
     let state = match store.load().await {
         Ok(s) => s,
@@ -1254,11 +1405,15 @@ pub async fn execute_tower_inbox(
     };
 
     #[derive(Deserialize, Default)]
+    #[serde(deny_unknown_fields)]
     struct InboxArgs {
         limit: Option<usize>,
         include_read: Option<bool>,
     }
-    let args: InboxArgs = serde_json::from_str(raw_args).unwrap_or_default();
+    let args: InboxArgs = match serde_json::from_str(raw_args) {
+        Ok(a) => a,
+        Err(e) => return err_result(format!("failed to parse TowerInbox input: {e}")),
+    };
 
     match store
         .read_inbox_page(
@@ -1311,11 +1466,11 @@ pub async fn execute_tower_finding(
 ) -> ExecutableToolResult {
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(repo_root));
-    // Serialize this repo's tower state against concurrent workers: hold the
-    // per-repo lock across the whole operation so its load→mutate→save cannot
-    // interleave with another agent's and lose an update.
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
 
     let state = match store.load().await {
         Ok(s) => s,
@@ -1400,9 +1555,11 @@ pub async fn execute_tower_mission(
 ) -> ExecutableToolResult {
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(&repo_root));
-    // Serialize this repo's tower state against concurrent workers (see above).
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
 
     let state = match store.load().await {
         Ok(s) => s,
@@ -1415,6 +1572,7 @@ pub async fn execute_tower_mission(
     };
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct MissionArgs {
         id: String,
         status: Option<crate::tools::tower::types::TowerMissionStatus>,
@@ -1515,8 +1673,11 @@ pub async fn execute_tower_status(
 ) -> ExecutableToolResult {
     let repo_root = resolve_tower_repo_root(&cwd.to_string_lossy());
     let store = TowerStore::new(PathBuf::from(repo_root));
-    let state_lock = store.state_lock();
-    let _state_guard = state_lock.lock().await;
+
+    let _state_guard = match store.lock_state_process("tool call").await {
+        Ok(guard) => guard,
+        Err(error) => return err_result(error),
+    };
     let active_agent_ids = (caller_agent_id == "main")
         .then(|| active_tower_agent_ids(task_runner))
         .flatten();
@@ -1536,6 +1697,20 @@ pub async fn execute_tower_status(
     }
 }
 
+const TOWER_INIT_DESCRIPTION: &str = include_str!("descriptions/init.md");
+const TOWER_PLAN_DESCRIPTION: &str = include_str!("descriptions/plan.md");
+const TOWER_SPAWN_DESCRIPTION: &str = include_str!("descriptions/spawn.md");
+const TOWER_REBASE_DESCRIPTION: &str = include_str!("descriptions/rebase.md");
+const TOWER_MERGE_DESCRIPTION: &str = include_str!("descriptions/merge.md");
+const TOWER_TEARDOWN_DESCRIPTION: &str = include_str!("descriptions/teardown.md");
+const TOWER_SEND_DESCRIPTION: &str = include_str!("descriptions/send.md");
+const TOWER_COMPLETE_DESCRIPTION: &str = include_str!("descriptions/complete.md");
+const TOWER_INBOX_DESCRIPTION: &str = include_str!("descriptions/inbox.md");
+const TOWER_FINDING_DESCRIPTION: &str = include_str!("descriptions/finding.md");
+const TOWER_REVIEW_DESCRIPTION: &str = include_str!("descriptions/review.md");
+const TOWER_MISSION_DESCRIPTION: &str = include_str!("descriptions/mission.md");
+const TOWER_STATUS_DESCRIPTION: &str = include_str!("descriptions/status.md");
+
 pub fn tower_tool_defs() -> Vec<ToolInfo> {
     tower_tool_defs_with_models(None)
 }
@@ -1545,185 +1720,345 @@ pub fn tower_tool_defs_with_models(
 ) -> Vec<ToolInfo> {
     let mut spawn = ToolInfo {
         name: "TowerSpawn".into(),
-        description: "Spawn a worker or reviewer tower subagent".into(),
+        description: TOWER_SPAWN_DESCRIPTION.into(),
         input_schema: serde_json::json!({
             "type": "object",
             "required": ["name", "kind"],
             "properties": {
-                "name": { "type": "string" },
-                "kind": { "type": "string", "enum": ["worker", "reviewer"] },
-                "mission_id": { "type": "string" },
-                "review_target": { "type": "string" },
-                "instructions": { "type": "string" }
-            }
+                "name": {
+                    "type": "string",
+                    "description": "Unique tower name for the agent (e.g. \"agent-build\", \"reviewer-a\"). Used for inbox addressing and mission ownership."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["worker", "reviewer"],
+                    "description": "workers execute a mission in their worktree; reviewers review one branch"
+                },
+                "mission_id": {
+                    "type": "string",
+                    "description": "Required for workers: the mission id (e.g. \"M1\") from TowerPlan"
+                },
+                "review_target": {
+                    "type": "string",
+                    "description": "Required for reviewers: the branch to review (e.g. \"feat/vulkan-build\")"
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": "Extra tower instructions appended to the generated briefing"
+                }
+            },
+            "additionalProperties": false
         }),
     };
     if let Some(pool) = secondary_model {
-        spawn.description.push_str(&format!(
-            "\n\n{}\nThe [default] marker is the worker pool default, not the reviewer default.",
-            pool.tower_description()
-        ));
+        spawn
+            .description
+            .push_str(&format!("\n\n{}", pool.tower_description()));
         spawn.input_schema["properties"]["model"] = serde_json::json!({
             "type": "string",
-            "description": "Worker: pool alias (default = pool default) or primary. Reviewer: primary by default, or an explicit pool alias."
+            "description": "Model for this new spawn: one of the aliases listed under \"Available models\" in this tool description, or \"primary\" for your current model and thinking level. Pass this only when the user explicitly requests a model; when omitted, Tower keeps its worker/reviewer defaults."
         });
     }
     vec![
         ToolInfo {
             name: "TowerInit".into(),
-            description:
-                "Initialize tower multi-agent orchestration workspace in the current repository"
-                    .into(),
+            description: TOWER_INIT_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "base": { "type": "string", "description": "Base branch for the tower (defaults to current branch)" }
-                }
+                    "base": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Local branch that missions fork from and merge back into (e.g. \"develop\"). Defaults to the branch currently checked out in the main worktree. On an existing workspace an explicit base re-anchors it — allowed anytime, even with open missions, whose branches then rebase onto the new base before merging. Remote-tracking refs (e.g. \"origin/main\") and tags are not accepted — create a local branch first."
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerPlan".into(),
-            description: "Plan tower missions with disjoint file scopes. Auto-wired dependencies order merges only, not spawning or editing; add explicit deps when one mission must merge after another.".into(),
+            description: TOWER_PLAN_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["missions"],
                 "properties": {
                     "missions": {
                         "type": "array",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "required": ["title", "scope"],
                             "properties": {
-                                "title": { "type": "string" },
-                                "scope": { "type": "array", "items": { "type": "string" } },
-                                "tasks": { "type": "array", "items": { "type": "string" } },
-                                "deps": { "type": "array", "items": { "type": "string" } },
-                                "kind": { "type": "string", "enum": ["build", "survey"] }
-                            }
+                                "title": {
+                                    "type": "string",
+                                    "description": "Short mission title; becomes the branch/worktree slug. Printable ASCII English only — any non-ASCII character is rejected. Include a unique identifier word (a business code, a module name, a ticket id)."
+                                },
+                                "scope": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": { "type": "string" },
+                                    "description": "Files/globs this mission may touch (e.g. \"src/build/**\"). Scopes of different build missions should be disjoint; when they overlap, the store auto-adds a dependency that serializes their merges."
+                                },
+                                "tasks": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Checklist the worker will tick off via TowerMission task_done — write each task as a verifiable item a reviewer can map to the diff"
+                                },
+                                "context": {
+                                    "type": "string",
+                                    "description": "The user's own key sentences about this mission, copied verbatim — the tower's paraphrase supplements them, never replaces them. Fill this whenever the requirement could be misread; never paste the full conversation history."
+                                },
+                                "deps": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Mission ids (e.g. \"M1\") that must merge before this one can merge"
+                                },
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["build", "survey"],
+                                    "description": "\"survey\" = read-only investigation: the scope is informational and reserves nothing (other missions may overlap it), the worker must not change code, and closing it needs no review or git merge. Default \"build\"."
+                                }
+                            },
+                            "additionalProperties": false
                         }
                     }
-                }
+                },
+                "additionalProperties": false
             }),
         },
         spawn,
         ToolInfo {
             name: "TowerRebase".into(),
-            description: "Rebase an open build mission onto the current tower base in its registered worktree".into(),
+            description: TOWER_REBASE_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["mission"],
                 "properties": {
-                    "mission": { "type": "string" }
-                }
+                    "mission": {
+                        "type": "string",
+                        "description": "Mission id (e.g. \"M3\") whose branch should be rebased onto the current base"
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerMerge".into(),
-            description: "Merge a completed tower mission branch back into base".into(),
+            description: TOWER_MERGE_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["branch"],
                 "properties": {
-                    "branch": { "type": "string" }
-                }
+                    "branch": {
+                        "type": "string",
+                        "description": "The mission branch to merge into the base branch (e.g. \"feat/vulkan-build\")"
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerTeardown".into(),
-            description: "Tear down eligible tower worktrees while tower mode stays active".into(),
+            description: TOWER_TEARDOWN_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "force": { "type": "boolean" },
-                    "exclude": { "type": "array", "items": { "type": "string" } },
-                    "dry_run": { "type": "boolean" }
-                }
+                    "force": {
+                        "type": "boolean",
+                        "description": "Remove worktrees even when they contain uncommitted changes — a worktree whose roster agent is still running is kept regardless"
+                    },
+                    "exclude": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Worktree names to keep — they are skipped and reported, whatever their state"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Print the would-remove / would-keep list with reasons without changing anything on disk or in state"
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerSend".into(),
-            description: "Send an inbox message to another tower agent or broadcast".into(),
+            description: TOWER_SEND_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["to", "subject", "body"],
                 "properties": {
-                    "to": { "type": "string" },
-                    "subject": { "type": "string" },
-                    "body": { "type": "string" },
-                    "scope": { "type": "string" },
-                    "action": { "type": "string" },
-                    "consent_ref": { "type": "string" }
-                }
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient: a roster agent name, \"tower\", or \"all\" (broadcast)"
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "One-line subject; keep it greppable"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Full message body (markdown)"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Optional scope tag (e.g. the mission id)"
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "Optional action tag for machine routing"
+                    },
+                    "consent_ref": {
+                        "type": "string",
+                        "description": "Optional reference to a consent/approval record this message relies on"
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerComplete".into(),
-            description: "Mark your mission completed and send its standard completion report atomically".into(),
+            description: TOWER_COMPLETE_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["report"],
                 "properties": {
-                    "report": { "type": "string", "description": "Full delivery report; build missions request review and surveys return their summary" }
-                }
+                    "report": {
+                        "type": "string",
+                        "description": "Full completion report for the tower and the next review round"
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerInbox".into(),
-            description: "Read messages from your tower inbox".into(),
+            description: TOWER_INBOX_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "limit": { "type": "integer" },
-                    "include_read": { "type": "boolean" }
-                }
+                    "limit": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "description": "Max messages to return (default 20), newest first"
+                    },
+                    "include_read": {
+                        "type": "boolean",
+                        "description": "Include previously acknowledged messages for history lookup; only returned messages are acknowledged"
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerFinding".into(),
-            description: "Record an out-of-scope finding for the tower to route".into(),
+            description: TOWER_FINDING_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["type", "title", "summary", "details", "suggested_fix"],
                 "properties": {
-                    "type": { "type": "string", "enum": ["bug", "improve", "vuln", "idea"] },
-                    "title": { "type": "string" },
-                    "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
-                    "summary": { "type": "string" },
-                    "location": { "type": "string" },
-                    "details": { "type": "string" },
-                    "suggested_fix": { "type": "string" }
-                }
+                    "type": {
+                        "type": "string",
+                        "enum": ["bug", "improve", "vuln", "idea"],
+                        "description": "Finding category"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short finding title"
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "critical"]
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "What was found, in a sentence or two"
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "File/symbol the finding concerns"
+                    },
+                    "details": {
+                        "type": "string",
+                        "description": "Full details: evidence, reproduction, impact"
+                    },
+                    "suggested_fix": {
+                        "type": "string",
+                        "description": "What you would do about it"
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerReview".into(),
-            description: "Submit a code review for a mission branch".into(),
+            description: TOWER_REVIEW_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["target", "status", "merge", "findings", "decision"],
                 "properties": {
-                    "target": { "type": "string" },
-                    "status": { "type": "string" },
-                    "merge": { "type": "string", "enum": ["merge", "fix-then-merge", "hold"] },
-                    "findings": { "type": "string" },
-                    "checks": { "type": "array", "items": { "type": "string" } },
-                    "decision": { "type": "string" }
-                }
+                    "target": {
+                        "type": "string",
+                        "description": "The branch you were assigned to review"
+                    },
+                    "status": {
+                        "type": "string",
+                        "pattern": "^(clean|p[12]-\\d+items)$",
+                        "description": "Verdict: \"clean\", or \"p1-Nitems\" / \"p2-Nitems\" with the number of findings at that priority"
+                    },
+                    "merge": {
+                        "type": "string",
+                        "enum": ["merge", "fix-then-merge", "hold"],
+                        "description": "Merge recommendation for the tower"
+                    },
+                    "findings": {
+                        "type": "string",
+                        "description": "Full findings text (markdown); write \"none\" when clean"
+                    },
+                    "checks": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Checklist items you verified (e.g. \"tests pass\", \"no secrets\")"
+                    },
+                    "decision": {
+                        "type": "string",
+                        "description": "The reasoning behind your verdict"
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerMission".into(),
-            description: "Inspect or update a tower mission's status, notes, or tasks".into(),
+            description: TOWER_MISSION_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["id"],
                 "properties": {
-                    "id": { "type": "string" },
-                    "status": { "type": "string" },
-                    "note": { "type": "string" },
-                    "blocker": { "type": "string" },
-                    "clear_blockers": { "type": "boolean" },
-                    "task_done": { "type": "string" },
+                    "id": {
+                        "type": "string",
+                        "description": "Mission id (e.g. \"M1\")"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["planned", "active", "completed", "blocked", "paused", "merged", "abandoned"],
+                        "description": "New lifecycle status. Workers may update only their own mission. \"abandoned\" is tower-only and gives the mission up without merging. \"merged\" cannot be set here; only TowerMerge records it after the merge gate succeeds. Merged and abandoned are terminal and cannot be reopened by a generic patch."
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Append a decision-log note"
+                    },
+                    "blocker": {
+                        "type": "string",
+                        "description": "Report a blocker (also sets status to blocked)"
+                    },
+                    "clear_blockers": {
+                        "type": "boolean",
+                        "description": "Clear all recorded blockers"
+                    },
+                    "task_done": {
+                        "type": "string",
+                        "description": "Mark the first open task containing this text as done"
+                    },
                     "task_drop": {
                         "type": "string",
                         "description": "Mark the first open task containing this text as dropped — the escape hatch for legitimately descoped tasks; requires task_drop_reason and is recorded in the mission notes and the activity log"
@@ -1732,17 +2067,22 @@ pub fn tower_tool_defs_with_models(
                         "type": "string",
                         "description": "Mandatory with task_drop: why the task is legitimately descoped"
                     },
-                    "scope": { "type": "array", "items": { "type": "string" } }
-                }
+                    "scope": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Tower only: replace the mission scope globs (picomatch — `**` crosses directories). Logged; widens what the merge gate accepts."
+                    }
+                },
+                "additionalProperties": false
             }),
         },
         ToolInfo {
             name: "TowerStatus".into(),
-            description: "Check the overall status of tower missions, roster, reviews, and inbox"
-                .into(),
+            description: TOWER_STATUS_DESCRIPTION.into(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": {}
+                "properties": {},
+                "additionalProperties": false
             }),
         },
     ]
@@ -1756,6 +2096,22 @@ mod tests {
         TowerAgentKind, TowerMission, TowerMissionKind, TowerMissionStatus, TowerRoster,
         TowerRosterEntry, TowerState,
     };
+
+    #[test]
+    fn branch_lease_fails_fast_for_the_same_branch_only() {
+        let root = Path::new("lease-test-repo");
+        let first = acquire_branch_lease(root, "feat/lease").unwrap();
+        let error = acquire_branch_lease(root, "feat/lease").unwrap_err();
+        assert!(error.contains("leased by another"), "{error}");
+
+        let other_branch = acquire_branch_lease(root, "feat/other").unwrap();
+        let other_repo =
+            acquire_branch_lease(Path::new("lease-test-repo-2"), "feat/lease").unwrap();
+        drop(first);
+        assert!(acquire_branch_lease(root, "feat/lease").is_ok());
+        drop(other_branch);
+        drop(other_repo);
+    }
 
     fn spawn_test_mission(status: TowerMissionStatus) -> TowerMission {
         TowerMission {
@@ -1919,15 +2275,66 @@ mod tests {
             .find(|definition| definition.name == "TowerPlan")
             .unwrap();
         assert!(
-            plan.description
-                .contains("order merges only, not spawning or editing"),
+            plan.description.contains("auto-adds merge dependencies"),
             "{}",
             plan.description
         );
         assert!(
-            plan.description.contains("explicit deps"),
+            plan.description.contains("add explicit deps"),
             "{}",
             plan.description
+        );
+    }
+
+    #[tokio::test]
+    async fn tower_init_reports_malformed_arguments_instead_of_running_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_tower_init(dir.path(), "main", "session-1", r#"{"base":42}"#).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("failed to parse TowerInit input"),
+            "{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn tower_teardown_reports_malformed_arguments_instead_of_running_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_tower_teardown(
+            dir.path(),
+            "main",
+            "session-1",
+            r#"{"force":"yes"}"#,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result
+                .content
+                .contains("failed to parse TowerTeardown input"),
+            "{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn tower_inbox_reports_malformed_arguments_instead_of_running_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        save_spawn_state(
+            dir.path(),
+            spawn_test_mission(TowerMissionStatus::Active),
+            Vec::new(),
+        )
+        .await;
+        let result = execute_tower_inbox(dir.path(), "main", r#"{"limit":"ten"}"#).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("failed to parse TowerInbox input"),
+            "{}",
+            result.content
         );
     }
 

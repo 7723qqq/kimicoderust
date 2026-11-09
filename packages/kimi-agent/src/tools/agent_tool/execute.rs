@@ -14,14 +14,9 @@ use crate::subagent::manager::ForegroundTurnOutcome;
 use crate::subagent::types::ParentCancel;
 use crate::turn_loop::types::{ExecutableToolResult, LoopTurnStopReason};
 
-/// v2 `BACKENDS_EXPERIMENTAL_UNAVAILABLE` (`session/subagent/backend/configSection.ts:57`):
-/// the exact refusal a `backend` argument gets while the backends feature is
-/// off, which is every configuration of this engine.
 const BACKENDS_UNAVAILABLE: &str =
     "backend is disabled: the subagent_backends experimental flag is off.";
 
-/// v2 `canRunInBackground`: all three task tools must be active for this
-/// caller, both in the merged live table and in its own profile policy.
 pub(super) async fn background_agent_available(
     manager: &Arc<SubagentManager>,
     runtime: &crate::subagent::manager::SubagentRuntime,
@@ -39,14 +34,6 @@ pub(super) async fn background_agent_available(
     .await
 }
 
-/// Execute the `Agent` tool natively (foreground core). Returns `None`
-/// when the call must fall back to the host — see the module docs.
-///
-/// `root` is the toolset's canonical workspace root, threaded into the tower
-/// resume gate's roster lookup: the gate must consult the tower state of the
-/// workspace the session actually runs in, not wherever the process happens
-/// to have its cwd. `None` — host-less calls — keeps the pre-P2-2 process
-/// cwd lookup.
 pub async fn execute_agent(
     manager: &Arc<SubagentManager>,
     root: Option<&std::path::Path>,
@@ -56,14 +43,10 @@ pub async fn execute_agent(
     tool_call_id: Option<&str>,
     pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> Option<ExecutableToolResult> {
-    // v2 `checkBackendArgs` (`agentTool.ts:328-349`): `backend` picks an
-    // external subagent backend (acp / claude-code / codex). This engine has
-    // none, and v2 with the `subagent_backends` flag off refuses the parameter
-    // with exactly this message instead of silently ignoring it — a model that
-    // asks for a backend must learn it is unavailable, not believe the
-    // in-process spawn honoured the request.
     if string_arg(args, "backend").is_some_and(|value| !value.trim().is_empty()) {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: BACKENDS_UNAVAILABLE.to_string(),
@@ -72,14 +55,9 @@ pub async fn execute_agent(
             display: None,
         });
     }
-    // Without a `[secondary_model]` pool the engine still absorbs the `model`
-    // parameter: omitting it inherits the caller's model, and any explicit
-    // value — `primary` included (v2 #4418) — is the no-pool error. The host
-    // no longer owns subagent model routing.
+
     let requested_model = string_arg(args, "model");
-    // Native resume (P55): a `resume` for an agent whose conversation we
-    // hold continues natively; unknown ids stay host-owned (v2 persistent
-    // scopes live there).
+
     if let Some(resume_id) = string_arg(args, "resume") {
         return execute_resume(
             manager,
@@ -94,11 +72,7 @@ pub async fn execute_agent(
     }
 
     let is_fork = args.get("fork").and_then(|v| v.as_bool()).unwrap_or(false);
-    // v2 #4152 (`planSpawn`): a fork inherits the caller's profile when
-    // `subagent_type` is omitted, so its system prompt — and with it the
-    // whole request prefix — stays byte-identical to the caller's and the
-    // provider's prompt cache survives the handoff. A plain spawn defaults
-    // to `coder`.
+
     let caller_id = crate::tools::CALLER_AGENT_ID
         .try_with(|id| id.clone())
         .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
@@ -113,11 +87,23 @@ pub async fn execute_agent(
     };
 
     if is_fork {
-        // v2 refuses `fork` outright when the flag is off. The flag defaults
-        // ON here (see `subagent::fork::subagent_fork_enabled`), so this is
-        // the opt-out path.
+        if !manager.agent_exists(&caller_id).await {
+            return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
+                delivery: None,
+                stop_turn: false,
+                content: format!("agent.not_found: Source agent \"{caller_id}\" does not exist"),
+                is_error: true,
+                note: None,
+                display: None,
+            });
+        }
+
         if !crate::subagent::fork::subagent_fork_enabled() {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: crate::subagent::fork::FORK_EXPERIMENTAL_UNAVAILABLE.to_string(),
@@ -129,8 +115,7 @@ pub async fn execute_agent(
         let resume = string_arg(args, "resume");
         let subagent_type = string_arg(args, "subagent_type");
         let model = string_arg(args, "model");
-        // v2 `forkIncompatibility` compares an explicit model against the
-        // caller's own alias: naming it is a no-op inherit, not an override.
+
         let caller_model_alias = manager.caller_model_alias().await;
         if let Some(err) = crate::subagent::fork_incompatibility(
             resume.as_deref(),
@@ -140,6 +125,8 @@ pub async fn execute_agent(
             caller_model_alias.as_deref(),
         ) {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: err.to_string(),
@@ -150,22 +137,15 @@ pub async fn execute_agent(
         }
     }
 
-    // Unknown profiles stay host-owned: plugin sources and external
-    // backends never reach the pushed snapshot.
     manager.get_definition(&profile_name).await?;
 
-    // v2 `planSpawn`: the requested type must be inside the caller's
-    // allowlist — the caller profile's `subagents` declaration, else the
-    // default profile's delegation set (plus the main agent's discovered
-    // extras). Forks skip the gate: a fork inherits a type the caller was
-    // already admitted as. The gate runs after the unknown-profile check so
-    // types the engine never registered keep their host fallback (plugin
-    // sources never reach the snapshot).
     if let Err(message) = manager
         .check_spawn_allowed(&caller_id, &profile_name, is_fork)
         .await
     {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: message,
@@ -175,7 +155,6 @@ pub async fn execute_agent(
         });
     }
 
-    // No injected runtime (unwired transport) — the host tool still works.
     let runtime = manager.runtime().await?;
 
     if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true)
@@ -184,13 +163,6 @@ pub async fn execute_agent(
         return Some(background_agent_unavailable());
     }
 
-    // The pool binding applies to non-fork spawns (resumes keep their own
-    // model either way, v2 `stripSubagentModelParameter`). A fork inherits
-    // the caller's model and thinking verbatim (v2 #4152 `planSpawn`) — a
-    // pool binding would move the fork onto the pool default and break the
-    // request prefix it shares with the caller. A pool-bound caller's fork
-    // binds that same pool entry (`instance_llm_of`); everyone else inherits
-    // the session model.
     let binding_llm = if is_fork {
         Some(
             manager
@@ -204,6 +176,8 @@ pub async fn execute_agent(
                 Ok(binding) => Some(binding.llm),
                 Err(message) => {
                     return Some(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: message,
@@ -220,6 +194,8 @@ pub async fn execute_agent(
                     )
                 {
                     return Some(ExecutableToolResult {
+                        spill: None,
+                        parts: Vec::new(),
                         delivery: None,
                         stop_turn: false,
                         content: message,
@@ -253,15 +229,13 @@ pub async fn execute_agent(
         None
     };
 
-    // P58: background execution — spawn, register in TaskRunner if present,
-    // launch detached, return the v2 running shape immediately. Completion flows
-    // back through the `subagent.completed` / `subagent.failed` lifecycle events,
-    // which the host turns into the usual synthetic notification turn.
     if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
         let agent_id = match manager.spawn(&profile_name, &description).await {
             Ok(id) => id,
             Err(message) => {
                 return Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: message,
@@ -273,6 +247,13 @@ pub async fn execute_agent(
         };
         if let Some(llm) = binding_llm.as_ref() {
             manager.set_instance_llm(&agent_id, llm.clone()).await;
+        }
+        if is_fork {
+            manager
+                .set_forked_from(&agent_id, Some(caller_id.clone()))
+                .await;
+
+            manager.arm_fork_probe(&agent_id, &caller_id);
         }
         emit_spawned_started(
             runtime.callbacks.as_ref(),
@@ -296,11 +277,6 @@ pub async fn execute_agent(
         };
         let task_runner = manager.get_task_runner().await;
 
-        // v2 `RegisterAgentTaskOptions`: a background subagent is a task of its
-        // own, with an `agent-xxxxxxxx` id minted by
-        // `generateTaskId(task.idPrefix)`. The agent id is a *separate*
-        // identifier: the tool output reports both, and resuming goes through
-        // the agent id, never the task id.
         let task_id = crate::storage::generate_task_id("agent");
 
         let profile = profile_name.clone();
@@ -321,8 +297,6 @@ pub async fn execute_agent(
                     }
                 }
                 Ok(ForegroundTurnOutcome::ParentCancelled) => {
-                    // The user interrupted this background subagent: report it as
-                    // cancelled (not failed), matching the foreground path.
                     emit_cancelled(cb.as_ref(), &agent, &profile);
                     TaskOutcome::Failed(USER_INTERRUPTED_SUBAGENT_MESSAGE.to_string())
                 }
@@ -334,8 +308,6 @@ pub async fn execute_agent(
         };
 
         let spawn_error = if let Some(runner) = task_runner {
-            // Session attribution rides the runtime the pipeline built for
-            // this turn — background task events land on the right lane.
             let session_id = manager
                 .runtime()
                 .await
@@ -362,10 +334,6 @@ pub async fn execute_agent(
             None
         };
         if let Some(error) = spawn_error {
-            // The registration consumed `bg_future`, so the subagent can never
-            // run to a terminal of its own. Reporting `status: running` here
-            // while the future is already gone is the worst of the two, so
-            // settle the lifecycle and hand the caller an error.
             let message = format!("failed to register the background task: {error}");
             emit_failed(
                 runtime.callbacks.as_ref(),
@@ -374,6 +342,8 @@ pub async fn execute_agent(
                 &message,
             );
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: message,
@@ -406,6 +376,8 @@ pub async fn execute_agent(
         ]
         .join("\n");
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content,
@@ -415,12 +387,12 @@ pub async fn execute_agent(
         });
     }
 
-    // Spawn first so the id exists even if the run times out (the failure
-    // text carries it, matching v2).
     let agent_id = match manager.spawn(&profile_name, &description).await {
         Ok(id) => id,
         Err(message) => {
             return Some(ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: message,
@@ -433,10 +405,14 @@ pub async fn execute_agent(
     if let Some(llm) = binding_llm.as_ref() {
         manager.set_instance_llm(&agent_id, llm.clone()).await;
     }
+    if is_fork {
+        manager
+            .set_forked_from(&agent_id, Some(caller_id.clone()))
+            .await;
 
-    // v2 `emitAgentRunSpawned` + `mirrorAgentRun`'s SubagentStarted: the
-    // host dispatches the same lifecycle events the host-side subagent
-    // path does, keyed by the parent tool call id.
+        manager.arm_fork_probe(&agent_id, &caller_id);
+    }
+
     emit_spawned_started(
         runtime.callbacks.as_ref(),
         &agent_id,
@@ -448,24 +424,25 @@ pub async fn execute_agent(
         &prompt,
     );
 
-    // v2 `taskService` arms the timeout only when `timeoutMs > 0` — an
-    // explicit `0` means "no timeout", not the 2h default.
-    let timeout = match timeout_ms {
-        Some(0) => u64::MAX,
-        Some(ms) => ms,
-        None => DEFAULT_SUBAGENT_TIMEOUT_MS,
+    let bound_ms = match timeout_ms {
+        Some(0) => None,
+        Some(ms) => Some(ms),
+        None => Some(DEFAULT_SUBAGENT_TIMEOUT_MS),
     };
 
-    let run = tokio::time::timeout(
-        std::time::Duration::from_millis(timeout),
-        manager.run_foreground_turn_with_history(
-            &agent_id,
-            &prompt,
-            inherited_history,
-            parent_cancel,
-        ),
-    )
-    .await;
+    let turn = manager.run_foreground_turn_with_history(
+        &agent_id,
+        &prompt,
+        inherited_history,
+        parent_cancel,
+    );
+
+    let run: Result<_, u64> = match bound_ms {
+        Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms), turn)
+            .await
+            .map_err(|_| ms),
+        None => Ok(turn.await),
+    };
 
     let (content, is_error) = match run {
         Ok(Ok(ForegroundTurnOutcome::Completed(turn))) => report_foreground_turn(
@@ -476,10 +453,6 @@ pub async fn execute_agent(
             parent_cancel,
         ),
         Ok(Ok(ForegroundTurnOutcome::ParentCancelled)) => {
-            // The user interrupted the subagent: v2 emitted a distinct
-            // `subagent.cancelled` here instead of a failure, so the TUI can
-            // mark the member cancelled. The user-interruption message still
-            // becomes the tool result.
             emit_cancelled(runtime.callbacks.as_ref(), &agent_id, &profile_name);
             (
                 format_failure(
@@ -499,8 +472,7 @@ pub async fn execute_agent(
                 &profile_name,
                 &message,
             );
-            // v2's error-code → report token table gives
-            // `AGENT_NO_FINAL_MESSAGE` its own token.
+
             (
                 format_failure(
                     &agent_id,
@@ -512,11 +484,11 @@ pub async fn execute_agent(
                 true,
             )
         }
-        Err(_elapsed) => {
+        Err(timeout_ms) => {
             let _ = manager.kill(&agent_id).await;
             let message = format!(
                 "Agent timed out after {}.",
-                format_timeout_description(timeout)
+                format_timeout_description(timeout_ms)
             );
             emit_failed(
                 runtime.callbacks.as_ref(),
@@ -531,6 +503,8 @@ pub async fn execute_agent(
         }
     };
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content,

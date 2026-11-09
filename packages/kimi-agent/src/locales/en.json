@@ -492,7 +492,7 @@
       "alreadyActive": "Plan mode is already active. Use ExitPlanMode when the plan is ready.",
       "enterFailed": "Failed to enter plan mode.",
       "enterFailedDetail": "Failed to enter plan mode: {{message}}",
-      "exitOnlyInPlanMode": "ExitPlanMode can only be called while plan mode is active. Use EnterPlanMode (or /plan) first.",
+      "exitOnlyInPlanMode": "ExitPlanMode can only be called while plan mode is active. Only the user can turn plan mode on.",
       "exitFailed": "Failed to exit plan mode.",
       "exitFailedDetail": "Failed to exit plan mode: {{message}}",
       "readFailed": "Failed to read plan file.",
@@ -711,9 +711,11 @@
     "compaction": {
       "cancelled": "compaction cancelled",
       "emptySummary": "The compaction response did not contain a usable summary.",
+      "truncated": "Compaction response was truncated before producing a complete summary.",
       "overflowFailed": "Compaction failed to bring the context under the model window after {{max_attempts}} attempts."
     },
     "permission": {
+      "compactionAuthorizationRequired": "Compaction requires authorization.",
       "autoModeCannotAsk": "Auto mode cannot ask interactive questions",
       "deniedByUserRule": "Denied by user rule: {{rule}}: {{why}}",
       "deniedByUserRuleNoWhy": "Denied by user rule: {{rule}}",
@@ -738,7 +740,17 @@
     "tools": {
       "memoryAction": "Memory: {{action}}",
       "unknownMemoryAction": "Unknown memory action: {{action}}",
-      "disabled": "Tool '{{tool_name}}' is disabled by the [tools] configuration and cannot run.",
+      "sandbox": {
+        "writeBlockedReadOnly": "Sandbox mode \"{{mode}}\" blocks writes to the filesystem. Set `[sandbox] mode = \"off\"` (or \"workspace-write\") to allow writes.",
+        "writeBlockedOutsideWorkspace": "Sandbox mode \"{{mode}}\" blocks writes outside the workspace root \"{{workspace}}\". Target path \"{{path}}\" is outside it.",
+        "codeExecutionBlocked": "Sandbox mode \"{{mode}}\" blocks code execution (run_code). Set `[sandbox] mode = \"off\"` to allow it.",
+        "toolBlockedReadOnly": "Sandbox mode \"{{mode}}\" allows read-only tools only; \"{{tool}}\" can mutate files or system state and is refused. Set `[sandbox] mode = \"off\"` to allow it.",
+        "toolBlockedUndeclared": "Sandbox mode \"{{mode}}\" refuses \"{{tool}}\" because the tool does not declare whether it has side effects (fail closed). Set `[sandbox] mode = \"off\"` to allow it.",
+        "shellBlockedReadOnly": "Sandbox mode \"{{mode}}\" refuses shell commands (\"{{tool}}\") because a shell command cannot be proven write-free. Set `[sandbox] mode = \"off\"` to run shell commands.",
+        "shellBlockedNoBackend": "Sandbox mode \"{{mode}}\" would need an OS sandbox backend to confine shell commands (\"{{tool}}\") and none is available on this host — refusing to run (fail closed). Set `[sandbox] mode = \"off\"` to run unsandboxed.",
+        "writeBlockedUnverifiable": "Sandbox mode \"{{mode}}\" allows file writes inside the workspace only; \"{{tool}}\" does not declare which files it writes, so it is refused (fail closed). Set `[sandbox] mode = \"off\"` to allow it."
+      },
+      "disabled": "Tool \"{{tool_name}}\" is disabled by the active tool policy",
       "read": {
         "pathRequired": "\"path\" is required and must be a string.",
         "lineOffsetInvalid": "\"line_offset\" must be an integer, got {{v}}.",
@@ -749,6 +761,7 @@
         "notAFile": "\"{{path}}\" is not a file.",
         "cannotOpen": "\"{{path}}\" could not be opened.",
         "cannotRead": "\"{{path}}\" could not be read.",
+        "cannotReadDetail": "\"{{path}}\" could not be read: {{e}}.",
         "notUtf8": "\"{{path}}\" is not readable as UTF-8 text. Only text files can be read.",
         "notUtf8Or16": "\"{{path}}\" is not valid UTF-8 or UTF-16 text. Only UTF-8 and UTF-16 text files can be read; for other encodings (e.g. GBK), convert the file to UTF-8 first (e.g. with `iconv`).",
         "offsetPastEnd": "line_offset {{offset}} is past the end of {{path}} ({{total_lines}} lines)"
@@ -771,11 +784,16 @@
         "filteredSensitiveWithList": "Filtered {{count}} sensitive file(s): {{list}}",
         "filteredSensitive": "Filtered {{filtered_sensitive}} sensitive file(s).",
         "noMoreMatches": "No more matches at offset={{offset}} in the current result set ({{total}} matches).",
-        "noFilesMatched": "No files matched pattern: {{pattern}}"
+        "noFilesMatched": "No files matched pattern: {{pattern}}",
+        "unreadable": "{{count}} file(s) could not be read and were skipped: {{list}}. Matches may be missing.",
+        "walkErrors": "{{count}} path(s) could not be traversed during the search. Matches may be missing.",
+        "lossyUtf8": "{{count}} matching file(s) contained invalid UTF-8 and were decoded with replacement characters; a match spanning such a sequence may have been missed."
       },
       "glob": {
         "patternRequired": "\"pattern\" is required and must be a string.",
         "pathNotExist": "\"{{p}}\" does not exist.",
+        "walkErrors": "{{count}} path(s) could not be traversed during the walk. Files may be missing.",
+        "walkTruncated": "The walk stopped after {{entries}} entries or {{seconds}}s; these results are partial. Narrow the pattern or path.",
         "showingMatches": "Showing matches {{from}}–{{to}} of {{total}}."
       },
       "write": {
@@ -792,15 +810,24 @@
         "outsideWorkspace": "\"{{path}}\" is outside the workspace and cannot be edited.",
         "notExist": "\"{{path}}\" does not exist.",
         "notUtf8": "\"{{path}}\" is not readable as UTF-8 text. Only text files can be edited.",
+        "cannotReadDetail": "\"{{path}}\" could not be read: {{e}}.",
         "oldStringNotFound": "old_string not found in {{path}}",
         "oldStringMatchedMultiple": "old_string matched {{occurrence_count}} times in {{path}} (expected exactly 1; widen the string or pass replace_all)",
         "cannotWrite": "\"{{path}}\" could not be written: {{error}}",
-        "edited": "Edited {{display}}"
+        "edited": "Edited {{path}} ({{occurrence_count}} {{occurrence_word}})"
       },
       "bash": {
         "commandFailed": "Command execution failed: {{e}}",
+        "cwdUnavailable": "The working directory \"{{cwd}}\" could not be resolved: {{e}}",
+        "waitFailed": "The command was started, but waiting for it failed: {{e}}",
+        "killedBySignal": "Command was terminated by signal {{signal}}.",
+        "terminatedBySignalUnknown": "Command was terminated by a signal.",
         "timedOut": "Timed out: {{command}}",
-        "killedByTimeout": "Command killed by timeout ({{timeout_s}}s)"
+        "killedByTimeout": "Command killed by timeout ({{timeout_s}}s)",
+        "outputTruncated": "Output was truncated at {{mib}} MiB; {{bytes}} more bytes were discarded. Redirect large output to a file (for example `command > out.txt`) and read it in slices.",
+        "outputReadFailed": "The command output stream could not be read: {{e}}. The output above may be incomplete.",
+        "backgroundStartFailed": "Command timed out after {{timeout_s}}s but could not be moved to the background: {{e}}. The command was stopped.",
+        "backgroundStartRefused": "The background task could not be started: {{e}}."
       },
       "agentSwarm": {
         "invalidArgs": "Invalid AgentSwarm arguments: {{reason}}",
@@ -886,7 +913,24 @@
         "statsFailed": "Knowledge stats failed: {{e}}",
         "importFailed": "Knowledge import failed: {{e}}"
       },
+      "listDirectory": {
+        "unreadableEntries": "({{count}} entries could not be read)"
+      },
       "memory": {
+        "mainAgentOnly": "Memory tools are available to the main agent only.",
+        "associativeMemoryEnabled": "Associative memory is enabled. The memory tools are unavailable while it is on.",
+        "deletedNotCommitted": "Memory entry {{path}} was deleted but not committed.",
+        "logHeader": "Memory history ({{count}} commit(s)):",
+        "logLine": "{{sha}} {{date}} {{message}}",
+        "revertFailed": "Revert to {{sha}} failed.",
+        "reverted": "Reverted to {{sha}}.",
+        "searchQueryRequired": "Search requires a `query` parameter.",
+        "noEntriesFound": "No memory entries found for query: \"{{query}}\"",
+        "foundEntries": "Found {{count}} memory entr{{plural}}:\n",
+        "writtenCommitted": "Memory written to {{path}} (sha {{sha}})\ntitle: {{title}}\ntype: {{type}}",
+        "writtenCommittedUnknownSha": "Memory written to {{path}}\ntitle: {{title}}\ntype: {{type}}",
+        "writtenNotCommitted": "Memory entry \"{{title}}\" ({{type}}) at {{path}} was written but not committed.",
+        "writeNeedsReference": "Memory write to {{path}} needs a reference to an existing entry.",
         "readPathRequired": "Read requires a `path` parameter.",
         "notFound": "Memory file not found: {{path}}",
         "writePathRequired": "Write requires a `path` parameter (filename).",
@@ -914,6 +958,7 @@
       "boolInvalid": "\"{{key}}\" must be a boolean, got {{value}}.",
       "nonNegativeIntInvalid": "\"{{key}}\" must be a non-negative integer, got {{value}}.",
       "argMustBeString": "Invalid {{tool}} arguments: `{{field}}` must be a string.",
+      "argMissing": "Invalid {{tool}} arguments: `{{field}}` is required.",
       "argMustBeBoolean": "Invalid {{tool}} arguments: `{{field}}` must be a boolean.",
       "argMustBeNumber": "Invalid {{tool}} arguments: `{{field}}` must be a number.",
       "argMustBeArray": "Invalid {{tool}} arguments: `{{field}}` must be an array.",

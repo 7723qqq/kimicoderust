@@ -165,6 +165,13 @@ impl MessageCallbacks {
         let Some(part_kind) = part.get("type").and_then(|v| v.as_str()) else {
             return;
         };
+        // v2 suppresses a hidden thinking part on its way to the event stream
+        // (`agent/loop/loopService.ts:1564-1581`): it stays in the assembled
+        // message for replay but is never dispatched. Announcing it here would
+        // open a Thinking frame the user should not see.
+        if crate::events::is_hidden_delta_part(part) {
+            return;
+        }
         let Some(chunk) = (match part_kind {
             "text" => part.get("text").and_then(|v| v.as_str()),
             "think" => part.get("think").and_then(|v| v.as_str()),

@@ -94,6 +94,8 @@ pub fn check_btw_tool_denial(
         && !BTW_READONLY_TOOLS.contains(&tool_name)
     {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: TOOL_CALL_DISABLED_MESSAGE.into(),

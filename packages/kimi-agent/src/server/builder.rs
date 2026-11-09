@@ -94,6 +94,7 @@ impl HttpServer {
     /// only product entry (`--serve`) replaces this with a real token, and
     /// [`http::serve`] refuses a non-loopback bind while it is in effect.
     pub fn with_hub(store: Arc<SqliteSessionStore>, hub: Arc<EventHub>) -> Self {
+        let cleanup_store = store.clone();
         let task_runner = Arc::new(TaskRunner::new(None));
         // Background task lifecycle fans out to the task's session lane (or
         // `global` for tasks without a session), both vocabularies.
@@ -112,15 +113,20 @@ impl HttpServer {
         // `with_task_runner` installs the same predicate on replacements.
         Self::install_task_liveness(&store, &task_runner);
         let store_persister = store.clone();
+        let persisted_heads = hub.persisted_heads();
         hub.set_persister(Arc::new(
             move |seq_ev: &crate::server::hub::SequencedEvent| {
                 let now = chrono::Utc::now().timestamp_millis();
                 let event_type = seq_ev.event.event_type().to_string();
                 let is_checkpoint = event_type == "turn.ended" || event_type == "checkpoint";
-                let is_compaction = event_type == "context.compaction";
+                // The engine reports compaction as `compaction.completed`
+                // carrying the spliced `messages`; `context.compaction` is the
+                // legacy writer path. Both are replay boundaries.
+                let is_compaction =
+                    event_type == "context.compaction" || event_type == "compaction.completed";
                 let payload_json =
                     serde_json::to_string(&seq_ev.event).unwrap_or_else(|_| "null".to_string());
-                if let Err(err) = store_persister.append_wire_event_json(
+                match store_persister.append_wire_event_json(
                     &format!("wevt-{}", fastrand::u64(..)),
                     &seq_ev.session_id,
                     &event_type,
@@ -129,12 +135,18 @@ impl HttpServer {
                     is_compaction,
                     now,
                 ) {
-                    tracing::warn!(
-                        session_id = %seq_ev.session_id,
-                        event_type = %event_type,
-                        error = %err,
-                        "Failed to persist wire event to sqlite store"
-                    );
+                    // This row is this process's own tail: record it so the
+                    // engine's stale-journal gate does not read it back as a
+                    // foreign write on the session's next turn.
+                    Ok(seq) => persisted_heads.note(&seq_ev.session_id, seq),
+                    Err(err) => {
+                        tracing::warn!(
+                            session_id = %seq_ev.session_id,
+                            event_type = %event_type,
+                            error = %err,
+                            "Failed to persist wire event to sqlite store"
+                        );
+                    }
                 }
             },
         ));
@@ -168,6 +180,8 @@ impl HttpServer {
             oauth_manager: Arc::new(oauth::OAuthManager::new()),
             prompt_queue: Arc::new(prompt_queue::PromptQueue::new()),
             config_override: Arc::new(Mutex::new(None)),
+            model_refresh_chain: tokio::sync::Mutex::new(()),
+            hooks_source: crate::tools::external_hooks::HooksSource::default(),
             models_dev_cache: Arc::new(models_dev::CatalogCache::new()),
             config_write_path: std::sync::Mutex::new(None),
             file_store: files::FileStore::new(),
@@ -185,8 +199,22 @@ impl HttpServer {
             allow_remote_shutdown: false,
             host_guard: None,
             telemetry_sink: None,
+            reclaimed: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            resume_slots: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            session_cleanup_hooks: Arc::new(std::sync::Mutex::new(Vec::new())),
+            idle_reaper: std::sync::OnceLock::new(),
         };
         server.install_remote_control_logout_hook();
+        // v2 `onWillDeleteSession`: the session's idle state directory (undo
+        // snapshots, wake state, per-session logs) outlives the rows unless a
+        // cleanup hook removes it. Registering it here means a delete that
+        // cannot remove the directory aborts instead of orphaning it.
+        {
+            let store = cleanup_store;
+            server.register_session_cleanup_hook(Box::new(move |session_id| {
+                crate::server::idle_sessions::remove_session_state_dir(&store, session_id)
+            }));
+        }
         server
     }
 
@@ -283,6 +311,12 @@ impl HttpServer {
         self.shutdown.clone()
     }
 
+    /// Whether shutdown has started. New work is refused from this point on
+    /// (existing turns are drained, not extended with new prompts).
+    pub(super) fn is_shutting_down(&self) -> bool {
+        self.shutdown.is_cancelled()
+    }
+
     pub fn subagent_manager(&self) -> Arc<crate::subagent::SubagentManager> {
         if let Some(engine) = &self.engine {
             engine.subagent_manager()
@@ -311,6 +345,10 @@ impl HttpServer {
             config.background.keep_alive_on_exit,
         );
         let warnings = config.config_warnings.clone();
+        // The `[hooks]` guard set starts from the configuration the server was
+        // started with; `POST /api/v1/config` replaces it in place when the
+        // body carries a `hooks` section.
+        self.hooks_source.replace(config.hooks.clone());
         self.config_override = Arc::new(Mutex::new(Some(config)));
         // Seeded from the file the server was started with, before any
         // subscriber exists: the global lane's replay ring hands the entity to
@@ -490,6 +528,9 @@ impl HttpServer {
         // store the login/usage routes drive.
         engine.set_oauth_manager(self.oauth_manager.clone());
         engine.set_config_source(self.config_override.clone());
+        // The engine reads `[hooks]` from this shared source once per turn, so
+        // a config reload reaches the next turn without a restart.
+        engine.set_hooks_source(self.hooks_source.clone());
         // The engine's `Skill` tool and the prompt's skills section must see the
         // same plugin catalog the REST skill lists do, so the plugin roots are
         // read from this server's manager on every session spec. Read lazily
@@ -504,12 +545,37 @@ impl HttpServer {
                 hooks: contributions_manager.enabled_hooks(),
             }
         }));
+        // v2 `plugin-sections-oversized` (`profileService.ts:1045-1079`): a
+        // contribution that did not fit the aggregate prompt budget is a
+        // user-facing warning. The budget is engine-wide, so it rides the
+        // global lane at composition time.
+        let (_, skipped_plugins) = self
+            .plugin_manager
+            .plugin_system_prompt_block_with_skipped();
+        self.publish_plugin_section_warning(&skipped_plugins);
         self.subagent_manager = engine.subagent_manager();
         self.subagent_manager
             .set_task_runner_sync(self.task_runner.clone());
         self.engine = Some(Arc::new(engine));
+        self.install_background_activity_sink();
         self.spawn_task_wake_service();
         self
+    }
+
+    /// Have the task runner recompute the session activity fold when a
+    /// background task settles (v2 `sessionActivityService` folding a
+    /// `TaskTerminatedNotice`). Re-installed on every runner swap so a caller
+    /// that builds the engine before attaching its runner still gets the
+    /// recompute.
+    fn install_background_activity_sink(&self) {
+        let Some(engine) = self.engine.as_ref().map(Arc::downgrade) else {
+            return;
+        };
+        self.task_runner.set_settle_sink(Arc::new(move |session| {
+            if let (Some(session), Some(engine)) = (session, engine.upgrade()) {
+                engine.publish_background_work_changed(session);
+            }
+        }));
     }
 
     /// Start the background-task wake service (v2 `taskService.notifyAgentTask`
@@ -617,6 +683,7 @@ impl HttpServer {
                 .set_task_runner_sync(task_runner.clone());
         }
         self.task_runner = task_runner;
+        self.install_background_activity_sink();
         self
     }
 
@@ -662,15 +729,31 @@ impl HttpServer {
         session_id: &str,
         body: Value,
     ) -> HttpResponse {
+        // Shutdown has already stopped accepting work: admitting a prompt here
+        // would start a turn after the drain began, so the process could never
+        // report a clean shutdown.
+        if self.is_shutting_down() {
+            return HttpResponse::json(
+                503,
+                &json!({ "error": "server is shutting down; new turns are not accepted" }),
+            );
+        }
         let content = body
             .get("content")
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        let (mut prompt, blocks) = match prompt_content_to_blocks(&content, &self.file_store) {
-            Ok(parsed) => parsed,
-            Err(error) => return HttpResponse::bad_request(error),
+        // Intake compression must use the model's provider policy (Kimi has a
+        // wider inline budget), not the baseline every other provider gets.
+        let provider = match &self.engine {
+            Some(engine) => engine.session_provider_type(session_id).await,
+            None => None,
         };
+        let (mut prompt, blocks) =
+            match prompt_content_to_blocks(&content, &self.file_store, provider.as_deref()) {
+                Ok(parsed) => parsed,
+                Err(error) => return HttpResponse::bad_request(error),
+            };
         if prompt.is_empty() {
             prompt = body
                 .get("prompt")
@@ -757,6 +840,29 @@ impl HttpServer {
                 "metadata": item.get("metadata").cloned().unwrap_or(Value::Null),
             }),
         );
+        // v2 `publishPromptQueued` (`loopService.ts:706-721`): a user prompt
+        // admitted behind an active turn also announces the queue depth. The
+        // content hides bundled skill blocks, like the submitted event.
+        if item.get("status").and_then(Value::as_str) == Some("queued")
+            && let Some(origin) = origin
+                .as_ref()
+                .filter(|origin| origin.get("kind").and_then(Value::as_str) == Some("user"))
+        {
+            let content = crate::turn_events::strip_bundled_skill_blocks(
+                &item.get("content").cloned().unwrap_or_else(|| json!([])),
+                origin,
+            );
+            crate::server::prompt_queue::publish_prompt_event(
+                &self.hub,
+                session_id,
+                json!({
+                    "type": "prompt.queued",
+                    "promptId": item.get("prompt_id").cloned().unwrap_or(Value::Null),
+                    "content": content,
+                    "queueLength": self.prompt_queue.queued_count(session_id),
+                }),
+            );
+        }
         if let Some(run) = run {
             let queue = self.prompt_queue.clone();
             let store = self.store_arc();
@@ -824,6 +930,17 @@ impl HttpServer {
             })
     }
 
+    /// The hooks in force for session lifecycle events. The reloadable set wins
+    /// once a configuration was attached — a failed reload leaves it untouched,
+    /// so a broken `config.toml` cannot clear the guards. Hosts that never
+    /// attached a configuration keep resolving hooks from the current config.
+    pub(crate) async fn current_hooks(&self) -> Vec<crate::permission::HookDef> {
+        match self.hooks_source.snapshot() {
+            Some(hooks) => hooks,
+            None => self.config().await.hooks,
+        }
+    }
+
     /// Publish `event.config.changed` after a config mutation the route layer
     /// applied (provider CRUD / refresh): the Web client folds the payload's
     /// config instead of re-fetching. Best-effort —the mutation already
@@ -833,6 +950,7 @@ impl HttpServer {
     /// `[model_catalog]` auto-refresh (`refresh_on_start` / interval).
     pub async fn refresh_models(&self, scope: &str, provider_id: Option<&str>) -> Value {
         let result = crate::server::provider_refresh::refresh(
+            &self.model_refresh_chain,
             &self.config_override,
             self.config_write_path().as_deref(),
             &self.oauth_manager,
@@ -873,11 +991,43 @@ impl HttpServer {
     /// remove / enable / disable): the payload is a bare bump — v3 clients
     /// re-fetch the plugin list, the same contract as upstream's
     /// `PluginMessage` global entity.
-    pub(crate) fn publish_plugin_changed(&self) {
+    pub(crate) fn publish_plugin_changed(&self, kind: &str, id: &str) {
+        // v2 `AgentPluginService`'s `plugin_change` reminder: the model must
+        // know the running session keeps the prompt and tools it started with.
+        crate::injection::plugin::publish_plugin_change_notice(kind, id);
         self.hub
             .bus_for("global")
             .publish(&crate::events::EngineEvent::Custom(json!({
                 "type": "event.plugin.changed",
+            })));
+        // A reload can change which contributions fit the prompt budget, so the
+        // warning is re-derived rather than left at its composition-time state.
+        let (_, skipped) = self
+            .plugin_manager
+            .plugin_system_prompt_block_with_skipped();
+        self.publish_plugin_section_warning(&skipped);
+    }
+
+    /// The v2 `plugin-sections-oversized` warning, verbatim message shape.
+    fn publish_plugin_section_warning(&self, skipped: &[String]) {
+        if skipped.is_empty() {
+            return;
+        }
+        let ids = skipped
+            .iter()
+            .map(|id| format!("\"{id}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let kb = crate::server::plugins::PLUGIN_SECTIONS_MAX_BYTES / 1024;
+        self.hub
+            .bus_for("global")
+            .publish(&crate::events::EngineEvent::Custom(json!({
+                "type": "warning",
+                "code": "plugin-sections-oversized",
+                "message": format!(
+                    "Plugin system-prompt contributions from {ids} were skipped: \
+                     the aggregate {kb} KB budget is exhausted."
+                ),
             })));
     }
 

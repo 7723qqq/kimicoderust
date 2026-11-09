@@ -1,15 +1,3 @@
-//! Native execution of the CreateGoal tool (state bridge protocol, design
-//! doc milestone 7, batch 7).
-//!
-//! The engine submits an action-shaped create through `host/state_write`
-//! (`{action: "create", objective, completion_criterion?}`) and renders the
-//! host's post-write goal snapshot with the v2 `CreateGoal` output: a
-//! pretty-printed JSON document `{ "goal": <snapshot> | null }` with the
-//! internal `goalId` stripped (the model-facing shape, `goalForModel`). The
-//! host stays the goal authority — it owns the lifecycle, the replace
-//! semantics, and the budget defaults; this module only parses the tool
-//! arguments and re-serializes the wire value with the v2 field order.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -19,29 +7,16 @@ use crate::callbacks::HostCallbacks;
 use crate::rpc::types::StateWriteRequest;
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// Failure message when the connected host does not implement the state
-/// bridge. The model must not retry the tool — the host cannot create goal
-/// state for this session.
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot create a goal.";
 
-/// v2 `MAX_GOAL_OBJECTIVE_LENGTH` (`goalService.ts:85`). The same ceiling
-/// bounds the completion criterion (`MAX_GOAL_COMPLETION_CRITERION_LENGTH`,
-/// `goalService.ts:87`).
 const MAX_GOAL_OBJECTIVE_CHARS: usize = 4000;
 
-/// Wire shape of the goal domain (`GoalToolResult`): the host returns the
-/// full `GoalSnapshot` (including `goalId`) or `null` when no goal exists.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalStateWire {
     goal: Option<GoalSnapshotWire>,
 }
 
-/// v2 `GoalSnapshot` minus `goalId` — the model-facing shape
-/// (`goalForModel`). Field order mirrors the v2 serializer so the rendered
-/// JSON matches `JSON.stringify(goalForModel(result), null, 2)`; optional
-/// fields are omitted when absent, like `JSON.stringify` drops `undefined`
-/// properties. The wire's `goalId` is ignored by serde.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalSnapshotWire {
@@ -61,7 +36,6 @@ struct GoalSnapshotWire {
     updated_at: u64,
 }
 
-/// v2 `GoalBudgetReport` — nullable budget fields serialize as JSON `null`.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalBudgetReportWire {
@@ -79,9 +53,6 @@ struct GoalBudgetReportWire {
     output_tokens_used: u64,
 }
 
-/// Execute the CreateGoal tool natively: validate the arguments, submit an
-/// action-shaped create through the state bridge, and render the v2-aligned
-/// JSON output from the host's post-write goal snapshot.
 pub async fn execute_create_goal(
     callbacks: &dyn HostCallbacks,
     caller_agent_id: &str,
@@ -93,11 +64,7 @@ pub async fn execute_create_goal(
     let Some(objective) = args.get("objective").and_then(|o| o.as_str()) else {
         return arg_error("CreateGoal", "objective", "engine.tools.argMustBeString");
     };
-    // v2 `validateObjective` (`goalService.ts:298-308`): the objective is
-    // trimmed, rejected when empty, and refused above
-    // `MAX_GOAL_OBJECTIVE_LENGTH` (4000, `goalService.ts:85`) with a sentence
-    // that points the model at a file instead. Domain text v2 ships verbatim
-    // stays English (ROADMAP §6.19), like the status refusal below.
+
     let objective = objective.trim();
     if objective.is_empty() {
         return arg_error("CreateGoal", "objective", "engine.tools.argMustNotBeEmpty");
@@ -107,8 +74,7 @@ pub async fn execute_create_goal(
             "Invalid CreateGoal arguments: `objective` cannot exceed {MAX_GOAL_OBJECTIVE_CHARS} characters. Put long content in a file and reference the file path."
         ));
     }
-    // The wire contract carries no replace flag; a model that asks for it
-    // must not get a silent no-op create.
+
     if args.get("replace").is_some() {
         return err_result(
             "Invalid CreateGoal arguments: `replace` is not supported by the connected host."
@@ -118,9 +84,6 @@ pub async fn execute_create_goal(
     let completion_criterion = match args.get("completionCriterion") {
         None => None,
         Some(value) => match value.as_str() {
-            // v2 `normalizeCompletionCriterion` (`goalService.ts:1045-1051`):
-            // trimmed, dropped when blank, and truncated — not refused — at
-            // the same 4000-character ceiling.
             Some(criterion) => {
                 let trimmed = criterion.trim();
                 if trimmed.is_empty() {
@@ -171,7 +134,6 @@ pub async fn execute_create_goal(
     }
 }
 
-/// Render the host's goal wire value as the v2 `CreateGoal` output.
 fn render_goal(value: &Value) -> ExecutableToolResult {
     let wire: GoalStateWire = match serde_json::from_value(value.clone()) {
         Ok(wire) => wire,
@@ -187,10 +149,6 @@ fn render_goal(value: &Value) -> ExecutableToolResult {
     }
 }
 
-/// Map a state bridge error to a tool result: an unwired host (message
-/// carries the `does not support state bridge` phrase) gets the dedicated
-/// failure message; everything else is passed through verbatim — the engine
-/// never retries a failed state write.
 fn map_state_error(error: String) -> ExecutableToolResult {
     if error.contains("does not support state bridge") {
         err_result(STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE.into())
@@ -199,10 +157,6 @@ fn map_state_error(error: String) -> ExecutableToolResult {
     }
 }
 
-/// Engine tool definition for CreateGoal, so the model can discover and call
-/// it (used by the standalone REPL and native tool listing). The description
-/// mirrors v2 `create-goal.md`; the schema mirrors `CreateGoalToolInputSchema`
-/// minus `replace`, which the wire contract does not carry.
 pub fn create_goal_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "CreateGoal".into(),
@@ -234,8 +188,6 @@ mod tests {
     };
     use std::sync::Arc;
 
-    /// Scripted callbacks: records the received state requests and answers
-    /// with canned responses.
     struct ScriptedCallbacks {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,
@@ -458,10 +410,6 @@ mod tests {
         assert_eq!(result.content, STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE);
     }
 
-    /// v2 `validateObjective` (`goalService.ts:298-308`): a blank objective is
-    /// rejected after trimming, and one past `MAX_GOAL_OBJECTIVE_LENGTH` is
-    /// refused rather than silently truncated. Both answers name the field and
-    /// the tool, and neither reaches the host.
     #[tokio::test]
     async fn test_objective_is_trimmed_and_length_bounded() {
         let (callbacks, _) = scripted(read_ok(Value::Null), write_ok(created_goal()));
@@ -495,8 +443,6 @@ mod tests {
             rejected.content
         );
 
-        // Exactly at the ceiling is accepted, and the surrounding whitespace is
-        // gone before it becomes the stored objective.
         let at_cap = "y".repeat(MAX_GOAL_OBJECTIVE_CHARS);
         let (callbacks, write_received) = scripted(read_ok(Value::Null), write_ok(created_goal()));
         let accepted = execute_create_goal(
@@ -510,8 +456,6 @@ mod tests {
         assert_eq!(request.value["objective"], at_cap.as_str());
     }
 
-    /// v2 `normalizeCompletionCriterion` (`goalService.ts:1045-1051`): blank
-    /// becomes absent, and an over-long one is truncated rather than refused.
     #[tokio::test]
     async fn test_completion_criterion_is_normalized_not_refused() {
         let (callbacks, write_received) = scripted(read_ok(Value::Null), write_ok(created_goal()));
@@ -609,7 +553,7 @@ mod tests {
         assert_eq!(def.input_schema["required"][0], "objective");
         assert_eq!(def.input_schema["properties"]["objective"]["minLength"], 1);
         assert!(def.input_schema["properties"]["completionCriterion"].is_object());
-        // The wire contract does not carry `replace`.
+
         assert!(def.input_schema["properties"].get("replace").is_none());
         assert!(def.description.contains("verifiable completion condition"));
     }

@@ -11,9 +11,10 @@ use crate::mcp::client::McpClient;
 use crate::mcp::errors::McpError;
 use crate::mcp::types::McpTool;
 use crate::native::tool_naming::qualify_mcp_tool_name;
+use crate::primitives::teardown::{Disposer, Ledger, TeardownError, TeardownReason};
 use crate::server::files::FileStore;
 use crate::tools::registry::{ToolDefinition, ToolDisclosure, ToolRegistry, ToolSource};
-use crate::turn_loop::types::{ExecutableToolResult, ToolDelivery, ToolInfo};
+use crate::turn_loop::types::{ExecutableToolResult, ToolInfo};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct McpToolSummary {
@@ -248,6 +249,11 @@ struct ServerState {
     /// Whether this server's tools are disclosed on demand rather than in the
     /// top-level tool list (v2 `disclosure: 'deferred'`).
     deferred: bool,
+    /// The per-server `deferred` declaration (`Option` as configured), kept
+    /// separate from the resolved [`Self::deferred`]: after discovery the
+    /// auto-defer threshold may flip the resolved value without turning a
+    /// declared `false` into a threshold decision.
+    deferred_declared: Option<bool>,
     /// When the live connection was established (v2 `entry.connectedAt`,
     /// connection-manager.ts:37). Compared against a stored grant's obtain
     /// time to tell a concurrent login from the credential a 401 rejected.
@@ -295,9 +301,26 @@ impl ToolFilter {
 
 /// v2 `DEFAULT_STARTUP_TIMEOUT_MS` (connection-manager.ts:65).
 pub const DEFAULT_MCP_STARTUP_TIMEOUT_MS: u64 = 30_000;
+/// v2 `MCP_INITIAL_LOAD_WAIT_MS` (`agent/mcp/mcp.ts:8`): how long the step
+/// head and a tool executor wait for the initial connect round before
+/// proceeding with whatever tools have registered so far.
+pub const MCP_INITIAL_LOAD_WAIT_MS: u64 = 2_000;
 /// v2 env bindings (configSection.ts:16-17).
 const MCP_STARTUP_TIMEOUT_ENV: &str = "KIMI_MCP_STARTUP_TIMEOUT_MS";
 const MCP_TOOL_TIMEOUT_ENV: &str = "KIMI_MCP_TOOL_TIMEOUT_MS";
+/// v2 `MCP_AUTO_DEFER_TOOL_THRESHOLD_ENV` (`mcpConfig/configSection.ts:23`).
+const MCP_AUTO_DEFER_TOOL_THRESHOLD_ENV: &str = "KIMI_MCP_AUTO_DEFER_TOOL_THRESHOLD";
+/// v2 retry-delay env bindings (`mcpConfig/configSection.ts:24-25`).
+const MCP_RECONNECT_INITIAL_DELAY_ENV: &str = "KIMI_MCP_RECONNECT_INITIAL_DELAY_MS";
+const MCP_RECONNECT_MAX_DELAY_ENV: &str = "KIMI_MCP_RECONNECT_MAX_DELAY_MS";
+/// v2 `MAX_FAILURE_STREAK` (`connection-manager.ts:102`): the retry ladder
+/// stops counting at 31 so the delay stays finite.
+const MAX_FAILURE_STREAK: u32 = 31;
+/// v2 `AUTO_DEFER_TOOL_THRESHOLD` (`connection-manager.ts:103`): a server with
+/// at least this many enabled tools is disclosed on demand.
+const DEFAULT_AUTO_DEFER_TOOL_THRESHOLD: u64 = 24;
+/// v2 `McpSectionSchema` upper bound for `autoDeferToolThreshold`.
+const MAX_AUTO_DEFER_TOOL_THRESHOLD: u64 = 1_000_000;
 /// v2 `MAX_MCP_TIMEOUT_MS` (config-schema.ts:5).
 const MAX_MCP_TIMEOUT_MS: u64 = 2_147_483_647;
 
@@ -385,6 +408,38 @@ fn resolve_tool_timeout(
     per_server.or(env).or(global)
 }
 
+/// v2 `parseAutoDeferToolThresholdEnv` (`mcpConfig/configSection.ts:34-37`):
+/// an integer in `[0, 1_000_000]`; anything else keeps the section value.
+fn parse_auto_defer_tool_threshold_env(name: &str) -> Option<u64> {
+    parse_auto_defer_tool_threshold(std::env::var(name).ok().as_deref())
+}
+
+/// The value side of the env parse, kept separate so the range and trimming
+/// rules are testable without mutating the process environment.
+fn parse_auto_defer_tool_threshold(raw: Option<&str>) -> Option<u64> {
+    let parsed: u64 = raw?.trim().parse().ok()?;
+    (parsed <= MAX_AUTO_DEFER_TOOL_THRESHOLD).then_some(parsed)
+}
+
+/// v2 `resolveDeferred` (`connection-manager.ts:244-250`): an explicit
+/// per-server value wins; otherwise the threshold decides when it is positive
+/// and the server has at least that many enabled tools; otherwise
+/// `defaultDeferred`.
+fn resolve_deferred(
+    declared: Option<bool>,
+    tool_count: usize,
+    threshold: u64,
+    default_deferred: Option<bool>,
+) -> bool {
+    if let Some(value) = declared {
+        return value;
+    }
+    if threshold > 0 && tool_count as u64 >= threshold {
+        return true;
+    }
+    default_deferred.unwrap_or(false)
+}
+
 pub struct McpManager {
     clients: Arc<RwLock<HashMap<String, Arc<McpClient>>>>,
     cached_tools: Arc<RwLock<HashMap<String, (String, McpTool)>>>,
@@ -421,6 +476,10 @@ pub struct McpManager {
     /// be lost, and the wait is usually entered after the load already ended.
     ready_tx: tokio::sync::watch::Sender<bool>,
     ready_rx: tokio::sync::watch::Receiver<bool>,
+    /// v2 `AgentMcpService.initialLoadWaitExpired`: once the 2 s initial-load
+    /// budget ran out, later steps and tool calls stop waiting entirely — the
+    /// server list is still loading and waiting again would only stall them.
+    initial_load_wait_expired: std::sync::atomic::AtomicBool,
     /// Working directory for a stdio server whose config omits `cwd` (v2
     /// `McpConnectionManagerOptions.stdioCwd`, which the host sets to the
     /// workspace cwd). Without it a server resolving a relative path would
@@ -444,6 +503,10 @@ pub struct McpManager {
     /// `workspaceMcpService.ts:42`). `None` announces the builtin
     /// `kimi-code`.
     client_name: Arc<std::sync::RwLock<Option<String>>>,
+    /// Owns the teardown steps in reverse acquisition order (v2
+    /// `connection-manager.ts:483-493`). A ledger makes [`Self::shutdown`]
+    /// idempotent and keeps one failing step from skipping the rest.
+    dispose: tokio::sync::Mutex<Ledger>,
 }
 
 impl Default for McpManager {
@@ -455,8 +518,108 @@ impl Default for McpManager {
 impl McpManager {
     pub fn new() -> Self {
         let (ready_tx, ready_rx) = tokio::sync::watch::channel(true);
+        let clients: Arc<RwLock<HashMap<String, Arc<McpClient>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let retry_ticker_stop: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let connect_tasks: Arc<Mutex<Vec<tokio::task::AbortHandle>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        // Registered in reverse acquisition order: the ledger drains
+        // backwards, so the retry ticker stops first, then in-flight startups
+        // are aborted, then probes are awaited, then every client is closed
+        // (v2 `connection-manager.ts:483-493`).
+        let mut dispose = Ledger::new("mcp-manager");
+        {
+            let clients = Arc::clone(&clients);
+            dispose
+                .register_labeled(
+                    "close-clients",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            let drained: Vec<Arc<McpClient>> = {
+                                let mut guard = clients.write().await;
+                                guard.drain().map(|(_, client)| client).collect()
+                            };
+                            for client in drained {
+                                client.close().await;
+                            }
+                            Ok(())
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
+        {
+            let probes = Arc::clone(&probe_tasks);
+            dispose
+                .register_labeled(
+                    "drain-probes",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            let drained: Vec<tokio::task::JoinHandle<()>> = {
+                                let mut guard = probes.lock().unwrap_or_else(|e| e.into_inner());
+                                std::mem::take(&mut *guard)
+                            };
+                            // Every probe is awaited. The first failure is
+                            // reported rather than swallowed, and does not skip
+                            // the probes after it.
+                            let mut failure: Option<TeardownError> = None;
+                            for probe in drained {
+                                if let Err(error) = probe.await
+                                    && failure.is_none()
+                                {
+                                    failure = Some(Box::new(error));
+                                }
+                            }
+                            match failure {
+                                Some(error) => Err(error),
+                                None => Ok(()),
+                            }
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
+        {
+            let startups = Arc::clone(&connect_tasks);
+            dispose
+                .register_labeled(
+                    "abort-startups",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            let drained: Vec<tokio::task::AbortHandle> = {
+                                let mut guard = startups.lock().unwrap_or_else(|e| e.into_inner());
+                                std::mem::take(&mut *guard)
+                            };
+                            for handle in drained {
+                                handle.abort();
+                            }
+                            Ok(())
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
+        {
+            let stop = Arc::clone(&retry_ticker_stop);
+            dispose
+                .register_labeled(
+                    "stop-retry-ticker",
+                    Disposer::new(move |_| {
+                        Box::pin(async move {
+                            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                            Ok(())
+                        })
+                    }),
+                )
+                .expect("a fresh ledger accepts registrations");
+        }
+
         Self {
-            clients: Arc::new(RwLock::new(HashMap::new())),
+            clients,
             cached_tools: Arc::new(RwLock::new(HashMap::new())),
             registry: Arc::new(RwLock::new(ToolRegistry::new())),
             servers: Arc::new(RwLock::new(HashMap::new())),
@@ -470,12 +633,14 @@ impl McpManager {
             next_status_id: std::sync::atomic::AtomicU64::new(1),
             ready_tx,
             ready_rx,
+            initial_load_wait_expired: std::sync::atomic::AtomicBool::new(false),
             default_stdio_cwd: std::sync::RwLock::new(None),
             retry_ticker_started: std::sync::atomic::AtomicBool::new(false),
-            retry_ticker_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            probe_tasks: Arc::new(Mutex::new(Vec::new())),
-            connect_tasks: Arc::new(Mutex::new(Vec::new())),
+            retry_ticker_stop,
+            probe_tasks,
+            connect_tasks,
             client_name: Arc::new(std::sync::RwLock::new(None)),
+            dispose: tokio::sync::Mutex::new(dispose),
         }
     }
 
@@ -568,14 +733,46 @@ impl McpManager {
     }
 
     /// Await the initial load started by [`Self::connect_all`] (v2
-    /// `waitForInitialLoad`, connection-manager.ts:235-241). Returns at once
-    /// when the load already finished, and when none was ever started.
+    /// `waitForInitialLoad`, connection-manager.ts:235-241), bounded by
+    /// [`MCP_INITIAL_LOAD_WAIT_MS`] (v2 `AgentMcpService.waitForInitialLoad`,
+    /// `agent/mcp/mcpService.ts:110-130`). Returns at once when the load
+    /// already finished, when none was ever started, and after the budget
+    /// expired once — a server that never completes its handshake must not
+    /// stall every later step.
     pub async fn wait_for_initial_load(&self) {
         if *self.ready_rx.borrow() {
             return;
         }
+        if self
+            .initial_load_wait_expired
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
         let mut rx = self.ready_rx.clone();
-        let _ = rx.wait_for(|ready| *ready).await;
+        let ready = rx.wait_for(|ready| *ready);
+        let settled = tokio::select! {
+            biased;
+            result = ready => result.is_ok(),
+            () = tokio::time::sleep(std::time::Duration::from_millis(MCP_INITIAL_LOAD_WAIT_MS)) => false,
+        };
+        if !settled {
+            self.initial_load_wait_expired
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // v2 `mcp_initial_load_wait`: how many servers were still pending
+            // when the budget ran out, so a slow startup is diagnosable.
+            let entries = self.server_entries().await;
+            let pending = entries
+                .iter()
+                .filter(|entry| entry.status == "pending")
+                .count();
+            tracing::info!(
+                budget_ms = MCP_INITIAL_LOAD_WAIT_MS,
+                pending_count = pending,
+                total_count = entries.len(),
+                "MCP initial load wait expired"
+            );
+        }
     }
 
     /// Register a status-change listener (v2 `onStatusChange`,
@@ -831,6 +1028,37 @@ impl McpManager {
             let filters = self.filters.read().await;
             filters.get(&name).cloned().unwrap_or_else(ToolFilter::all)
         };
+        // v2 resolves disclosure after discovery, with the enabled tool count
+        // (`connection-manager.ts:740`), so the auto-defer threshold can flip a
+        // server whose `deferred` was not declared.
+        let enabled_tool_count = tools
+            .iter()
+            .filter(|tool| filter.allows(&tool.name))
+            .count();
+        let defaults = self
+            .defaults
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let threshold = parse_auto_defer_tool_threshold_env(MCP_AUTO_DEFER_TOOL_THRESHOLD_ENV)
+            .or(defaults.auto_defer_tool_threshold)
+            .unwrap_or(DEFAULT_AUTO_DEFER_TOOL_THRESHOLD);
+        let deferred = {
+            let declared = self
+                .servers
+                .read()
+                .await
+                .get(&name)
+                .and_then(|state| state.deferred_declared);
+            resolve_deferred(
+                declared,
+                enabled_tool_count,
+                threshold,
+                defaults.default_deferred,
+            )
+        };
+        // v2 `connection-manager.ts:905`: compaction is opt-in.
+        let compact_schemas = defaults.compact_tool_schemas.unwrap_or(false);
 
         let enabled_count = {
             let mut cached = self.cached_tools.write().await;
@@ -874,18 +1102,14 @@ impl McpManager {
                 // v2 #4719: register into the session's active/pending
                 // registry. A changed same-name definition stays pending so
                 // `list_tool_infos` keeps serving the pinned schema.
-                let deferred = self
-                    .servers
-                    .read()
-                    .await
-                    .get(&name)
-                    .is_some_and(|state| state.deferred);
                 let definition = ToolDefinition {
                     name: qualified_name,
                     description: tool.description.clone().unwrap_or_default(),
-                    input_schema: crate::mcp::schema_compaction::compact_mcp_input_schema(
-                        &tool.input_schema,
-                    ),
+                    input_schema: if compact_schemas {
+                        crate::mcp::schema_compaction::compact_mcp_input_schema(&tool.input_schema)
+                    } else {
+                        tool.input_schema.clone()
+                    },
                     source: ToolSource::Mcp,
                     disclosure: if deferred {
                         ToolDisclosure::Deferred
@@ -907,6 +1131,9 @@ impl McpManager {
 
         if let Some(state) = self.servers.write().await.get_mut(&name) {
             state.raw_tools = tools;
+            // The resolved disclosure is known only after discovery; persist it
+            // so `deferred_tool_names` and the next `configure` agree.
+            state.deferred = deferred;
         }
         self.clients.write().await.insert(name, client_arc);
         Ok(enabled_count)
@@ -1276,42 +1503,18 @@ impl McpManager {
 
     /// Close every client and forget all entries (v2 `shutdown`).
     pub async fn shutdown(&self) {
-        // Stop the startup-retry ticker: a retry that fires during teardown
-        // would reconnect a server the caller is closing.
-        self.retry_ticker_stop
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        // Cancel startups that are still handshaking before anything else: an
-        // in-flight connect is not in `clients` yet, so draining `clients`
-        // below would miss its child — the process (and the plugin directory
-        // it runs in) would outlive the teardown until the startup timeout.
-        // Aborting the task drops the future, and `kill_on_drop` takes the
-        // child with it (v2 cancels in-flight startup in `shutdown`).
-        let startups: Vec<tokio::task::AbortHandle> = {
-            let mut tasks = self.connect_tasks.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *tasks)
-        };
-        for task in startups {
-            task.abort();
+        // The registered disposers run in reverse acquisition order: the retry
+        // ticker stops, in-flight startups are aborted, probes are awaited,
+        // then the clients close. A second call is a no-op.
+        let mut dispose = self.dispose.lock().await;
+        if !dispose.is_active() {
+            return;
         }
-        // Drain in-flight liveness probes before clearing the entries: v2's
-        // `shutdown` awaits the per-entry operation tail, so a probe still
-        // running during teardown is observed rather than orphaned. A probe for
-        // a client this teardown replaces sees `isCurrent` fail and does
-        // nothing.
-        let probes: Vec<tokio::task::JoinHandle<()>> = {
-            let mut tasks = self.probe_tasks.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *tasks)
-        };
-        for probe in probes {
-            let _ = probe.await;
-        }
-        let clients: Vec<Arc<McpClient>> = {
-            let mut guard = self.clients.write().await;
-            guard.drain().map(|(_, client)| client).collect()
-        };
-        for client in clients {
-            client.close().await;
-        }
+        dispose.teardown(TeardownReason::ScopeClose).await;
+        drop(dispose);
+
+        // State, not resources: forget the advertised tools and the per-server
+        // bookkeeping the closed clients backed.
         {
             let servers: Vec<String> = self.servers.read().await.keys().cloned().collect();
             for server in servers {
@@ -1365,33 +1568,17 @@ impl McpManager {
                 let attachments = self.attachments.read().await.clone();
                 let converted = crate::mcp::output::mcp_result_to_output(
                     &res,
+                    tool_name,
                     Some(&attachments),
                     None,
                     cancelled,
                 );
-                let mut text_parts = vec![converted.content];
-                if res.structured_content.is_some() || res.meta.is_some() {
-                    let mut extras = serde_json::Map::new();
-                    if let Some(sc) = res.structured_content {
-                        extras.insert("structuredContent".to_string(), sc);
-                    }
-                    if let Some(m) = res.meta {
-                        extras.insert("_meta".to_string(), m);
-                    }
-                    let extras_json =
-                        serde_json::to_string_pretty(&Value::Object(extras)).unwrap_or_default();
-                    text_parts.push(format!(
-                        "<mcp-result-extras>\n{}\n</mcp-result-extras>",
-                        extras_json
-                    ));
-                }
                 Some(ExecutableToolResult {
-                    delivery: (!converted.delivery.is_empty()).then_some(ToolDelivery {
-                        blocks: converted.delivery,
-                        origin: None,
-                    }),
+                    spill: None,
+                    parts: converted.parts,
+                    delivery: None,
                     stop_turn: false,
-                    content: text_parts.join("\n"),
+                    content: converted.content,
                     is_error: res.is_error,
                     note: None,
                     display: None,
@@ -1417,6 +1604,8 @@ impl McpManager {
                     format!("MCP execution error: {e}")
                 };
                 Some(ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content,
@@ -1475,11 +1664,11 @@ impl McpManager {
             ticker: self
                 .retry_ticker_started
                 .load(std::sync::atomic::Ordering::SeqCst),
-            initial_delay_ms: defaults
-                .reconnect_initial_delay_ms
+            initial_delay_ms: parse_timeout_env(MCP_RECONNECT_INITIAL_DELAY_ENV)
+                .or(defaults.reconnect_initial_delay_ms)
                 .unwrap_or(DEFAULT_RECONNECT_INITIAL_DELAY_MS),
-            max_delay_ms: defaults
-                .reconnect_max_delay_ms
+            max_delay_ms: parse_timeout_env(MCP_RECONNECT_MAX_DELAY_ENV)
+                .or(defaults.reconnect_max_delay_ms)
                 .unwrap_or(DEFAULT_RECONNECT_MAX_DELAY_MS),
         }
     }
@@ -1624,7 +1813,10 @@ impl McpManager {
                 servers.get(name).is_some_and(|state| {
                     is_live_status(&state.status)
                         && state.recipe == recipe
-                        && state.deferred == deferred
+                        // Compare the declaration, not the resolved value: the
+                        // auto-defer threshold can flip `deferred` after
+                        // discovery, and that must not force a reconnect.
+                        && state.deferred_declared == options.deferred
                         && state.oauth == oauth
                 })
             };
@@ -1665,6 +1857,7 @@ impl McpManager {
                 error: None,
                 raw_tools: Vec::new(),
                 deferred,
+                deferred_declared: options.deferred,
                 connected_at_ms: None,
                 oauth: options.oauth.unwrap_or(false),
                 retry_at_ms: None,
@@ -2162,7 +2355,7 @@ fn next_failure_state(
     if !policy.enabled || !policy.ticker {
         return ("failed", None, 0);
     }
-    let streak = streak.saturating_add(1);
+    let streak = streak.saturating_add(1).min(MAX_FAILURE_STREAK);
     let delay = retry_delay_ms(streak - 1, policy.initial_delay_ms, policy.max_delay_ms);
     ("retry-waiting", Some(now_ms + delay as i64), streak)
 }

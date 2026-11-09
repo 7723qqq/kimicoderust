@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod judge;
+
 /// Goal status, mirroring v2 `GoalStatus`.
 ///
 /// This is the **persistence** spelling (`budget_limited`, `usage_limited`)

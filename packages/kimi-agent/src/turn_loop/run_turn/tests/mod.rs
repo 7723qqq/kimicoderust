@@ -15,7 +15,11 @@ mod finish_history;
 #[cfg(test)]
 mod goal_cancel;
 #[cfg(test)]
+mod goal_judge;
+#[cfg(test)]
 mod injection_telemetry_tools;
+#[cfg(test)]
+mod notify_user_nudge;
 #[cfg(test)]
 mod overflow_compaction;
 #[cfg(test)]
@@ -24,6 +28,8 @@ mod preflight_order;
 mod progress_reminder;
 #[cfg(test)]
 mod steering_compaction;
+#[cfg(test)]
+mod step_events;
 #[cfg(test)]
 mod tool_select_history;
 

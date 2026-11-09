@@ -269,7 +269,8 @@ async fn released_resolves_only_after_the_pump_exits() {
     tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
         .await
         .expect("released() never resolved after shutdown")
-        .expect("the waiting task panicked");
+        .expect("the waiting task panicked")
+        .expect("release must not time out");
     assert!(session.is_released());
     assert_eq!(
         Arc::strong_count(&session.core),
@@ -292,10 +293,12 @@ async fn released_resolves_immediately_once_already_released() {
     session.shutdown();
     tokio::time::timeout(std::time::Duration::from_secs(5), session.released())
         .await
-        .expect("the first released() never resolved");
+        .expect("the first released() never resolved")
+        .expect("the first release must not time out");
     tokio::time::timeout(std::time::Duration::from_secs(5), session.released())
         .await
-        .expect("a later released() never resolved");
+        .expect("a later released() never resolved")
+        .expect("a later release must not time out");
 }
 
 /// Every waiter registered before the pump exits is woken by the guard —
@@ -324,7 +327,8 @@ async fn released_wakes_every_registered_waiter() {
         tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
             .await
             .expect("a waiter was left behind after the pump exited")
-            .expect("a waiting task panicked");
+            .expect("a waiting task panicked")
+            .expect("a release waiter must not time out");
     }
 }
 
@@ -412,8 +416,9 @@ fn test_print_background_mode_from_wire() {
     assert!(!PrintBackgroundMode::Exit.waits());
 }
 
-/// The steer prompt the engine hands the model: one block per completed
-/// task, with the output preview attached when the runner kept one.
+/// The steer prompt the engine hands the model: v2's `<notification>` block
+/// per completed task, with the output preview attached when the runner kept
+/// one.
 #[test]
 fn test_render_task_notifications() {
     use crate::storage::{TaskNotification, TaskStatus};
@@ -426,6 +431,12 @@ fn test_render_task_notifications() {
             started_at: 0,
             ended_at: 100,
             session_id: Some("sess-1".into()),
+            kind: None,
+            agent_id: None,
+            stop_reason: None,
+            output_path: None,
+            output_size_bytes: 10,
+            truncated: false,
         },
         TaskNotification {
             task_id: "t2".into(),
@@ -435,15 +446,35 @@ fn test_render_task_notifications() {
             started_at: 150,
             ended_at: 200,
             session_id: Some("sess-1".into()),
+            kind: None,
+            agent_id: None,
+            stop_reason: None,
+            output_path: None,
+            output_size_bytes: 0,
+            truncated: false,
         },
     ]);
     assert_eq!(
         rendered,
-        "Wall time: 0.100 seconds\n\
-             Background task t (completed) finished: run the test suite\n\
-             42 passing\n\n\
-             Wall time: 0.050 seconds\n\
-             Background task t2 (killed) finished: stop me"
+        "<notification id=\"task:t:completed\" category=\"task\" type=\"task.completed\" \
+         source_kind=\"background_task\" source_id=\"t\">\n\
+         Title: Background process completed\n\
+         Severity: info\n\
+         Wall time: 0.100 seconds\n\
+         run the test suite completed.\n\
+         <output-preview bytes=\"10\" total_bytes=\"10\" truncated=\"false\">\n\
+         No persisted full output is available; this preview is the currently buffered task \
+         output.\n\
+         42 passing\n\
+         </output-preview>\n\
+         </notification>\n\n\
+         <notification id=\"task:t2:killed\" category=\"task\" type=\"task.killed\" \
+         source_kind=\"background_task\" source_id=\"t2\">\n\
+         Title: Background process killed\n\
+         Severity: warning\n\
+         Wall time: 0.050 seconds\n\
+         stop me killed.\n\
+         </notification>"
     );
 }
 
@@ -1359,6 +1390,8 @@ async fn test_turn_events_dispatch_in_order() {
             turn_id: 0,
             prompt_id: Some(prompt_id),
             origin: serde_json::json!({"kind": "user"}),
+            prompt: Some("hello".to_string()),
+            prompt_attachments: None,
         }
     );
     match &seen[2] {
@@ -1367,11 +1400,17 @@ async fn test_turn_events_dispatch_in_order() {
             reason,
             error,
             duration_ms,
+            interrupt_reason,
+            trace_id,
+            stop_reason,
         } => {
             assert_eq!(*turn_id, 0);
             assert_eq!(*reason, TurnEndReason::Completed);
             assert!(error.is_none());
             assert!(duration_ms.is_some());
+            assert!(interrupt_reason.is_none());
+            assert_eq!(trace_id.as_deref(), Some("turn-0"));
+            assert!(stop_reason.is_none());
         }
         other => panic!("expected turn.ended, got {other:?}"),
     }
@@ -1658,23 +1697,25 @@ fn turn_end_reasons_map_onto_v2s_four_values() {
         assert_eq!(end_reason_of(&stop), expected, "{stop:?}");
     }
     assert_eq!(
-        turn_end_error_payload(&Stop::MaxSteps, 7),
-        Some(serde_json::json!({
-            "type": "error",
+        serde_json::to_value(turn_end_error_payload(&Stop::MaxSteps, 7).unwrap()).unwrap(),
+        serde_json::json!({
             "code": "loop.max_steps_exceeded",
             "message": "Turn exceeded maxSteps=7. If max_steps_per_turn is too small, raise it in config.toml (loop_control.max_steps_per_turn), or run \"/update-config\" to update it, then \"/reload\".",
+            "name": "LoopError",
+            "details": { "maxSteps": 7 },
             "retryable": false,
-        })),
+        }),
         "the max_steps payload mirrors createMaxStepsExceededError (loop.ts:20-27)"
     );
     assert_eq!(
-        turn_end_error_payload(&Stop::Filtered, 3),
-        Some(serde_json::json!({
-            "type": "error",
+        serde_json::to_value(turn_end_error_payload(&Stop::Filtered, 3).unwrap()).unwrap(),
+        serde_json::json!({
             "code": "provider.filtered",
             "message": "Provider safety policy blocked the response.",
+            "name": "ProviderFilteredError",
+            "details": { "finishReason": "filtered" },
             "retryable": false,
-        }))
+        })
     );
     assert_eq!(turn_end_error_payload(&Stop::EndTurn, 3), None);
 }
@@ -1735,9 +1776,11 @@ fn test_turn_failure_payload_classifies_the_llm_status() {
         assert_eq!(turn_failure_code(message), expected, "{message}");
     }
     assert_eq!(
-        turn_failure_payload("llm http status 400 Bad Request: invalid schema"),
+        serde_json::to_value(turn_failure_payload(
+            "llm http status 400 Bad Request: invalid schema"
+        ))
+        .unwrap(),
         serde_json::json!({
-            "type": "error",
             "code": "provider.api_error",
             "message": "llm http status 400 Bad Request: invalid schema",
             "retryable": false,
@@ -1804,6 +1847,9 @@ async fn test_failed_turn_reports_ended_with_error() {
     assert_eq!(payload["code"], "internal");
     assert_eq!(payload["message"], "provider is offline");
     assert_eq!(payload["retryable"], false);
+    // `turn.ended.error` is a `KimiErrorPayload`; only the separate `error`
+    // event below carries `type` (v2 `turnOps.ts` / `mcpEvents.ts`).
+    assert!(payload.get("type").is_none(), "{payload}");
     // v2 dispatches a separate error event alongside the failed turn
     // (loopService.ts:1533-1537); without it a turn that dies before any
     // output leaves the user with no explanation at all.
@@ -1821,12 +1867,14 @@ async fn test_failed_turn_reports_ended_with_error() {
                 "agent_id": "main",
                 "turn_id": "turn-0",
                 "step": 1,
+                "step_id": "turn-0-step-1",
             }),
             serde_json::json!({
                 "type": "llm.step.interrupted",
                 "agent_id": "main",
                 "turn_id": "turn-0",
                 "step": 1,
+                "step_id": "turn-0-step-1",
                 "reason": "error",
                 "message": "provider is offline",
             }),
@@ -1875,7 +1923,8 @@ async fn test_settled_resolves_immediately_when_idle() {
     .await;
     tokio::time::timeout(std::time::Duration::from_millis(100), session.settled())
         .await
-        .expect("settled must resolve immediately on an idle session");
+        .expect("settled must resolve immediately on an idle session")
+        .expect("an idle session settles without waiting");
 }
 
 #[tokio::test]
@@ -1902,7 +1951,8 @@ async fn test_settled_waits_for_active_turn() {
     let _ = receipt.outcome().await;
     tokio::time::timeout(std::time::Duration::from_millis(1000), settled)
         .await
-        .expect("settled must resolve once the turn finished");
+        .expect("settled must resolve once the turn finished")
+        .expect("the settled wait must not time out");
 }
 
 #[tokio::test]
@@ -2002,7 +2052,8 @@ async fn test_cancel_held_turn_resolves_and_settles() {
     }));
     tokio::time::timeout(std::time::Duration::from_millis(1000), session.settled())
         .await
-        .expect("cancelling the only held turn must settle the session");
+        .expect("cancelling the only held turn must settle the session")
+        .expect("the settle wait must not time out");
 }
 
 /// A finished turn folds its usage into the model bucket the pump recorded
@@ -2202,7 +2253,11 @@ async fn settle_goal_blocks_on_a_spent_budget_before_settling_an_abort() {
     )
     .await;
     assert!(after.continuation.is_none());
-    let stored = store.read_domain("goal").expect("the goal is stored");
+    let stored = store
+        .read_domain_state("goal")
+        .into_result()
+        .expect("the goal domain must be readable")
+        .expect("the goal is stored");
     assert_eq!(stored["goal"]["status"], "blocked");
     assert_eq!(
         stored["goal"]["terminalReason"],
@@ -2271,7 +2326,11 @@ async fn settle_goal_after_turn_folds_blocks_and_continues() {
     )
     .await;
     assert!(second.continuation.is_none(), "the budget is spent");
-    let stored = store.read_domain("goal").expect("the goal is stored");
+    let stored = store
+        .read_domain_state("goal")
+        .into_result()
+        .expect("the goal domain must be readable")
+        .expect("the goal is stored");
     assert_eq!(stored["goal"]["status"], "blocked");
     assert_eq!(
         stored["goal"]["terminalReason"],
@@ -2347,7 +2406,8 @@ async fn test_interactive_session_wakes_on_a_background_task_completion() {
 
     tokio::time::timeout(std::time::Duration::from_millis(1000), session.settled())
         .await
-        .expect("the notification turn settles the session again");
+        .expect("the notification turn settles the session again")
+        .expect("the settle wait must not time out");
 }
 
 #[tokio::test]
@@ -2421,7 +2481,8 @@ async fn user_prompt_cancels_active_wake_and_requeues_it_after_the_user_turn() {
     gates.remove(0).send(()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
         .await
-        .expect("the requeued wake settles");
+        .expect("the requeued wake settles")
+        .expect("the settle wait must not time out");
 
     let requests = requests.lock().unwrap();
     assert!(
@@ -2498,7 +2559,8 @@ async fn user_prompt_cancels_queued_wake_and_requeues_it_after_the_user_turns() 
     gates.remove(0).send(()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
         .await
-        .expect("the requeued wake settles");
+        .expect("the requeued wake settles")
+        .expect("the settle wait must not time out");
 
     let requests = requests.lock().unwrap();
     assert!(
@@ -2561,7 +2623,8 @@ async fn drop_wakes_discards_a_deferred_replay_by_variant() {
     ));
     tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
         .await
-        .expect("no deferred wake remains after the variant is dropped");
+        .expect("no deferred wake remains after the variant is dropped")
+        .expect("the settle wait must not time out");
     assert_eq!(requests.lock().unwrap().len(), 2);
 }
 
@@ -2649,7 +2712,8 @@ async fn replay_handler_receives_original_payload_without_engine_replay() {
     );
     tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
         .await
-        .expect("a delegated replay is complete when its handler returns Ok");
+        .expect("a delegated replay is complete when its handler returns Ok")
+        .expect("the settle wait must not time out");
 }
 
 #[tokio::test]
@@ -2742,7 +2806,8 @@ async fn engine_session_driver_holds_receipts_and_delegates_drop_result() {
     assert!(!driver.drop_wakes("sess-driver", "tower_inbox"));
     tokio::time::timeout(std::time::Duration::from_secs(5), session.settled())
         .await
-        .expect("the cancelled wake releases the driver-owned receipt");
+        .expect("the cancelled wake releases the driver-owned receipt")
+        .expect("the settle wait must not time out");
 }
 
 #[tokio::test]
@@ -2948,7 +3013,8 @@ async fn test_interactive_session_continues_an_active_goal() {
     ));
     tokio::time::timeout(std::time::Duration::from_millis(2000), session.settled())
         .await
-        .expect("the continuation chain settles");
+        .expect("the continuation chain settles")
+        .expect("the settle wait must not time out");
 
     let calls = requests.lock().unwrap();
     assert_eq!(calls.len(), 2, "one goal continuation turn");

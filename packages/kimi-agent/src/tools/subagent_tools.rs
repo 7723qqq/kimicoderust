@@ -1,24 +1,15 @@
-//! Native execution of Subagent orchestration tools (P28 批 2).
-//!
-//! Exposes `invoke_subagent`, `manage_subagents`, and `define_subagent` natively
-//! within the Rust engine runtime.
-
 use serde_json::Value;
 use std::sync::Arc;
 
 use crate::subagent::{SubagentDefinition, SubagentManager};
 use crate::turn_loop::types::ExecutableToolResult;
 
-/// Execute `invoke_subagent` tool natively.
 pub async fn execute_invoke_subagent(
     manager: &Arc<SubagentManager>,
     args: &Value,
 ) -> ExecutableToolResult {
     let mut spawned_records = Vec::new();
 
-    // Spawn the subagent, running an autonomous turn loop when the host has
-    // injected a runtime (llm + callbacks); otherwise fall back to a plain
-    // lifecycle record so the tool stays usable without a runtime.
     async fn spawn_or_run(
         manager: &Arc<SubagentManager>,
         type_name: &str,
@@ -84,7 +75,6 @@ pub async fn execute_invoke_subagent(
             }
         }
     } else {
-        // Single subagent payload fallback
         let type_name = args
             .get("TypeName")
             .or_else(|| args.get("type_name"))
@@ -114,6 +104,8 @@ pub async fn execute_invoke_subagent(
             }
             Err(e) => {
                 return ExecutableToolResult {
+                    spill: None,
+                    parts: Vec::new(),
                     delivery: None,
                     stop_turn: false,
                     content: format!("Failed to invoke subagent: {e}"),
@@ -126,6 +118,8 @@ pub async fn execute_invoke_subagent(
     }
 
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: serde_json::to_string_pretty(&serde_json::json!({
@@ -140,7 +134,6 @@ pub async fn execute_invoke_subagent(
     }
 }
 
-/// Execute `manage_subagents` tool natively.
 pub async fn execute_manage_subagents(
     manager: &SubagentManager,
     args: &Value,
@@ -155,6 +148,8 @@ pub async fn execute_manage_subagents(
         "list" => {
             let list = manager.list().await;
             ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: serde_json::to_string_pretty(&list).unwrap_or_default(),
@@ -181,6 +176,8 @@ pub async fn execute_manage_subagents(
             }
 
             ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: serde_json::json!({ "killed": killed }).to_string(),
@@ -190,6 +187,8 @@ pub async fn execute_manage_subagents(
             }
         }
         _ => ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: format!("Unsupported manage_subagents action: '{action}'"),
@@ -200,7 +199,6 @@ pub async fn execute_manage_subagents(
     }
 }
 
-/// Execute `define_subagent` tool natively.
 pub async fn execute_define_subagent(
     manager: &SubagentManager,
     args: &Value,
@@ -213,6 +211,8 @@ pub async fn execute_define_subagent(
         Some(n) => n.to_string(),
         None => {
             return ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: "Missing required 'name' argument".into(),
@@ -264,6 +264,8 @@ pub async fn execute_define_subagent(
         .await;
 
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: format!("Subagent '{name}' registered successfully."),
@@ -273,8 +275,6 @@ pub async fn execute_define_subagent(
     }
 }
 
-/// Engine tool definitions for the subagent orchestration tools, so the
-/// model can discover and call them (used by the standalone REPL).
 pub fn subagent_tool_defs() -> Vec<crate::turn_loop::types::ToolInfo> {
     vec![
         crate::turn_loop::types::ToolInfo {
@@ -334,7 +334,6 @@ mod tests {
     async fn test_subagent_tools_execution() {
         let manager = Arc::new(SubagentManager::new());
 
-        // 1. Invoke research subagent
         let invoke_args = serde_json::json!({
             "Subagents": [
                 {
@@ -348,13 +347,11 @@ mod tests {
         assert!(!res.is_error);
         assert!(res.content.contains("running"));
 
-        // 2. Manage: list
         let list_args = serde_json::json!({ "Action": "list" });
         let res = execute_manage_subagents(manager.as_ref(), &list_args).await;
         assert!(!res.is_error);
         assert!(res.content.contains("Codebase Searcher"));
 
-        // 3. Define custom subagent
         let define_args = serde_json::json!({
             "name": "tester",
             "description": "Test runner",
@@ -457,8 +454,6 @@ mod tests {
         assert!(!res.is_error);
         assert!(res.content.contains("running"));
 
-        // With a runtime injected, the subagent runs an autonomous turn and
-        // reaches Completed instead of staying a bare lifecycle record.
         let list = manager.list().await;
         assert_eq!(list.len(), 1);
         for _ in 0..50 {

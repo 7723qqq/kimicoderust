@@ -39,6 +39,69 @@ fn spec() -> PipelineSpec {
     }
 }
 
+#[tokio::test]
+async fn session_spec_publishes_the_session_roots_to_the_agent_manager() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("workspace");
+    let extra = temp_dir.path().join("extra");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&extra).unwrap();
+
+    let mut spec = spec();
+    spec.workspace_root = Some(workspace.to_string_lossy().into_owned());
+    spec.extra_roots = vec![
+        extra.to_string_lossy().into_owned(),
+        temp_dir
+            .path()
+            .join("missing")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    let engine = ServerEngine::new(
+        spec,
+        Arc::new(EventHub::new()),
+        Arc::new(SqliteSessionStore::in_memory().unwrap()),
+    );
+    let workspace_row = engine
+        .store()
+        .create_workspace(workspace.to_str().unwrap(), None)
+        .unwrap();
+    engine
+        .store()
+        .create_session_with_workspace("sess-roots", None, Some(&workspace_row.id))
+        .unwrap();
+
+    // The turn's roots are the session's live workspace: workdir plus the
+    // directories this session may touch. A missing extra root is dropped, the
+    // same way the toolset drops it.
+    engine.session_spec("sess-roots").await;
+    let manager = engine.subagent_manager();
+    let first = manager
+        .session_workspace_context("sess-roots")
+        .expect("the turn publishes the session roots")
+        .snapshot();
+    assert_eq!(first.revision, 1);
+    assert_eq!(
+        first.roots.work_dir(),
+        std::fs::canonicalize(&workspace).unwrap()
+    );
+    assert!(
+        first
+            .roots
+            .contains(&std::fs::canonicalize(&extra).unwrap())
+    );
+
+    // The next turn resolves the same set, so nothing is republished.
+    engine.session_spec("sess-roots").await;
+    assert_eq!(
+        manager
+            .session_workspace_context("sess-roots")
+            .unwrap()
+            .revision(),
+        1
+    );
+}
+
 fn engine() -> ServerEngine {
     ServerEngine::new(
         spec(),
@@ -71,6 +134,7 @@ async fn server_prompt_lists_plugin_skills_under_qualified_names() {
         dir: plugin_root,
         plugin_id: "plugin-a".into(),
         instructions: None,
+        session_start: None,
     }];
     engine.with_plugin_skill_roots(Arc::new(move || plugin_dirs.clone()));
 
@@ -200,6 +264,30 @@ async fn the_context_window_is_unknown_for_a_model_with_no_size() {
         engine.model_context_window("s1").await,
         None,
         "no alias for the model means an unknown window, not a zero one"
+    );
+}
+
+#[tokio::test]
+async fn the_session_provider_type_follows_the_resolved_model() {
+    let engine = engine();
+    let config: crate::config::KimiConfig = r#"
+[providers.kimi]
+type = "kimi"
+api_key = "k"
+base_url = "https://api.moonshot.cn/v1"
+
+[models.test-model]
+provider = "kimi"
+model = "kimi-k2"
+"#
+    .parse()
+    .unwrap();
+    engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(config))));
+    assert_eq!(
+        engine.session_provider_type("s1").await.as_deref(),
+        Some("kimi"),
+        "prompt intake must read the same provider the transport will use \
+         (the Kimi image budget is wider than the baseline)"
     );
 }
 
@@ -613,13 +701,20 @@ async fn a_turn_on_a_foreign_held_session_is_refused_as_occupied() {
         .store()
         .create_session("sess-occupied-engine", Some("occupied test"))
         .unwrap();
-    // A second service on the same directory stands in for another process:
-    // its holder file carries this pid (alive on every platform) with a
-    // token this process never claimed, exactly what a foreign hold writes.
+    // A second service on the same directory stands in for another process.
     let foreign = crate::session::lock::SessionLockService::new(
         crate::session::lock::SESSION_LOCKS.lock_dir().to_path_buf(),
     );
     foreign.hold("sess-occupied-engine").unwrap();
+    // A real foreign hold carries a foreign pid. A same-pid file is this
+    // process's own leftover and is reclaimable by design, so rewrite the
+    // payload to look like the other host it is standing in for.
+    let lock_path = foreign.lock_dir().join("sess-occupied-engine.lock");
+    let mut holder: crate::session::lock::SessionLockHolder =
+        serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap();
+    holder.pid = 999_999_999;
+    holder.hostname = "other-host".into();
+    std::fs::write(&lock_path, serde_json::to_string(&holder).unwrap()).unwrap();
 
     let error = engine
         .run_turn_on(&ScriptedLlm, "sess-occupied-engine", 1, Vec::new(), "hello")
@@ -758,7 +853,7 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
     }
     let events: Vec<std::sync::Arc<crate::server::hub::SequencedEvent>> = {
         let mut collected = Vec::new();
-        for _ in 0..9 {
+        for _ in 0..10 {
             collected.push(next_event(&mut sub).await);
         }
         collected
@@ -771,6 +866,7 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
         sequence,
         vec![
             "event.session.work_changed",  // busy=true
+            "session.meta.updated",        // first-prompt lastPrompt/title
             "agent.status.updated",        // snapshot (first for the session)
             "agent.status.updated",        // phase: running
             "event.message.created",       // the user prompt
@@ -796,13 +892,13 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
     assert_eq!(pending_interaction, "none");
     assert!(last_turn_reason.is_none());
 
-    let crate::events::EngineEvent::Custom(start_phase) = &events[2].event else {
-        panic!("expected the running phase, got {:?}", events[2].event);
+    let crate::events::EngineEvent::Custom(start_phase) = &events[3].event else {
+        panic!("expected the running phase, got {:?}", events[3].event);
     };
     assert_eq!(start_phase["phase"]["kind"], "running");
 
-    let crate::events::EngineEvent::Custom(end_phase) = &events[8].event else {
-        panic!("expected the ended phase, got {:?}", events[8].event);
+    let crate::events::EngineEvent::Custom(end_phase) = &events[9].event else {
+        panic!("expected the ended phase, got {:?}", events[9].event);
     };
     assert_eq!(end_phase["phase"]["kind"], "ended");
     assert_eq!(end_phase["phase"]["reason"], "completed");
@@ -811,9 +907,9 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
     // carrying the loop's end reason — the v2 turn-lifecycle contract.
     let crate::events::EngineEvent::TurnEnded {
         turn_id, reason, ..
-    } = &events[4].event
+    } = &events[5].event
     else {
-        panic!("expected turn.ended, got {:?}", events[4].event);
+        panic!("expected turn.ended, got {:?}", events[5].event);
     };
     assert_eq!(turn_id, "turn-1");
     assert_eq!(reason, "completed");
@@ -822,9 +918,9 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
         busy,
         last_turn_reason,
         ..
-    } = &events[5].event
+    } = &events[6].event
     else {
-        panic!("expected work_changed, got {:?}", events[5].event);
+        panic!("expected work_changed, got {:?}", events[6].event);
     };
     assert!(!busy);
     assert_eq!(last_turn_reason.as_deref(), Some("completed"));
@@ -887,7 +983,9 @@ async fn status_updated_folds_agent_config_and_context_then_dedups() {
     assert_eq!(payload["thinkingEffort"], "high");
     assert_eq!(payload["permission"], "manual");
     assert_eq!(payload["planMode"], true);
-    assert_eq!(payload["contextTokens"], 1);
+    // v2 `estimateTokensForMessage` counts the role plus the content: role
+    // "user" (1) + four content bytes (1) = 2.
+    assert_eq!(payload["contextTokens"], 2);
 
     // An unchanged state re-publish is dropped by the snapshot dedup.
     engine.publish_status_updated("sess-status").await;
@@ -1364,8 +1462,9 @@ async fn a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuatio
 }
 
 /// The status gauge is measured + estimated (v2 `statusSize`): the turn's
-/// last request anchors the context it served, so the gauge reports the
-/// provider's total rather than a small content estimate.
+/// last request anchors the *input prefix* it served, so the reply appended
+/// after it is estimated on top (v2 `measured` uses the request context
+/// length, not the finished transcript's).
 #[tokio::test]
 async fn a_finished_turn_anchors_the_context_gauge_on_its_last_request() {
     let engine = engine();
@@ -1379,11 +1478,124 @@ async fn a_finished_turn_anchors_the_context_gauge_on_its_last_request() {
     // UsageLlm reports input 10, cache read 3, cache creation 2, output 5 —
     // v2's measured total is their sum.
     let measured = 20;
-    assert_eq!(engine.session_context_tokens("sess-count"), measured);
+    let history = engine.store().load_session_history("sess-count").unwrap();
+    // The loop appends its injected reminder as a user turn, so the stored
+    // slice is [user, reminder, reply]; only the reply trails the request.
+    assert_eq!(
+        history.len(),
+        3,
+        "the user message, a reminder and the reply"
+    );
+    let reply = crate::session::token_counting::estimate_message(&history[2]);
+    assert_eq!(
+        engine.token_counting("sess-count").anchors[0].length,
+        history.len() - 1,
+        "the anchor covers the request input, not the reply"
+    );
+    assert_eq!(
+        engine.session_context_tokens("sess-count"),
+        measured + reply,
+        "the measured prefix plus the estimated reply"
+    );
     assert_eq!(
         engine.status_payload("sess-count")["contextTokens"],
-        measured,
-        "the gauge carries the measured total"
+        measured + reply,
+        "the gauge carries the measured total and the estimated tail"
+    );
+}
+
+/// v2 `matchesContext`: a request whose input prefix a compaction replaced no
+/// longer anchors the conversation — the turn falls back to an estimate at
+/// the final transcript length instead of pinning a stale measurement.
+#[test]
+fn a_spliced_request_measurement_falls_back_to_an_estimate() {
+    let engine = engine();
+    engine.store().create_session("sess-splice", None).unwrap();
+    let messages = vec![
+        crate::turn_loop::types::LLMMessage {
+            role: "user".into(),
+            content: "hello".into(),
+            ..Default::default()
+        },
+        crate::turn_loop::types::LLMMessage {
+            role: "assistant".into(),
+            content: "done".into(),
+            ..Default::default()
+        },
+    ];
+    engine
+        .store()
+        .save_turn("sess-splice", "turn-1", 1, &messages, None, None)
+        .unwrap();
+
+    let usage = crate::rpc::types::TokenUsage {
+        input_tokens: 10,
+        output_tokens: 5,
+        ..Default::default()
+    };
+    let stale = crate::turn_loop::types::RequestMeasurement {
+        usage: usage.clone(),
+        input_messages: 2,
+        spliced_after: true,
+    };
+    engine.record_token_counting("sess-splice", Some(&stale), 0);
+    let state = engine.token_counting("sess-splice");
+    assert!(
+        state.anchors.iter().all(|anchor| !anchor.measured),
+        "a stale request must not install a measured anchor"
+    );
+    assert_eq!(
+        engine.session_context_tokens("sess-splice"),
+        crate::session::token_counting::estimate_messages(&messages),
+        "the whole transcript is estimated"
+    );
+
+    // The same request, still current: two loop messages (system + user) map
+    // to a one-message durable prefix, and the reply is estimated on top.
+    let fresh = crate::turn_loop::types::RequestMeasurement {
+        usage,
+        input_messages: 2,
+        spliced_after: false,
+    };
+    engine.record_token_counting("sess-splice", Some(&fresh), 0);
+    assert_eq!(
+        engine.session_context_tokens("sess-splice"),
+        15 + crate::session::token_counting::estimate_message(&messages[1])
+    );
+}
+
+/// The tool-schema table is part of every request, so the gauge counts it and
+/// `should_compact` — the threshold the turn loop and the micro-compaction
+/// path read — sizes the same figure. Enabling a large toolset must therefore
+/// move the trigger, not leave it unaware of the schema.
+#[test]
+fn the_context_gauge_and_the_compaction_threshold_share_the_tool_schema_basis() {
+    let engine = engine();
+    engine.store().create_session("sess-schema", None).unwrap();
+
+    engine.record_token_counting("sess-schema", None, 0);
+    let without_schema = engine.session_context_tokens("sess-schema");
+    engine.record_token_counting("sess-schema", None, 900);
+    let with_schema = engine.session_context_tokens("sess-schema");
+    assert_eq!(
+        with_schema - without_schema,
+        900,
+        "the gauge adds the active tool schema"
+    );
+
+    let config = crate::compaction::CompactionConfig {
+        max_context_tokens: 1_000,
+        trigger_ratio: 0.5,
+        reserved_context_size: 0,
+        ..crate::compaction::config_for_window(Some(1_000))
+    };
+    assert!(
+        !crate::compaction::should_compact(without_schema as u32, &config),
+        "below the threshold without the schema"
+    );
+    assert!(
+        crate::compaction::should_compact(with_schema as u32, &config),
+        "the threshold reads the same gauge figure, so the schema moves it"
     );
 }
 
@@ -1397,17 +1609,25 @@ async fn truncating_the_transcript_rebases_the_context_gauge() {
         .run_turn_on(&UsageLlm, "sess-cut", 1, Vec::new(), "hello")
         .await
         .expect("scripted turn completes");
-    assert_eq!(engine.session_context_tokens("sess-cut"), 20);
+    assert_eq!(engine.session_context_tokens("sess-cut"), 24);
 
     let undone = engine.store().undo_turns("sess-cut", 1).expect("undo");
     assert_eq!(undone, 1);
     engine.record_context_truncation("sess-cut");
+    // The messages are gone, but the request still carries the turn's tool
+    // schema — the gauge counts it on the same basis as the compaction
+    // trigger.
+    let schema_tokens = engine.token_counting("sess-cut").tool_schema_tokens;
+    assert!(schema_tokens > 0, "the scripted turn enables a toolset");
     assert_eq!(
         engine.session_context_tokens("sess-cut"),
-        0,
-        "no messages remain, so no tokens remain"
+        schema_tokens,
+        "only the tool-schema overhead remains"
     );
-    assert_eq!(engine.status_payload("sess-cut")["contextTokens"], 0);
+    assert_eq!(
+        engine.status_payload("sess-cut")["contextTokens"],
+        schema_tokens
+    );
 }
 
 /// The todo list the ACP `plan` notification projects: read from the same
@@ -1509,4 +1729,635 @@ fn session_thinking_off_clears_the_budget_and_the_keep() {
     assert_eq!(native.thinking_budget, None);
     assert_eq!(native.thinking_keep, None);
     assert_ne!(native.reasoning_effort.as_deref(), Some("off"));
+}
+
+/// v2 `WireService.externallyModified` / `SessionRunGateService.begin()`: a
+/// journal that moved since this engine last saw it means another client wrote
+/// the session while it was idle. A session never observed is a fresh scope
+/// (nothing is stale), and adopting the head is the reload that clears it.
+#[test]
+fn a_journal_that_moved_since_the_observed_head_reads_as_externally_modified() {
+    let engine = engine();
+    engine.store().create_session("sess-stale", None).unwrap();
+
+    assert!(
+        !engine.journal_moved("sess-stale"),
+        "a session this engine has never observed has no watermark to differ from"
+    );
+    let head = engine.observe_journal_head("sess-stale");
+    assert!(!engine.journal_moved("sess-stale"));
+
+    engine
+        .store()
+        .append_wire_event(&crate::native::event_store::RawWireEvent {
+            id: "evt-foreign".into(),
+            session_id: "sess-stale".into(),
+            event_type: "message.user".into(),
+            payload: serde_json::json!({ "content": "written by another client" }),
+            is_checkpoint: false,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .unwrap();
+    assert!(
+        engine.journal_moved("sess-stale"),
+        "a foreign append after the watermark must read as an external modification"
+    );
+
+    assert!(engine.observe_journal_head("sess-stale") > head);
+    assert!(
+        !engine.journal_moved("sess-stale"),
+        "adopting the head (the reload the stale error asks for) clears the doubt"
+    );
+}
+
+/// Rows this process's own persister wrote are the engine's in-flight tail, not
+/// an external modification. The turn watermark is taken before its post-turn
+/// events and the next prompt's `prompt.submitted` are persisted, so without
+/// the persisted head every second turn in the same process would be refused as
+/// `session.stale` — before its step head could drain a surviving steer.
+#[test]
+fn a_row_this_process_persisted_is_not_an_external_modification() {
+    let engine = engine();
+    engine
+        .store()
+        .create_session("sess-own-tail", None)
+        .unwrap();
+    engine.observe_journal_head("sess-own-tail");
+
+    let seq = engine
+        .store()
+        .append_wire_event(&crate::native::event_store::RawWireEvent {
+            id: "evt-own-tail".into(),
+            session_id: "sess-own-tail".into(),
+            event_type: "turn.ended".into(),
+            payload: serde_json::json!({ "reason": "cancelled" }),
+            is_checkpoint: true,
+            is_compaction: false,
+            created_at: 1,
+        })
+        .unwrap();
+    assert!(
+        engine.journal_moved("sess-own-tail"),
+        "a row written behind the engine's back is foreign until the persister claims it"
+    );
+    engine.hub.persisted_heads().note("sess-own-tail", seq);
+    assert!(
+        !engine.journal_moved("sess-own-tail"),
+        "the persister's own row is this process's in-flight tail"
+    );
+}
+
+#[test]
+fn agents_md_reminder_lists_stale_and_new_files() {
+    use crate::environment::AgentsMdChange;
+
+    let changes = vec![
+        AgentsMdChange::Modified {
+            path: std::path::PathBuf::from("/repo/AGENTS.md"),
+        },
+        AgentsMdChange::Removed {
+            path: std::path::PathBuf::from("/repo/old/AGENTS.md"),
+        },
+        AgentsMdChange::Added {
+            path: std::path::PathBuf::from("/repo/pkg/AGENTS.md"),
+        },
+    ];
+    let text = agents_md_change_reminder(&changes).expect("reminder");
+    assert!(text.contains("/repo/AGENTS.md"));
+    assert!(text.contains("/repo/old/AGENTS.md (deleted)"));
+    assert!(text.contains("/repo/pkg/AGENTS.md"));
+    assert!(text.contains("the copies injected in the system prompt are stale"));
+}
+
+#[test]
+fn agents_md_reminder_is_silent_without_changes() {
+    assert!(agents_md_change_reminder(&[]).is_none());
+}
+
+// ── `[environments]` at session creation ─────────────────────────────
+
+fn environment_entry(kind: &str) -> crate::environment::EnvironmentEntry {
+    crate::environment::EnvironmentEntry {
+        kind: Some(kind.to_string()),
+        ..Default::default()
+    }
+}
+
+/// An engine whose config carries `environments`, plus a workspace-backed
+/// session created before the environment is frozen.
+async fn engine_with_environments(
+    environments: crate::environment::EnvironmentsConfig,
+) -> (tempfile::TempDir, ServerEngine) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let mut spec = spec();
+    spec.workspace_root = Some(workspace.to_string_lossy().into_owned());
+    let engine = ServerEngine::new(
+        spec,
+        Arc::new(EventHub::new()),
+        Arc::new(SqliteSessionStore::in_memory().unwrap()),
+    );
+    let mut config = crate::config::KimiConfig::default();
+    config.environments = environments;
+    engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(config))));
+
+    let workspace_row = engine
+        .store()
+        .create_workspace(workspace.to_str().unwrap(), None)
+        .unwrap();
+    engine
+        .store()
+        .create_session_with_workspace("sess-env", None, Some(&workspace_row.id))
+        .unwrap();
+    (temp_dir, engine)
+}
+
+/// Declaring a remote entry does not poison creation: with no `default`, the
+/// session binds to the built-in local environment, exactly like a config with
+/// no `[environments]` section.
+#[tokio::test]
+async fn a_declared_environment_without_a_default_still_binds_local() {
+    let (temp_dir, engine) = engine_with_environments(crate::environment::EnvironmentsConfig {
+        default: None,
+        entries: std::collections::BTreeMap::from([("dev".to_string(), environment_entry("ssh"))]),
+    })
+    .await;
+
+    let snapshot = engine
+        .freeze_session_environment("sess-env")
+        .await
+        .unwrap()
+        .expect("a workspace-backed session freezes a snapshot");
+    assert_eq!(snapshot.environment_id(), "local");
+    assert_eq!(
+        snapshot.cwd(),
+        std::fs::canonicalize(temp_dir.path().join("workspace")).unwrap()
+    );
+}
+
+/// A declared default is what upstream uses when a session names no
+/// environment; this engine cannot reach the transport, so creation fails with
+/// the transport named rather than silently running locally.
+#[tokio::test]
+async fn a_declared_default_is_refused_as_unavailable_on_creation() {
+    let (_temp_dir, engine) = engine_with_environments(crate::environment::EnvironmentsConfig {
+        default: Some("dev".to_string()),
+        entries: std::collections::BTreeMap::from([("dev".to_string(), environment_entry("ssh"))]),
+    })
+    .await;
+
+    let error = engine
+        .freeze_session_environment("sess-env")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        crate::environment::codes::ENVIRONMENT_UNAVAILABLE
+    );
+    assert!(error.detail().contains("'dev'"), "{}", error.detail());
+    assert!(error.detail().contains("ssh"), "{}", error.detail());
+}
+
+/// `local` is built in, not a declarable transport (upstream's entry union is
+/// ssh/docker/command): a config that declares it is malformed and creation
+/// reports that, instead of pretending the transport is merely unavailable.
+///
+/// This is the create/restore backstop: the config loader already staged the
+/// same finding as an `event.config.warning`, but the file can be edited while
+/// the server runs, so the typed error must still be reachable here.
+#[tokio::test]
+async fn a_local_declaration_fails_creation_with_a_declaration_error() {
+    let (_temp_dir, engine) = engine_with_environments(crate::environment::EnvironmentsConfig {
+        default: None,
+        entries: std::collections::BTreeMap::from([(
+            "dev".to_string(),
+            environment_entry("local"),
+        )]),
+    })
+    .await;
+
+    let error = engine
+        .freeze_session_environment("sess-env")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        crate::environment::codes::ENVIRONMENT_DECLARATION_INVALID
+    );
+    assert!(error.detail().contains("'dev'"), "{}", error.detail());
+    assert!(error.detail().contains("built in"), "{}", error.detail());
+}
+
+/// A dangling `default` stays a config error at the same moment upstream
+/// reports it: while the declaration is validated, before any snapshot.
+#[tokio::test]
+async fn a_dangling_default_fails_creation_with_a_declaration_error() {
+    let (_temp_dir, engine) = engine_with_environments(crate::environment::EnvironmentsConfig {
+        default: Some("missing".to_string()),
+        entries: std::collections::BTreeMap::new(),
+    })
+    .await;
+
+    let error = engine
+        .freeze_session_environment("sess-env")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        crate::environment::codes::ENVIRONMENT_DECLARATION_INVALID
+    );
+    assert!(error.detail().contains("missing"), "{}", error.detail());
+}
+
+/// A scripted LLM that reports one usage per call, so a multi-turn test can
+/// drive the cache-read series the tracker observes.
+struct ScriptedUsageLlm {
+    calls: std::sync::atomic::AtomicUsize,
+    usages: Vec<TokenUsage>,
+}
+
+impl LLM for ScriptedUsageLlm {
+    fn system_prompt(&self) -> &str {
+        "sys"
+    }
+    fn model_name(&self) -> &str {
+        "cache-model"
+    }
+    fn is_retryable_error(&self, _error: &str) -> bool {
+        false
+    }
+    fn chat(
+        &self,
+        _params: LLMChatParams,
+    ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>> {
+        let index = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .min(self.usages.len().saturating_sub(1));
+        let usage = self.usages.get(index).cloned().unwrap_or_default();
+        Box::pin(async move {
+            Ok(LLMChatResponse {
+                content: "done".into(),
+                thinking: Vec::new(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".into()),
+                usage,
+                timing: None,
+            })
+        })
+    }
+}
+
+fn cache_usage(input_other: u32, cache_read: u32, cache_creation: u32, output: u32) -> TokenUsage {
+    TokenUsage {
+        input_tokens: input_other,
+        output_tokens: output,
+        total_tokens: input_other + cache_read + cache_creation + output,
+        input_cache_read: cache_read,
+        input_cache_creation: cache_creation,
+    }
+}
+
+/// D14: a collapsing cache read is recorded once with its buckets; a
+/// sub-threshold dip afterwards adds no noise. The read entry exposes what was
+/// collected without any wire field.
+#[tokio::test]
+async fn a_cache_read_collapse_is_recorded_and_a_small_dip_is_not() {
+    let engine = engine();
+    engine.store().create_session("sess-cache", None).unwrap();
+    let llm = ScriptedUsageLlm {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        usages: vec![
+            cache_usage(10, 10_000, 0, 10),
+            cache_usage(5_000, 2_000, 0, 10),
+            cache_usage(5_000, 1_900, 0, 10),
+        ],
+    };
+
+    engine
+        .run_turn_on(&llm, "sess-cache", 1, Vec::new(), "first")
+        .await
+        .expect("first turn completes");
+    let snapshot = engine.cache_observation("sess-cache");
+    assert_eq!(
+        snapshot["breaks"].as_array().map(Vec::len),
+        Some(0),
+        "the first observation only seeds the baseline"
+    );
+    assert_eq!(snapshot["last"]["cache_read"], 10_000);
+    assert_eq!(snapshot["last"]["input_tokens"], 10_010);
+    assert_eq!(
+        snapshot["last"]["message_count"], 3,
+        "system + user + the loop's reminder"
+    );
+    assert_eq!(snapshot["baseline"]["input_cache_read"], 10_000);
+
+    let history = engine.store().load_session_history("sess-cache").unwrap();
+    engine
+        .run_turn_on(&llm, "sess-cache", 2, history, "second")
+        .await
+        .expect("second turn completes");
+    let snapshot = engine.cache_observation("sess-cache");
+    let breaks = snapshot["breaks"].as_array().expect("breaks is an array");
+    assert_eq!(breaks.len(), 1, "one collapse, one record");
+    assert_eq!(breaks[0]["cause"], "unexplained");
+    assert_eq!(breaks[0]["previous"]["input_cache_read"], 10_000);
+    assert_eq!(breaks[0]["current"]["input_cache_read"], 2_000);
+
+    let history = engine.store().load_session_history("sess-cache").unwrap();
+    engine
+        .run_turn_on(&llm, "sess-cache", 3, history, "third")
+        .await
+        .expect("third turn completes");
+    assert_eq!(
+        engine.cache_observation("sess-cache")["breaks"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "2000 -> 1900 is exactly the 95% boundary and must stay silent"
+    );
+}
+
+/// D14: an unmeasured step is not a break and does not move the baseline, so
+/// providers that report nothing cannot fabricate a collapse.
+#[test]
+fn an_unmeasured_cache_observation_does_not_move_the_baseline() {
+    let engine = engine();
+    engine
+        .store()
+        .create_session("sess-cache-unmeasured", None)
+        .unwrap();
+    let observation = crate::session::cache_observation::build_cache_observation(
+        crate::session::cache_observation::CacheObservationInput {
+            model_alias: "cache-model",
+            protocol: None,
+            provider_type: None,
+            message_count: 2,
+            history_hash: "h",
+            projection: None,
+            thinking_effort: None,
+            usage: Some(&cache_usage(10, 10_000, 0, 10)),
+        },
+    );
+    engine.observe_cache_observations(
+        "sess-cache-unmeasured",
+        "turn-1",
+        crate::callbacks::MAIN_AGENT_ID,
+        std::slice::from_ref(&observation),
+        &[],
+        None,
+    );
+    let empty = crate::rpc::types::TokenUsage::default();
+    let unmeasured = crate::session::cache_observation::build_cache_observation(
+        crate::session::cache_observation::CacheObservationInput {
+            model_alias: "cache-model",
+            protocol: None,
+            provider_type: None,
+            message_count: 3,
+            history_hash: "h2",
+            projection: None,
+            thinking_effort: None,
+            usage: Some(&empty),
+        },
+    );
+    engine.observe_cache_observations(
+        "sess-cache-unmeasured",
+        "turn-2",
+        crate::callbacks::MAIN_AGENT_ID,
+        std::slice::from_ref(&unmeasured),
+        &[],
+        None,
+    );
+    let snapshot = engine.cache_observation("sess-cache-unmeasured");
+    assert_eq!(snapshot["breaks"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        snapshot["baseline"]["input_cache_read"], 10_000,
+        "the unmeasured step must not replace the reference"
+    );
+}
+
+/// D14: a compaction rebase drops every pre-compaction comparison datum (the
+/// break baseline, the last observation, the request snapshots) so the summary
+/// prefix is never measured against the old transcript; the recorded breaks
+/// are history and stay.
+#[test]
+fn a_compaction_resets_the_cache_break_baseline() {
+    let engine = engine();
+    engine
+        .store()
+        .create_session("sess-cache-reset", None)
+        .unwrap();
+    let observation = crate::session::cache_observation::build_cache_observation(
+        crate::session::cache_observation::CacheObservationInput {
+            model_alias: "cache-model",
+            protocol: None,
+            provider_type: None,
+            message_count: 2,
+            history_hash: "h",
+            projection: None,
+            thinking_effort: None,
+            usage: Some(&cache_usage(10, 10_000, 0, 10)),
+        },
+    );
+    engine.observe_cache_observations(
+        "sess-cache-reset",
+        "turn-1",
+        crate::callbacks::MAIN_AGENT_ID,
+        std::slice::from_ref(&observation),
+        &[],
+        Some(&crate::session::cache_observation::CacheProbeRequest {
+            model_alias: "cache-model".into(),
+            tools_hash: "tools".into(),
+            system_prompt_hash: "prompt".into(),
+            message_count: 2,
+            history_hash: "h".into(),
+            input_tokens: Some(10_020),
+            started_at: 1,
+            finished_at: 2,
+        }),
+    );
+    assert_eq!(
+        engine.cache_observation("sess-cache-reset")["baseline"]["input_cache_read"],
+        10_000
+    );
+    assert!(
+        engine.cache_observation("sess-cache-reset")["requests"]
+            .get(crate::callbacks::MAIN_AGENT_ID)
+            .is_some()
+    );
+
+    engine.record_context_rebase("sess-cache-reset");
+    let snapshot = engine.cache_observation("sess-cache-reset");
+    assert!(snapshot["baseline"].is_null(), "the baseline was dropped");
+    assert!(
+        snapshot["last"].is_null(),
+        "the pre-compaction observation must not label the summary prefix"
+    );
+    assert_eq!(
+        snapshot["requests"]
+            .as_object()
+            .map(|requests| requests.len()),
+        Some(0),
+        "the pre-compaction request snapshots must not be compared with the summary prefix"
+    );
+}
+
+/// D14: a turn that compacted mid-loop hands the engine the observation index
+/// where the history was replaced. The fold resets the break baseline there, so
+/// the post-compaction cache-read drop is not reported as a break (v2 resets on
+/// `context.compactionCompleted`).
+#[test]
+fn a_compaction_boundary_in_the_fold_resets_the_baseline() {
+    let engine = engine();
+    engine
+        .store()
+        .create_session("sess-fold-reset", None)
+        .unwrap();
+    let before_usage = cache_usage(10, 10_000, 0, 10);
+    let before = crate::session::cache_observation::build_cache_observation(
+        crate::session::cache_observation::CacheObservationInput {
+            model_alias: "cache-model",
+            protocol: None,
+            provider_type: None,
+            message_count: 6,
+            history_hash: "before",
+            projection: None,
+            thinking_effort: None,
+            usage: Some(&before_usage),
+        },
+    );
+    let after_usage = cache_usage(10, 1_000, 0, 10);
+    let after = crate::session::cache_observation::build_cache_observation(
+        crate::session::cache_observation::CacheObservationInput {
+            model_alias: "cache-model",
+            protocol: None,
+            provider_type: None,
+            message_count: 2,
+            history_hash: "after",
+            projection: None,
+            thinking_effort: None,
+            usage: Some(&after_usage),
+        },
+    );
+    engine.observe_cache_observations(
+        "sess-fold-reset",
+        "turn-1",
+        crate::callbacks::MAIN_AGENT_ID,
+        &[before, after],
+        &[1],
+        None,
+    );
+    let snapshot = engine.cache_observation("sess-fold-reset");
+    assert_eq!(
+        snapshot["breaks"].as_array().map(Vec::len),
+        Some(0),
+        "the read drop across the compaction boundary is not a break"
+    );
+    assert_eq!(
+        snapshot["baseline"]["input_cache_read"], 1_000,
+        "the post-compaction observation becomes the new baseline"
+    );
+}
+
+/// D10: the engine reads the configured strategy through the config source, so
+/// an explicit `measured`/`estimated` changes the gauge and the default is
+/// byte-for-byte the historical figure.
+#[test]
+fn the_context_gauge_honours_the_configured_token_counting_strategy() {
+    use std::str::FromStr;
+    // The gauge reads `KIMI_TOKEN_COUNTING_STRATEGY` on every call, so the
+    // whole test must own the variable: taking the lock only for the last
+    // assertion let a parallel config test flip the value under the earlier
+    // ones.
+    let _env = crate::session::token_counting::tests::env_lock();
+    unsafe { std::env::remove_var("KIMI_TOKEN_COUNTING_STRATEGY") };
+    let engine = engine();
+    engine
+        .store()
+        .create_session("sess-strategy", None)
+        .unwrap();
+    let messages = vec![
+        crate::turn_loop::types::LLMMessage {
+            role: "user".into(),
+            content: "hello".into(),
+            ..Default::default()
+        },
+        crate::turn_loop::types::LLMMessage {
+            role: "assistant".into(),
+            content: "hi".into(),
+            ..Default::default()
+        },
+    ];
+    engine
+        .store()
+        .save_turn("sess-strategy", "turn-1", 1, &messages, None, None)
+        .unwrap();
+    let measurement = crate::turn_loop::types::RequestMeasurement {
+        usage: cache_usage(100, 0, 0, 5),
+        input_messages: messages.len(),
+        spliced_after: false,
+    };
+    engine.record_token_counting("sess-strategy", Some(&measurement), 0);
+
+    let tail = crate::session::token_counting::estimate_message(&messages[1]);
+    let composed = 105 + tail;
+    let estimated = crate::session::token_counting::estimate_messages(&messages);
+    assert_eq!(engine.session_context_tokens("sess-strategy"), composed);
+    assert_eq!(
+        engine.status_payload("sess-strategy")["contextTokens"],
+        composed
+    );
+
+    engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(
+        crate::config::KimiConfig::from_str("[tokenCounting]\nstrategy = \"measured\"\n").unwrap(),
+    ))));
+    assert_eq!(
+        engine.session_context_tokens("sess-strategy"),
+        105,
+        "measured ignores the estimated tail"
+    );
+
+    engine.set_config_source(Arc::new(tokio::sync::Mutex::new(Some(
+        crate::config::KimiConfig::from_str("[tokenCounting]\nstrategy = \"estimated\"\n").unwrap(),
+    ))));
+    assert_eq!(
+        engine.session_context_tokens("sess-strategy"),
+        estimated,
+        "estimated is the pure estimator over the stored history"
+    );
+
+    // Back to the default: no config source at all.
+    engine.set_config_source(Arc::new(tokio::sync::Mutex::new(None)));
+    assert_eq!(engine.session_context_tokens("sess-strategy"), composed);
+}
+
+/// D10: a read that races a config reload must not report the default. The
+/// async config source is briefly held while a reload swaps it, and the
+/// synchronous gauge used to treat `try_lock` contention as "unconfigured".
+#[tokio::test]
+async fn a_contended_config_read_does_not_downgrade_the_token_counting_strategy() {
+    use std::str::FromStr;
+    let _env = crate::session::token_counting::tests::env_lock();
+    unsafe { std::env::remove_var("KIMI_TOKEN_COUNTING_STRATEGY") };
+    let engine = engine();
+    let source = Arc::new(tokio::sync::Mutex::new(Some(
+        crate::config::KimiConfig::from_str("[tokenCounting]\nstrategy = \"measured\"\n").unwrap(),
+    )));
+    engine.set_config_source(Arc::clone(&source));
+    assert_eq!(
+        engine.token_counting_strategy(),
+        crate::session::token_counting::TokenCountingStrategy::Measured
+    );
+
+    // Stand in for a reload: hold the source while the gauge reads it.
+    let guard = source.lock().await;
+    assert_eq!(
+        engine.token_counting_strategy(),
+        crate::session::token_counting::TokenCountingStrategy::Measured,
+        "a contended read must reuse the last resolved strategy, not the default"
+    );
+    drop(guard);
 }

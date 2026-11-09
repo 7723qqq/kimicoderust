@@ -55,17 +55,12 @@ impl HttpServer {
                     Err(e) => HttpResponse::internal_error(format!("Failed to read file: {e}")),
                 }
             }
-            ("POST", p)
-                if p == "/api/v1/workspace/fs::list"
-                    || p == "/workspace/fs::list"
-                    // Single-colon spelling matches the official Web bundle
-                    // (see the search/suggest arm below).
-                    || p == "/api/v1/workspace/fs:list"
-                    || p == "/workspace/fs:list" =>
-            {
-                // v2 `POST /workspace/fs::list`: the session-less fs:list; the
-                // workspace reference travels in the body and
-                // `include_git_status` is omitted upstream (inert here).
+            ("POST", p) if p == "/api/v1/workspace/fs:list" || p == "/workspace/fs:list" => {
+                // v2 `POST /workspace/fs::list` — the literal `/workspace/fs:list`
+                // (`::` escapes the colon, `kap-server/src/routes/fs.ts:333`):
+                // the session-less fs:list; the workspace reference travels in
+                // the body and `include_git_status` is omitted upstream (inert
+                // here).
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(v) => v,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
@@ -86,23 +81,14 @@ impl HttpServer {
             }
 
             ("POST", p)
-                if p == "/api/v1/workspace/fs::search"
-                    || p == "/workspace/fs::search"
-                    || p == "/api/v1/workspace/fs:search"
+                if p == "/api/v1/workspace/fs:search"
                     || p == "/workspace/fs:search"
-                    || p == "/api/v1/fs::suggest"
-                    || p == "/fs::suggest"
                     || p == "/api/v1/fs:suggest"
                     || p == "/fs:suggest"
                     // v2 spells these `/workspace/fs::search` and
-                    // `/workspace/fs::suggest` (double colon,
-                    // kap-server/src/routes/fs.ts:414,460); the official Web
-                    // bundle calls both with a *single* colon. The `::search`
-                    // sibling already accepted both spellings here, so `suggest`
-                    // now matches it — otherwise every file-mention request paid
-                    // a 404 round-trip before the client's fallback to search.
-                    || p == "/api/v1/workspace/fs::suggest"
-                    || p == "/workspace/fs::suggest"
+                    // `/workspace/fs::suggest`; `::` escapes the colon, so the
+                    // literal paths are single-colon
+                    // (`kap-server/src/routes/fs.ts:383,478`).
                     || p == "/api/v1/workspace/fs:suggest"
                     || p == "/workspace/fs:suggest" =>
             {
@@ -526,6 +512,22 @@ impl HttpServer {
                 if session_id.is_empty() || session_id.contains('/') || session_id.contains(':') {
                     return HttpResponse::not_found();
                 }
+                // The session's engine state directory (undo snapshots, wake
+                // state, per-session logs) does not cascade with the SQLite
+                // rows, so it is removed explicitly before the row delete. A
+                // failure aborts the delete: reporting `deleted: true` while the
+                // snapshots survive would leave orphan files behind.
+                if let Err(error) = self.run_session_cleanup_hooks(session_id) {
+                    return HttpResponse::json(
+                        500,
+                        &json!({
+                            "code": crate::server::envelope::error_codes::INTERNAL_ERROR,
+                            "msg": format!(
+                                "Could not clean up session \"{session_id}\": {error}"
+                            ),
+                        }),
+                    );
+                }
                 let workspace_id = self
                     .store
                     .get_session(session_id)
@@ -535,6 +537,10 @@ impl HttpServer {
                 match self.store.delete_session(session_id) {
                     Ok(true) => {
                         self.interaction_manager.cancel_session(session_id);
+                        if let Some(engine) = self.engine.as_ref() {
+                            engine.forget_change_notifier(session_id);
+                            engine.forget_mcp_status(session_id);
+                        }
                         // v2 `sessionExternalHooksService.triggerSessionEnd`:
                         // deleting the session archives it —the close
                         // reason is `archive` (REPL exit is `exit`).
@@ -547,7 +553,7 @@ impl HttpServer {
                             .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
                             .map(|w| w.root);
                         let guard = crate::tools::external_hooks::HookGuard::new(
-                            self.config().await.hooks.clone(),
+                            self.current_hooks().await,
                         )
                         .with_session_cwd(session_cwd);
                         guard

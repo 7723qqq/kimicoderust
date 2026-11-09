@@ -179,6 +179,7 @@ fn gate_setup(
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     (dir, native, permission_calls, executed, native_count)
@@ -270,6 +271,7 @@ fn veto_setup(agent_tool_veto: Option<String>, tools_veto: Option<String>) -> Ve
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     (dir, native, permission_calls, executed, events)
@@ -315,6 +317,50 @@ async fn test_tools_veto_denies_every_native_call() {
         vec![(
             "tool.native".to_string(),
             "side chat: tools are off".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn test_before_execute_listener_veto_runs_before_permission() {
+    let (_dir, mut native, permission_calls, executed, events) = veto_setup(None, None);
+    native.before_execute = Some(Arc::new(
+        crate::tools::before_execute::BeforeExecuteGate::new(vec![Arc::new(
+            |context: crate::tools::before_execute::BeforeExecuteContext| {
+                Box::pin(async move {
+                    Ok(Some(
+                        crate::tools::before_execute::BeforeExecuteDecision::Veto(format!(
+                            "{} is not allowed here",
+                            context.tool_name
+                        )),
+                    ))
+                })
+            },
+        )]),
+    ));
+    let response = native
+        .execute_tool(ToolExecuteRequest {
+            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+            turn_id: "t".into(),
+            tool_call_id: "c1".into(),
+            tool_name: "Read".into(),
+            arguments: serde_json::json!({ "path": "a.txt" }),
+        })
+        .await
+        .unwrap();
+    assert!(response.is_error);
+    assert_eq!(response.content, "Read is not allowed here");
+    assert_eq!(
+        permission_calls.load(Ordering::Relaxed),
+        0,
+        "a beforeExecute veto outranks permission"
+    );
+    assert_eq!(executed.load(Ordering::Relaxed), 0, "no host fallback");
+    assert_eq!(
+        veto_events(&events),
+        vec![(
+            "tool.native".to_string(),
+            "Read is not allowed here".to_string()
         )]
     );
 }
@@ -562,8 +608,8 @@ async fn test_sandbox_policy_enforcement() {
 
     assert!(!glob_res.is_error);
 
-    // 5. ReadOnly 模式必须拦截 Bash：shell 是代码执行入口，不能绕过写沙箱。
-    //    拒绝必须发生在真实 shell 派生之前（否则只读沙箱形同虚设）。
+    // 5. ReadOnly 模式必须拦截 Bash：shell 命令无法证明无写入，拒绝必须发生在真实
+    //    shell 派生之前（否则只读沙箱形同虚设）。
     let bash_ro_res = native
         .execute_tool(ToolExecuteRequest {
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -576,15 +622,31 @@ async fn test_sandbox_policy_enforcement() {
         .unwrap();
 
     assert!(bash_ro_res.is_error);
-    assert!(bash_ro_res.content.contains("blocks code execution"));
+    assert!(bash_ro_res.content.contains("cannot be proven write-free"));
     assert!(!bash_ro_res.content.contains("sandbox-escape"));
 
-    // 6. WorkspaceWrite 模式放行命令执行（纯策略断言，不派生真 shell）。
+    // 6. WorkspaceWrite 模式没有 OS 级沙箱后端，同样拒绝 shell；Off 模式放行。
     let ww_policy = SandboxExecutionPolicy::workspace_write("/workspace/root");
-    assert!(ww_policy.sandbox_code_execution_guard().is_none());
-    // Off 模式同样放行。
+    assert!(
+        ww_policy
+            .sandbox_tool_veto(
+                "Bash",
+                crate::tools::sandbox::tool_side_effect("Bash"),
+                &Vec::new()
+            )
+            .unwrap()
+            .contains("none is available on this host")
+    );
     let off_policy = SandboxExecutionPolicy::off("/workspace/root");
-    assert!(off_policy.sandbox_code_execution_guard().is_none());
+    assert!(
+        off_policy
+            .sandbox_tool_veto(
+                "Bash",
+                crate::tools::sandbox::tool_side_effect("Bash"),
+                &Vec::new()
+            )
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -619,6 +681,7 @@ async fn test_native_write_checkpoints_prepare_and_record() {
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     let response = native
@@ -691,6 +754,7 @@ async fn a_remembered_session_approval_stops_the_second_ask() {
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     let request = || ToolExecuteRequest {
@@ -948,6 +1012,7 @@ fn stale_gate_setup(
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     (dir, native, executed, native_count, events, state_reads)
@@ -1213,6 +1278,7 @@ fn goal_gate_setup(
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     (
@@ -1425,6 +1491,7 @@ fn hook_gate_setup(
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     (
@@ -1678,6 +1745,7 @@ async fn test_native_tool_callbacks_forwards_ask_question() {
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     let mut request = sample_ask_question_request();
@@ -1884,6 +1952,7 @@ async fn test_native_tool_callbacks_forwards_state_bridge() {
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     let mut read_request = sample_state_read_request();
@@ -2249,6 +2318,7 @@ async fn test_native_tool_callbacks_list_tools_merges_mcp_tools() {
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
 
@@ -2297,6 +2367,7 @@ async fn test_initial_tool_snapshot_filters_late_mcp_additions_without_disclosur
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
 
@@ -2343,7 +2414,10 @@ async fn test_native_tool_callbacks_readvertise_a_loaded_deferred_tool_schema() 
         NativeToolset::new(tmp.path().to_str().unwrap(), None)
             .unwrap()
             .with_mcp(mcp_mgr)
-            .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
+            .with_model_capabilities(Some(vec![
+                "tool_use".into(),
+                "dynamically_loaded_tools".into(),
+            ]))
             .with_tool_select_enabled(true),
     );
     let inner = Arc::new(HostWithToolsCallbacks { tools: vec![] });
@@ -2363,6 +2437,7 @@ async fn test_native_tool_callbacks_readvertise_a_loaded_deferred_tool_schema() 
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
 
@@ -2392,11 +2467,15 @@ async fn test_native_tool_callbacks_readvertise_a_loaded_deferred_tool_schema() 
         .unwrap();
     assert!(!loaded.is_error, "{}", loaded.content);
     assert!(
-        loaded.delivery.as_ref().is_some_and(|delivery| delivery
-            .blocks
-            .iter()
-            .any(|block| matches!(block, crate::rpc::types::ContentBlock::Text { .. }))),
-        "the announcement text still rides the delivery channel"
+        loaded
+            .content
+            .contains("Loaded: mcp__github__github_sample_tool"),
+        "the load report is the result text: {}",
+        loaded.content
+    );
+    assert!(
+        loaded.delivery.is_none(),
+        "v2 selectToolsTool.ts:149 returns only text; the announcement travels via the disclosure injection"
     );
 
     // The very next table the loop pulls carries the definition itself.
@@ -2432,6 +2511,7 @@ async fn test_native_tool_callbacks_list_tools_survives_a_missing_host_table() {
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
 
@@ -2493,6 +2573,7 @@ async fn test_native_tool_callbacks_list_tools_applies_the_tools_filter() {
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
 
@@ -2574,6 +2655,7 @@ fn capturing_setup() -> (
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
     (dir, native, seen)
@@ -2677,6 +2759,7 @@ async fn a_deny_verdict_keeps_its_reason_on_the_returned_decision() {
         tower_worktree_root: None,
         tower_enabled: false,
         notify_user_enabled: true,
+        before_execute: None,
         sandbox_policy: None,
     };
 
@@ -2948,6 +3031,7 @@ fn host_goal(goal_id: &str) -> crate::rpc::types::GoalContext {
 
 fn workspace_state(workspace: &std::path::Path, domain: &str) -> serde_json::Value {
     let raw = crate::storage::state_store::read_workspace_state(workspace, domain)
+        .expect("the state store must be readable")
         .expect("the domain must be stored");
     serde_json::from_str(&raw).unwrap()
 }

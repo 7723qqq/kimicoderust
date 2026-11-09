@@ -298,6 +298,39 @@ pub enum AgentPhase {
     },
 }
 
+/// The phase's turn id, `None` while idle: the `activeTurnId` of v2's
+/// `loop.snapshot()` (`loopService.ts:519-553`).
+pub fn phase_turn_id(phase: &AgentPhase) -> Option<u64> {
+    match phase {
+        AgentPhase::Idle => None,
+        AgentPhase::Running { turn_id, .. }
+        | AgentPhase::Streaming { turn_id, .. }
+        | AgentPhase::ToolCall { turn_id, .. }
+        | AgentPhase::Retrying { turn_id, .. }
+        | AgentPhase::AwaitingApproval { turn_id, .. }
+        | AgentPhase::Interrupted { turn_id, .. }
+        | AgentPhase::Ended { turn_id, .. } => Some(*turn_id),
+    }
+}
+
+/// The instant the phase began, when it carries one.
+pub fn phase_since(phase: &AgentPhase) -> Option<u64> {
+    match phase {
+        AgentPhase::Idle => None,
+        AgentPhase::Running { since, .. }
+        | AgentPhase::Streaming { since, .. }
+        | AgentPhase::ToolCall { since, .. }
+        | AgentPhase::Retrying { since, .. }
+        | AgentPhase::AwaitingApproval { since, .. } => Some(*since),
+        AgentPhase::Interrupted { at, .. } | AgentPhase::Ended { at, .. } => Some(*at),
+    }
+}
+
+/// Whether the loop is waiting on a client answer (an approval or a question).
+pub fn phase_has_pending_requests(phase: &AgentPhase) -> bool {
+    matches!(phase, AgentPhase::AwaitingApproval { .. })
+}
+
 /// One session's phase fold. Cheap to hold behind an [`Arc`]; every method
 /// publishes the transition it applies, so callers stay oblivious of the
 /// wire.
@@ -331,6 +364,26 @@ impl ActivityTracker {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// The turn's step counter (each tool round advances it — see `step`).
+    /// The phase carries the same number while it is live; this accessor is
+    /// for snapshots that need it even when the phase has already moved to
+    /// `ended`/`interrupted`.
+    pub fn turn_step(&self) -> u32 {
+        self.step.load(Ordering::Relaxed)
+    }
+
+    /// When the current (or latest) turn started, in epoch millis — v2
+    /// `LoopSnapshot.turn.since` is the active turn's `startedAt`, not the
+    /// current phase's start. Derived from the monotonic `Instant` so the
+    /// wall-clock duration and this stamp cannot disagree.
+    pub fn turn_started_ms(&self) -> Option<u64> {
+        let started = (*self
+            .turn_started_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()))?;
+        Some(now_ms().saturating_sub(started.elapsed().as_millis() as u64))
     }
 
     /// Transition and publish. Phases in the same *series* — the same kind
@@ -806,6 +859,8 @@ mod tests {
             turn_id: 3,
             prompt_id: Some("prompt-3-test".to_string()),
             origin: serde_json::json!({ "kind": "user" }),
+            prompt: Some("hello".to_string()),
+            prompt_attachments: None,
         });
         let started = next_event(&mut sub).await;
         assert_eq!(started["type"], "turn.started");
@@ -816,6 +871,9 @@ mod tests {
             reason: crate::turn_events::TurnEndReason::Completed,
             error: None,
             duration_ms: Some(12),
+            interrupt_reason: None,
+            trace_id: None,
+            stop_reason: None,
         });
         let ended = next_event(&mut sub).await;
         assert_eq!(ended["type"], "turn.ended");

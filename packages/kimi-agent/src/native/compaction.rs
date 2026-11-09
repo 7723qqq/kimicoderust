@@ -1,19 +1,16 @@
-//! Context compaction strategy — decides when and how much to compact.
+//! napi projections of the compaction window algorithm.
 //!
-//! Mirrors `packages/agent-core-v2/src/agent/fullCompaction/strategy.ts` so the
-//! TS and Rust layers cannot drift on the windowing algorithm. The TS side
-//! builds `CompactionMessageMeta[]` from `Message[]` (one pass, using the
-//! cached `estimateTokensForMessage`) and passes it across the napi
+//! The algorithm itself lives in [`crate::compaction::window`]; this module
+//! only defines the objects that cross the napi boundary and forwards to it.
+//! The TS side builds `CompactionMessageMeta[]` from `Message[]` (one pass,
+//! using the cached `estimateTokensForMessage`) and passes it across the
 //! boundary; Rust only sees the lightweight projection.
-//!
-//! `compute_compact_count`, `reduce_compact_on_overflow`, `can_split_after`,
-//! and `select_compaction_user_messages` are exposed as napi bindings;
-//! `fit_compact_count_to_window` and `prefix_ends_with_open_tool_exchange`
-//! stay private to this module.
-//!
 
 #[cfg(feature = "napi")]
 use napi_derive::napi;
+
+use crate::compaction::CompactionConfig;
+use crate::compaction::window::{self, CompactMessage, UserMessageSelection};
 
 /// Lightweight projection of a `Message` for the compaction algorithm.
 ///
@@ -35,7 +32,7 @@ pub struct CompactionMessageMeta {
 /// `Infinity` (the `DEFAULT_COMPACTION_CONFIG` default). The threshold
 /// `recent_user_messages >= max_recent_user_messages` then never fires
 /// for realistic message counts, matching the TS behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct CompactionConfigMeta {
     pub max_size: u32,
@@ -45,199 +42,34 @@ pub struct CompactionConfigMeta {
     pub min_overflow_reduction_ratio: f64,
 }
 
-/// Decide how many leading messages to compact.
-///
-/// Returns N where `messages[0..N]` is compacted and `messages[N..]` is
-/// preserved. 0 means no compaction possible (no valid split point).
-///
-/// `is_manual` selects the manual path (scan backward for the first safe
-/// split); otherwise the auto path runs (grow the recent tail until a
-/// cap is reached, recording the last valid split point).
-pub fn compute_compact_count(
-    messages: &[CompactionMessageMeta],
-    config: &CompactionConfigMeta,
-    is_manual: bool,
-) -> u32 {
-    let n = messages.len();
-    if n == 0 {
-        return 0;
+impl CompactMessage for CompactionMessageMeta {
+    fn role(&self) -> &str {
+        &self.role
     }
 
-    if is_manual {
-        for i in (1..n).rev() {
-            if can_split_after(messages, i) {
-                return fit_compact_count_to_window(messages, (i + 1) as u32, config);
-            }
-        }
-        return 0;
+    fn tool_calls_count(&self) -> u32 {
+        self.tool_calls_count
     }
 
-    let max_size = config.max_size as f64;
-    let mut recent_messages = 1usize;
-    let mut recent_user_messages = 0u32;
-    let mut recent_size = 0u32;
-    let mut best_n: Option<u32> = None;
-
-    while recent_messages < n {
-        let m_idx = n - recent_messages;
-        let m = &messages[m_idx];
-        if m.role == "user" {
-            recent_user_messages += 1;
-        }
-        recent_size = recent_size.saturating_add(m.tokens);
-
-        let split_index = m_idx - 1;
-        if can_split_after(messages, split_index) {
-            best_n = Some((split_index + 1) as u32);
-        }
-
-        let reaches_max_count = (recent_messages as u32) >= config.max_recent_messages;
-        let reaches_max_user = recent_user_messages >= config.max_recent_user_messages;
-        let reaches_max_size = (recent_size as f64) >= max_size * config.max_recent_size_ratio;
-        if (reaches_max_count || reaches_max_user || reaches_max_size) && best_n.is_some() {
-            break;
-        }
-        recent_messages += 1;
+    fn tokens(&self) -> u32 {
+        self.tokens
     }
 
-    fit_compact_count_to_window(messages, best_n.unwrap_or(0), config)
+    fn text(&self) -> &str {
+        ""
+    }
 }
 
-/// Find a split point when the LLM throws a context overflow error.
-///
-/// Walks backward from the tail accumulating tokens until the reduced
-/// size reaches `min_overflow_reduction_ratio * max_size`, returning the
-/// first valid split point that satisfies the threshold. Falls back to
-/// the last valid split point found, or `messages.len()` if none.
-pub fn reduce_compact_on_overflow(
-    messages: &[CompactionMessageMeta],
-    config: &CompactionConfigMeta,
-) -> u32 {
-    let n = messages.len();
-    if n <= 2 {
-        return n as u32;
-    }
-
-    let min_reduced_size = ((config.max_size as f64) * config.min_overflow_reduction_ratio)
-        .ceil()
-        .max(1.0) as u32;
-
-    let mut reduced_size = 0u32;
-    let mut best_n: Option<u32> = None;
-
-    for i in (1..n - 1).rev() {
-        reduced_size = reduced_size.saturating_add(messages[i + 1].tokens);
-        if can_split_after(messages, i) {
-            best_n = Some((i + 1) as u32);
-            if reduced_size >= min_reduced_size {
-                return (i + 1) as u32;
-            }
+impl From<CompactionConfigMeta> for CompactionConfig {
+    fn from(config: CompactionConfigMeta) -> Self {
+        Self {
+            max_context_tokens: config.max_size,
+            max_recent_messages: config.max_recent_messages,
+            max_recent_user_messages: config.max_recent_user_messages,
+            max_recent_size_ratio: config.max_recent_size_ratio,
+            ..Self::default()
         }
     }
-
-    best_n.unwrap_or(n as u32)
-}
-
-/// Shrink `compacted_count` so the compacted prefix fits within `max_size`.
-///
-/// Walks `n` backward from `compacted_count - 1` to `1`, subtracting
-/// `messages[n].tokens` at each step. The first `n` where
-/// `can_split_after(messages, n-1)` holds and `compacted_size <= max_size`
-/// is returned. Falls back to the last valid split point, or the original
-/// `compacted_count` if no valid split exists.
-fn fit_compact_count_to_window(
-    messages: &[CompactionMessageMeta],
-    compacted_count: u32,
-    config: &CompactionConfigMeta,
-) -> u32 {
-    if config.max_size == 0 || compacted_count == 0 {
-        return compacted_count;
-    }
-
-    let mut compacted_size: u32 = messages
-        .iter()
-        .take(compacted_count as usize)
-        .map(|m| m.tokens)
-        .sum();
-    if compacted_size <= config.max_size {
-        return compacted_count;
-    }
-
-    let mut best_n: Option<u32> = None;
-    for n in (1..compacted_count as usize).rev() {
-        compacted_size = compacted_size.saturating_sub(messages[n].tokens);
-        if !can_split_after(messages, n - 1) {
-            continue;
-        }
-        best_n = Some(n as u32);
-        if compacted_size <= config.max_size {
-            return n as u32;
-        }
-    }
-
-    best_n.unwrap_or(compacted_count)
-}
-
-/// Whether a compaction split is safe to place immediately after
-/// `messages[index]`.
-///
-/// A split is safe only when:
-///   - `messages[index]` is not a user message and not an assistant
-///     message with pending tool calls (cutting either off from what
-///     follows would break the conversation), AND
-///   - the next message is not a tool result (its owning assistant
-///     would be in the compacted prefix, orphaning the result), AND
-///   - the compacted prefix itself does not end with an unresolved
-///     tool exchange (pending tool results must stay in the tail).
-pub fn can_split_after(messages: &[CompactionMessageMeta], index: usize) -> bool {
-    let m = match messages.get(index) {
-        Some(m) => m,
-        None => return false,
-    };
-    if m.role == "user" {
-        return false;
-    }
-    if m.role == "assistant" && m.tool_calls_count > 0 {
-        return false;
-    }
-    if messages
-        .get(index + 1)
-        .map(|m| m.role == "tool")
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    if prefix_ends_with_open_tool_exchange(messages, index) {
-        return false;
-    }
-    true
-}
-
-/// Whether the prefix `messages[0..=index]` ends with an unresolved
-/// tool exchange — i.e. the last message is a tool result whose owning
-/// assistant had more tool calls than the trailing results can satisfy.
-fn prefix_ends_with_open_tool_exchange(messages: &[CompactionMessageMeta], index: usize) -> bool {
-    let m = match messages.get(index) {
-        Some(m) => m,
-        None => return false,
-    };
-    if m.role != "tool" {
-        return false;
-    }
-
-    let mut tool_result_count = 0u32;
-    for i in (0..=index).rev() {
-        let msg = match messages.get(i) {
-            Some(m) => m,
-            None => return false,
-        };
-        if msg.role == "tool" {
-            tool_result_count += 1;
-            continue;
-        }
-        return msg.role == "assistant" && msg.tool_calls_count > tool_result_count;
-    }
-    false
 }
 
 /// A user message projected for handoff selection. Mirrors the TS
@@ -250,6 +82,24 @@ pub struct HandoffMessageMeta {
     pub role: String,
     pub text: String,
     pub tokens: u32,
+}
+
+impl CompactMessage for HandoffMessageMeta {
+    fn role(&self) -> &str {
+        &self.role
+    }
+
+    fn tool_calls_count(&self) -> u32 {
+        0
+    }
+
+    fn tokens(&self) -> u32 {
+        self.tokens
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 /// Result of `select_compaction_user_messages`. Indices reference the input
@@ -265,126 +115,61 @@ pub struct CompactionUserSelection {
     pub omitted_tokens: u32,
 }
 
-/// Select user messages compaction keeps verbatim, with head/tail split.
+impl From<UserMessageSelection> for CompactionUserSelection {
+    fn from(selection: UserMessageSelection) -> Self {
+        Self {
+            head_indices: selection.head_indices,
+            tail_indices: selection.tail_indices,
+            head_truncate_chars: selection.head_truncate.map(|(_, kept)| kept),
+            tail_truncate_chars: selection.tail_truncate.map(|(_, kept)| kept),
+            elided: selection.elided,
+            omitted_tokens: selection.omitted_tokens,
+        }
+    }
+}
+
+/// Decide how many leading messages to compact.
 ///
-/// Mirrors TS `selectCompactionUserMessages`. When total tokens fit, all go
-/// to tail. Otherwise: tail takes newest messages (boundary truncated keeping
-/// its END), head takes oldest (boundary truncated keeping its BEGINNING).
-pub fn select_compaction_user_messages(
+/// Returns N where `messages[0..N]` is compacted and `messages[N..]` is
+/// preserved. 0 means no compaction possible (no valid split point).
+pub(crate) fn compute_compact_count(
+    messages: &[CompactionMessageMeta],
+    config: &CompactionConfigMeta,
+    is_manual: bool,
+) -> u32 {
+    window::compute_compact_count(messages, &CompactionConfig::from(*config), is_manual)
+}
+
+/// Find a split point when the LLM throws a context overflow error.
+pub(crate) fn reduce_compact_on_overflow(
+    messages: &[CompactionMessageMeta],
+    config: &CompactionConfigMeta,
+) -> u32 {
+    window::reduce_compact_on_overflow(
+        messages,
+        config.max_size,
+        config.min_overflow_reduction_ratio,
+    )
+}
+
+/// Whether a compaction split is safe to place immediately after
+/// `messages[index]`.
+pub(crate) fn can_split_after(messages: &[CompactionMessageMeta], index: usize) -> bool {
+    window::can_split_after(messages, index)
+}
+
+/// Select user messages compaction keeps verbatim, with head/tail split.
+pub(crate) fn select_compaction_user_messages(
     messages: &[HandoffMessageMeta],
     max_tokens: u32,
     head_tokens: u32,
 ) -> CompactionUserSelection {
-    let total_tokens: u32 = messages.iter().map(|m| m.tokens).sum();
-    if total_tokens == 0 || total_tokens <= max_tokens {
-        return CompactionUserSelection {
-            head_indices: vec![],
-            tail_indices: (0..messages.len() as u32).collect(),
-            head_truncate_chars: None,
-            tail_truncate_chars: None,
-            elided: false,
-            omitted_tokens: 0,
-        };
-    }
+    window::select_user_messages(messages, max_tokens, head_tokens).into()
+}
 
-    let head_budget = head_tokens.min(max_tokens);
-    let tail_budget = max_tokens - head_budget;
-
-    // ── Tail pass: newest → oldest ─────────────────────────────────────
-    let mut tail_remaining = tail_budget;
-    let mut head_end_exclusive = messages.len();
-    let mut tail_truncate_chars: Option<u32> = None;
-
-    for i in (0..messages.len()).rev() {
-        if tail_remaining == 0 {
-            break;
-        }
-        let m = &messages[i];
-        if m.tokens <= tail_remaining {
-            tail_remaining -= m.tokens;
-            head_end_exclusive = i;
-        } else {
-            let kept = crate::native::tokens::truncate_text_to_tokens_from_end(
-                &m.text,
-                tail_remaining as usize,
-            );
-            if !kept.is_empty() {
-                head_end_exclusive = i;
-                tail_truncate_chars = Some(kept.len() as u32);
-            }
-            break;
-        }
-    }
-
-    let mut tail_indices: Vec<u32> = (head_end_exclusive as u32..messages.len() as u32).collect();
-    tail_indices.reverse();
-
-    // Boundary-beginning: if tail boundary was truncated (its END kept),
-    // the dropped BEGINNING is a head candidate at the same index.
-    let boundary_begin: Option<u32> = tail_truncate_chars.and_then(|kept_len| {
-        let idx = head_end_exclusive;
-        if idx < messages.len() {
-            let prefix_len = messages[idx].text.len() as u32 - kept_len;
-            if prefix_len > 0 {
-                Some(idx as u32)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    });
-
-    let mut head_candidates: Vec<u32> = (0..head_end_exclusive as u32).collect();
-    if let Some(b) = boundary_begin {
-        head_candidates.push(b);
-    }
-
-    // ── Head pass: oldest → newest ─────────────────────────────────────
-    let mut head_remaining = head_budget;
-    let mut head_indices: Vec<u32> = Vec::new();
-    let mut head_truncate_chars: Option<u32> = None;
-
-    for &i in &head_candidates {
-        if head_remaining == 0 {
-            break;
-        }
-        let m = &messages[i as usize];
-        if m.tokens <= head_remaining {
-            head_remaining -= m.tokens;
-            head_indices.push(i);
-        } else {
-            let kept =
-                crate::native::tokens::truncate_text_to_tokens(&m.text, head_remaining as usize);
-            if !kept.is_empty() {
-                head_truncate_chars = Some(kept.len() as u32);
-                head_indices.push(i);
-            }
-            break;
-        }
-    }
-
-    head_indices.sort_unstable();
-    head_indices.dedup();
-
-    let kept_tokens: u32 = head_indices
-        .iter()
-        .map(|&i| messages[i as usize].tokens)
-        .sum::<u32>()
-        + tail_indices
-            .iter()
-            .filter(|i| !head_indices.contains(i))
-            .map(|&i| messages[i as usize].tokens)
-            .sum::<u32>();
-
-    CompactionUserSelection {
-        head_indices,
-        tail_indices,
-        head_truncate_chars,
-        tail_truncate_chars,
-        elided: true,
-        omitted_tokens: total_tokens.saturating_sub(kept_tokens),
-    }
+#[cfg(test)]
+fn prefix_ends_with_open_tool_exchange(messages: &[CompactionMessageMeta], index: usize) -> bool {
+    window::prefix_ends_with_open_tool_exchange(messages, index)
 }
 
 #[cfg(test)]

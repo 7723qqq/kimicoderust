@@ -2,8 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// A finish_reason of `length` maps to a MaxTokens stop — v2 fails the
-/// subagent run with a verbatim error instead of reporting a summary.
 struct MaxTokensLlm;
 impl LLM for MaxTokensLlm {
     fn system_prompt(&self) -> &str {
@@ -127,7 +125,7 @@ async fn resume_turns_distill_under_the_same_policy() {
         .await
         .expect("resume runs natively");
         assert!(!second.is_error);
-        // three LLM calls: initial, resume turn, distillation continuation
+
         assert_eq!(llm.call_count(), 3);
         assert!(
             second
@@ -152,8 +150,7 @@ fn timeout_description_mirrors_v2() {
 #[tokio::test]
 async fn foreground_success_formats_v2_shape() {
     let manager = manager_with(Arc::new(SummaryLlm)).await;
-    // `research` is not in the default allowlist; register it as a
-    // discovered profile so the spawn gate admits it (v2 extras).
+
     manager
         .register_discovered_definition(crate::subagent::types::SubagentDefinition {
             name: "research".into(),
@@ -188,13 +185,13 @@ async fn foreground_success_formats_v2_shape() {
     assert!(content.contains("actual_subagent_type: research"));
     assert!(content.contains("status: completed"));
     assert!(content.contains("[summary]\nfindings: the loop is in run_turn.rs"));
-    assert!(content.starts_with("agent_id: subagent-"));
+    assert!(content.starts_with("agent_id: agent-"));
 }
 
 #[tokio::test]
 async fn default_profile_is_coder() {
     let manager = manager_with(Arc::new(SummaryLlm)).await;
-    // The snapshot pushes `coder`; untyped calls must resolve to it.
+
     manager
         .register_definition(crate::subagent::types::SubagentDefinition {
             name: "coder".into(),
@@ -242,9 +239,7 @@ async fn unknown_profile_falls_back_to_host() {
 #[tokio::test]
 async fn extended_features_fall_back_to_host() {
     let manager = manager_with(Arc::new(SummaryLlm)).await;
-    // Unknown resume ids stay host-owned (P55 native resume only covers
-    // agents whose conversation we hold; unknown ids fall back so the
-    // host's persistent scopes can resolve them).
+
     assert!(
         execute_agent(
             &manager,
@@ -259,8 +254,6 @@ async fn extended_features_fall_back_to_host() {
         .is_none(),
         "unknown resume ids must fall back to the host"
     );
-    // Note: `run_in_background` (P58), `resume`, `fork` and the explicit
-    // `model` override are all native; the spawn paths cover them.
 }
 
 #[tokio::test]
@@ -284,7 +277,6 @@ async fn timeout_reports_v2_failure_shape() {
     assert!(result.content.contains("resume_hint:"));
 }
 
-/// LLM that ends its turn immediately without writing any assistant text.
 struct EmptyLlm;
 impl LLM for EmptyLlm {
     fn system_prompt(&self) -> &str {
@@ -313,9 +305,6 @@ impl LLM for EmptyLlm {
     }
 }
 
-/// v2 `runAgentTurn` `awaitRun`: a turn that ends without assistant text has
-/// no handoff to report, so it fails with `AGENT_NO_FINAL_MESSAGE` instead of
-/// completing with an empty summary.
 #[tokio::test]
 async fn a_turn_without_a_final_message_fails_the_run() {
     let manager = manager_with(Arc::new(EmptyLlm)).await;

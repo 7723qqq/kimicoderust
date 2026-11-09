@@ -391,3 +391,109 @@ async fn owned_tower_bash_deletion_returns_a_guard_veto_before_execution() {
     );
     assert!(!follow_up.content.contains("stub"), "{}", follow_up.content);
 }
+
+// ── D14(a): hard-failure observation sink ──────────────────────────────────
+
+/// A turn that fails hard (`Err`, no `TurnResult`) must still hand the steps
+/// that completed before the failure to the caller through the out-of-band
+/// sink; otherwise the engine's end-of-turn fold never sees them.
+#[tokio::test]
+async fn a_hard_failed_turn_still_reports_its_completed_steps_through_the_sink() {
+    struct SucceedsThenFailsLlm;
+    impl LLM for SucceedsThenFailsLlm {
+        fn system_prompt(&self) -> &str {
+            "base"
+        }
+        fn model_name(&self) -> &str {
+            "scripted"
+        }
+        fn is_retryable_error(&self, _: &str) -> bool {
+            false
+        }
+        fn chat(
+            &self,
+            params: LLMChatParams,
+        ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            let first_step = !params
+                .messages
+                .iter()
+                .any(|message| message.role == "assistant");
+            Box::pin(async move {
+                if !first_step {
+                    return Err(Box::new(std::io::Error::other("provider exploded"))
+                        as Box<dyn std::error::Error + Send + Sync>);
+                }
+                Ok(LLMChatResponse {
+                    content: String::new(),
+                    thinking: vec![],
+                    tool_calls: vec![ToolCall {
+                        id: "tc-1".into(),
+                        name: "Bash".into(),
+                        arguments: serde_json::json!({ "command": "echo hi" }),
+                        extras: None,
+                        args_parse_error: None,
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        total_tokens: 15,
+                        ..Default::default()
+                    },
+                    timing: None,
+                })
+            })
+        }
+    }
+
+    let llm = SucceedsThenFailsLlm;
+    let callbacks: Arc<dyn HostCallbacks> = rpc_callbacks(stub_tool_server());
+    let input = RunTurnInput {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: "test-turn-sink-on-failure".into(),
+        llm: &llm,
+        messages: vec![LLMMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            ..Default::default()
+        }],
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: None,
+        media_dropped: None,
+        media_recovery: None,
+        toolset: None,
+    };
+    let sink = Arc::new(Mutex::new(TurnObservations::default()));
+
+    let error = run_turn_continued_with_observations(input, &callbacks, Some(sink.clone()))
+        .await
+        .expect_err("the second step fails the turn");
+    assert!(error.to_string().contains("provider exploded"), "{error}");
+
+    let observations = sink.lock().unwrap();
+    assert_eq!(
+        observations.cache_observations.len(),
+        1,
+        "the completed first step must survive the Err path"
+    );
+    assert_eq!(
+        observations.cache_probe_requests.len(),
+        1,
+        "the completed request is also the probe baseline"
+    );
+    assert!(
+        observations.cache_observation_resets.is_empty(),
+        "no compaction ran, so no reset boundary is expected"
+    );
+}

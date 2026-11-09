@@ -36,8 +36,6 @@ impl TowerStore {
     }
 
     async fn recover_minimal_state_locked(&self) -> Result<(TowerState, Option<String>), String> {
-        // Another caller may have recovered while this one was observing the
-        // missing file. The outer state lock makes this second load decisive.
         if let Ok(state) = self.load().await {
             let recovered_at = self.load_state_value().await.ok().and_then(|raw| {
                 raw.get("recoveredAt")
@@ -77,12 +75,12 @@ impl TowerStore {
     pub(super) async fn resolve_agent_operation(
         &self,
         caller_agent_id: &str,
-    ) -> Result<(TowerState, String, Option<String>), String> {
+    ) -> Result<(TowerState, String, Option<String>, bool), String> {
         match self.load().await {
             Ok(state) => {
                 let recovered_at = self.recovered_at().await?;
                 match self.resolve_caller_name(&state, caller_agent_id) {
-                    Ok(caller) => return Ok((state, caller, recovered_at)),
+                    Ok(caller) => return Ok((state, caller, recovered_at, false)),
                     Err(error) if recovered_at.is_none() => return Err(error),
                     Err(_) => {}
                 }
@@ -93,14 +91,14 @@ impl TowerStore {
         let caller_agent_id = caller_agent_id.to_string();
         self.with_state_lock(move || async move {
             let (mut state, recovered_at) = self.load_or_recover_locked().await?;
-            let caller = self
+            let (caller, placeholder) = self
                 .resolve_recovered_caller_locked(
                     &mut state,
                     &caller_agent_id,
                     recovered_at.as_deref(),
                 )
                 .await?;
-            Ok((state, caller, recovered_at))
+            Ok((state, caller, recovered_at, placeholder))
         })
         .await
     }
@@ -110,15 +108,15 @@ impl TowerStore {
         state: &mut TowerState,
         caller_agent_id: &str,
         recovered_at: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, bool), String> {
         if let Ok(caller) = self.resolve_caller_name(state, caller_agent_id) {
-            return Ok(caller);
+            return Ok((caller, false));
         }
         let Some(recovered_at) = recovered_at else {
-            return self.resolve_caller_name(state, caller_agent_id);
+            return Ok((self.resolve_caller_name(state, caller_agent_id)?, false));
         };
         if caller_agent_id == "main" {
-            return Ok(TOWER_NAME.into());
+            return Ok((TOWER_NAME.into(), false));
         }
         let caller = caller_agent_id.to_string();
         state.roster.agents.push(TowerRosterEntry {
@@ -145,6 +143,6 @@ impl TowerStore {
             None,
         )
         .await?;
-        Ok(caller)
+        Ok((caller, true))
     }
 }

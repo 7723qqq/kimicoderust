@@ -442,6 +442,40 @@ impl TerminalManager {
         Ok(())
     }
 
+    /// Terminate every terminal this server still has running.
+    ///
+    /// A pty child is a *host* process: it outlives this process unless it is
+    /// killed, so server shutdown has to release it item by item. Called after
+    /// the in-flight turns have drained, so no turn is still writing to a
+    /// terminal that is being closed. Returns how many were running.
+    pub async fn close_all(&self) -> usize {
+        let running: Vec<(String, String)> = {
+            let lock = self.entries.read().await;
+            lock.values()
+                .filter(|entry| entry.descriptor.status == "running")
+                .map(|entry| {
+                    (
+                        entry.descriptor.session_id.clone(),
+                        entry.descriptor.id.clone(),
+                    )
+                })
+                .collect()
+        };
+        let mut closed = 0;
+        for (session_id, terminal_id) in running {
+            match self.close(&session_id, &terminal_id).await {
+                Ok(()) => closed += 1,
+                Err(error) => tracing::warn!(
+                    session_id,
+                    terminal_id,
+                    %error,
+                    "shutdown could not close a terminal"
+                ),
+            }
+        }
+        closed
+    }
+
     /// Close and kill a terminal process.
     pub async fn close(&self, session_id: &str, terminal_id: &str) -> Result<(), String> {
         let mut lock = self.entries.write().await;

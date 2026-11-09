@@ -16,28 +16,9 @@ use crate::subagent::manager::ForegroundTurnOutcome;
 use crate::subagent::types::ParentCancel;
 use crate::turn_loop::types::{ExecutableToolResult, LoopTurnStopReason};
 
-/// v2 `agentTool.ts` refuses a resume that also names a `subagent_type`: the
-/// resumed agent keeps its own profile, and accepting both would silently drop
-/// the type the caller asked for.
 pub const RESUME_WITH_TYPE_UNAVAILABLE: &str =
     "Cannot set subagent_type when resuming an existing agent. Resume by agent id only.";
 
-/// The tower resume gate (v2 `towerService`'s foreground-resume veto,
-/// #3648): the denial message when the resumed agent is a tower agent —
-/// its profile is the tower worker profile *or* its id sits in the tower
-/// roster — and the resume is not backgrounded. The v2 exception stays:
-/// with no background execution on the host table (`is_background_available`
-/// false — no `TaskList`/`TaskOutput`/`TaskStop`), a foreground resume is the
-/// only form the tool accepts, so it is not denied. `None` means the resume
-/// proceeds as before: a plain profile with an empty roster query, an
-/// explicit `run_in_background=true`, or an unreadable tower state (missing
-/// `state.json` counts as no tower, so a false positive never blocks a
-/// plain resume).
-///
-/// `cwd` (P2-2) is the base the roster lookup resolves the tower repo root
-/// from: the toolset passes its canonical workspace root so the gate reads
-/// the session's tower state rather than the process cwd's; no-toolset call
-/// sites fall back to `std::env::current_dir()`.
 pub(super) async fn tower_resume_denial(
     cwd: Option<std::path::PathBuf>,
     profile_name: &str,
@@ -53,8 +34,7 @@ pub(super) async fn tower_resume_denial(
     }
     let roster_hit = match crate::tools::tower::tower_resume_target(cwd, resume_id).await {
         Ok(hit) => hit,
-        // No tower (or no cwd): the tower cannot vouch for any id, so no
-        // foreground resume is refused here.
+
         Err(_) => return None,
     };
     if profile_name != TOWER_WORKER_PROFILE && roster_hit.is_none() {
@@ -71,9 +51,6 @@ pub(super) async fn tower_resume_denial(
     ))
 }
 
-/// Execute a native `resume`: continue a conversation the manager still
-/// holds. Returns `None` when the id is unknown (host-owned persistent
-/// scopes) so the call falls back verbatim.
 pub(super) async fn execute_resume(
     manager: &Arc<SubagentManager>,
     root: Option<&std::path::Path>,
@@ -83,13 +60,14 @@ pub(super) async fn execute_resume(
     parent_cancel: Option<&ParentCancel>,
     tool_call_id: Option<&str>,
 ) -> Option<ExecutableToolResult> {
-    // v2 checks the argument combination before it touches the lifecycle.
     if args
         .get("subagent_type")
         .and_then(|value| value.as_str())
         .is_some_and(|value| !value.trim().is_empty())
     {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: RESUME_WITH_TYPE_UNAVAILABLE.to_string(),
@@ -99,12 +77,7 @@ pub(super) async fn execute_resume(
         });
     }
     let profile_name = manager.resume_profile(resume_id).await?;
-    // v2 `agentTool.ts` guards the resume path before it does anything:
-    // `AGENT_NOT_A_SUBAGENT`, `AGENT_NOT_OWNED` and `AGENT_ALREADY_RUNNING`.
-    // Without them any agent could name any other agent's id in `resume` and
-    // drive a turn inside its conversation — the single-agent twin of the hole
-    // `AgentSwarm` had. The two guards are the same functions the swarm resume
-    // runs, so the two paths cannot drift apart.
+
     let caller_agent_id = crate::tools::CALLER_AGENT_ID
         .try_with(|id| id.clone())
         .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
@@ -112,6 +85,8 @@ pub(super) async fn execute_resume(
         crate::swarm::service::require_owned_subagent(manager, &caller_agent_id, resume_id).await
     {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: error,
@@ -122,6 +97,8 @@ pub(super) async fn execute_resume(
     }
     if let Err(error) = crate::swarm::service::require_idle_subagent(manager, resume_id).await {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: error,
@@ -142,16 +119,8 @@ pub(super) async fn execute_resume(
         Err(error) => return Some(error),
     };
 
-    // Tower resume discipline (v2 `towerService` Agent veto, #3648): the main
-    // agent never needs a tower agent's return value inline — its output flows
-    // back through the tower protocol files — while a foreground resume blocks
-    // the whole turn and jams the fleet. A roster agent resumed in the
-    // foreground is therefore refused with the background hint, unless this
-    // caller lacks any of TaskList / TaskOutput / TaskStop.
     let task_runner = manager.get_task_runner().await;
     if let Some(reason) = tower_resume_denial(
-        // P2-2: the toolset's canonical workspace root when the host wired
-        // one, else the process cwd as before (no-toolset call sites).
         root.map(std::path::Path::to_path_buf)
             .or_else(|| std::env::current_dir().ok()),
         &profile_name,
@@ -162,6 +131,8 @@ pub(super) async fn execute_resume(
     .await
     {
         return Some(ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: reason,
@@ -172,8 +143,6 @@ pub(super) async fn execute_resume(
     }
 
     if run_in_background == Some(true) {
-        // The background helper emits its own spawned+started pair, so no
-        // foreground one here.
         return Some(
             run_resume_in_background(
                 manager,
@@ -199,22 +168,21 @@ pub(super) async fn execute_resume(
         &prompt,
     );
 
-    // v2 `taskService` arms the timeout only when `timeoutMs > 0` — an
-    // explicit `0` means "no timeout", not the 2h default.
-    let timeout = match timeout_ms {
-        Some(0) => u64::MAX,
-        Some(ms) => ms,
-        None => DEFAULT_SUBAGENT_TIMEOUT_MS,
+    let bound_ms = match timeout_ms {
+        Some(0) => None,
+        Some(ms) => Some(ms),
+        None => Some(DEFAULT_SUBAGENT_TIMEOUT_MS),
     };
-    let run = tokio::time::timeout(
-        std::time::Duration::from_millis(timeout),
-        manager.resume_foreground_turn(resume_id, &prompt, parent_cancel),
-    )
-    .await;
+    let turn = manager.resume_foreground_turn(resume_id, &prompt, parent_cancel);
+
+    let run: Result<_, u64> = match bound_ms {
+        Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms), turn)
+            .await
+            .map_err(|_| ms),
+        None => Ok(turn.await),
+    };
 
     let run = match run {
-        // The manager answered `None` only if its runtime vanished mid-call;
-        // surface it as a regular failure instead of a fallback.
         Ok(None) => Ok(Some(Err("resume state was lost".to_string()))),
         other => other,
     };
@@ -228,10 +196,6 @@ pub(super) async fn execute_resume(
             parent_cancel,
         ),
         Ok(Some(Ok(ForegroundTurnOutcome::ParentCancelled))) => {
-            // Same terminal the fresh-spawn and background-resume arms emit
-            // (`:1038`, `:611`): without it `subagent.started` from
-            // `emit_spawned_started` above is never settled and the member
-            // stays Running forever.
             emit_cancelled(runtime.callbacks.as_ref(), resume_id, &profile_name);
             (
                 format_failure(
@@ -265,7 +229,6 @@ pub(super) async fn execute_resume(
             )
         }
         Ok(None) => {
-            // Runtime vanished mid-call; surface it as a regular failure.
             let message = "resume state was lost".to_string();
             emit_subagent_event(
                 runtime.callbacks.as_ref(),
@@ -280,11 +243,11 @@ pub(super) async fn execute_resume(
                 true,
             )
         }
-        Err(_elapsed) => {
+        Err(timeout_ms) => {
             let _ = manager.kill(resume_id).await;
             let message = format!(
                 "Agent timed out after {}.",
-                format_timeout_description(timeout)
+                format_timeout_description(timeout_ms)
             );
             emit_subagent_event(
                 runtime.callbacks.as_ref(),
@@ -301,6 +264,8 @@ pub(super) async fn execute_resume(
         }
     };
     Some(ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content,
@@ -310,16 +275,6 @@ pub(super) async fn execute_resume(
     })
 }
 
-/// A background resume (P58 semantics on the resume path): the continued
-/// turn runs detached; the completion flows back through the
-/// `subagent.completed` / `subagent.failed` lifecycle events, which the host
-/// turns into the usual synthetic notification turn. Registered in the
-/// TaskRunner when one is present so the task is listed and stoppable — the
-/// `task_runner` argument is always `Some` on the call sites this helper
-/// serves (the tower gate below falls back to foreground without one).
-/// The task id is freshly minted per registration — the agent id is stable
-/// across resumes, and TaskRunner keeps settled entries, so reusing it would
-/// make every later resume a rejected duplicate.
 pub(super) async fn run_resume_in_background(
     manager: &Arc<SubagentManager>,
     callbacks: Arc<dyn crate::callbacks::HostCallbacks>,
@@ -346,9 +301,6 @@ pub(super) async fn run_resume_in_background(
     let profile = profile_name.to_string();
     let bg_profile = profile.clone();
     let bg_future = async move {
-        // No parent cancel: a background subagent outlives this turn and is
-        // stopped through the task runner, not the turn's cancel signal
-        // (the v2 registerTask arms no signal for detached tasks).
         let outcome = mgr.resume_foreground_turn(&agent, &bg_prompt, None).await;
         match outcome {
             Some(Ok(ForegroundTurnOutcome::Completed(turn))) => {
@@ -363,9 +315,7 @@ pub(super) async fn run_resume_in_background(
             }
             Some(Ok(ForegroundTurnOutcome::ParentCancelled)) => {
                 emit_cancelled(cb.as_ref(), &agent, &bg_profile);
-                // Not `Killed`: that status means the runner's own `stop()` cut
-                // the task short, and this arm means the subagent was
-                // cancelled upstream while the task ran to its end.
+
                 TaskOutcome::Failed(USER_INTERRUPTED_SUBAGENT_MESSAGE.to_string())
             }
             Some(Err(message)) => {
@@ -381,19 +331,12 @@ pub(super) async fn run_resume_in_background(
     };
 
     if let Some(runner) = task_runner {
-        // Session attribution rides the runtime the pipeline built for
-        // this turn — background task events land on the right lane.
         let session_id = manager
             .runtime()
             .await
             .and_then(|r| r.session_id.clone())
             .filter(|session| !session.is_empty());
-        // A resume reuses the agent's stable id, so the task id must be
-        // freshly minted: TaskRunner rejects duplicate ids and keeps settled
-        // entries, so the second background resume of the same agent under
-        // the agent id would be silently swallowed (v2 `generateTaskId`
-        // mints a fresh id per registration; the bash background path uses
-        // the same `task_{fastrand}` pattern).
+
         let task_id = format!("task_{}", fastrand::u64(..));
         let registered = runner.spawn_task_with_meta(
             crate::storage::TaskSpawnMeta {
@@ -408,9 +351,6 @@ pub(super) async fn run_resume_in_background(
             bg_future,
         );
         if let Err(error) = registered {
-            // `bg_future` is consumed by the failed registration, so the
-            // `subagent.started` already published above would never be
-            // settled. Settle it here before returning.
             emit_failed(
                 callbacks.as_ref(),
                 resume_id,
@@ -418,6 +358,8 @@ pub(super) async fn run_resume_in_background(
                 &format!("failed to register the background resume task: {error}"),
             );
             return ExecutableToolResult {
+                spill: None,
+                parts: Vec::new(),
                 delivery: None,
                 stop_turn: false,
                 content: format!("failed to register the background resume task: {error}"),
@@ -427,6 +369,8 @@ pub(super) async fn run_resume_in_background(
             };
         }
         return ExecutableToolResult {
+            spill: None,
+            parts: Vec::new(),
             delivery: None,
             stop_turn: false,
             content: [
@@ -454,6 +398,8 @@ pub(super) async fn run_resume_in_background(
     tokio::spawn(bg_future);
 
     ExecutableToolResult {
+        spill: None,
+        parts: Vec::new(),
         delivery: None,
         stop_turn: false,
         content: [

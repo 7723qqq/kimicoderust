@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::retry::RetryConfig;
 use super::tool_result_render;
 use super::tool_scheduler::{self, ScheduledToolCall};
-use super::turn_step::execute_loop_step_with_retry;
+use super::turn_step::{execute_loop_step_with_projection, execute_loop_step_with_retry};
 use super::types::*;
 use super::wall_time;
 use super::watch::TurnPhase;
@@ -34,13 +34,14 @@ use crate::rpc::types::{BoxFuture, TokenUsage, ToolExecuteRequest};
 /// The injection providers render synchronously, while the state authority is
 /// behind the async `host/state_read` channel — so the turn loop refreshes
 /// this snapshot at each step head (see the injection pass) and the providers
-/// read the cached values. A failed read keeps the previous value, so a host
-/// without the state bridge degrades to no reminder instead of erroring the turn.
+/// read the cached values. A failed read is recorded as `Unreadable` with its
+/// cause, so a host without the state bridge produces a reported skip instead
+/// of silently looking like "this domain has no state".
 #[derive(Default)]
 struct CallbackStateSnapshot {
-    goal: std::sync::Mutex<Option<serde_json::Value>>,
-    plan: std::sync::Mutex<Option<serde_json::Value>>,
-    todo: std::sync::Mutex<Option<serde_json::Value>>,
+    goal: std::sync::Mutex<crate::primitives::read::ReadOutcome<serde_json::Value>>,
+    plan: std::sync::Mutex<crate::primitives::read::ReadOutcome<serde_json::Value>>,
+    todo: std::sync::Mutex<crate::primitives::read::ReadOutcome<serde_json::Value>>,
 }
 
 impl CallbackStateSnapshot {
@@ -58,29 +59,74 @@ impl CallbackStateSnapshot {
         if include_todo {
             let (goal, plan, todo) =
                 futures_util::future::join3(read("goal"), read("plan"), read("todo")).await;
-            *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = goal.ok().map(|r| r.value);
-            *self.plan.lock().unwrap_or_else(|e| e.into_inner()) = plan.ok().map(|r| r.value);
-            if let Ok(response) = todo {
-                *self.todo.lock().unwrap_or_else(|e| e.into_inner()) = Some(response.value);
-            }
+            self.store("goal", goal);
+            self.store("plan", plan);
+            self.store("todo", todo);
         } else {
             let (goal, plan) = futures_util::future::join(read("goal"), read("plan")).await;
-            *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = goal.ok().map(|r| r.value);
-            *self.plan.lock().unwrap_or_else(|e| e.into_inner()) = plan.ok().map(|r| r.value);
+            self.store("goal", goal);
+            self.store("plan", plan);
         }
+    }
+
+    /// Record one host read. A failure keeps its cause rather than collapsing
+    /// into `Absent`: "the bridge is down" and "there is no goal" render as
+    /// different things, and only the first one is worth a warning.
+    fn store(&self, domain: &str, outcome: Result<crate::rpc::types::StateReadResponse, String>) {
+        let slot = match domain {
+            "goal" => &self.goal,
+            "plan" => &self.plan,
+            _ => &self.todo,
+        };
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = match outcome {
+            Ok(response) => crate::primitives::read::ReadOutcome::Found(response.value),
+            Err(error) => crate::primitives::read::ReadOutcome::Unreadable(
+                crate::primitives::read::UnreadableCause::new(
+                    format!("host/state_read {domain}"),
+                    error,
+                ),
+            ),
+        };
     }
 }
 
 impl crate::injection::DomainValueSource for CallbackStateSnapshot {
-    fn read_domain(&self, domain: &str) -> Option<serde_json::Value> {
+    fn read_domain_state(
+        &self,
+        domain: &str,
+    ) -> crate::primitives::read::ReadOutcome<serde_json::Value> {
         let slot = match domain {
             "goal" => &self.goal,
             "plan" => &self.plan,
             "todo" => &self.todo,
-            _ => return None,
+            // This snapshot only caches those three domains; any other name is
+            // genuinely not held here, which is not a read failure.
+            _ => return crate::primitives::read::ReadOutcome::Absent,
         };
         slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+}
+
+/// v2 `nonHistoryStateFingerprint` (`compactionApply.ts:88-93`): the todo list
+/// and the full task list as one stable string. Compaction awaits an LLM round;
+/// a todo/task write that lands while it runs would otherwise be overwritten by
+/// the summary's stale rendering, so the round is cancelled when the
+/// fingerprint moved (`:53-54`).
+async fn non_history_state_fingerprint(callbacks: &dyn crate::callbacks::HostCallbacks) -> String {
+    let read = |domain: &'static str| async move {
+        callbacks
+            .state_read(crate::rpc::types::StateReadRequest {
+                domain: domain.to_string(),
+                key: domain.to_string(),
+                turn_id: String::new(),
+                tool_call_id: String::new(),
+            })
+            .await
+            .ok()
+            .map(|response| response.value)
+    };
+    let (todos, tasks) = futures_util::future::join(read("todo"), read("task")).await;
+    serde_json::json!({ "todos": todos, "tasks": tasks }).to_string()
 }
 
 /// Incremental estimate of the current history's token cost.
@@ -93,12 +139,25 @@ impl crate::injection::DomainValueSource for CallbackStateSnapshot {
 /// the cache so the next `sync` recomputes from scratch.
 #[derive(Default)]
 struct ContextTokens {
+    /// Estimated tokens of the message list alone.
     tokens: u32,
     len: usize,
     stale: bool,
+    /// Request overhead the message list does not describe: the tool schema
+    /// table the provider also receives (v2 `countRequestTokens` adds the tool
+    /// definitions to the estimate). Kept separate so an anchored measurement,
+    /// which already includes it, is not double counted.
+    overhead: u32,
 }
 
 impl ContextTokens {
+    fn new(overhead: u32) -> Self {
+        Self {
+            overhead,
+            ..Default::default()
+        }
+    }
+
     /// Re-sync against the current injection-free history.
     fn sync(&mut self, messages: &[LLMMessage]) {
         if self.stale || messages.len() < self.len {
@@ -112,7 +171,18 @@ impl ContextTokens {
     }
 
     fn tokens(&self) -> u32 {
-        self.tokens
+        self.tokens.saturating_add(self.overhead)
+    }
+
+    /// Anchor the estimate on a provider measurement (v2
+    /// `tokenCountingService.tokenCountWithPending`): the last response's
+    /// `input_tokens` is the real size of the request the model saw, so the
+    /// heuristic only has to cover the messages appended after it. Without
+    /// this the estimate drifts low and auto compaction fires late.
+    fn record_measured(&mut self, input_tokens: u32, messages: &[LLMMessage]) {
+        self.tokens = input_tokens.saturating_sub(self.overhead);
+        self.len = messages.len();
+        self.stale = false;
     }
 
     /// The cached prefix was rewritten in place; force a full recompute.
@@ -157,6 +227,14 @@ fn turn_result(
         messages,
         last_request_usage: None,
         stop_hook_continuation: None,
+        gate_blocked: false,
+        // Overwritten by `with_accounting` on every exit path inside the loop;
+        // the bare default keeps this helper a total constructor.
+        compaction_usage: None,
+        tool_schema_tokens: 0,
+        cache_observations: Vec::new(),
+        cache_probe_requests: Vec::new(),
+        cache_observation_resets: Vec::new(),
     }
 }
 
@@ -172,7 +250,26 @@ fn emit_step_begin_event(callbacks: &dyn HostCallbacks, agent_id: &str, turn_id:
         "agent_id": agent_id,
         "turn_id": turn_id,
         "step": step,
+        "step_id": step_event_id(turn_id, step),
     }));
+}
+
+/// The `stepId` v2 stamps on `turn.step.started` / `turn.step.completed`
+/// (`loopService.ts:1393-1424` draws a fresh uuid per step). The engine derives
+/// it from the turn and step number instead: the begin, interrupted, and end
+/// boundaries then agree without threading a value through every failure path,
+/// and the id is still unique within a turn.
+fn step_event_id(turn_id: &str, step: u32) -> String {
+    format!("{turn_id}-step-{step}")
+}
+
+/// v2 `isCannedUnknownToolResult` (`loopService.ts:1818-1834`): the executor's
+/// built-in answer for a name it could not resolve — an error whose whole
+/// content is exactly `unknown tool: <name>`. A tool that ran and returned the
+/// same text cannot be told apart from it at this layer, and re-running once is
+/// what v2 accepts as the cost of the deferral.
+fn is_unknown_tool_refusal(content: &str, is_error: bool, tool_name: &str) -> bool {
+    is_error && content == format!("unknown tool: {tool_name}")
 }
 
 /// The turn loop's step-interrupted event (v2 `TurnStepInterrupted`,
@@ -193,6 +290,7 @@ fn emit_step_interrupted_event(
         "agent_id": agent_id,
         "turn_id": turn_id,
         "step": step,
+        "step_id": step_event_id(turn_id, step),
         "reason": reason,
         "message": message,
     }));
@@ -250,7 +348,10 @@ fn emit_step_end_event(
         "agent_id": agent_id,
         "turn_id": turn_id,
         "step": step,
+        "step_id": step_event_id(turn_id, step),
         "finish_reason": result.finish_reason.as_deref(),
+        "provider_finish_reason": provider_finish_reason(result.finish_reason.as_deref()),
+        "raw_finish_reason": result.finish_reason.as_deref(),
         "usage": {
             "input_tokens": result.usage.input_tokens,
             "output_tokens": result.usage.output_tokens,
@@ -291,6 +392,31 @@ fn turn_stop_reason_from_finish(finish_reason: Option<&str>) -> LoopTurnStopReas
     }
 }
 
+/// Normalize a provider finish reason the way v2's `ProviderFinishReason`
+/// does (`human/llm/finish-reason.ts:1-6`): one value out of
+/// `completed | tool_calls | truncated | filtered | paused | other`, next to the
+/// provider's own spelling (`raw_finish_reason`). Both are reported on the step
+/// so a gateway's new stop token is diagnosable instead of being flattened
+/// away. The filtered vocabulary is delegated to
+/// [`turn_step::is_content_filtered`], the same list the turn-level mapping
+/// uses, so the two cannot drift.
+pub(crate) fn provider_finish_reason(finish_reason: Option<&str>) -> Option<&'static str> {
+    let raw = finish_reason?;
+    // Google sends upper-case reasons (`SAFETY`, `STOP`), the other providers
+    // lower-case ones; the vocabulary is case-insensitive.
+    let normalized = raw.to_ascii_lowercase();
+    if crate::turn_loop::turn_step::is_content_filtered(Some(normalized.as_str())) {
+        return Some("filtered");
+    }
+    Some(match normalized.as_str() {
+        "stop" | "end_turn" | "stop_sequence" | "completed" => "completed",
+        "tool_calls" | "function_call" | "tool_use" => "tool_calls",
+        "length" | "max_tokens" => "truncated",
+        "pause_turn" | "paused" => "paused",
+        _ => "other",
+    })
+}
+
 /// Run a single turn with engine-side telemetry emission (M1c).
 ///
 /// Wraps [`run_turn`] and emits `turn_started` / `turn_ended` /
@@ -320,6 +446,11 @@ pub fn run_turn_with_lifecycle_telemetry<'a>(
     // turn outlives it.
     let telemetry = telemetry.clone();
     let turn_id = input.turn_id.clone();
+    let agent_id = input.agent_id.clone();
+    // v2 `KnowledgeLearner` runs against the session workspace the user
+    // opened, not the engine process's cwd. Resolved before `input` moves
+    // into the turn.
+    let workspace_root = turn_workspace_root(&input);
     callbacks.telemetry(telemetry_payload(
         "turn_started",
         &telemetry,
@@ -362,6 +493,14 @@ pub fn run_turn_with_lifecycle_telemetry<'a>(
                             "interrupt_reason": telemetry_interrupt_reason(&result.stop_reason),
                         })),
                     ));
+                }
+                // v2 `KnowledgeLearner` (`knowledgeLearner.ts:31-53`), main
+                // agent only: turn end is when a user correction becomes a
+                // stored standard.
+                if agent_id == crate::callbacks::MAIN_AGENT_ID
+                    && let Some(workspace_root) = &workspace_root
+                {
+                    crate::injection::knowledge::learn_from_turn(&result.messages, workspace_root);
                 }
             }
             Err(_) => {
@@ -503,6 +642,21 @@ pub fn run_turn_continued<'a>(
     input: RunTurnInput<'a>,
     callbacks: &'a Arc<dyn HostCallbacks>,
 ) -> BoxFuture<'a, Result<TurnResult, Box<dyn std::error::Error + 'a>>> {
+    run_turn_continued_with_observations(input, callbacks, None)
+}
+
+/// [`run_turn_continued`] with an out-of-band observation sink (D14(a)).
+///
+/// Every pass of the turn writes its per-step cache records to `sink` as they
+/// are produced, so a pass that fails hard leaves the caller with the steps
+/// that already completed. On a clean finish the returned `TurnResult` carries
+/// the same records; a caller that supplies a sink only needs to read it on
+/// the `Err` path.
+pub fn run_turn_continued_with_observations<'a>(
+    input: RunTurnInput<'a>,
+    callbacks: &'a Arc<dyn HostCallbacks>,
+    sink: Option<TurnObservationsSink>,
+) -> BoxFuture<'a, Result<TurnResult, Box<dyn std::error::Error + 'a>>> {
     let RunTurnInput {
         agent_id,
         turn_id,
@@ -565,7 +719,7 @@ pub fn run_turn_continued<'a>(
                 // interruption reminder only fires at a fresh turn's head.
                 previous_turn_aborted: carry_previous_turn_aborted,
             };
-            let mut result = match run_turn(iter_input, callbacks).await {
+            let mut result = match run_turn_inner(iter_input, callbacks, sink.clone()).await {
                 Ok(result) => result,
                 Err(error) => {
                     // v2 closes the mode from a `TurnEnded` subscription, so it
@@ -718,12 +872,81 @@ impl TurnCancellation {
         &self.token
     }
 }
+/// Push one completed step's observation into a caller-supplied sink.
+///
+/// A poisoned or absent sink is skipped on purpose: the sink is a diagnostic
+/// side channel for the failure path, never a reason to fail a turn.
+fn sink_push_observation(
+    sink: &Option<TurnObservationsSink>,
+    observation: &crate::session::cache_observation::CacheObservation,
+) {
+    if let Some(sink) = sink
+        && let Ok(mut guard) = sink.lock()
+    {
+        guard.cache_observations.push(observation.clone());
+    }
+}
+
+fn sink_push_probe_request(
+    sink: &Option<TurnObservationsSink>,
+    request: &crate::session::cache_observation::CacheProbeRequest,
+) {
+    if let Some(sink) = sink
+        && let Ok(mut guard) = sink.lock()
+    {
+        guard.cache_probe_requests.push(request.clone());
+    }
+}
+
+fn sink_push_reset(sink: &Option<TurnObservationsSink>, index: usize) {
+    if let Some(sink) = sink
+        && let Ok(mut guard) = sink.lock()
+    {
+        guard.cache_observation_resets.push(index);
+    }
+}
+
+/// Where this pass's first observation lands in the sink. A Stop-hook
+/// continuation reuses one sink across passes, so reset indices are rebased
+/// onto the running total instead of restarting at zero.
+fn sink_observation_base(sink: &Option<TurnObservationsSink>) -> usize {
+    sink.as_ref()
+        .and_then(|sink| sink.lock().ok().map(|guard| guard.cache_observations.len()))
+        .unwrap_or(0)
+}
+
+/// The session workspace root the turn's tools resolve against (v2
+/// `workspaceDir`). Falls back to the process cwd only for a toolset-less turn,
+/// where this process owns no workspace to name — host-proxy turns with native
+/// tools on still carry the toolset, so the product paths use the session root.
+fn turn_workspace_root(input: &RunTurnInput<'_>) -> Option<std::path::PathBuf> {
+    input
+        .toolset
+        .as_ref()
+        .map(|toolset| toolset.workspace_root().to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+}
+
 /// Run a single turn.
 #[tracing::instrument(name = "run_turn", skip_all, fields(turn_id = %input.turn_id, max_steps = input.max_steps, has_goal = input.goal.is_some()))]
-
 pub fn run_turn<'a>(
     input: RunTurnInput<'a>,
     callbacks: &'a Arc<dyn HostCallbacks>,
+) -> BoxFuture<'a, Result<TurnResult, Box<dyn std::error::Error + 'a>>> {
+    run_turn_inner(input, callbacks, None)
+}
+
+/// The turn driver behind [`run_turn`], with an optional out-of-band
+/// observation sink.
+///
+/// `sink` receives every per-step prompt-cache record as it is produced, so a
+/// turn that ends in `Err` — with no `TurnResult` to carry them — still hands
+/// the steps that completed before the failure to the caller. The `Ok` path is
+/// unchanged: the same records are also folded into the returned `TurnResult`.
+fn run_turn_inner<'a>(
+    input: RunTurnInput<'a>,
+    callbacks: &'a Arc<dyn HostCallbacks>,
+    sink: Option<TurnObservationsSink>,
 ) -> BoxFuture<'a, Result<TurnResult, Box<dyn std::error::Error + 'a>>> {
     let turn_id = input.turn_id.clone();
     // v2 `loopService.ts:1047-1050`: the cap applies only when it is a
@@ -741,10 +964,20 @@ pub fn run_turn<'a>(
     // turn body: a prior disclosure suppresses the per-turn baseline
     // re-injection until the date changes.
     let date_baseline = crate::injection::scan_date_baseline(&user_messages);
-    // Same for the workspace AGENTS.md reminder: the paths an earlier reminder
-    // already named are not suggested again (v2 reads the same set off the
-    // last injection's `origin.disclosure`).
-    let agents_md_baseline = crate::injection::scan_agents_md_baseline(&user_messages);
+    // Same for the AGENTS.md reminder: the paths an earlier reminder already
+    // named are not suggested again (v2 reads the same set off the last
+    // injection's `origin.disclosure`), and the paths this session's system
+    // prompt already loaded are seeded as known (v2 `seedInjected`,
+    // `agentsMdReminderService.ts:98-124`) — otherwise the reminder names files
+    // the model was already given and tells it to read them again.
+    let mut agents_md_baseline = crate::injection::scan_agents_md_baseline(&user_messages);
+    for path in
+        crate::prompt::agents_md::extract_agents_md_paths_from_prompt(input.llm.system_prompt())
+    {
+        if !agents_md_baseline.iter().any(|seen| seen == &path) {
+            agents_md_baseline.push(path);
+        }
+    }
     // Same for the permission-mode reminders: the mode the last reminder
     // recorded survives across turns, so a resumed session does not
     // re-announce a mode the model was already told about.
@@ -773,6 +1006,9 @@ pub fn run_turn<'a>(
     callbacks.set_turn_goal(&turn_id, goal.as_ref().map(|g| g.goal_id.as_str()));
 
     Box::pin(async move {
+        // D14(a): the sink's current length is this pass's rebase offset for
+        // cache-break reset indices (a Stop-hook continuation reuses the sink).
+        let sink_base = sink_observation_base(&sink);
         // Per-turn watchdog (v2 `AgentLoopService.armTurnWatch`, upstream
         // #4280 diagnostics half): warns when the turn produces no observable
         // progress — steps, streamed deltas, tool activity, phase — for
@@ -790,9 +1026,10 @@ pub fn run_turn<'a>(
             .llm
             .set_turn_watch(Some(Arc::clone(&turn_watch_state)));
         let mut total_usage = crate::rpc::types::TokenUsage::default();
-        // The most recent step's own usage: the measured context anchor a
-        // caller puts on the conversation (v2 `TokenCountingAgentModel`).
-        let mut last_request_usage: Option<crate::rpc::types::TokenUsage> = None;
+        // The most recent step's own usage plus the input scope it served: the
+        // measured context anchor a caller puts on the conversation (v2
+        // `TokenCountingAgentModel.measured`).
+        let mut last_request_usage: Option<crate::turn_loop::types::RequestMeasurement> = None;
         let mut steps: u32 = 0;
         // LLM retries performed so far (attempts beyond the first per step);
         // surfaced on the turn result as a telemetry figure. Event counting
@@ -807,6 +1044,60 @@ pub fn run_turn<'a>(
         let elapsed_wall_clock_ms = |started: std::time::Instant| {
             started.elapsed().as_millis().min(i64::MAX as u128) as i64
         };
+
+        // Compaction requests are real LLM calls. Keep their usage apart from
+        // the turn's own so session accounting can bill them without inflating
+        // per-turn request totals. `did_compact` separates "no compaction" from
+        // "a compaction the provider reported no usage for".
+        let mut compaction_usage = crate::rpc::types::TokenUsage::default();
+        let mut did_compact = false;
+        // Prompt-cache observations, one per LLM response (v2
+        // `llmRequesterLastTurnRequest.observation`, consumed by
+        // `AgentCacheBreakService.observe`). Collected here because only the
+        // step loop knows both the request that was sent and its usage; the
+        // engine folds them into its per-session break tracker.
+        let mut cache_observations: Vec<crate::session::cache_observation::CacheObservation> =
+            Vec::new();
+        // The tool schema table is a constant part of every request. The
+        // compaction trigger (`ContextTokens`) and the persisted context gauge
+        // both size against it, so they cannot disagree about how full the
+        // context is.
+        let tool_schema_tokens = serde_json::to_string(&tool_defs)
+            .map(|json| crate::compaction::estimate_tokens_for_json(&json))
+            .unwrap_or(0);
+        // `prompt_cache_probe` compares the request's shape against the parent
+        // agent's last request (v2 `llmRequesterLastTurnRequest`). The system
+        // prompt is constant for the turn; the tool table can change per step,
+        // so it is hashed with the step's definitions below.
+        let system_prompt_hash =
+            crate::session::cache_observation::fingerprint(input.llm.system_prompt());
+        // Every request of the turn, in step order: the first one is what a
+        // fork's first record compares against its parent, the last one is the
+        // agent's new `prompt_cache_probe` baseline.
+        let mut cache_probe_requests: Vec<crate::session::cache_observation::CacheProbeRequest> =
+            Vec::new();
+        // Observation indices where a compaction replaced the history: the
+        // engine's fold drops the break baseline at each one (v2
+        // `AgentCacheBreakService` resets on `context.compactionCompleted`).
+        let mut cache_observation_resets: Vec<usize> = Vec::new();
+        // Every exit path carries the accounting, so an early return (hook
+        // block, budget limit, abort) cannot drop it.
+        macro_rules! finish {
+            ($($arg:expr),* $(,)?) => {{
+                let mut result = turn_result($($arg),*).with_accounting(
+                    if did_compact {
+                        Some(compaction_usage.clone())
+                    } else {
+                        None
+                    },
+                    tool_schema_tokens,
+                );
+                result.cache_observations = std::mem::take(&mut cache_observations);
+                result.cache_probe_requests = std::mem::take(&mut cache_probe_requests);
+                result.cache_observation_resets = std::mem::take(&mut cache_observation_resets);
+                result
+            }};
+        }
 
         // Build system prompt, optionally enriched with goal steering text.
         // A goal that is paused / blocked is not driven by this turn: it gets
@@ -831,19 +1122,22 @@ pub fn run_turn<'a>(
         }];
         messages.extend(user_messages);
 
-        // v2 `shapeUnsupportedDynamicToolContext` (#4719 / #4720): a history
-        // recorded while the model could load tools may still carry a
-        // `<tools_added>` announcement that tells this (now incapable) model
-        // to call `select_tools`. Rewrite it into the runtime-change reminder
-        // before any hook or provider sees the messages.
+        // v2 `shapeHistory` (`toolSelectService.ts:125-130`): a history
+        // recorded under a different disclosure mode is reshaped before any
+        // hook or provider sees it. With dynamic loading on, only the newest
+        // `<tools_relevant>` block survives; with it off, every discovery
+        // announcement is dropped so this model is never told to call
+        // `select_tools`.
         let supports_dynamic_loading = input
             .toolset
             .as_ref()
             .is_some_and(|toolset| toolset.supports_dynamic_tool_loading());
-        crate::tools::tool_select_state::shape_unsupported_dynamic_tool_history(
-            &mut messages,
-            supports_dynamic_loading,
-        );
+        messages =
+            crate::tools::tool_select_state::shape_history(messages, supports_dynamic_loading);
+
+        if supports_dynamic_loading && let Some(toolset) = &input.toolset {
+            toolset.seed_loaded_tools_from_history(&messages);
+        }
 
         // v2 `onBeforeSubmitPrompt`: matching hooks settle before the model
         // call. A block appends the rendered assistant result and skips the
@@ -865,14 +1159,15 @@ pub fn run_turn<'a>(
                     })),
                     ..Default::default()
                 });
-                return Ok(turn_result(
+                return Ok(finish!(
                     LoopTurnStopReason::EndTurn,
                     0,
                     crate::rpc::types::TokenUsage::default(),
                     0,
                     0,
                     messages,
-                ));
+                )
+                .with_gate_blocked());
             }
             if !outcome.append.is_empty() {
                 let prompt = &mut messages[prompt_index];
@@ -893,8 +1188,8 @@ pub fn run_turn<'a>(
         }
 
         // Running token estimate for the injection-free history (see
-        // [`ContextTokens`]).
-        let mut context_tokens = ContextTokens::default();
+        // [`ContextTokens`]). The tool-schema baseline was computed above.
+        let mut context_tokens = ContextTokens::new(tool_schema_tokens);
 
         // Retry configuration for LLM calls within this turn. The attempt
         // count is host-configurable (v2 `loopControl.maxAttemptsPerStep`);
@@ -956,7 +1251,8 @@ pub fn run_turn<'a>(
         // v2 `getEffectiveMaxContextTokens`: an overflow observed earlier in
         // this process lowers the window for this model, so the trigger and
         // the recovery gates use the conservative value.
-        let effective_window = crate::compaction::effective_max_tokens(
+        let effective_window = crate::compaction::effective_max_tokens_for(
+            &input.agent_id,
             input.llm.model_name(),
             input.max_context_tokens,
         );
@@ -1007,8 +1303,28 @@ pub fn run_turn<'a>(
         // the product, the local store in the REPL. No local store is built
         // here: in the product the state lives host-side and a workspace- or
         // home-local directory would be a side effect with no consumer.
-        let mut injection_registry =
-            crate::injection::InjectionRegistry::with_defaults(date_baseline, agents_md_baseline);
+        // The session workspace root every injection roots itself in: the
+        // AGENTS.md reminder probes it, and the knowledge base stores under
+        // it. Not the engine process's cwd — the host can run the engine from
+        // anywhere, and a session opens one workspace.
+        let workspace_root = turn_workspace_root(&input);
+        let mut injection_registry = crate::injection::InjectionRegistry::with_defaults(
+            workspace_root.clone(),
+            date_baseline,
+            agents_md_baseline,
+        );
+        // NotifyUser nudge (v2 `notifyUserNudgeService`): round after round of
+        // tool calls without an update is progress the user never sees. The
+        // availability gate is the advertised table — when NotifyUser is not
+        // there, the model cannot answer the nudge, so the provider stays
+        // unregistered (v2 gates on the same resolved availability).
+        crate::injection::notify_user_nudge::register_notify_user_nudge(
+            &mut injection_registry,
+            input
+                .tool_defs
+                .iter()
+                .any(|tool| tool.name == crate::tools::core_tool_defs::NOTIFY_USER_TOOL_NAME),
+        );
         // v2 `ProgressTrackerService`: once the turn has made
         // `EBM_BLIND_MUTATION_THRESHOLD` changes nobody verified, the next
         // request asks for a verification run. The reminder is gated on
@@ -1020,7 +1336,11 @@ pub fn run_turn<'a>(
         // would land on every following request.
         let ebm_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ebm_injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut progress_tracker = crate::turn_loop::progress_track::ProgressTracker::default();
+        // v2 keeps the tracker on the Agent-scoped `ProgressTrackerService`;
+        // the toolset carries the same session-scoped state here. Callers
+        // without a toolset (host-proxy tests) fall back to a per-turn tracker.
+        let mut local_progress_tracker =
+            crate::turn_loop::progress_track::ProgressTracker::default();
         {
             let pending = ebm_pending.clone();
             let injected = ebm_injected.clone();
@@ -1035,9 +1355,29 @@ pub fn run_turn<'a>(
                 }),
             );
         }
+        // v2 `AgentTestScopeGuardService` (`agent/testScopeGuard`): a whole
+        // suite run from the repository root arms exactly one reminder for the
+        // turn, cleared here once the injection has been emitted.
+        let test_scope_guard =
+            Arc::new(crate::turn_loop::test_scope_guard::TestScopeGuard::from_env());
+        {
+            let guard = test_scope_guard.clone();
+            injection_registry.register(
+                crate::turn_loop::test_scope_guard::TEST_SCOPE_REMINDER_VARIANT,
+                Box::new(move |_ctx| guard.take_pending()),
+            );
+        }
         crate::injection::permission_mode::register_permission_mode_injection(
             &mut injection_registry,
-            input.permission_mode,
+            // v2's permission mode is never unset: a snapshot without a mode
+            // defaults to Manual (`permissionMode.ts`), and the reminder says
+            // so on the first turn. Treating `None` as "no reminder" left a
+            // turn with no policy snapshot running under an unannounced mode.
+            Some(
+                input
+                    .permission_mode
+                    .unwrap_or(crate::permission::PermissionMode::Manual),
+            ),
             permission_mode_baseline,
         );
         // The interruption reminder's baseline was scanned at the top of the
@@ -1047,6 +1387,31 @@ pub fn run_turn<'a>(
                 &mut injection_registry,
                 true,
                 &[],
+            );
+        }
+        // The knowledge-base reminder (v2 `KnowledgeInjection`,
+        // `knowledgeService.ts:46-49`): main agent only, first step of the
+        // turn, and silent unless a knowledge database already exists.
+        if input.agent_id == crate::callbacks::MAIN_AGENT_ID {
+            crate::injection::knowledge::register_knowledge_injection(
+                &mut injection_registry,
+                workspace_root.clone(),
+            );
+        }
+        // Plugin session-start skills (v2 `AgentPluginService`,
+        // `agent/plugin`): main agent only. The roots are the ones this
+        // turn's toolset scans, so the injected skill is exactly the one the
+        // prompt advertises; the reminder freezes after its first injection
+        // and only a host-driven refresh supersedes it.
+        if input.agent_id == crate::callbacks::MAIN_AGENT_ID
+            && let Some(toolset) = &input.toolset
+        {
+            crate::injection::plugin::register_plugin_session_start(
+                &mut injection_registry,
+                toolset.plugin_skill_dirs(),
+                toolset.session_id().unwrap_or_default(),
+                &messages,
+                false,
             );
         }
         let goal_plan_state = Arc::new(CallbackStateSnapshot::default());
@@ -1071,24 +1436,37 @@ pub fn run_turn<'a>(
             && tool_defs
                 .iter()
                 .any(|def| def.name == crate::injection::todo_reminder::TODO_LIST_TOOL_NAME)
-            && let Ok(response) = callbacks
+        {
+            let todo_read = callbacks
                 .state_read(crate::rpc::types::StateReadRequest {
                     domain: "todo".into(),
                     key: "todo".into(),
                     turn_id: String::new(),
                     tool_call_id: String::new(),
                 })
-                .await
-        {
-            *goal_plan_state
-                .todo
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(response.value);
-            crate::injection::todo_reminder::register_todo_reminder(
-                &mut injection_registry,
-                goal_plan_state.clone(),
-            );
-            todo_reminder_registered = true;
+                .await;
+            // The read is still the capability probe this comment describes:
+            // no answer means no todo persistence, so the reminder stays off.
+            // What changed is that the failure is now reported instead of the
+            // reminder disappearing without a trace.
+            let bridged = match &todo_read {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "the todo state bridge did not answer; the stale-todo reminder is not armed"
+                    );
+                    false
+                }
+            };
+            goal_plan_state.store("todo", todo_read);
+            if bridged {
+                crate::injection::todo_reminder::register_todo_reminder(
+                    &mut injection_registry,
+                    goal_plan_state.clone(),
+                );
+                todo_reminder_registered = true;
+            }
         }
         // Swarm mode is a mode like plan mode, so it announces itself the same
         // way (v2 `SwarmInjection`): the `swarm_mode` variant injects an
@@ -1100,18 +1478,15 @@ pub fn run_turn<'a>(
         );
         // Progressive tool disclosure (v2 `toolSelectAnnouncementsService`):
         // every new turn re-announces the deferred tool set — added names the
-        // model has not seen yet, removed names whose servers went away. The
-        // provider is turn-gated (`is_new_turn`), matching v2's variant gate.
+        // model has not seen yet, removed names whose servers went away, or a
+        // ranked `<tools_relevant>` slice for a large catalogue. The provider
+        // is turn-gated (`is_new_turn`), matching v2's variant gate, and reads
+        // the conversation because v2 folds the announcements already in it.
         if let Some(toolset) = &input.toolset {
             let disclosure_toolset = toolset.clone();
             injection_registry.register(
-                "tool_select",
-                Box::new(move |_ctx| disclosure_toolset.take_disclosure_announcement()),
-            );
-            let update_toolset = toolset.clone();
-            injection_registry.register(
-                "tool_update_pending",
-                Box::new(move |_ctx| update_toolset.take_pending_update_notice()),
+                crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+                Box::new(move |ctx| disclosure_toolset.take_disclosure_announcement(ctx.history)),
             );
             // Previous-session background tasks (v2 `taskService.reconcile` →
             // `appendPreviousSessionTasksReminder`): a task the last process
@@ -1178,10 +1553,30 @@ pub fn run_turn<'a>(
         // root probe still has to run there.
         let mut step_access = crate::injection::StepAccess::default();
 
+        // v2 `lastCompactedTokenCount` (`fullCompactionService.ts:197-201`):
+        // once a turn has compacted, another auto compaction is pointless until
+        // the history grows past what that round produced — otherwise a
+        // summary+tail that still exceeds the window compacts again every step
+        // and shrinks the context toward nothing. v2 resets it per turn
+        // (`resetForTurn`, :439-443); this is a turn-local, so the same.
+        let mut last_compacted_token_count: Option<u32> = None;
+
+        // v2 `compactionRearmPending`: a compaction that spliced the history
+        // during the previous step re-arms the turn-scoped reminders for the
+        // next injection pass, because it can drop the injection messages the
+        // splice crossed. The flag is consumed by exactly one pass and never
+        // re-fires per step — a rearm is an event, not the turn head.
+        let mut rearm_pending = false;
+
         for step_num in 0..max_steps {
             steps = step_num + 1;
             turn_watch_state.note_steps(steps as u64);
             let turn_wall_clock_ms = elapsed_wall_clock_ms(turn_started);
+            // Whether this step's injection pass runs in rearm mode. A
+            // compaction below (before the pass) sets it for this step; the
+            // emergency overflow path, which compacts after the pass, sets
+            // `rearm_pending` for the next one.
+            let mut rearm_this_step = std::mem::take(&mut rearm_pending);
 
             // ── Goal budget check ──────────────────────────────────────────
             // Only an *active* goal drives this turn. v2 binds a turn to the
@@ -1203,7 +1598,7 @@ pub fn run_turn<'a>(
                         "turn_id": turn_id,
                         "goal_id": goal.goal_id,
                     }));
-                    return Ok(turn_result(
+                    return Ok(finish!(
                         LoopTurnStopReason::BudgetLimited,
                         step_num,
                         total_usage,
@@ -1226,7 +1621,7 @@ pub fn run_turn<'a>(
             if let Some(ref cancel) = input.cancellation
                 && cancel.load(std::sync::atomic::Ordering::Relaxed)
             {
-                return Ok(turn_result(
+                return Ok(finish!(
                     LoopTurnStopReason::Aborted,
                     step_num,
                     total_usage,
@@ -1267,11 +1662,13 @@ pub fn run_turn<'a>(
             // matching terminal event — and on the split search, so a history
             // the split cannot cut (see `should_compact_auto`) stays silent
             // instead of announcing a `completed` that folded nothing.
-            if crate::compaction::should_compact_auto(
-                &messages,
-                context_tokens.tokens(),
-                &compaction_config,
-            ) {
+            if last_compacted_token_count.is_none_or(|last| context_tokens.tokens() > last)
+                && crate::compaction::should_compact_auto(
+                    &messages,
+                    context_tokens.tokens(),
+                    &compaction_config,
+                )
+            {
                 callbacks.emit_event(serde_json::json!({
                     "type": "compaction.started",
                     "trigger": "auto",
@@ -1284,12 +1681,18 @@ pub fn run_turn<'a>(
                 // the success arm below. Hooks observe the trim but never
                 // block it.
                 if let Some(ref guard) = hook_guard {
-                    guard.notify_pre_compact(&turn_id, messages.len()).await;
+                    guard
+                        .notify_pre_compact(&turn_id, messages.len(), context_tokens.tokens())
+                        .await;
                 }
                 // v2 `postProcessSummary` reads the todo state at compaction
                 // time; a host without the bridge or without todos degrades
                 // to a plain summary.
                 let todos = crate::compaction::read_todos_for_summary(callbacks.as_ref()).await;
+                // v2 `nonHistoryStateFingerprint`: the todo/task state this
+                // round started from. A write during the summarizer call means
+                // the summary's rendering is already stale.
+                let non_history_state = non_history_state_fingerprint(callbacks.as_ref()).await;
                 turn_watch_state.set_phase(TurnPhase::Compacting);
                 match crate::compaction::compact_messages_with_summary_at_report(
                     &messages,
@@ -1300,55 +1703,139 @@ pub fn run_turn<'a>(
                     Some(turn_cancel.token()),
                     effective_window,
                     todos,
+                    &input.agent_id,
+                    // The turn loop is inside the running turn: its
+                    // post-last-user messages are v2's `inFlightTurn`.
+                    true,
+                    // v2 `llmRequesterService` captures the agent's last turn
+                    // request as the compaction probe's baseline before the
+                    // summarizer request runs.
+                    cache_probe_requests.last(),
+                    Some(turn_id.as_str()),
                 )
                 .await
                 {
                     Ok(Some((compacted, report))) => {
-                        callbacks.emit_event(serde_json::json!({
-                            "type": "compaction.completed",
-                            "result": {
-                                "summary": report.summary,
-                                "compactedCount": report.compacted_count,
-                                "tokensBefore": report.tokens_before,
-                                "tokensAfter": report.tokens_after,
-                            },
-                        }));
-                        // v2 `compaction_finished`: the success telemetry for
-                        // the round that just landed, usage included.
-                        callbacks.telemetry(report.finished_payload(
-                            "auto",
-                            1,
-                            input.llm.thinking_effort().unwrap_or("none"),
-                            crate::turn_loop::turn_index(&turn_id),
-                        ));
-                        tracing::debug!(
-                            turn_id = %turn_id,
-                            step = step_num,
-                            before = messages.len(),
-                            after = compacted.len(),
-                            "compacted turn context before LLM call"
-                        );
-                        // The completion arm of the pair opened alongside
-                        // `compaction.started` above (v2
-                        // `agentExternalHooksService` PostCompact): the
-                        // trigger and the post-trim token count describe the
-                        // trim that just landed.
-                        if let Some(ref guard) = hook_guard {
-                            guard
-                                .notify_post_compact(&turn_id, "auto", report.tokens_after as u64)
-                                .await;
+                        // The summarizer request's `prompt_cache_probe` (v2
+                        // `source: 'compaction'`) is about the request, so it is
+                        // reported even when the round is cancelled below.
+                        if let Some(probe) = report.cache_probe.as_ref() {
+                            callbacks.telemetry(probe.telemetry_payload());
                         }
-                        // The compacted shape already closes its block with
-                        // the continuation note (v2 `buildContextCompactionShape`
-                        // splices exactly `result.messages`), so nothing is
-                        // rearmed here: v2's `compactionRearmPending`
-                        // re-injects reminders, which the injection pass below
-                        // owns, not a second continuation.
-                        messages = compacted;
-                        context_tokens.rebase_with_summary(
-                            &messages,
-                            report.usage.as_ref().map(|usage| usage.output_tokens),
-                        );
+                        // The summarizer request was paid for even when the
+                        // round is cancelled below, so bill it either way.
+                        if let Some(usage) = &report.usage {
+                            compaction_usage.accumulate(usage);
+                            did_compact = true;
+                        }
+                        if non_history_state_fingerprint(callbacks.as_ref()).await
+                            != non_history_state
+                        {
+                            // v2 `applyCompactionRound` (`:53-54`): state moved
+                            // while the summary was generated — cancel instead
+                            // of applying a summary that would silently
+                            // overwrite it. `last_compacted_token_count` stays
+                            // unset, so the next step retries against the
+                            // updated state.
+                            callbacks.emit_event(serde_json::json!({
+                                "type": "compaction.cancelled",
+                            }));
+                        } else {
+                            let result = {
+                                let mut result = serde_json::json!({
+                                    "summary": report.summary,
+                                    "compactedCount": report.compacted_count,
+                                    "tokensBefore": report.tokens_before,
+                                    "tokensAfter": report.tokens_after,
+                                });
+                                if report.dropped_count > 0 {
+                                    result["droppedCount"] =
+                                        serde_json::json!(report.dropped_count);
+                                }
+                                result
+                            };
+                            callbacks.emit_event(serde_json::json!({
+                                "type": "compaction.completed",
+                                "result": result,
+                                // v2 persists the spliced shape with the compaction
+                                // (`contextMemoryService.ts:115-134`,
+                                // `context.compaction` carries `messages`): a replay
+                                // that only kept the summary lost the kept user
+                                // messages and the continuation note. The native
+                                // event store folds this array at its boundary.
+                                "messages": &compacted,
+                            }));
+                            // v2 `compaction_finished`: the success telemetry for
+                            // the round that just landed, usage included.
+                            callbacks.telemetry(report.finished_payload(
+                                "auto",
+                                1,
+                                input.llm.thinking_effort().unwrap_or("none"),
+                                crate::turn_loop::turn_index(&turn_id),
+                            ));
+                            tracing::debug!(
+                                turn_id = %turn_id,
+                                step = step_num,
+                                before = messages.len(),
+                                after = compacted.len(),
+                                "compacted turn context before LLM call"
+                            );
+                            // The completion arm of the pair opened alongside
+                            // `compaction.started` above (v2
+                            // `agentExternalHooksService` PostCompact): the
+                            // trigger and the post-trim token count describe the
+                            // trim that just landed.
+                            if let Some(ref guard) = hook_guard {
+                                guard
+                                    .notify_post_compact(
+                                        &turn_id,
+                                        "auto",
+                                        report.tokens_after as u64,
+                                    )
+                                    .await;
+                            }
+                            // The compacted shape already closes its block with
+                            // the continuation note (v2 `buildContextCompactionShape`
+                            // splices exactly `result.messages`), so no second
+                            // continuation is appended here. What the splice
+                            // does require is v2's `compactionRearmPending`:
+                            // the injection pass below re-runs the turn-scoped
+                            // providers with `isNewTurn = true` for this step,
+                            // which is how a reminder the compaction dropped
+                            // comes back.
+                            messages = compacted;
+                            rearm_this_step = true;
+                            // The context was replaced: a fork captured before
+                            // this point must no longer compare against the old
+                            // parent request (v2's `prefixRevision` check).
+                            if let Some(manager) = input
+                                .toolset
+                                .as_ref()
+                                .and_then(|toolset| toolset.subagent_manager())
+                            {
+                                manager.bump_probe_generation(&input.agent_id);
+                            }
+                            // The engine's end-of-turn fold resets the break
+                            // baseline here, so the post-compaction steps start
+                            // a new trajectory.
+                            cache_observation_resets.push(cache_observations.len());
+                            sink_push_reset(&sink, sink_base + cache_observations.len());
+                            // The request that produced the measurement above
+                            // served the pre-splice prefix; v2's identity check
+                            // (`matchesContext`) would reject it once the
+                            // context is replaced.
+                            if let Some(measurement) = last_request_usage.as_mut() {
+                                measurement.spliced_after = true;
+                            }
+                            context_tokens.rebase_with_summary(
+                                &messages,
+                                report.usage.as_ref().map(|usage| usage.output_tokens),
+                            );
+                            // v2 `compactionWorker` (:551-558): remember what the
+                            // round actually produced so the next `checkAutoCompaction`
+                            // does not fire while the history still sits at or below it.
+                            last_compacted_token_count = Some(context_tokens.tokens());
+                        }
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -1380,8 +1867,10 @@ pub fn run_turn<'a>(
                 // Refresh the state snapshots through the host callbacks so
                 // the injections render the state the tools just wrote — the
                 // same channel, so a mid-turn plan exit, goal pause, or todo
-                // update shows up at this step head. A failed read keeps the
-                // previous value. The turn-start todo read already covers step 0.
+                // update shows up at this step head. A failed read is stored
+                // as `Unreadable`, so the provider reports the skip instead of
+                // rendering stale state as if it were current. The turn-start
+                // todo read already covers step 0.
                 goal_plan_state
                     .refresh(callbacks.as_ref(), todo_reminder_registered && step_num > 0)
                     .await;
@@ -1390,11 +1879,26 @@ pub fn run_turn<'a>(
                 // (the goal reminder is the only one) inject a step late — so
                 // on a normal one-step turn it never fired at all.
                 //
+                // A compaction splice earlier in this step re-arms the
+                // turn-scoped providers for this single pass (v2
+                // `compactionRearmPending`; see `rearm_this_step`). The
+                // providers that derive their state from the conversation
+                // re-read it, so a reminder the splice dropped is injected
+                // again.
+                //
                 // The AGENTS.md reminder additionally needs the directories the
                 // previous step's tool calls touched; without them it saw an
                 // empty world and only ever probed the workspace root.
-                for (variant, text) in injection_registry.build_injections_with_history_named(
-                    step_num == 0,
+                let is_new_turn = step_num == 0 || rearm_this_step;
+                if rearm_this_step {
+                    // v2's injected positions are read off the conversation,
+                    // which the splice just replaced; the registry's per-turn
+                    // list has to forget the passes the splice undid.
+                    injection_registry.clear_injected();
+                }
+                for (variant, text) in injection_registry.build_injections_rearmed(
+                    is_new_turn,
+                    rearm_this_step,
                     &step_access,
                     &messages,
                 ) {
@@ -1418,7 +1922,29 @@ pub fn run_turn<'a>(
 
             // Delegate LLM call (with retry) to turn_step module.
             // Convert the 'static error to the turn's 'a-bounded error type.
-            let telemetry = |event: serde_json::Value| callbacks.telemetry(event);
+            let telemetry = |event: serde_json::Value| {
+                if event.get("event").and_then(|value| value.as_str()) == Some("TurnStepRetrying") {
+                    let retry_step = event
+                        .get("step")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0) as u32;
+                    callbacks.emit_event(serde_json::json!({
+                        "type": "llm.step.retrying",
+                        "agent_id": input.agent_id,
+                        "turn_id": turn_id,
+                        "step": retry_step,
+                        "step_id": step_event_id(&turn_id, retry_step),
+                        "failed_attempt": event["failed_attempt"],
+                        "next_attempt": event["next_attempt"],
+                        "max_attempts": event["max_attempts"],
+                        "delay_ms": event["delay_ms"],
+                        "error_name": event["error_name"],
+                        "error_message": event["error_message"],
+                        "status_code": event["status_code"],
+                    }));
+                }
+                callbacks.telemetry(event);
+            };
             // v2 `recoverFromContextOverflow` (fullCompactionService.ts:468-478)
             // does not give up on the first overflow: it compacts and **retries
             // the step**, and `recordOverflowRecovery` allows
@@ -1435,6 +1961,9 @@ pub fn run_turn<'a>(
             // the compaction guard can fail the turn, and outside the recovery
             // loop so an overflow round does not announce the same step twice.
             emit_step_begin_event(callbacks.as_ref(), &input.agent_id, &turn_id, steps);
+            // Wall-clock start of the request, for `prompt_cache_probe`'s
+            // `parent_request_gap_ms` (v2 records `startedAt` per request).
+            let step_started_at = chrono::Utc::now().timestamp_millis();
             // v2 `failMachineStep` (loopService.ts:2160-2171): a terminal step
             // failure closes the step it began before the turn ends, carrying
             // the error text the user will see. Every step-block failure
@@ -1492,7 +2021,7 @@ pub fn run_turn<'a>(
                             "aborted",
                             None,
                         );
-                        return Ok(turn_result(
+                        return Ok(finish!(
                             stop_reason,
                             steps,
                             total_usage,
@@ -1509,7 +2038,7 @@ pub fn run_turn<'a>(
                         fail_current_step!(error);
                     }
                 };
-                let call = execute_loop_step_with_retry(
+                let call = execute_loop_step_with_projection(
                     &turn_id,
                     step_num,
                     input.llm,
@@ -1524,6 +2053,7 @@ pub fn run_turn<'a>(
                     )),
                     input.max_context_tokens,
                     Some(total_usage.input_tokens),
+                    structure_strict,
                 )
                 .await;
                 let e = match call {
@@ -1558,7 +2088,7 @@ pub fn run_turn<'a>(
                             "aborted",
                             None,
                         );
-                        return Ok(turn_result(
+                        return Ok(finish!(
                             stop_reason,
                             steps,
                             total_usage,
@@ -1695,19 +2225,12 @@ pub fn run_turn<'a>(
                         )
                     {
                         structure_strict = true;
-                        // Only a real repair earns the round trip: resending an
-                        // unchanged request would spend the one strict attempt
-                        // on a shape problem the dedupe cannot see (an
-                        // unrecorded field, a provider quirk).
-                        if super::tool_call_id::dedupe_duplicate_tool_calls(&mut messages) {
-                            callbacks.emit_event(serde_json::json!({
-                                "type": "warning",
-                                "code": crate::llm::request_structure::STRUCTURE_STRICT_CODE,
-                                "message": "Provider rejected the structure of the request; duplicate tool calls were removed and the request was retried.",
-                            }));
-                            continue 'overflow_recovery;
-                        }
-                        structure_strict = false;
+                        callbacks.emit_event(serde_json::json!({
+                            "type": "warning",
+                            "code": crate::llm::request_structure::STRUCTURE_STRICT_CODE,
+                            "message": "Provider rejected the structure of the request; the request was retried with a strict projection.",
+                        }));
+                        continue 'overflow_recovery;
                     }
                     let estimated_request_tokens =
                         crate::compaction::estimate_messages_tokens(&messages);
@@ -1743,11 +2266,17 @@ pub fn run_turn<'a>(
                     // `PreCompact` while the original history still exists,
                     // `PostCompact` on the success arm below.
                     if let Some(ref guard) = hook_guard {
-                        guard.notify_pre_compact(&turn_id, messages.len()).await;
+                        guard
+                            .notify_pre_compact(&turn_id, messages.len(), estimated_request_tokens)
+                            .await;
                     }
                     // Same todo suffix as the threshold path (v2
                     // `postProcessSummary`), read at compaction time.
                     let todos = crate::compaction::read_todos_for_summary(callbacks.as_ref()).await;
+                    // Same fingerprint as the threshold path: the overflow
+                    // recovery round must not overwrite a todo/task write that
+                    // landed while the summary was generated.
+                    let non_history_state = non_history_state_fingerprint(callbacks.as_ref()).await;
                     // v2's `compaction_failed` carries `duration_ms`: the time
                     // until the failure, measured around the failing call.
                     let compaction_started = std::time::Instant::now();
@@ -1762,6 +2291,10 @@ pub fn run_turn<'a>(
                             effective_window,
                             crate::compaction::estimate_messages_tokens(&messages),
                             todos,
+                            &input.agent_id,
+                            true,
+                            cache_probe_requests.last(),
+                            Some(turn_id.as_str()),
                         )
                         .await;
                     let (force_compacted, report) = match compacted_report {
@@ -1819,8 +2352,8 @@ pub fn run_turn<'a>(
                             // The summarizer request's trace id, when the
                             // failure carried one (v2 `request_id`).
                             if let Some(id) = summarizer_error
-                                .and_then(|inner| inner.downcast_ref::<crate::llm::LlmError>())
-                                .and_then(crate::llm::LlmError::trace_id)
+                                .and_then(|inner| inner.downcast_ref::<kimi_core::error::LlmError>())
+                                .and_then(kimi_core::error::LlmError::trace_id)
                             {
                                 payload["request_id"] = serde_json::json!(id);
                             }
@@ -1828,6 +2361,18 @@ pub fn run_turn<'a>(
                             fail_current_step!(error);
                         }
                     };
+                    // The recovery summarizer request's `prompt_cache_probe`
+                    // (v2 `source: 'compaction'`) describes the request, so it
+                    // is reported regardless of whether the round is applied.
+                    if let Some(probe) = report.cache_probe.as_ref() {
+                        callbacks.telemetry(probe.telemetry_payload());
+                    }
+                    // The recovery summarizer call is billable whether or not
+                    // the round below is applied.
+                    if let Some(usage) = &report.usage {
+                        compaction_usage.accumulate(usage);
+                        did_compact = true;
+                    }
                     // A compaction that produced no summary cannot change the
                     // next request, so retrying would just burn the remaining
                     // attempts on an identical prompt. The v2 shape keeps the
@@ -1858,14 +2403,35 @@ pub fn run_turn<'a>(
                         }));
                         fail_current_step!(std::io::Error::other(err_str));
                     }
-                    callbacks.emit_event(serde_json::json!({
-                        "type": "compaction.completed",
-                        "result": {
+                    // v2 `applyCompactionRound` (`:53-54`): a state write
+                    // during summarization cancels the round. The original
+                    // overflow stands, so the step fails the same way an
+                    // unrecovered overflow does.
+                    if non_history_state_fingerprint(callbacks.as_ref()).await != non_history_state
+                    {
+                        callbacks.emit_event(serde_json::json!({
+                            "type": "compaction.cancelled",
+                        }));
+                        fail_current_step!(std::io::Error::other(err_str));
+                    }
+                    let result = {
+                        let mut result = serde_json::json!({
                             "summary": report.summary,
                             "compactedCount": report.compacted_count,
                             "tokensBefore": report.tokens_before,
                             "tokensAfter": report.tokens_after,
-                        },
+                        });
+                        if report.dropped_count > 0 {
+                            result["droppedCount"] = serde_json::json!(report.dropped_count);
+                        }
+                        result
+                    };
+                    callbacks.emit_event(serde_json::json!({
+                        "type": "compaction.completed",
+                        "result": result,
+                        // Same as the auto path: replay needs the spliced shape,
+                        // not just the summary.
+                        "messages": &force_compacted,
                     }));
                     // v2 `compaction_finished` for the recovery round that
                     // just landed (the round index is the overflow attempt).
@@ -1892,6 +2458,32 @@ pub fn run_turn<'a>(
                         "recovered from context overflow via emergency compaction"
                     );
                     messages = force_compacted;
+                    // The injection pass already ran for this step, so v2's
+                    // rearm lands on the next pass; the retried request inside
+                    // this step sees the compacted prefix without re-running
+                    // the providers, exactly like a post-compaction step head.
+                    rearm_pending = true;
+                    // Same context replacement as the threshold path: forks
+                    // captured before this round stop comparing against the
+                    // old parent request.
+                    if let Some(manager) = input
+                        .toolset
+                        .as_ref()
+                        .and_then(|toolset| toolset.subagent_manager())
+                    {
+                        manager.bump_probe_generation(&input.agent_id);
+                    }
+                    // The end-of-turn fold resets the break baseline at this
+                    // boundary, so the retry's cache read is not compared
+                    // with the pre-compaction one.
+                    cache_observation_resets.push(cache_observations.len());
+                    sink_push_reset(&sink, sink_base + cache_observations.len());
+                    // The overflow retry replaces the prefix the previous
+                    // request measured: the anchor no longer describes the
+                    // context v2's `matchesContext` would compare it with.
+                    if let Some(measurement) = last_request_usage.as_mut() {
+                        measurement.spliced_after = true;
+                    }
                     context_tokens.rebase_with_summary(
                         &messages,
                         report.usage.as_ref().map(|usage| usage.output_tokens),
@@ -1903,9 +2495,94 @@ pub fn run_turn<'a>(
             consecutive_overflow_compactions = 0;
 
             total_usage.accumulate(&step_result.usage);
-            last_request_usage = Some(step_result.usage.clone());
+            // Anchor the measurement to the input this request served
+            // (`messages` at this point is the request, system message
+            // included) instead of the turn's final transcript, which still
+            // grows by the reply and any tool exchanges below. v2
+            // `TokenCountingAgentModel.measured`: length = `context.length`.
+            last_request_usage = Some(crate::turn_loop::types::RequestMeasurement {
+                usage: step_result.usage.clone(),
+                input_messages: messages.len(),
+                spliced_after: false,
+            });
+            // Re-anchor the compaction estimate on what the provider actually
+            // charged for this step's input (system prompt + tool schema + the
+            // history as projected). The messages appended below are then
+            // estimated on top of the measurement.
+            // A transport that reports no usage leaves the heuristic in place.
+            if step_result.usage.input_tokens > 0 {
+                context_tokens.record_measured(step_result.usage.input_tokens, &messages);
+            }
             llm_retries += step_result.attempts.saturating_sub(1);
             last_finish_reason = step_result.finish_reason.clone();
+
+            // Cache observation for this request (v2 `buildCacheObservation`):
+            // the model/projection the turn ran with, the history the request
+            // carried, and the cache buckets the provider charged. `messages`
+            // here is still the request; the reply/tool exchanges are appended
+            // below.
+            {
+                let request_json = serde_json::to_string(&messages).unwrap_or_default();
+                let history_hash = crate::session::cache_observation::fingerprint(&request_json);
+                let observation = crate::session::cache_observation::build_cache_observation(
+                    crate::session::cache_observation::CacheObservationInput {
+                        model_alias: input
+                            .llm
+                            .model_alias()
+                            .unwrap_or_else(|| input.llm.model_name()),
+                        protocol: input.llm.protocol(),
+                        provider_type: input.llm.provider_type(),
+                        message_count: messages.len(),
+                        history_hash: &history_hash,
+                        projection: crate::session::cache_observation::projection_label(
+                            structure_strict,
+                            media_degraded,
+                            media_stripped,
+                        ),
+                        thinking_effort: input.llm.thinking_effort(),
+                        usage: Some(&step_result.usage),
+                    },
+                );
+                sink_push_observation(&sink, &observation);
+                cache_observations.push(observation);
+                // This request is also what `prompt_cache_probe` compares: a
+                // fork inherits the latest one as its baseline, and the agent's
+                // own last request replaces it for the next comparison (v2
+                // `llmRequesterLastTurnRequest`).
+                let probe_request = crate::session::cache_observation::CacheProbeRequest {
+                    model_alias: input
+                        .llm
+                        .model_alias()
+                        .unwrap_or_else(|| input.llm.model_name())
+                        .to_string(),
+                    tools_hash: crate::session::cache_observation::fingerprint(
+                        &serde_json::to_string(&step_tool_defs).unwrap_or_default(),
+                    ),
+                    system_prompt_hash: system_prompt_hash.clone(),
+                    message_count: messages.len(),
+                    history_hash,
+                    input_tokens: Some(crate::session::cache_observation::input_total(
+                        &step_result.usage,
+                    )),
+                    started_at: step_started_at,
+                    finished_at: chrono::Utc::now().timestamp_millis(),
+                };
+                // Main-agent turns expose the manager through their toolset;
+                // publishing per step is what lets a fork spawned by this
+                // step's tool call capture the parent's last request exactly
+                // as v2 does at fork-scope creation. Subagent turns carry no
+                // toolset, so the manager publishes their last request when
+                // the turn returns.
+                if let Some(manager) = input
+                    .toolset
+                    .as_ref()
+                    .and_then(|toolset| toolset.subagent_manager())
+                {
+                    manager.record_probe_request(&input.agent_id, probe_request.clone());
+                }
+                sink_push_probe_request(&sink, &probe_request);
+                cache_probe_requests.push(probe_request);
+            }
 
             // v2 `turn.step.completed` — the addressed copy of this step's
             // boundary, paired with the `emit_step_begin_event` above.
@@ -1971,7 +2648,7 @@ pub fn run_turn<'a>(
                     } else {
                         None
                     };
-                    let mut result = turn_result(
+                    let mut result = finish!(
                         turn_stop_reason_from_finish(step_result.finish_reason.as_deref()),
                         steps,
                         total_usage,
@@ -2139,6 +2816,117 @@ pub fn run_turn<'a>(
                         .map(|_| std::sync::Arc::default())
                         .collect();
 
+                    // v2 `AgentGoalJudgeService` through `UpdateGoal`
+                    // (`updateGoalTool.ts:68-83`): marking a goal `complete`
+                    // is verified against the transcript by an independent
+                    // judge request before the write. A rejection never
+                    // reaches the goal service; an `impossible` verdict turns
+                    // the write into `blocked`. The judge fails open (v2:
+                    // network/timeout allows completion).
+                    let mut synthetic_results: Vec<Option<ExecutableToolResult>> =
+                        tool_calls.iter().map(|_| None).collect();
+                    if input.agent_id == crate::callbacks::MAIN_AGENT_ID {
+                        for index in 0..tool_calls.len() {
+                            let (name, arguments, call_id) = {
+                                let tc = &tool_calls[index];
+                                (tc.name.clone(), tc.arguments.clone(), tc.id.clone())
+                            };
+                            if refusals[index].is_some()
+                                || dedupe_plan
+                                    .original_of
+                                    .get(index)
+                                    .is_some_and(|original| *original != index)
+                                || !name.eq_ignore_ascii_case("UpdateGoal")
+                                || arguments.get("status").and_then(|value| value.as_str())
+                                    != Some("complete")
+                            {
+                                continue;
+                            }
+                            // The judge checks the goal as it exists right now
+                            // (v2 `goalAtExecution`); an unreadable goal is
+                            // left to the write's own error.
+                            let goal = callbacks
+                                .state_read(crate::rpc::types::StateReadRequest {
+                                    domain: "goal".into(),
+                                    key: "goal".into(),
+                                    turn_id: turn_id.clone(),
+                                    tool_call_id: call_id.clone(),
+                                })
+                                .await
+                                .ok()
+                                .and_then(|response| {
+                                    crate::goal::judge::goal_snapshot_from_domain(&response.value)
+                                });
+                            let Some(goal) = goal else {
+                                continue;
+                            };
+                            let system_offset = usize::from(
+                                messages
+                                    .first()
+                                    .is_some_and(|message| message.role == "system"),
+                            );
+                            let transcript = messages[system_offset..].to_vec();
+                            let verdict = crate::goal::judge::evaluate_transcript(
+                                input.llm,
+                                &transcript,
+                                &goal,
+                                Some(turn_cancel.token().clone()),
+                            )
+                            .await;
+                            if verdict.ok {
+                                continue;
+                            }
+                            if verdict.impossible {
+                                // v2 blocks with the judge's reason; the state
+                                // bridge's update action carries no reason
+                                // field, so only the status is recorded here.
+                                tool_calls[index].arguments =
+                                    serde_json::json!({ "status": "blocked" });
+                                continue;
+                            }
+                            // The host still sees the call start/complete so
+                            // its transcript card is not lost; the result
+                            // below answers the call without touching state.
+                            callbacks.emit_event(serde_json::json!({
+                                "type": "tool.call.started",
+                                "agent_id": input.agent_id,
+                                "turn_id": turn_id,
+                                "tool_call_id": call_id,
+                                "tool_name": name,
+                                "args": arguments,
+                            }));
+                            synthetic_results[index] = Some(ExecutableToolResult {
+                                spill: None,
+                                parts: Vec::new(),
+                                delivery: None,
+                                stop_turn: false,
+                                content: format!(
+                                    "Goal completion rejected by judge: {}\nContinue working \
+                                     toward the goal objective.",
+                                    verdict.reason
+                                ),
+                                is_error: false,
+                                note: None,
+                                display: None,
+                            });
+                        }
+                    }
+                    let synthetic_indices: std::collections::HashSet<usize> = synthetic_results
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, result)| result.is_some().then_some(index))
+                        .collect();
+
+                    let tool_descriptions: std::collections::HashMap<String, String> =
+                        step_tool_defs
+                            .iter()
+                            .map(|def| (def.name.clone(), def.description.clone()))
+                            .collect();
+                    let workspace_dir = input
+                        .toolset
+                        .as_ref()
+                        .map(|toolset| toolset.workspace_root().to_string_lossy().into_owned());
+
                     // Execute tools with resource-conflict scheduling:
                     // non-conflicting calls run concurrently, conflicting
                     // calls (e.g. two writes to the same file) are
@@ -2149,6 +2937,9 @@ pub fn run_turn<'a>(
                         let callbacks = callbacks.clone();
                         let dedupe_cells = dedupe_cells.clone();
                         let original_of = dedupe_plan.original_of.clone();
+                        let tool_descriptions = tool_descriptions.clone();
+                        let workspace_dir = workspace_dir.clone();
+                        let toolset = input.toolset.clone();
                         move |tc: ToolCall| {
                             let index = call_index.get(&tc.id).copied();
                             // The step's first same-key occurrence this
@@ -2161,6 +2952,9 @@ pub fn run_turn<'a>(
                             let agent_id = agent_id.clone();
                             let callbacks = callbacks.clone();
                             let dedupe_cells = dedupe_cells.clone();
+                            let toolset = toolset.clone();
+                            let tool_descriptions = tool_descriptions.clone();
+                            let workspace_dir = workspace_dir.clone();
                             async move {
                                 // A same-step repeat never executes: it
                                 // shares the original's result, which the
@@ -2174,7 +2968,8 @@ pub fn run_turn<'a>(
                                 if let Some(original) = dup_source {
                                     let shared = dedupe_cells[original]
                                         .get_or_init(|| async {
-                                            ExecutableToolResult { delivery: None,
+                                            ExecutableToolResult { spill: None, delivery: None,
+                                                parts: Vec::new(),
                                                 stop_turn: false,
                                                 content: "Tool call deduplicated but original result was lost".into(),
                                                 is_error: true,
@@ -2196,6 +2991,22 @@ pub fn run_turn<'a>(
                                 // repeat can share it; a transport error
                                 // becomes the same error result the
                                 // scheduler would synthesize for it.
+                                let resolution = crate::tools::resolve::resolve_tool_execution(
+                                    &tc.name,
+                                    &tc.arguments,
+                                    workspace_dir.as_ref().map(String::as_str),
+                                );
+                                let call_description = resolution
+                                    .description
+                                    .or_else(|| {
+                                        if tc.name.starts_with("mcp__") {
+                                            tool_descriptions.get(&tc.name).cloned()
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .filter(|description| !description.is_empty());
+                                let call_display = resolution.display;
                                 let execute = async {
                                     // The tool-call lifecycle: `tool.native`
                                     // only reports the outcome, so a consumer
@@ -2217,23 +3028,43 @@ pub fn run_turn<'a>(
                                     // reads "spawn agent swarm (3 subagents)"
                                     // rather than dumping the JSON. Declared
                                     // before execution so it rides this event.
-                                    // v2's `RunnableToolExecution.display`: a
-                                    // host renders this instead of the raw
-                                    // argument string — the approval prompt
-                                    // reads "spawn agent swarm (3 subagents)"
-                                    // rather than dumping the JSON. Declared
-                                    // before execution so it rides this event.
-                                    if let Some(display) =
-                                        crate::tools::agent_tool::agent_call_display(
-                                            &tc.name,
-                                            &tc.arguments,
-                                        )
+                                    if let Some(display) = call_display
+                                        && let Ok(display) = serde_json::to_value(display)
                                         && let Some(map) = started.as_object_mut()
                                     {
                                         map.insert("display".into(), display);
                                     }
-                                    callbacks.emit_event(started);
-                                    match callbacks.execute_tool(req).await {
+                                    if let Some(map) = started.as_object_mut()
+                                        && let Some(description) = call_description
+                                    {
+                                        map.insert("description".into(), description.into());
+                                    }
+                                    callbacks.emit_event(started.clone());
+                                    let mut outcome = callbacks.execute_tool(req.clone()).await;
+                                    // v2 B15 (loopService.ts:1798-1845): a call
+                                    // answered with the canned
+                                    // `unknown tool: <name>` result is
+                                    // re-executed once the tool-execution
+                                    // chain drains, because a late MCP
+                                    // registration makes the name callable
+                                    // after the first attempt. Re-announce the
+                                    // start so the retry reads exactly like
+                                    // v2's re-execution.
+                                    if let Ok(first) = &outcome
+                                        && is_unknown_tool_refusal(
+                                            &first.content,
+                                            first.is_error,
+                                            &tc.name,
+                                        )
+                                        && let Some(mcp) = toolset
+                                            .as_ref()
+                                            .and_then(|toolset| toolset.mcp_manager())
+                                    {
+                                        mcp.wait_for_initial_load().await;
+                                        callbacks.emit_event(started);
+                                        outcome = callbacks.execute_tool(req).await;
+                                    }
+                                    match outcome {
                                         Ok(response) => {
                                             callbacks.emit_event(serde_json::json!({
                                                 "type": if response.is_error {
@@ -2248,6 +3079,8 @@ pub fn run_turn<'a>(
                                                 "is_error": response.is_error,
                                             }));
                                             ExecutableToolResult {
+                                                spill: None,
+                                                parts: Vec::new(),
                                                 delivery: response.delivery,
                                                 stop_turn: response.stop_turn,
                                                 content: response.content,
@@ -2267,6 +3100,8 @@ pub fn run_turn<'a>(
                                                 "error": e,
                                             }));
                                             ExecutableToolResult {
+                                                spill: None,
+                                                parts: Vec::new(),
                                                 delivery: None,
                                                 stop_turn: false,
                                                 content: format!("Tool execution error: {e}"),
@@ -2297,8 +3132,9 @@ pub fn run_turn<'a>(
                     for (index, tc) in tool_calls.iter().enumerate() {
                         // Answered by the preflight refusal above; the tower
                         // guard reads `command`, which an undecodable call does
-                        // not have.
-                        if refusals[index].is_some() {
+                        // not have. A judge-rejected goal write is answered
+                        // with its synthetic result instead of executing.
+                        if refusals[index].is_some() || synthetic_results[index].is_some() {
                             continue;
                         }
                         if tc.name.eq_ignore_ascii_case("bash")
@@ -2324,8 +3160,16 @@ pub fn run_turn<'a>(
                                 })
                                 .unwrap_or(false);
                             if owned {
-                                let process_cwd = std::env::current_dir()
-                                    .ok()
+                                // Relative `cwd` arguments resolve against
+                                // what the toolset actually executes in (the
+                                // caller's bound directory, else the session
+                                // workspace root), never the engine process's
+                                // own cwd.
+                                let execution_cwd = input
+                                    .toolset
+                                    .as_ref()
+                                    .map(|toolset| toolset.execution_root())
+                                    .or_else(|| std::env::current_dir().ok())
                                     .and_then(|cwd| std::fs::canonicalize(&cwd).ok())
                                     .map(crate::tools::strip_verbatim_prefix)
                                     .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -2334,12 +3178,12 @@ pub fn run_turn<'a>(
                                     .get("cwd")
                                     .and_then(|value| value.as_str())
                                     .filter(|cwd| !cwd.is_empty())
-                                    .map_or(process_cwd.clone(), |cwd| {
+                                    .map_or(execution_cwd.clone(), |cwd| {
                                         let path = std::path::Path::new(cwd);
                                         crate::tools::strip_verbatim_prefix(if path.is_absolute() {
                                             path.to_path_buf()
                                         } else {
-                                            process_cwd.join(path)
+                                            execution_cwd.join(path)
                                         })
                                     });
                                 let veto =
@@ -2359,6 +3203,29 @@ pub fn run_turn<'a>(
                         }
                         schedulable.push(tc.clone());
                     }
+                    // v2 `stopBatchAfterThis` (`updateGoalTool.ts:44-48`,
+                    // `setGoalBudgetTool.ts:35-44`) is resolved before the
+                    // batch starts: the prediction decides which calls may run
+                    // at all, independent of whether the predicting tool later
+                    // succeeds. The goal read comes from the host, which owns
+                    // the snapshot v2 reads in memory.
+                    let mut predicted_stop_index: Option<usize> = None;
+                    for (index, tc) in tool_calls.iter().enumerate() {
+                        if refusals[index].is_some() {
+                            continue;
+                        }
+                        if crate::tools::goal_tools::predicted_stop_batch(
+                            callbacks.as_ref(),
+                            &input.agent_id,
+                            &tc.name,
+                            &tc.arguments,
+                        )
+                        .await
+                        {
+                            predicted_stop_index = Some(index);
+                            break;
+                        }
+                    }
                     let scheduled: Vec<ScheduledToolCall> = schedulable
                         .iter()
                         .map(|tc| ScheduledToolCall {
@@ -2366,6 +3233,19 @@ pub fn run_turn<'a>(
                             accesses: tool_scheduler::infer_tool_accesses(&tc.name, &tc.arguments),
                         })
                         .collect();
+                    let run_count = predicted_stop_index.map(|stop| {
+                        // Count the calls the scheduler will actually receive up
+                        // to and including the predicted stop. A judge-rejected
+                        // (synthetic) stop still stops the batch in v2 —
+                        // `stopBatchAfterThis` is resolved before execution —
+                        // so it must not fall out of the count just because it
+                        // is not scheduled.
+                        (0..=stop)
+                            .filter(|index| {
+                                refusals[*index].is_none() && synthetic_results[*index].is_none()
+                            })
+                            .count()
+                    });
 
                     // Derive what the AGENTS.md reminder needs from the accesses
                     // already computed above, exactly as v2's
@@ -2398,18 +3278,26 @@ pub fn run_turn<'a>(
                             if let Some(command) =
                                 arguments.get("command").and_then(|value| value.as_str())
                             {
-                                let process_cwd = std::env::current_dir()
-                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                // Same base the call will execute in: a
+                                // relative `cwd` is resolved against the
+                                // session's execution root, not the engine
+                                // process's working directory.
+                                let execution_cwd = input
+                                    .toolset
+                                    .as_ref()
+                                    .map(|toolset| toolset.execution_root())
+                                    .or_else(|| std::env::current_dir().ok())
+                                    .unwrap_or_else(|| std::path::PathBuf::from("."));
                                 let effective_cwd = match cwd_arg {
                                     Some(cwd) if !cwd.is_empty() => {
                                         let candidate = std::path::Path::new(cwd);
                                         if candidate.is_absolute() {
                                             candidate.to_path_buf()
                                         } else {
-                                            process_cwd.join(candidate)
+                                            execution_cwd.join(candidate)
                                         }
                                     }
-                                    _ => process_cwd,
+                                    _ => execution_cwd,
                                 };
                                 let home = std::env::var_os("USERPROFILE")
                                     .or_else(|| std::env::var_os("HOME"))
@@ -2451,9 +3339,6 @@ pub fn run_turn<'a>(
                                 if let Some(parent) = accessed.parent() {
                                     step_access.dirs.push(parent.to_path_buf());
                                 }
-                                if crate::injection::is_agents_md_path(&accessed) {
-                                    step_access.self_read.push(accessed);
-                                }
                             } else {
                                 step_access.dirs.push(accessed);
                             }
@@ -2473,6 +3358,7 @@ pub fn run_turn<'a>(
                             input.cancellation.as_ref(),
                             scheduled,
                             exec_fn,
+                            run_count,
                         )
                         .await
                         {
@@ -2487,7 +3373,7 @@ pub fn run_turn<'a>(
                                     flag.load(std::sync::atomic::Ordering::Relaxed)
                                 });
                                 if cancelled {
-                                    return Ok(turn_result(
+                                    return Ok(finish!(
                                         LoopTurnStopReason::Aborted,
                                         steps,
                                         total_usage,
@@ -2506,10 +3392,40 @@ pub fn run_turn<'a>(
                     let mut executed_durations = executed_durations.into_iter();
                     let mut results = Vec::with_capacity(tool_calls.len());
                     let mut durations_ms = Vec::with_capacity(tool_calls.len());
-                    for refusal in refusals.iter() {
+                    for (index, refusal) in refusals.iter().enumerate() {
+                        // v2 `prepareSkippedToolCall` runs for every call after
+                        // the predicted stop, including one the preflight would
+                        // have rejected — the batch stopped before it could be
+                        // prepared. The scheduler only ran the calls up to
+                        // `run_count`, so no executed result is consumed here.
+                        if run_count.is_some()
+                            && predicted_stop_index.is_some_and(|stop| index > stop)
+                        {
+                            results.push(ExecutableToolResult {
+                                spill: None,
+                                parts: Vec::new(),
+                                delivery: None,
+                                stop_turn: false,
+                                content: tool_scheduler::SKIPPED_TOOL_OUTPUT.to_string(),
+                                is_error: true,
+                                note: None,
+                                display: None,
+                            });
+                            durations_ms.push(None);
+                            continue;
+                        }
+                        // A judge-rejected goal write never reaches the
+                        // scheduler; its answer is already decided.
+                        if let Some(synthetic) = synthetic_results[index].take() {
+                            results.push(synthetic);
+                            durations_ms.push(None);
+                            continue;
+                        }
                         match refusal {
                             Some(content) => {
                                 results.push(ExecutableToolResult {
+                                    spill: None,
+                                    parts: Vec::new(),
                                     delivery: None,
                                     stop_turn: false,
                                     content: content.clone(),
@@ -2536,6 +3452,65 @@ pub fn run_turn<'a>(
                     // final result, and the cross-step streak advances.
                     let dedupe_force_stop = tool_dedupe.finalize_step(&dedupe_plan, &mut results);
 
+                    // v2 `agentsMdReminderService.trackChanges`: a read only
+                    // marks the file known when the call actually succeeded
+                    // (`onDidExecuteTool` fires on a completed call). Recording
+                    // it at plan time suppressed the reminder for reads that
+                    // were then refused or failed, so the model never learned
+                    // the file exists.
+                    for (index, result) in results.iter().enumerate() {
+                        if result.is_error {
+                            continue;
+                        }
+                        let Some(call) = tool_calls.get(index) else {
+                            continue;
+                        };
+                        if !matches!(
+                            call.name.to_ascii_lowercase().as_str(),
+                            "read" | "edit" | "write"
+                        ) {
+                            continue;
+                        }
+                        for access in
+                            tool_scheduler::infer_tool_accesses(&call.name, &call.arguments)
+                        {
+                            let crate::turn_loop::types::ToolResourceAccess::File(access) = access
+                            else {
+                                continue;
+                            };
+                            let accessed = std::path::PathBuf::from(&access.path);
+                            if crate::injection::is_agents_md_path(&accessed) {
+                                step_access.self_read.push(accessed);
+                            }
+                        }
+                    }
+
+                    // v2 `AgentTestScopeGuardService.observe` through
+                    // `toolExecutor.hooks.onDidExecuteTool`: a completed `Bash`
+                    // call that ran the whole suite from the repository root
+                    // arms one reminder for the next request of this turn.
+                    for (index, result) in results.iter().enumerate() {
+                        if result.is_error {
+                            continue;
+                        }
+                        let Some(call) = tool_calls.get(index) else {
+                            continue;
+                        };
+                        if !call.name.eq_ignore_ascii_case("Bash") {
+                            continue;
+                        }
+                        let Some(command) = call
+                            .arguments
+                            .get("command")
+                            .and_then(|value| value.as_str())
+                        else {
+                            continue;
+                        };
+                        if test_scope_guard.observe(command).is_some() {
+                            break;
+                        }
+                    }
+
                     // v2 `ProgressTrackerService.onDidExecuteTool`: score each
                     // executed call; three unverified mutations arm the
                     // verification reminder for the next request.
@@ -2554,9 +3529,11 @@ pub fn run_turn<'a>(
                         };
                         let receipt =
                             progress_receipt(&call.name, &call.arguments, !result.is_error);
-                        if progress_tracker.observe(&receipt)
-                            >= crate::turn_loop::progress_track::EBM_BLIND_MUTATION_THRESHOLD
-                        {
+                        let blind = match input.toolset.as_ref() {
+                            Some(toolset) => toolset.observe_progress(&receipt),
+                            None => local_progress_tracker.observe(&receipt),
+                        };
+                        if blind >= crate::turn_loop::progress_track::EBM_BLIND_MUTATION_THRESHOLD {
                             ebm_pending.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
@@ -2568,8 +3545,11 @@ pub fn run_turn<'a>(
                         // and never reached the native gate, so no tool.native
                         // event surfaced it — emit one here so the transcript
                         // still shows the call with its shared result (v2
-                        // keeps the vetoed repeat visible).
-                        if dedupe_plan.original_of.get(i).is_some_and(|o| *o != i)
+                        // keeps the vetoed repeat visible). A judge-rejected
+                        // goal write likewise never ran a tool, so its card is
+                        // closed here.
+                        if (dedupe_plan.original_of.get(i).is_some_and(|o| *o != i)
+                            || synthetic_indices.contains(&i))
                             && let Some(tc) = tool_calls.get(i)
                         {
                             callbacks.emit_event(serde_json::json!({
@@ -2596,41 +3576,63 @@ pub fn run_turn<'a>(
                         // wall-time header on top of it
                         // (`renderToolResultForModel`), so a failed call reads
                         // `Wall time: …\n<system>ERROR: …`.
-                        let rendered = tool_result_render::render_status(&tr.content, tr.is_error);
-                        let content = match durations_ms.get(i).copied().flatten() {
-                            Some(duration_ms) if wall_time::should_render_wall_time(tool_name) => {
-                                wall_time::prepend_wall_time(&rendered, duration_ms)
+                        let rendered_parts = if tr.parts.is_empty() {
+                            Vec::new()
+                        } else {
+                            let mut parts =
+                                tool_result_render::render_parts(&tr.parts, tr.is_error);
+                            if let Some(duration_ms) = durations_ms.get(i).copied().flatten()
+                                && wall_time::should_render_wall_time(tool_name)
+                            {
+                                tool_result_render::prepend_wall_time_parts(
+                                    &mut parts,
+                                    duration_ms,
+                                );
                             }
-                            _ => rendered,
+                            if let Some(note) = tr.note.as_deref().filter(|note| !note.is_empty()) {
+                                tool_result_render::append_note_parts(&mut parts, note);
+                            }
+                            parts
                         };
-                        // v2 appends the note last (`renderToolResultForModel`,
-                        // `contextMemory/toolResultRender.ts:43-48`): status
-                        // wrapper, then the wall-time header, then the note.
-                        //
-                        // The note is not decoration. Read fills it with the
-                        // guidance the model needs to act on what it just got —
-                        // "use Bash to read the elided content", "Edit and Write
-                        // expect UTF-8 — convert the file's encoding first" — so
-                        // leaving it out hides the instructions and leaves the
-                        // model with a truncated file and no idea why.
-                        let content = match tr.note.as_deref().filter(|note| !note.is_empty()) {
-                            Some(note) => format!("{content}\n{note}"),
-                            None => content,
+                        let content = if rendered_parts.is_empty() {
+                            let rendered =
+                                tool_result_render::render_status(&tr.content, tr.is_error);
+                            let content = match durations_ms.get(i).copied().flatten() {
+                                Some(duration_ms)
+                                    if wall_time::should_render_wall_time(tool_name) =>
+                                {
+                                    wall_time::prepend_wall_time(&rendered, duration_ms)
+                                }
+                                _ => rendered,
+                            };
+                            let content = match tr.note.as_deref().filter(|note| !note.is_empty()) {
+                                Some(note) => format!("{content}\n{note}"),
+                                None => content,
+                            };
+                            content
+                        } else {
+                            match rendered_parts.as_slice() {
+                                [ContentBlock::Text { text, .. }] => text.clone(),
+                                _ => String::new(),
+                            }
                         };
                         messages.push(LLMMessage {
                             role: "tool".into(),
                             content,
-                            blocks: Vec::new(),
+                            blocks: rendered_parts,
                             tool_calls: Vec::new(),
                             tool_call_id: tool_calls.get(i).map(|tc| tc.id.clone()),
                             prompt_id: None,
                             origin: None,
                         });
-                        // Rich content the tool delivers (an image the model
-                        // asked to read): a follow-up user message right after
-                        // the tool result, the same shape a pasted image takes.
-                        // A same-step repeat shares the original's result —
-                        // and its delivery — so only the original emits it.
+                        // v2 `deliverToolResult` (`loopService.ts:678-690`):
+                        // `delivery` is stripped from the result and, for
+                        // `kind: 'steer'`, submitted as its own user message.
+                        // No media rides this channel — the result's own parts
+                        // carry it. Skill is the only producer
+                        // (`skillTool.ts:132-135`). A same-step repeat shares
+                        // the original's delivery, so only the original emits
+                        // it.
                         let is_repeat = dedupe_plan.original_of.get(i).is_some_and(|o| *o != i);
                         if !is_repeat
                             && let Some(delivery) = tr.delivery.as_ref()
@@ -2656,7 +3658,7 @@ pub fn run_turn<'a>(
                     // (complete/blocked), set-goal-budget (over budget) and
                     // the plan-review reject paths.
                     if results.iter().any(|tr| tr.stop_turn) {
-                        return Ok(turn_result(
+                        return Ok(finish!(
                             LoopTurnStopReason::EndTurn,
                             steps,
                             total_usage,
@@ -2764,7 +3766,7 @@ pub fn run_turn<'a>(
                             }
                         }
 
-                        return Ok(turn_result(
+                        return Ok(finish!(
                             LoopTurnStopReason::RepeatBreaker,
                             steps,
                             total_usage,
@@ -2802,7 +3804,7 @@ pub fn run_turn<'a>(
             );
         }
         Ok(
-            turn_result(reason, steps, total_usage, 0, llm_retries, messages.clone())
+            finish!(reason, steps, total_usage, 0, llm_retries, messages.clone())
                 .with_last_request_usage(last_request_usage),
         )
     })

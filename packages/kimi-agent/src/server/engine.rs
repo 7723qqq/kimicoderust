@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use crate::callbacks::HostCallbacks;
 use crate::mcp::manager::McpManager;
 use crate::pipeline::{PipelineHost, PipelineSpec, build_engine_pipeline};
+use crate::primitives::read::ReadOutcome;
 use crate::rpc::types::{
     AskQuestionRequest, AskQuestionResponse, BoxFuture, ContentBlock, LlmChatRequest,
     LlmChatResponse, PermissionCheckRequest, PermissionDecision, TokenUsage, ToolExecuteRequest,
@@ -36,7 +37,7 @@ use crate::server::interaction::InteractionManager;
 use crate::session::sqlite_store::SqliteSessionStore;
 use crate::subagent::SubagentManager;
 use crate::tools::{memory_filing, memory_store};
-use crate::turn_loop::run_turn::run_turn_continued;
+use crate::turn_loop::run_turn::run_turn_continued_with_observations;
 use crate::turn_loop::types::{LLM, LLMMessage, RunTurnInput};
 use serde_json::Value;
 
@@ -198,6 +199,9 @@ pub struct TurnReport {
     /// The bound model's context window this turn ran against, when the
     /// config declares it. `None` = unknown (the turn loop used its defaults).
     pub context_window: Option<u32>,
+    /// The prompt gate blocked this turn (v2 `onBeforeSubmitPrompt`), so the
+    /// prompt row must settle as `blocked`, not `completed`.
+    pub gate_blocked: bool,
 }
 
 /// The thinking axes a model alias declares: whether reasoning is always on,
@@ -224,6 +228,12 @@ pub enum EngineError {
     /// A live foreign process holds the session's occupancy lock (v2
     /// `session.occupied`, upstream #4246); the message is v2's wording.
     Occupied(String),
+    /// The journal moved since this engine last saw it (v2 `session.stale`,
+    /// `SessionRunGateService.begin()`): another client wrote the session
+    /// while it was idle, and starting here would interleave two histories.
+    Stale(String),
+    /// The session's bound environment could not be restored.
+    Environment(String),
 }
 
 impl std::fmt::Display for EngineError {
@@ -233,6 +243,8 @@ impl std::fmt::Display for EngineError {
             Self::Turn(why) => write!(f, "turn failed: {why}"),
             Self::Store(error) => write!(f, "session store error: {error}"),
             Self::Occupied(message) => f.write_str(message),
+            Self::Stale(message) => f.write_str(message),
+            Self::Environment(message) => f.write_str(message),
         }
     }
 }
@@ -256,7 +268,17 @@ pub struct ServerEngine {
     /// Expected-turn guard for automatic wake interruption: a late cancel must
     /// not hit the user turn that replaced the wake.
     active_turn_numbers: Mutex<HashMap<String, u32>>,
+    /// v2 `AppendLogStore`'s per-scope `knownLength`, ported to the SQLite
+    /// journal: the `MAX(seq)` this engine last saw for a session. A turn that
+    /// starts against a journal beyond this watermark was written by another
+    /// client while the session was idle, and is refused with `session.stale`
+    /// (v2 `SessionRunGateService.begin()` / `WireService.externallyModified`).
+    journal_heads: Mutex<HashMap<String, u64>>,
     mcp_manager: Mutex<Option<Arc<McpManager>>>,
+    /// Per-session MCP status subscriptions, so a server-hosted session sees
+    /// `mcp.server.status` / `tool.list.updated` the same way the napi host
+    /// does. Dropped on session dispose (v2 `attachMcpTools`'s `_register`).
+    mcp_status: Mutex<HashMap<String, Arc<crate::mcp::status::McpStatusBridge>>>,
     interaction_manager: Mutex<Option<Arc<InteractionManager>>>,
     subagent_manager: Arc<SubagentManager>,
     /// OAuth token source for OAuth-bound providers; `None` until the server
@@ -274,6 +296,22 @@ pub struct ServerEngine {
     /// re-resolved to its provider (base URL / key) rather than only renaming
     /// the model on the engine's base transport.
     config_source: Mutex<Option<Arc<tokio::sync::Mutex<Option<crate::config::KimiConfig>>>>>,
+    /// The reloadable `[hooks]` set. Read once per session spec; a config
+    /// reload replaces it in place and a failed reload leaves it untouched.
+    /// Installing it is opt-in, so hosts that resolve hooks themselves keep
+    /// reading the policy snapshot baked into their spec.
+    hooks_source: Mutex<Option<crate::tools::external_hooks::HooksSource>>,
+    /// The last successfully resolved token-counting strategy (v2
+    /// `[tokenCounting].strategy`).
+    ///
+    /// The config source above is an async mutex, but the gauge and the
+    /// turn-recording paths are synchronous. A contended `try_lock` used to
+    /// fall back to the default, which made an explicit `measured` /
+    /// `estimated` look unconfigured for the duration of a reload. The cache
+    /// keeps the last real answer instead; the default is only used when no
+    /// config has ever been readable.
+    token_counting_strategy_cache:
+        Mutex<Option<crate::session::token_counting::TokenCountingStrategy>>,
     /// The enabled plugins' skill roots, asked for fresh on every session spec
     /// (`with_plugin_skill_roots`). The standalone server owns the plugin
     /// manager and installs a reader, so an install / enable / disable / remove
@@ -298,6 +336,23 @@ pub struct ServerEngine {
     /// interruption reminder's trigger, v2 `TurnEnded` reason filter). Read
     /// and cleared when the next turn's spec is built.
     last_turn_aborted: Mutex<HashMap<String, bool>>,
+    /// Per-session AGENTS.md fingerprint, so an instruction file that changed
+    /// after the prompt was built is reported on the next turn instead of at
+    /// the next process start.
+    agents_md_watches: Mutex<HashMap<String, crate::environment::AgentsMdWatch>>,
+    /// Per-session snapshots for v2's other `changeNotifier` variants (skills,
+    /// subagents, workspace directories). Each variant records what it last
+    /// observed and only queues a reminder when the next observation differs.
+    change_notifier: Mutex<HashMap<String, crate::injection::change_notifier::ChangeNotifierState>>,
+    /// The skills listing `session_spec` already rendered for this turn's
+    /// system prompt, handed to the change notifier so a turn never scans the
+    /// skill roots twice. `Unreadable` is carried through unchanged so the
+    /// notifier can keep its baseline instead of reporting a deleted catalog.
+    pending_skill_listings: Mutex<HashMap<String, crate::primitives::read::ReadOutcome<String>>>,
+    /// v2's per-session log settings (`agent-core-v2/src/_base/log/logConfig.ts`):
+    /// the level, the size cap and the number of rotated files. Read once at
+    /// construction; the sink itself is opened per turn.
+    session_log_config: crate::session::session_log::SessionLogConfig,
     /// Whether the *user* asked for the running turn to stop (v2
     /// `TurnEnded.interruptReason === 'user_cancelled'`). Set by [`Self::cancel_turn`]
     /// and consumed at turn end: a teardown or a host-side abort flips the same
@@ -310,6 +365,11 @@ pub struct ServerEngine {
     /// its own schedule, so what matters is how long the prefix has been
     /// sitting unused.
     last_assistant_at: Mutex<HashMap<String, i64>>,
+    /// `session_id\0code\0message` keys whose `warning` event was already
+    /// published. A warning derived from static inputs (the AGENTS.md size
+    /// budget) is recomputed on every turn's prompt rebuild; keying by the
+    /// message means an edit that changes the finding is announced again.
+    emitted_session_warnings: Mutex<std::collections::HashSet<String>>,
     /// Per-session activity trackers (the `agent.status.updated` phase
     /// machine), shared with the interaction manager so a pending
     /// approval/question moves the phase too.
@@ -331,6 +391,10 @@ pub struct ServerEngine {
     /// a provider-forced degrade/strip re-applies to the session's later
     /// turns; [`Self::record_context_truncation`] advances its revision.
     media_recovery: Mutex<HashMap<String, crate::llm::media_budget::SharedMediaRecovery>>,
+    /// Per-session prompt-cache observability (D14): the cache-break tracker,
+    /// the recent breaks and the last observation. Nothing here is on the
+    /// wire; [`Self::cache_observation`] is the read entry.
+    cache_states: Mutex<HashMap<String, SessionCacheState>>,
     /// Installed once by the standalone composition root. Per-turn toolsets
     /// share the driver but receive session-specific runtimes.
     tower_wake_driver: Mutex<Option<Arc<dyn crate::session::wake::TowerWakeDriver>>>,
@@ -341,6 +405,23 @@ pub struct ServerEngine {
 
 /// Builds the host callbacks for one session.
 pub type HostFactory = Arc<dyn Fn(&str) -> Arc<dyn crate::callbacks::HostCallbacks> + Send + Sync>;
+
+/// How many cache breaks one session keeps for the read entry. The event is
+/// also telemetry; the retained ring is only for diagnostics/inspection.
+const CACHE_BREAK_RETENTION: usize = 32;
+
+/// One session's prompt-cache observability state (D14).
+#[derive(Default)]
+struct SessionCacheState {
+    /// v2 `AgentCacheBreakService`: the previous step's snapshot.
+    tracker: crate::session::cache_observation::CacheBreakTracker,
+    /// Recent breaks, newest last, capped at [`CACHE_BREAK_RETENTION`].
+    breaks: std::collections::VecDeque<crate::session::cache_observation::CacheBreakObservation>,
+    /// The last request's observation (v2 `lastTurnRequest.observation`).
+    last: Option<crate::session::cache_observation::CacheObservation>,
+    /// The last request each agent served, keyed by agent id.
+    requests: HashMap<String, crate::session::cache_observation::CacheProbeRequest>,
+}
 
 /// Reads the enabled plugins' skill roots on demand (see
 /// [`ServerEngine::with_plugin_skill_roots`]).
@@ -373,22 +454,32 @@ impl ServerEngine {
             compaction_max_attempts: None,
             active_turns: Mutex::new(HashMap::new()),
             active_turn_numbers: Mutex::new(HashMap::new()),
+            journal_heads: Mutex::new(HashMap::new()),
             mcp_manager: Mutex::new(None),
+            mcp_status: Mutex::new(HashMap::new()),
             interaction_manager: Mutex::new(None),
             subagent_manager: Arc::new(SubagentManager::with_store(store.clone())),
             oauth_manager: Mutex::new(None),
             steer_queues: Mutex::new(HashMap::new()),
             steer_slots: Mutex::new(HashMap::new()),
             config_source: Mutex::new(None),
+            hooks_source: Mutex::new(None),
+            token_counting_strategy_cache: Mutex::new(None),
             host_factory: Mutex::new(None),
             status_hashes: Mutex::new(HashMap::new()),
             last_turn_aborted: Mutex::new(HashMap::new()),
+            agents_md_watches: Mutex::new(HashMap::new()),
+            change_notifier: Mutex::new(HashMap::new()),
+            pending_skill_listings: Mutex::new(HashMap::new()),
+            session_log_config: crate::session::session_log::SessionLogConfig::from_env(),
             last_cancel_user: Mutex::new(HashMap::new()),
             last_assistant_at: Mutex::new(HashMap::new()),
+            emitted_session_warnings: Mutex::new(std::collections::HashSet::new()),
             media: crate::llm::media_resolver::MediaResolver::new()
                 .with_upload_cache(store.clone()),
             media_dropped: Mutex::new(HashMap::new()),
             media_recovery: Mutex::new(HashMap::new()),
+            cache_states: Mutex::new(HashMap::new()),
             session_mcp: Mutex::new(HashMap::new()),
             tower_wake_driver: Mutex::new(None),
             tower_wake_runtimes: Mutex::new(HashMap::new()),
@@ -443,10 +534,49 @@ impl ServerEngine {
     /// `session/new` uses this so the client's `mcpServers` stay scoped to
     /// that session (v2 `sessions.create({ mcpServers })`).
     pub fn set_session_mcp_manager(&self, session_id: &str, manager: Arc<McpManager>) {
+        // The old subscription belongs to the old manager; the next turn
+        // re-attaches to the new one.
+        self.mcp_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
         self.session_mcp
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(session_id.to_string(), manager);
+    }
+
+    /// Attach the session's MCP status bridge once, if the session has a
+    /// manager. Events go to the session's lane, so a connected/failed server
+    /// reaches the WS clients without polling the roster (v2
+    /// `attachMcpTools`).
+    fn ensure_mcp_status_bridge(&self, session_id: &str) {
+        let Some(manager) = self.mcp_manager_for(session_id) else {
+            return;
+        };
+        let mut bridges = self
+            .mcp_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if bridges.contains_key(session_id) {
+            return;
+        }
+        let bus = self.hub.bus_for(session_id);
+        let emit: crate::mcp::status::McpEventSink = Arc::new(move |event| {
+            bus.publish(&crate::events::EngineEvent::Custom(event));
+        });
+        bridges.insert(
+            session_id.to_string(),
+            crate::mcp::status::attach(&manager, emit),
+        );
+    }
+
+    /// Drop a disposed session's MCP status subscription (delete / archive).
+    pub fn forget_mcp_status(&self, session_id: &str) {
+        self.mcp_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
     }
 
     /// The MCP manager a session's turns run with: its own when a client
@@ -511,6 +641,21 @@ impl ServerEngine {
         *self.config_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(source);
     }
 
+    /// Attach the reloadable `[hooks]` set. Once installed, every session spec
+    /// takes its hooks from this source instead of the engine-wide snapshot,
+    /// so a config reload reaches the next turn without a restart. A turn that
+    /// is already running keeps the guard it built.
+    pub fn set_hooks_source(&self, source: crate::tools::external_hooks::HooksSource) {
+        *self.hooks_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(source);
+    }
+
+    fn hooks_source(&self) -> Option<crate::tools::external_hooks::HooksSource> {
+        self.hooks_source
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Install the reader for the enabled plugins' skill roots. Called once by
     /// the server that owns the plugin manager; the returned roots go into each
     /// session's [`PipelineSpec`] so the system prompt's skills section and the
@@ -557,6 +702,42 @@ impl ServerEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// The context-gauge strategy for this engine (v2 `[tokenCounting]` +
+    /// `KIMI_TOKEN_COUNTING_STRATEGY`).
+    ///
+    /// The gauge readers ([`Self::session_context_tokens`] and the turn-end
+    /// recording) are synchronous while the config source is an async mutex.
+    /// `try_lock` reads the live config whenever no reload holds it; when a
+    /// reload *is* holding it, the last successfully resolved strategy is
+    /// returned instead of the default — an explicit `measured` / `estimated`
+    /// must never look unconfigured just because a read raced a write. The
+    /// default (which still honours the env binding) applies only when no
+    /// config has ever been readable.
+    fn token_counting_strategy(&self) -> crate::session::token_counting::TokenCountingStrategy {
+        let mut cache = self
+            .token_counting_strategy_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(source) = self.config_source()
+            && let Ok(guard) = source.try_lock()
+        {
+            let strategy = guard.as_ref().map_or_else(
+                // No config published yet: only `KIMI_TOKEN_COUNTING_STRATEGY`
+                // can apply.
+                || crate::config::KimiConfig::default().resolve_token_counting_strategy(),
+                |config| config.resolve_token_counting_strategy(),
+            );
+            *cache = Some(strategy);
+            return strategy;
+        }
+        if let Some(strategy) = *cache {
+            return strategy;
+        }
+        let strategy = crate::config::KimiConfig::default().resolve_token_counting_strategy();
+        *cache = Some(strategy);
+        strategy
     }
 
     /// The `[experimental].micro_compaction` knob: `Some(config)` when the
@@ -625,6 +806,32 @@ impl ServerEngine {
         (size > 0).then_some(size as usize)
     }
 
+    /// The provider type the session's model resolves to (`kimi`,
+    /// `anthropic`, `openai`, …), for prompt-intake decisions that vary by
+    /// provider — today the inline-image budget. `None` when no engine config
+    /// or model is resolvable; callers then use the baseline policy.
+    pub async fn session_provider_type(&self, session_id: &str) -> Option<String> {
+        let model = self
+            .store
+            .get_state("agent_config", session_id)
+            .ok()
+            .flatten()
+            .and_then(|profile| {
+                profile
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| self.spec.model_name.clone());
+        let source = self.config_source()?;
+        let config = {
+            let guard = source.lock().await;
+            guard.clone()
+        }?;
+        let native = config.extract_native_llm(Some(&model))?;
+        Some(native.provider_type).filter(|value| !value.is_empty())
+    }
+
     /// The thinking capability a model alias declares (v2 catalog
     /// `thinkingSupported` / `alwaysThinking` / `supportEfforts`), or `None`
     /// when the model is unknown or declares no thinking axis at all.
@@ -655,6 +862,29 @@ impl ServerEngine {
         })
     }
 
+    /// Publish an observable `warning` event on the session lane, once per
+    /// distinct `(session, code, message)`. v2's `WarningIssued` is an
+    /// observable agent event and its consumers treat repeats as noise; the
+    /// engine recomputes some findings every turn, so the dedupe lives here.
+    fn publish_session_warning(&self, session_id: &str, code: &str, message: &str) {
+        let key = format!("{session_id}\u{0}{code}\u{0}{message}");
+        let inserted = self
+            .emitted_session_warnings
+            .lock()
+            .map(|mut emitted| emitted.insert(key))
+            .unwrap_or(false);
+        if !inserted {
+            return;
+        }
+        self.hub
+            .bus_for(session_id)
+            .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
+                "type": "warning",
+                "code": code,
+                "message": message,
+            })));
+    }
+
     /// Record that this session just produced assistant output, which resets
     /// micro compaction's idle clock (v2 `onDidFinishStep` stamping
     /// `lastAssistantAt`).
@@ -669,8 +899,8 @@ impl ServerEngine {
 
     /// Whether the background memory filing pass may run: the
     /// `KIMI_AGENT_MEMORY_FILING` env override over the
-    /// `[experimental].memory_filing` entry, on when neither is set. The pass
-    /// spends an LLM call per turn, so either switch turns it off.
+    /// `[experimental].memory_filing` entry, off when neither is set — v2
+    /// files only through the model's memory tool, with no turn-end pass.
     async fn memory_filing_enabled(&self) -> bool {
         memory_filing::resolve_gate(
             memory_filing::env_switch(),
@@ -784,7 +1014,7 @@ impl ServerEngine {
                 .unwrap_or_default()
         });
         let native = config.extract_native_llm(Some(model))?;
-        Some(crate::rpc::types::NativeLlmConfig {
+        let mut llm = crate::rpc::types::NativeLlmConfig {
             protocol: native.protocol,
             alias: native.alias,
             provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
@@ -809,7 +1039,15 @@ impl ServerEngine {
             reasoning_key: native.reasoning_key.clone(),
             // `resolve_effort` above already applied the declared off-effort.
             off_effort: None,
-        })
+            response_format: None,
+            sampling: None,
+            determinism: None,
+            extra_params: None,
+            binary_path: native.binary_path.clone(),
+            antigravity: native.antigravity.clone(),
+        };
+        config.apply_model_request_options(&mut llm, Some(model));
+        Some(llm)
     }
 
     fn oauth_manager(&self) -> Option<Arc<crate::server::oauth::OAuthManager>> {
@@ -825,6 +1063,43 @@ impl ServerEngine {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(session_id)
+    }
+
+    /// The active turn's number, when one is running (v2 `LoopSnapshot`
+    /// `activeTurnId`). The turn number and the activity phase's `turnId` are
+    /// the same value, but the number survives the brief window where the
+    /// phase has already moved to `ended` on an unusual exit.
+    pub fn active_turn_number(&self, session_id: &str) -> Option<u32> {
+        self.active_turn_numbers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .copied()
+    }
+
+    /// Whether the running turn has been asked to stop (v2 `aborting` / the
+    /// `ending` flag of `LoopSnapshot.turn`). The flag is set by the cancel
+    /// paths and read by the loop at its next checkpoint.
+    pub fn is_turn_ending(&self, session_id: &str) -> bool {
+        self.active_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    /// The session's activity phase machine (v2 `loop.snapshot().turn.phase`).
+    pub fn activity_phase(&self, session_id: &str) -> crate::server::activity::AgentPhase {
+        self.activity_registry.tracker(session_id).snapshot()
+    }
+
+    /// The session's activity tracker, for snapshots that also need the step
+    /// counter and the turn's start stamp.
+    pub fn activity_tracker(
+        &self,
+        session_id: &str,
+    ) -> Arc<crate::server::activity::ActivityTracker> {
+        self.activity_registry.tracker(session_id)
     }
 
     /// Queue a steering prompt for `session_id`'s active turn. Returns `false`
@@ -1027,12 +1302,182 @@ impl ServerEngine {
         &self.spec.model_name
     }
 
-    /// Check whether a turn is currently executing for the given session.
+    /// Whether the session has any work in flight. v2's
+    /// `sessionActivityService` folds three sources: the main turn, every
+    /// agent's turn, and the background task set. A background subagent turn
+    /// (tower/swarm) or a running `Bash`-style task keeps the session busy
+    /// after the main turn ends, which is what the prompt queue and the idle
+    /// reaper must see.
     pub fn is_busy(&self, session_id: &str) -> bool {
-        self.active_turns
+        if self
+            .active_turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(session_id)
+        {
+            return true;
+        }
+        if self.has_background_work(session_id) {
+            return true;
+        }
+        false
+    }
+
+    /// The non-turn half of the v2 activity fold: a detached subagent turn or
+    /// a running background task still belongs to the session even when no
+    /// main turn is executing.
+    fn has_background_work(&self, session_id: &str) -> bool {
+        if self.subagent_manager.session_has_active_turn(session_id) {
+            return true;
+        }
+        self.subagent_manager
+            .get_task_runner_sync()
+            .is_some_and(|runner| runner.has_running_task_for_session(session_id))
+    }
+
+    /// Recompute and publish `work_changed` for a session after background
+    /// work settled (v2's `TaskTerminatedNotice` / agent-turn-end recompute).
+    /// The main turn's own end publishes directly; this covers the tail where
+    /// the session stayed busy only for a task or a detached subagent turn.
+    pub(crate) fn publish_background_work_changed(&self, session_id: &str) {
+        let turn_running = self
+            .active_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(session_id);
+        if turn_running {
+            // The turn's own completion publishes the next transition.
+            return;
+        }
+        let busy = self.is_busy(session_id);
+        let reason = self
+            .store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|summary| summary.last_turn_reason);
+        self.publish_work_changed(session_id, busy, reason.as_deref());
+    }
+
+    /// The turns still executing, as `(session id, turn number)`.
+    ///
+    /// A turn number is `0` when the session is between "marked busy" and
+    /// "recorded a number"; that still names the session, which is what a
+    /// shutdown report needs.
+    pub fn active_turns_snapshot(&self) -> Vec<(String, u32)> {
+        let sessions: Vec<String> = self
+            .active_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        let numbers = self
+            .active_turn_numbers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions
+            .into_iter()
+            .map(|session| {
+                let turn = numbers.get(&session).copied().unwrap_or(0);
+                (session, turn)
+            })
+            .collect()
+    }
+
+    /// Wait for in-flight turns to finish.
+    ///
+    /// The reference's `settled()` has no upper bound
+    /// (`agent/loop/loopService.ts:970-993`). Shutdown deliberately waits
+    /// rather than cancelling: the turn may be one tool call away from a clean
+    /// transcript write.
+    pub async fn drain_active_turns(&self) {
+        while !self.active_turns_snapshot().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Adopt the journal's current head as this engine's watermark — v2 opening
+    /// a session scope (`AppendLogStore` `knownLength`) and the point a client
+    /// reloads after a `session.stale`. Returns the adopted head.
+    pub fn observe_journal_head(&self, session_id: &str) -> u64 {
+        let head = self.store.latest_wire_event_seq(session_id).unwrap_or(0);
+        self.journal_heads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session_id.to_string(), head);
+        head
+    }
+
+    /// Drop the watermark of a session this engine no longer tracks (delete /
+    /// fork target replacement). A session with no watermark reads as freshly
+    /// opened, which is v2's state right after `resume`.
+    pub fn forget_journal_head(&self, session_id: &str) {
+        self.journal_heads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
+        // The persisted head belongs to the deleted journal too: a session id
+        // re-created later starts a new journal whose sequences can be below
+        // this one, and a leftover head would read as a foreign write forever.
+        self.hub.forget_persisted_head(session_id);
+    }
+
+    /// Drop the per-session catalog-change snapshot when the session goes away
+    /// (delete / archive). v2 disposes it with the agent; this engine has no
+    /// agent object, so the lifecycle events have to forget it explicitly —
+    /// otherwise the map grows with every session ever opened.
+    pub fn forget_change_notifier(&self, session_id: &str) {
+        self.change_notifier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
+    }
+
+    /// The session's diagnostic log sink (v2 `sessionLogService`), or `None`
+    /// when this engine has no workspace root to locate a session directory
+    /// under. The sink is opened per turn; opening is lazy (no directory is
+    /// created until a line is written).
+    fn session_log(&self, session_id: &str) -> Option<crate::session::session_log::SessionLog> {
+        let root = self.spec.workspace_root.as_deref()?;
+        let dir = crate::storage::paths::engine_session_dir(std::path::Path::new(root), session_id)
+            .ok()?;
+        Some(crate::session::session_log::SessionLog::open(
+            &dir,
+            self.session_log_config,
+        ))
+    }
+
+    /// v2 `resolveSessionLogPath` for this engine's session directory. The
+    /// export uses it to pick the session log members regardless of whether the
+    /// file exists yet.
+    pub fn session_log_path(&self, session_id: &str) -> Option<std::path::PathBuf> {
+        let root = self.spec.workspace_root.as_deref()?;
+        let dir = crate::storage::paths::engine_session_dir(std::path::Path::new(root), session_id)
+            .ok()?;
+        Some(crate::session::session_log::resolve_session_log_path(&dir))
+    }
+
+    /// v2 `WireService.externallyModified()`: the journal moved since this
+    /// engine last saw it. Both growth (a foreign turn appended rows) and
+    /// shrinkage (a foreign undo rewrote them) count — `AppendLogStore`'s
+    /// `disk < known || disk > known + inFlight`. A session this engine has
+    /// never observed has nothing to compare against, exactly like a scope
+    /// whose first read *is* the truth.
+    ///
+    /// Rows this process's persister wrote are its own in-flight tail (v2's
+    /// `inFlight`): the turn's own post-turn events and the next prompt's
+    /// `prompt.submitted` land after the turn watermark was taken, and must
+    /// not read back as an external write. Only rows beyond both the observed
+    /// watermark and the persisted head are foreign.
+    fn journal_moved(&self, session_id: &str) -> bool {
+        let head = self.store.latest_wire_event_seq(session_id).unwrap_or(0);
+        let own_tail = self.hub.persisted_head(session_id).unwrap_or(0);
+        self.journal_heads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .is_some_and(|seen| head != (*seen).max(own_tail))
     }
 
     /// Signal cancellation for the active turn in the given session, if one is running.
@@ -1250,6 +1695,13 @@ impl ServerEngine {
     /// summarizer — resolves it the same way instead of a second copy.
     async fn session_spec(&self, session_id: &str) -> PipelineSpec {
         let mut policy_snapshot = self.spec.policy_snapshot.clone().unwrap_or_default();
+        // `[hooks]` are reloadable: take the current set so a config edit
+        // reaches the next turn, while a turn already running keeps the guard
+        // it built. A failed reload never replaces the source, so a broken
+        // config cannot clear every guard and let blocked calls through.
+        if let Some(hooks) = self.hooks_source().and_then(|source| source.snapshot()) {
+            policy_snapshot.pre_tool_hooks = hooks;
+        }
         let session_metadata = self
             .store
             .get_state("metadata", session_id)
@@ -1295,7 +1747,64 @@ impl ServerEngine {
         }
         extra_roots.extend(self.project_local_roots(session_id));
 
+        // The roots are re-derived every turn, so a directory added between
+        // turns (host `/add-dir` → session metadata, or `local.toml`) must be
+        // published for the spawns that follow: children resolve their cwd
+        // against the session's live roots, and the revision records that the
+        // set moved. Non-existent roots are dropped exactly as the toolset's
+        // extra roots are, and an unchanged set publishes nothing.
+        if let Some(root) = self.session_root_path(session_id) {
+            let additional: Vec<std::path::PathBuf> = extra_roots
+                .iter()
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_dir())
+                .collect();
+            if let Ok(roots) = crate::environment::WorkspaceRoots::new(root, additional) {
+                self.subagent_manager
+                    .refresh_session_workspace_roots(session_id, roots);
+            }
+        }
+
         let plugin_skill_dirs = self.plugin_skill_roots();
+        // One scan per turn, shared by the system prompt and the change
+        // notifier: `session_spec` runs at the head of every turn, so scanning
+        // a second time just for change detection would double the disk walk.
+        let skill_scan = crate::skills::SkillScanRoots {
+            root: self
+                .spec
+                .workspace_root
+                .as_deref()
+                .map(std::path::PathBuf::from),
+            extra_dirs: self.spec.skill_dirs.clone(),
+            plugin_dirs: plugin_skill_dirs.clone(),
+            merge_all_available_skills: self.spec.merge_all_available_skills,
+        };
+        let skill_listing = skill_scan
+            .catalog_outcome()
+            .map(|skills| crate::prompt::skills_renderer::render_skills_markdown(&skills));
+        self.pending_skill_listings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session_id.to_string(), skill_listing.clone());
+        let session_profile = match self.store.get_state("agent_config", session_id) {
+            Ok(Some(profile)) => profile,
+            Ok(None) => serde_json::Value::Null,
+            Err(error) => {
+                tracing::warn!(
+                    %session_id,
+                    %error,
+                    "could not read the session's agent_config; the turn runs with the \
+                     engine-wide profile instead of guessing the overrides"
+                );
+                serde_json::Value::Null
+            }
+        };
+        let bound_profile = session_profile
+            .get("profile")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
         let mut session_system_prompt = self.spec.system_prompt.clone();
         if (session_system_prompt.is_empty()
             || session_system_prompt == "sys"
@@ -1306,13 +1815,32 @@ impl ServerEngine {
             // The prompt's skills section scans the declared extra roots and the
             // plugin roots, in that order: v2 ranks `extra` (10) above `plugin`
             // (5), so a plugin skill never shadows a declared one.
-            session_system_prompt = crate::prompt::SystemPromptBuilder::new(ws)
+            let builder = crate::prompt::SystemPromptBuilder::new(ws)
                 .with_skill_dirs(self.spec.skill_dirs.clone())
                 .with_plugin_skill_dirs(plugin_skill_dirs.clone())
                 .with_merge_all_available_skills(self.spec.merge_all_available_skills)
                 .with_additional_dirs(extra_roots.iter().map(std::path::PathBuf::from).collect())
-                .with_memory(true)
-                .build();
+                .with_memory(true);
+            let builder = match &bound_profile {
+                Some(name) => builder.with_profile(name.clone()),
+                None => builder,
+            };
+            // Reuse the scan above. On an unreadable root the builder falls
+            // back to its own best-effort scan, exactly as before this turn's
+            // detection existed.
+            let builder = match &skill_listing {
+                crate::primitives::read::ReadOutcome::Found(listing) => {
+                    builder.with_custom_skills(listing.clone())
+                }
+                _ => builder,
+            };
+            let (prompt, warnings) = builder.build_with_warnings();
+            session_system_prompt = prompt;
+            // v2 `publishAgentsMdWarning` (`profileService.ts:874-884`): the
+            // loader's finding reaches the client as an observable `warning`.
+            for warning in warnings {
+                self.publish_session_warning(session_id, "agents-md-oversized", &warning);
+            }
         }
 
         let mut spec = PipelineSpec {
@@ -1324,16 +1852,6 @@ impl ServerEngine {
             plugin_skill_dirs,
             ..clone_spec(&self.spec)
         };
-        // The session's persisted profile (`agent_config`) overrides the
-        // engine-wide spec for this turn: the REST prompt/profile surface
-        // writes model / thinking / disabled-tools there and the standalone
-        // server has no host to re-resolve per-turn params.
-        let session_profile = self
-            .store
-            .get_state("agent_config", session_id)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
         // A session model override re-resolves to its provider first, so a
         // cross-provider alias picks up the right base URL / key; the
         // field-level overrides below then win for model / thinking / tools.
@@ -1347,6 +1865,18 @@ impl ServerEngine {
             spec.native_llm = Some(native);
         }
         apply_session_overrides(&mut spec, &session_profile);
+        if let Some(name) = bound_profile.as_deref()
+            && !name.eq_ignore_ascii_case(crate::prompt::profiles::DEFAULT_AGENT_PROFILE_NAME)
+            && let Some(profile) = crate::prompt::ProfileCatalog::with_builtins().get(name)
+        {
+            let snapshot = spec
+                .policy_snapshot
+                .get_or_insert_with(crate::permission::PolicySnapshot::default);
+            let filter = snapshot
+                .tools_filter
+                .get_or_insert_with(crate::tools::tool_policy::ToolsFilter::default);
+            crate::tools::tool_policy::restrict_to_profile(&mut filter.enabled, &profile.tools);
+        }
         spec
     }
 
@@ -1363,6 +1893,312 @@ impl ServerEngine {
             .flatten()
             .and_then(|session| session.workspace_id)?;
         self.store.get_workspace(&workspace_id).ok().flatten()
+    }
+
+    /// The directory a session was created in: its workspace root, else the
+    /// cwd recorded on the session row.
+    fn session_root_path(&self, session_id: &str) -> Option<std::path::PathBuf> {
+        if let Some(workspace) = self.session_workspace(session_id) {
+            return Some(std::path::PathBuf::from(workspace.root));
+        }
+        self.store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|session| session.cwd)
+            .map(std::path::PathBuf::from)
+    }
+
+    /// The validated `[environments]` declaration.
+    ///
+    /// No config source means the host resolves configuration itself (napi
+    /// path), where a declared remote environment would already have been
+    /// rejected; the built-in local environment is the correct default.
+    async fn environment_declaration(
+        &self,
+    ) -> Result<crate::environment::EnvironmentDeclaration, crate::environment::EnvironmentError>
+    {
+        let config = match self.config_source() {
+            Some(source) => source.lock().await.clone(),
+            None => None,
+        };
+        match config {
+            Some(config) => {
+                crate::environment::EnvironmentDeclaration::from_config(&config.environments)
+            }
+            None => Ok(crate::environment::EnvironmentDeclaration::default()),
+        }
+    }
+
+    /// Watch the session's instruction files for the next turn.
+    ///
+    /// The prompt is built once per turn from these files; a file that changed
+    /// after the previous prompt was assembled becomes a model-visible
+    /// `agents_md_change` reminder (v2 `changeNotifierService`) instead of
+    /// something to discover after a restart. Absence stays silent — it is the
+    /// normal state of most workspaces.
+    fn observe_agents_md(&self, session_id: &str, work_dir: &std::path::Path) -> Option<String> {
+        let home = crate::default_workspace::user_home_dir();
+        let mut watches = self
+            .agents_md_watches
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let watch = watches.entry(session_id.to_string()).or_insert_with(|| {
+            crate::environment::AgentsMdWatch::start(work_dir, None, home.as_deref())
+        });
+        let changes = watch.check(work_dir, None, home.as_deref());
+        for change in &changes {
+            tracing::warn!(
+                session_id,
+                code = crate::environment::codes::AGENTS_MD_CHANGED,
+                change = %change,
+                "AGENTS.md changed after the prompt was built"
+            );
+        }
+        for warning in watch.status().warnings() {
+            tracing::warn!(
+                session_id,
+                code = crate::environment::codes::AGENTS_MD_UNREADABLE,
+                warning = %warning,
+                "AGENTS.md could not be read"
+            );
+        }
+        // v2 `notifyAgentsMdChanges` (`changeNotifierService.ts:146-183`): the
+        // change is model-visible, not just a log line — it is injected as the
+        // `agents_md_change` reminder, whose text says the copies already in
+        // the system prompt are stale.
+        agents_md_change_reminder(&changes)
+    }
+
+    /// Observe v2's skills / subagents / workspace-directory `changeNotifier`
+    /// variants for one turn.
+    ///
+    /// Everything here is bounded by work the turn already did: the skills
+    /// value is the listing `session_spec` rendered for this turn's system
+    /// prompt (never a second scan), the subagent list is an in-memory map, and
+    /// the workspace roots are the session's cached context refreshed at the
+    /// head of this turn. The only fallback scan happens when no prompt was
+    /// built this turn (a host-supplied system prompt), which is exactly the
+    /// case where the model cannot have seen the current listing.
+    async fn observe_catalog_changes(
+        &self,
+        session_id: &str,
+        spec: &PipelineSpec,
+        prompt: &str,
+    ) -> Vec<(String, &'static str)> {
+        use crate::injection::change_notifier::{
+            ChangeNotifierState, ModelPoolSnapshot, SKILLS_CHANGE_VARIANT,
+            SUBAGENTS_CHANGE_VARIANT, SubagentProfile, WORKSPACE_DIRS_CHANGE_VARIANT,
+            WorkspaceSnapshot,
+        };
+
+        // Gather the async observation before taking the snapshot lock: a std
+        // mutex must not be held across an await.
+        let profiles: Vec<SubagentProfile> = self
+            .subagent_manager
+            .profile_listing()
+            .await
+            .into_iter()
+            .map(|profile| SubagentProfile {
+                name: profile.name,
+                description: profile.description,
+                when_to_use: profile.when_to_use,
+            })
+            .collect();
+        let pool = spec.secondary_model.as_ref().map(|pool| ModelPoolSnapshot {
+            default_model: Some(pool.default_model.clone()),
+            models: pool
+                .models
+                .iter()
+                .map(|entry| (entry.alias.clone(), entry.hint.clone()))
+                .collect(),
+        });
+        let workspace = self
+            .subagent_manager
+            .session_workspace_roots_sync(session_id);
+        let workspace_snapshot = workspace.as_ref().map(|roots| WorkspaceSnapshot {
+            additional: roots
+                .additional_dirs()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        });
+        let cwd = workspace
+            .as_ref()
+            .map(|roots| roots.work_dir().display().to_string())
+            .or_else(|| {
+                self.session_root_path(session_id)
+                    .map(|path| path.display().to_string())
+            })
+            .unwrap_or_default();
+
+        let listing = self
+            .pending_skill_listings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id)
+            .unwrap_or_else(|| {
+                crate::skills::SkillScanRoots {
+                    root: spec.workspace_root.as_deref().map(std::path::PathBuf::from),
+                    extra_dirs: spec.skill_dirs.clone(),
+                    plugin_dirs: spec.plugin_skill_dirs.clone(),
+                    merge_all_available_skills: spec.merge_all_available_skills,
+                }
+                .catalog_outcome()
+                .map(|skills| crate::prompt::skills_renderer::render_skills_markdown(&skills))
+            });
+
+        let mut states = self
+            .change_notifier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = states
+            .entry(session_id.to_string())
+            .or_insert_with(ChangeNotifierState::default);
+        // v2 evaluates the composed tool policy per name
+        // (`isToolActiveComposed('Skill')`, `('Agent')`, `('AgentSwarm')`).
+        // `native_tools` only says the engine advertises *some* native table;
+        // the `[tools]` filter (global + profile + session disables) decides
+        // whether this particular tool is in it. Collapsing both into one
+        // boolean made a workspace that disabled `Skill` still announce skill
+        // changes the model could never act on.
+        let tools_filter = spec
+            .policy_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.tools_filter.as_ref());
+        let is_tool_active = |name: &str| {
+            spec.native_tools && tools_filter.map_or(true, |filter| filter.allows(name))
+        };
+        let mut reminders = Vec::new();
+        // v2's `plugin_change` reminder: mutations are queued by the plugin
+        // routes and announced once per live session.
+        if let Some(text) = crate::injection::plugin::take_plugin_change_notices(session_id) {
+            reminders.push((text, crate::injection::plugin::PLUGIN_CHANGE_VARIANT));
+        }
+        if let Some(text) = state.skills(listing, prompt, &is_tool_active) {
+            reminders.push((text, SKILLS_CHANGE_VARIANT));
+        }
+        if let Some(text) = state.subagents(&profiles, pool, &is_tool_active) {
+            reminders.push((text, SUBAGENTS_CHANGE_VARIANT));
+        }
+        if let Some(text) = state.workspace_dirs(workspace_snapshot, &cwd) {
+            reminders.push((text, WORKSPACE_DIRS_CHANGE_VARIANT));
+        }
+        reminders
+    }
+
+    /// Freeze the session's environment at creation (v2 `createSession`).
+    ///
+    /// A chat-only session has no directory; it still records `local` with no
+    /// cwd so a later resume can tell "never bound" from "bound elsewhere".
+    pub async fn freeze_session_environment(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::environment::EnvironmentSnapshot>, crate::environment::EnvironmentError>
+    {
+        use crate::environment::{EnvironmentSnapshot, WorkspaceRoots, codes};
+
+        let declaration = self.environment_declaration().await?;
+        let Some(root) = self.session_root_path(session_id) else {
+            self.store
+                .set_session_environment_snapshot(
+                    session_id,
+                    crate::environment::declaration::LOCAL_ENVIRONMENT_ID,
+                    None,
+                    &std::collections::BTreeMap::new(),
+                )
+                .map_err(|error| {
+                    crate::environment::EnvironmentError::new(
+                        codes::ENVIRONMENT_STORE_FAILED,
+                        error.to_string(),
+                    )
+                })?;
+            self.subagent_manager
+                .clear_session_environment(session_id)
+                .await;
+            return Ok(None);
+        };
+        let roots = WorkspaceRoots::new(root, Vec::new())?;
+        let snapshot = EnvironmentSnapshot::capture(
+            &declaration,
+            None,
+            Some(roots.work_dir()),
+            std::collections::BTreeMap::new(),
+            &roots,
+            true,
+        )?;
+        // Children spawn against this snapshot: same environment id, cwd and
+        // variables, never a re-derivation from the current config. Registered
+        // only after the store write succeeds, so an error leaves no
+        // half-bound session behind.
+        let cwd = snapshot.cwd().display().to_string();
+        self.store
+            .set_session_environment_snapshot(
+                session_id,
+                snapshot.environment_id(),
+                Some(&cwd),
+                snapshot.env(),
+            )
+            .map_err(|error| {
+                crate::environment::EnvironmentError::new(
+                    codes::ENVIRONMENT_STORE_FAILED,
+                    error.to_string(),
+                )
+            })?;
+        self.subagent_manager
+            .set_session_environment(session_id, snapshot.clone(), roots)
+            .await;
+        Ok(Some(snapshot))
+    }
+
+    /// Restore the frozen environment on resume.
+    ///
+    /// `Ok(None)` covers both "no binding" (legacy row) and "binding without a
+    /// directory" (chat-only session); a binding whose directory vanished is an
+    /// error, because continuing would silently run the turn somewhere else.
+    pub async fn restore_session_environment(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::environment::RestoreOutcome>, crate::environment::EnvironmentError>
+    {
+        use crate::environment::{EnvironmentSnapshot, WorkspaceRoots, codes};
+
+        let Some(stored) = self
+            .store
+            .get_session_environment_snapshot(session_id)
+            .map_err(|error| {
+                crate::environment::EnvironmentError::new(
+                    codes::ENVIRONMENT_STORE_FAILED,
+                    error.to_string(),
+                )
+            })?
+        else {
+            return Ok(None);
+        };
+        let declaration = self.environment_declaration().await?;
+        let Some(root) = stored
+            .binding
+            .cwd
+            .clone()
+            .or_else(|| self.session_root_path(session_id))
+        else {
+            self.subagent_manager
+                .clear_session_environment(session_id)
+                .await;
+            return Ok(None);
+        };
+        let roots = WorkspaceRoots::new(root, Vec::new())?;
+        let outcome = EnvironmentSnapshot::restore(
+            &declaration,
+            &stored.binding,
+            Some(stored.env),
+            &roots,
+            true,
+        )?;
+        self.subagent_manager
+            .set_session_environment(session_id, outcome.snapshot.clone(), roots)
+            .await;
+        Ok(Some(outcome))
     }
 
     /// The session-scoped durable state store (v2 agent scope), when the
@@ -1397,19 +2233,15 @@ impl ServerEngine {
     ) -> Option<Result<Value, String>> {
         let store = self.session_state_store(session_id)?;
         let outcome = store
-            .apply_write(
+            .apply_write_and_persist(
                 "goal",
                 &serde_json::json!({ "action": "objective", "objective": objective }),
             )
             .map_err(|error| error.to_string());
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => return Some(Err(error)),
-        };
-        if let Err(error) = store.write_domain("goal", &outcome.stored) {
-            return Some(Err(error));
+        match outcome {
+            Ok(outcome) => Some(Ok(outcome.response["goal"].clone())),
+            Err(error) => Some(Err(error)),
         }
-        Some(Ok(outcome.response["goal"].clone()))
     }
 
     /// The goal-continuation prompt the session's next autonomous turn owes,
@@ -1587,10 +2419,7 @@ impl ServerEngine {
                 serde_json::to_value(state).unwrap_or_default(),
             );
         }
-        if let Err(error) = self
-            .store
-            .put_session_state("metadata", session_id, session_id, &metadata)
-        {
+        if let Err(error) = self.store.put_session_metadata(session_id, &metadata) {
             tracing::warn!(%session_id, %error, "could not persist the token-counting state");
         }
     }
@@ -1628,27 +2457,50 @@ impl ServerEngine {
                 serde_json::to_value(state).unwrap_or_default(),
             );
         }
-        if let Err(error) = self
-            .store
-            .put_session_state("metadata", session_id, session_id, &metadata)
-        {
+        if let Err(error) = self.store.put_session_metadata(session_id, &metadata) {
             tracing::warn!(%session_id, %error, "could not persist the micro-compaction cutoff");
         }
     }
 
-    /// Fold the finished turn into the counting state: a measured request
-    /// anchors the conversation exactly, a turn without an LLM call — or one
-    /// whose provider reported no usage (v2 skips `measured` when the response
-    /// carries `undefined` usage) — records an estimate instead.
-    fn record_token_counting(&self, session_id: &str, last_request: Option<&TokenUsage>) {
+    /// Fold the finished turn into the counting state: the last request
+    /// anchors the input prefix it actually served (v2
+    /// `TokenCountingAgentModel.measured`, whose `length` is the request
+    /// context — not the transcript after the reply), and only while that
+    /// prefix still describes the history. A turn without an LLM call, one
+    /// whose provider reported no usage, or one a compaction spliced after the
+    /// request records an estimate instead (v2 `matchesContext` returning
+    /// false leaves the measured anchors untouched).
+    fn record_token_counting(
+        &self,
+        session_id: &str,
+        last_request: Option<&crate::turn_loop::types::RequestMeasurement>,
+        tool_schema_tokens: u32,
+    ) {
         let history = self
             .store
             .load_session_history(session_id)
             .unwrap_or_default();
         let mut state = self.token_counting(session_id);
-        match last_request.filter(|usage| usage.measured_context_tokens() > 0) {
-            Some(usage) => state.measured(history.len(), usage.measured_context_tokens()),
-            None => state.record_turn(&history),
+        // Persist the active tool-schema overhead with the gauge; otherwise the
+        // status and the compaction trigger would size the same history
+        // differently once a turn enables a large toolset.
+        state.tool_schema_tokens = u64::from(tool_schema_tokens);
+        // The loop's request carries the system prompt at index 0; the durable
+        // history does not, so the anchor length is the request length minus
+        // one. A prefix longer than the stored history cannot match the
+        // context either.
+        let anchor = last_request
+            .filter(|request| !request.spliced_after && request.usage.measured_context_tokens() > 0)
+            .and_then(|request| {
+                Some((
+                    request.input_messages.checked_sub(1)?,
+                    request.usage.measured_context_tokens(),
+                ))
+            })
+            .filter(|(length, _)| *length <= history.len());
+        match anchor {
+            Some((length, tokens)) => state.measured(length, tokens),
+            None => state.record_turn(&history, self.token_counting_strategy()),
         }
         self.save_token_counting(session_id, &state);
     }
@@ -1661,7 +2513,8 @@ impl ServerEngine {
             .store
             .load_session_history(session_id)
             .unwrap_or_default();
-        self.token_counting(session_id).status_size(&history)
+        self.token_counting(session_id)
+            .status_size(&history, self.token_counting_strategy())
     }
 
     /// Re-baseline the counting state after the transcript was cut (undo).
@@ -1727,6 +2580,120 @@ impl ServerEngine {
         let mut micro = self.micro_compaction_state(session_id);
         micro.reset();
         self.save_micro_compaction_state(session_id, &micro);
+        // v2 `AgentCacheBreakService` listens for `context.compactionCompleted`
+        // and drops its baseline: the pre-compaction cache read is not
+        // comparable with the summary prefix.
+        self.reset_cache_baseline(session_id);
+    }
+
+    /// Fold a finished turn's per-step cache observations into the session's
+    /// tracker (v2 `AgentCacheBreakService.observe`, called once per step).
+    /// A detected break is logged, emitted as `cache_break_detected` telemetry
+    /// and retained for [`Self::cache_observation`]; the turn's last request
+    /// also becomes the agent's `prompt_cache_probe` baseline.
+    pub fn observe_cache_observations(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        agent_id: &str,
+        observations: &[crate::session::cache_observation::CacheObservation],
+        resets: &[usize],
+        probe_request: Option<&crate::session::cache_observation::CacheProbeRequest>,
+    ) {
+        if observations.is_empty() && probe_request.is_none() {
+            return;
+        }
+        let callbacks = self.session_callbacks_for(session_id);
+        let mut states = self.cache_states.lock().unwrap_or_else(|e| e.into_inner());
+        let state = states.entry(session_id.to_string()).or_default();
+        for (index, observation) in observations.iter().enumerate() {
+            if resets.contains(&index) {
+                // v2 `AgentCacheBreakService` resets on
+                // `context.compactionCompleted`: the step after a replaced
+                // history starts a new trajectory, so its cache read is never
+                // compared with the pre-compaction one.
+                state.tracker.reset();
+            }
+            state.last = Some(observation.clone());
+            let now = chrono::Utc::now().timestamp_millis();
+            let Some(breakage) =
+                state
+                    .tracker
+                    .observe(&observation.usage(), Some(observation), now)
+            else {
+                continue;
+            };
+            tracing::warn!(
+                %session_id,
+                %turn_id,
+                step = index + 1,
+                cause = breakage.cause.as_str(),
+                previous_cache_read = breakage.previous.input_cache_read,
+                current_cache_read = breakage.current.input_cache_read,
+                "prompt cache read collapsed"
+            );
+            callbacks.telemetry(breakage.telemetry_payload(Some(turn_id), Some(index as u32 + 1)));
+            state.breaks.push_back(breakage);
+            while state.breaks.len() > CACHE_BREAK_RETENTION {
+                state.breaks.pop_front();
+            }
+        }
+        if let Some(request) = probe_request {
+            state.requests.insert(agent_id.to_string(), request.clone());
+        }
+    }
+
+    /// The session's prompt-cache observability snapshot (D14): the recent
+    /// breaks, the last request's observation and every agent's last request
+    /// shape. This is the read entry — none of it is a wire field.
+    pub fn cache_observation(&self, session_id: &str) -> serde_json::Value {
+        let states = self.cache_states.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = states.get(session_id) else {
+            return serde_json::json!({
+                "breaks": [],
+                "last": null,
+                "baseline": null,
+                "requests": {},
+            });
+        };
+        serde_json::json!({
+            "breaks": state.breaks.iter().collect::<Vec<_>>(),
+            "last": state.last,
+            "baseline": state.tracker.baseline(),
+            "requests": state.requests,
+        })
+    }
+
+    /// Drop the prompt-cache comparison state after a compaction (v2
+    /// `AgentCacheBreakService` resets on `context.compactionCompleted`): the
+    /// break baseline, the last observation and every agent's request snapshot
+    /// describe the pre-compaction transcript, so none of them may be compared
+    /// with the summary prefix. The recorded breaks are history and stay.
+    /// The main agent's probe generation advances as well (v2
+    /// `prefixRevision`), invalidating a fork that captured the old request.
+    fn reset_cache_baseline(&self, session_id: &str) {
+        let mut states = self.cache_states.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = states.get_mut(session_id) {
+            state.tracker.reset();
+            state.last = None;
+            state.requests.clear();
+        }
+        drop(states);
+        self.subagent_manager
+            .bump_probe_generation(crate::callbacks::MAIN_AGENT_ID);
+    }
+
+    /// The last request the main agent served in `session_id` (v2
+    /// `lastTurnRequest()`), read as a manual compaction's probe baseline.
+    fn cache_probe_request(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::session::cache_observation::CacheProbeRequest> {
+        let states = self.cache_states.lock().unwrap_or_else(|e| e.into_inner());
+        states
+            .get(session_id)
+            .and_then(|state| state.requests.get(crate::callbacks::MAIN_AGENT_ID))
+            .cloned()
     }
 
     /// The LLM one session's turns run on, without building a pipeline.
@@ -1793,6 +2760,12 @@ impl ServerEngine {
         let started = std::time::Instant::now();
         let mut summary_usage = None;
         let mut summary_retry_count = 0;
+        let mut summary_dropped_count = 0;
+        // v2 captures `lastTurnRequest()` before the summarizer request starts;
+        // a manual compaction runs between turns, so the stored turn-end
+        // snapshot is that request.
+        let probe_baseline = self.cache_probe_request(session_id);
+        let mut summary_probe = None;
         let summary = if count == 0 {
             None
         } else {
@@ -1810,8 +2783,11 @@ impl ServerEngine {
                         .and_then(|value| value.as_u64())
                         .and_then(|value| u32::try_from(value).ok())
                 });
-            let effective_window =
-                crate::compaction::effective_max_tokens(llm.model_name(), configured_window);
+            let effective_window = crate::compaction::effective_max_tokens_for(
+                crate::callbacks::MAIN_AGENT_ID,
+                llm.model_name(),
+                configured_window,
+            );
             let summary = crate::compaction::summarize_with_llm_budgeted(
                 &history[1..count as usize],
                 llm.as_ref(),
@@ -1819,11 +2795,16 @@ impl ServerEngine {
                 None,
                 config.max_attempts,
                 effective_window,
+                crate::callbacks::MAIN_AGENT_ID,
+                probe_baseline.as_ref(),
+                None,
             )
             .await
             .map_err(|error| EngineError::Turn(error.to_string()))?;
             summary_usage = summary.usage.clone();
             summary_retry_count = summary.retry_count;
+            summary_dropped_count = summary.dropped_count;
+            summary_probe = summary.cache_probe.clone();
             Some(crate::compaction::post_process_summary(
                 summary.summary,
                 self.session_todo_summary(session_id),
@@ -1835,6 +2816,19 @@ impl ServerEngine {
             .compact_session_with_summary(session_id, instruction, summary)
             .map_err(EngineError::Turn)?;
         let summary_output_tokens = summary_usage.as_ref().map(|usage| usage.output_tokens);
+        // A manual compaction is a real LLM call: bill it in the session's
+        // compaction slice so the model bucket and the exported status both
+        // account for it.
+        if let Some(usage) = &summary_usage
+            && let Err(e) = crate::session::usage::record_compaction(
+                &self.store,
+                session_id,
+                llm.model_name(),
+                usage,
+            )
+        {
+            tracing::warn!(%session_id, %e, "could not persist compaction usage");
+        }
         if report.removed > 0 {
             // The transcript is now the summary prefix: re-baseline the
             // counting state so the gauge does not keep the pre-compaction
@@ -1847,15 +2841,22 @@ impl ServerEngine {
         // included. `turn_id` is omitted — this runs between turns.
         if count > 0 {
             let callbacks = self.session_callbacks_for(session_id);
+            // v2 `prompt_cache_probe` with `source: 'compaction'` compares the
+            // summarizer request with the agent's last turn request.
+            if let Some(probe) = summary_probe.as_ref() {
+                callbacks.telemetry(probe.telemetry_payload());
+            }
             callbacks.telemetry(
                 crate::compaction::CompactionReport {
                     summary: String::new(),
                     compacted_count: report.compacted_count,
+                    dropped_count: summary_dropped_count,
                     tokens_before: report.tokens_before,
                     tokens_after: report.tokens_after,
                     usage: summary_usage,
                     retry_count: summary_retry_count,
                     duration_ms,
+                    cache_probe: None,
                 }
                 .finished_payload(
                     "manual",
@@ -1865,6 +2866,14 @@ impl ServerEngine {
                 ),
             );
         }
+        // v2's `context.compaction` persists the spliced history so a replay
+        // reproduces the summary, the kept verbatim user messages and the
+        // continuation note; the native event store folds this array at its
+        // boundary instead of keeping only a system summary.
+        let compacted_messages = self
+            .store
+            .load_session_history(session_id)
+            .unwrap_or_default();
         self.hub
             .bus_for(session_id)
             .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
@@ -1875,6 +2884,7 @@ impl ServerEngine {
                 "tokensBefore": report.tokens_before,
                 "tokensAfter": report.tokens_after,
                 "keptUserMessageCount": report.kept_user_message_count,
+                "messages": compacted_messages,
             })));
         self.hub
             .bus_for(session_id)
@@ -1884,6 +2894,9 @@ impl ServerEngine {
                 "reason": "manual",
                 "summary_message_id": serde_json::Value::Null,
             })));
+        // Refresh the status snapshot so the context gauge and the usage
+        // buckets reflect the compaction that just ran.
+        self.publish_status_updated(session_id).await;
         Ok(report)
     }
 
@@ -1947,13 +2960,22 @@ impl ServerEngine {
             _ => None,
         };
         let ws_ref = ws_root.as_deref().unwrap_or(std::path::Path::new("."));
+        let read_todo_items =
+            |store: crate::storage::StateStore| match store.read_domain_state("todo") {
+                ReadOutcome::Found(value) => Some(value),
+                ReadOutcome::Absent => None,
+                ReadOutcome::Unreadable(cause) => {
+                    tracing::warn!(%cause, "todo state is unreadable; this summary shows no items");
+                    None
+                }
+            };
         let session_domain = crate::storage::StateStore::for_session(ws_ref, session_id)
             .ok()
-            .and_then(|store| store.read_domain("todo"));
+            .and_then(read_todo_items);
         let raw = session_domain.or_else(|| {
             crate::storage::StateStore::for_workspace(ws_ref)
                 .ok()
-                .and_then(|store| store.read_domain("todo"))
+                .and_then(read_todo_items)
         });
         crate::tools::todo_item::read_todo_items(raw.as_ref().unwrap_or(&serde_json::Value::Null))
     }
@@ -1971,13 +2993,22 @@ impl ServerEngine {
             _ => None,
         };
         let ws_ref = ws_root.as_deref().unwrap_or(std::path::Path::new("."));
+        let read_todo_items =
+            |store: crate::storage::StateStore| match store.read_domain_state("todo") {
+                ReadOutcome::Found(value) => Some(value),
+                ReadOutcome::Absent => None,
+                ReadOutcome::Unreadable(cause) => {
+                    tracing::warn!(%cause, "todo state is unreadable; this summary shows no items");
+                    None
+                }
+            };
         let session_domain = crate::storage::StateStore::for_session(ws_ref, session_id)
             .ok()
-            .and_then(|store| store.read_domain("todo"));
+            .and_then(read_todo_items);
         let raw = session_domain.or_else(|| {
             crate::storage::StateStore::for_workspace(ws_ref)
                 .ok()
-                .and_then(|store| store.read_domain("todo"))
+                .and_then(read_todo_items)
         });
         crate::compaction::todo_list_for_summary(raw.as_ref())
     }
@@ -1999,6 +3030,53 @@ impl ServerEngine {
             Arc::new(ServerHost::standalone().with_oauth(self.oauth_manager()));
         let sections = self.plugin_contributions().sections;
         crate::pipeline::build_llm_for_spec(&spec, &callbacks, sections.as_deref()).ok()
+    }
+
+    /// Persist the prompt-derived session metadata and announce it
+    /// (v2 `applyPromptMetadata` + `SessionMetaUpdated`).
+    ///
+    /// The title is only applied while the session is untitled and not custom;
+    /// `lastPrompt` always advances so the session list can show the latest
+    /// request even after the title is frozen by a rename.
+    fn apply_prompt_metadata(&self, session_id: &str, prompt: &str, origin: Option<&Value>) {
+        let client_metadata = origin.and_then(|origin| origin.get("clientMetadata"));
+        let Some(text) =
+            crate::session::title::prompt_metadata_text_from_parts(prompt, client_metadata)
+        else {
+            return;
+        };
+        let title = crate::session::title::title_from_prompt_metadata_text(&text);
+        match self.store.apply_prompt_metadata(session_id, &text, &title) {
+            Ok(applied) => {
+                let current_title = self
+                    .store
+                    .get_session(session_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|session| session.title);
+                let patch = if applied {
+                    serde_json::json!({
+                        "title": title,
+                        "lastPrompt": text,
+                        "isCustomTitle": false,
+                    })
+                } else {
+                    serde_json::json!({ "lastPrompt": text })
+                };
+                self.hub
+                    .bus_for(session_id)
+                    .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
+                        "type": "session.meta.updated",
+                        "agentId": crate::callbacks::MAIN_AGENT_ID,
+                        "sessionId": session_id,
+                        "title": current_title,
+                        "patch": patch,
+                    })));
+            }
+            Err(error) => {
+                tracing::warn!(%session_id, %error, "failed to persist prompt metadata");
+            }
+        }
     }
 
     /// Build an engine context for one turn and run it.
@@ -2033,6 +3111,47 @@ impl ServerEngine {
         // A self-contained engine must refuse the host-proxy fallback rather
         // than reach ServerHost.llm_chat and fail mid-turn.
         let spec = self.session_spec(session_id).await;
+        // The environment was frozen when the session was created; a resume
+        // must use that binding, not today's defaults. A vanished directory is
+        // an explicit failure, and a declaration edit is a warning, never a
+        // silent rebind.
+        match self.restore_session_environment(session_id).await {
+            Ok(Some(outcome)) => {
+                for drift in &outcome.drift {
+                    tracing::warn!(
+                        session_id,
+                        ?drift,
+                        "session environment drifted from its declaration; keeping the frozen binding"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return Err(EngineError::Environment(error.to_string())),
+        }
+        // The prompt was assembled from AGENTS.md before this turn; report a
+        // file that changed since the previous turn, and an unreadable one.
+        if let Some(root) = self.session_root_path(session_id) {
+            if let Some(reminder) = self.observe_agents_md(session_id, &root) {
+                // v2 injects this as the `agents_md_change` reminder, so the
+                // model — not only the host log — learns the prompt copy is
+                // stale before it reasons about the affected paths again.
+                history.push(crate::injection::injection_message_named(
+                    reminder,
+                    "agents_md_change",
+                ));
+            }
+        }
+        // v2's other `changeNotifier` variants (skills, subagents, workspace
+        // directories). Each compares against the snapshot it recorded on the
+        // previous turn and queues at most one reminder: a change is announced
+        // once, and a failed read keeps the baseline instead of manufacturing a
+        // "everything was deleted" reminder.
+        for (reminder, variant) in self
+            .observe_catalog_changes(session_id, &spec, &spec.system_prompt)
+            .await
+        {
+            history.push(crate::injection::injection_message_named(reminder, variant));
+        }
         let ws_root = match self.store.get_session(session_id) {
             Ok(Some(s)) if s.workspace_id.is_some() => {
                 let wid = s.workspace_id.unwrap();
@@ -2071,6 +3190,9 @@ impl ServerEngine {
             ),
         );
         let host_callbacks: Arc<dyn HostCallbacks> = message_callbacks.clone();
+        // Attach the session's MCP status bridge before the pipeline runs, so a
+        // server that connects while the turn is in flight reaches the lane.
+        self.ensure_mcp_status_bridge(session_id);
         let contributions = self.plugin_contributions();
         let pipeline = build_engine_pipeline(
             &spec,
@@ -2118,6 +3240,12 @@ impl ServerEngine {
             turn_number as usize,
         );
 
+        // `session_query` reads the same store's wire journal and session
+        // summaries. Installed alongside file history; hosts with callbacks
+        // that are not `NativeToolCallbacks` ignore it and the tool reports
+        // `session_query.index_unavailable`.
+        pipeline.callbacks.set_session_store(self.store.clone());
+
         // Micro compaction (v2 `AgentMicroCompactionService`): with the
         // `[experimental].micro_compaction` flag on, blank oversized old tool
         // results in the outgoing history so the rebuilt prefix stays small.
@@ -2142,7 +3270,9 @@ impl ServerEngine {
             let last_assistant_at = self.last_assistant_at_for(session_id);
             // Measured+estimated, the same figure the status gauge reports, so
             // the fullness gate and the gauge cannot disagree.
-            let context_tokens = self.token_counting(session_id).status_size(&history) as usize;
+            let context_tokens =
+                self.token_counting(session_id)
+                    .status_size(&history, self.token_counting_strategy()) as usize;
             let outcome_gate = crate::compaction::micro::detect_micro_compaction(
                 last_assistant_at,
                 now,
@@ -2155,6 +3285,7 @@ impl ServerEngine {
             // history each time would blank a newer result as the transcript
             // grows, changing the prefix the cutoff exists to keep stable.
             let mut micro = self.micro_compaction_state(session_id);
+            let previous_cutoff = micro.cutoff;
             let advanced = outcome_gate.triggered()
                 && micro.advance(history.len(), config.keep_recent_messages);
             if advanced {
@@ -2168,6 +3299,8 @@ impl ServerEngine {
                     })));
             }
             if micro.cutoff > 0 {
+                let message_count = history.len();
+                let tokens_before = crate::compaction::estimate_messages_tokens(&history) as usize;
                 let outcome = crate::compaction::micro::apply_micro_compaction_at(
                     &history,
                     micro.cutoff,
@@ -2175,6 +3308,40 @@ impl ServerEngine {
                 );
                 if outcome.changed {
                     history = outcome.messages;
+                }
+                // v2 `micro_compaction_finished` telemetry: reported whenever
+                // the cutoff moved, even if no result was large enough to
+                // blank, so the effect counts and the gate knobs are visible.
+                if advanced {
+                    let tokens_after =
+                        crate::compaction::estimate_messages_tokens(&history) as usize;
+                    let truncated_before: usize =
+                        outcome.replaced.iter().map(|item| item.tokens_before).sum();
+                    let truncated_after: usize =
+                        outcome.replaced.iter().map(|item| item.tokens_after).sum();
+                    let cache_age_ms =
+                        last_assistant_at.map(|last| now.saturating_sub(last).max(0));
+                    pipeline.callbacks.emit_event(serde_json::json!({
+                        "event": "micro_compaction_finished",
+                        "keep_recent_messages": config.keep_recent_messages,
+                        "min_content_tokens": config.min_content_tokens,
+                        "cache_missed_threshold_ms": config.cache_missed_threshold_ms,
+                        "truncated_marker": config.truncated_marker,
+                        "min_context_usage_ratio": config.min_context_usage_ratio,
+                        "truncated_tool_result_count": outcome.replaced.len(),
+                        "truncated_tool_result_tokens_before": truncated_before,
+                        "truncated_tool_result_tokens_after": truncated_after,
+                        "tokens_before": tokens_before,
+                        "tokens_after": tokens_after,
+                        "previous_cutoff": previous_cutoff,
+                        "cutoff": micro.cutoff,
+                        "message_count": message_count,
+                        "cache_age_ms": cache_age_ms,
+                        "thinking_effort": pipeline
+                            .llm
+                            .thinking_effort()
+                            .unwrap_or("none"),
+                    }));
                 }
             }
         }
@@ -2272,6 +3439,18 @@ impl ServerEngine {
         let _occupancy = crate::session::lock::SESSION_LOCKS
             .hold_guard(session_id)
             .map_err(|error| EngineError::Occupied(error.to_string()))?;
+        // v2 `SessionRunGateService.begin()`: once the lock is ours, a journal
+        // that moved since we last saw it was written by another client while
+        // this session sat idle. Release the publish (v2 does, rather than
+        // letting the grace window hold it) and refuse, so the host reloads
+        // instead of interleaving two histories.
+        if self.journal_moved(session_id) {
+            self.observe_journal_head(session_id);
+            crate::session::lock::SESSION_LOCKS.release(session_id);
+            return Err(EngineError::Stale(format!(
+                "Session \"{session_id}\" was updated by another client; reload it before continuing"
+            )));
+        }
         let turn_id = format!("turn-{}", fastrand::u64(..));
         // The model this turn's usage belongs to (v2 groups `UsageRecord`s by
         // the request's model). Read before the LLM moves into `RunTurnInput`.
@@ -2289,6 +3468,17 @@ impl ServerEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(session_id.to_string(), turn_number);
         self.publish_work_changed(session_id, true, None);
+        // v2 `sessionOutcomeMirrorService`: a new turn clears the previous
+        // outcome. `lastTurnReason` describes the last turn that *ended*; while
+        // a turn is running there is no such turn, so the stale value must not
+        // survive into the new turn's window.
+        if let Err(error) = self.store.set_last_turn_reason(session_id, None) {
+            tracing::warn!(%session_id, %error, "failed to clear last_turn_reason at turn start");
+        }
+        // v2 `applyPromptMetadata` runs for every prompt (sessionMetadataService
+        // .ts:150-159): `lastPrompt` always advances, and the derived title
+        // only fills in while the session is still untitled and not custom.
+        self.apply_prompt_metadata(session_id, prompt, origin.as_ref());
         self.publish_status_updated(session_id).await;
         // #3697: a fresh steer signal for this turn, so a signal fired by an
         // earlier turn cannot end this turn's first `WaitFor`.
@@ -2301,6 +3491,18 @@ impl ServerEngine {
         // ended or interrupted.
         let activity = self.activity_registry.tracker(session_id);
         activity.turn_started(turn_number);
+        // v2 `sessionLogService`: the turn lifecycle lands in the session's own
+        // `logs/kimi-code.log` at the configured level (default `info`).
+        if let Some(log) = self.session_log(session_id) {
+            log.log(
+                crate::session::session_log::LogLevel::Info,
+                "turn started",
+                &[
+                    ("turn", &turn_number.to_string()),
+                    ("model", &self.spec.model_name),
+                ],
+            );
+        }
         // The undo anchor for this turn: snapshot the session's durable state
         // before the turn can change it, so a later undo (REST `:undo` /
         // native `undoHistory`) restores the state the cut turn started from.
@@ -2431,17 +3633,55 @@ impl ServerEngine {
             previous_turn_aborted,
         };
 
+        // D14(a): a hard failure returns `Err` with no `TurnResult`, so the
+        // turn loop also mirrors each completed step's cache observation into
+        // this sink. The `Ok` path keeps reading `result`; the `Err` path
+        // folds whatever completed before the failure instead of dropping it.
+        let observations = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::turn_loop::types::TurnObservations::default(),
+        ));
         // Flatten the loop error before any later await: `Box<dyn StdError>`
         // is not `Send`, and the spawned turn future must stay `Send`.
-        let turn = match run_turn_continued(input, &callbacks).await {
+        let turn = match run_turn_continued_with_observations(
+            input,
+            &callbacks,
+            Some(observations.clone()),
+        )
+        .await
+        {
             Ok(result) => Ok(result),
             Err(error) => Err(error.to_string()),
         };
+        // The turn is done appending to the journal, so this engine's watermark
+        // now covers every row it produced. Without this the next turn in the
+        // same process would read its own rows as a foreign modification.
+        self.observe_journal_head(session_id);
+        // v2 `cancelInteractionsForTurn` (`interactionWiring.ts:35-51`): the
+        // turn is over, so an approval/question still tagged with it can no
+        // longer be answered by anything. Sweeping it here — on the finished
+        // turn only, not the whole session — keeps a reconnect from listing a
+        // phantom prompt while a concurrent turn keeps its own.
+        if let Some(manager) = self.interaction_manager() {
+            manager.cancel_turn(session_id, &turn_id, "turn_ended");
+        }
         let result = match turn {
             Ok(result) => {
                 let reason = work_turn_reason(&result.stop_reason);
+                if let Some(log) = self.session_log(session_id) {
+                    log.log(
+                        crate::session::session_log::LogLevel::Info,
+                        "turn ended",
+                        &[("turn", &turn_number.to_string()), ("reason", reason)],
+                    );
+                }
                 self.publish_turn_ended(session_id, turn_number, reason);
-                self.publish_work_changed(session_id, false, Some(reason));
+                // A detached subagent turn or a background task may outlive
+                // this turn; the fold stays busy until that work settles.
+                self.publish_work_changed(
+                    session_id,
+                    self.has_background_work(session_id),
+                    Some(reason),
+                );
                 // Mirror the outcome into the session row as well as the live
                 // event (v2 `SessionOutcomeMirror`): a client that attaches
                 // after this turn, or after a restart, still sees the outcome.
@@ -2450,11 +3690,49 @@ impl ServerEngine {
                 if let Err(e) = self.store.set_last_turn_reason(session_id, Some(reason)) {
                     tracing::warn!(%session_id, %e, "could not persist the turn outcome");
                 }
+                // D14: fold the step observations into the session's
+                // cache-break tracker (v2 `AgentCacheBreakService.observe`
+                // runs at each step; the turn loop hands the steps over here).
+                self.observe_cache_observations(
+                    session_id,
+                    &turn_id,
+                    crate::callbacks::MAIN_AGENT_ID,
+                    &result.cache_observations,
+                    &result.cache_observation_resets,
+                    result.cache_probe_requests.last(),
+                );
                 result
             }
             Err(error) => {
+                if let Some(log) = self.session_log(session_id) {
+                    log.log(
+                        crate::session::session_log::LogLevel::Error,
+                        "turn failed",
+                        &[
+                            ("turn", &turn_number.to_string()),
+                            ("error", error.as_str()),
+                        ],
+                    );
+                }
+                // D14(a): fold the steps that completed before the failure.
+                // Without this a hard-failed turn silently dropped every
+                // prompt-cache observation it had already collected.
+                if let Ok(partial) = observations.lock() {
+                    self.observe_cache_observations(
+                        session_id,
+                        &turn_id,
+                        crate::callbacks::MAIN_AGENT_ID,
+                        &partial.cache_observations,
+                        &partial.cache_observation_resets,
+                        partial.cache_probe_requests.last(),
+                    );
+                }
                 self.publish_turn_ended(session_id, turn_number, "failed");
-                self.publish_work_changed(session_id, false, Some("failed"));
+                self.publish_work_changed(
+                    session_id,
+                    self.has_background_work(session_id),
+                    Some("failed"),
+                );
                 if let Err(e) = self.store.set_last_turn_reason(session_id, Some("failed")) {
                     tracing::warn!(%session_id, %e, "could not persist the turn outcome");
                 }
@@ -2501,7 +3779,11 @@ impl ServerEngine {
         // Fold the turn into the context-token counting state: the last
         // request measured the prefix it served, everything after it is
         // estimated until the next measurement (v2 `TokenCountingMeasured`).
-        self.record_token_counting(session_id, result.last_request_usage.as_ref());
+        self.record_token_counting(
+            session_id,
+            result.last_request_usage.as_ref(),
+            result.tool_schema_tokens,
+        );
 
         // Fold the turn's counters into the session's per-model usage buckets
         // (v2 `UsageAgentModel.record` -> durable `byModel`). The turn is
@@ -2511,6 +3793,18 @@ impl ServerEngine {
             crate::session::usage::record_turn(&self.store, session_id, &turn_model, &result.usage)
         {
             tracing::warn!(%session_id, %e, "could not persist turn usage");
+        }
+        // Compaction requests the turn ran are billable too; record them in
+        // their own slice so per-turn statistics stay clean.
+        if let Some(compaction_usage) = &result.compaction_usage
+            && let Err(e) = crate::session::usage::record_compaction(
+                &self.store,
+                session_id,
+                &turn_model,
+                compaction_usage,
+            )
+        {
+            tracing::warn!(%session_id, %e, "could not persist compaction usage");
         }
 
         // v2 `incrementGoalTurn` + `accountTokenUsage` + `settleAbnormalTurn`:
@@ -2596,6 +3890,7 @@ impl ServerEngine {
             llm_transport: result.llm_transport,
             native_tool_calls: result.native_tool_calls,
             context_window,
+            gate_blocked: result.gate_blocked,
         })
     }
 }
@@ -2630,11 +3925,10 @@ fn rebased_tokens(
     let Some(measured) = summary_output_tokens else {
         return estimate;
     };
-    let Some(summary) = history.iter().find(|message| {
-        message
-            .content
-            .starts_with(crate::compaction::COMPACTION_SUMMARY_PREFIX)
-    }) else {
+    let Some(summary) = history
+        .iter()
+        .find(|message| crate::compaction::is_compaction_summary_message(message))
+    else {
         return estimate;
     };
     let summary_estimate = crate::session::token_counting::estimate_message(summary);
@@ -2795,6 +4089,46 @@ fn clone_spec(spec: &PipelineSpec) -> PipelineSpec {
         merge_all_available_skills: spec.merge_all_available_skills,
         background: spec.background,
     }
+}
+
+/// v2 `notifyAgentsMdChanges` text (`changeNotifierService.ts:146-183`),
+/// rendered from the watch's classified changes. `BecameUnreadable` joins the
+/// stale group and `BecameReadable` the new group, because in both cases the
+/// copy in the system prompt no longer matches the file on disk.
+fn agents_md_change_reminder(changes: &[crate::environment::AgentsMdChange]) -> Option<String> {
+    use crate::environment::AgentsMdChange;
+
+    let mut stale = Vec::new();
+    let mut fresh = Vec::new();
+    for change in changes {
+        match change {
+            AgentsMdChange::Modified { path } => stale.push(format!("- {}", path.display())),
+            AgentsMdChange::Removed { path } => {
+                stale.push(format!("- {} (deleted)", path.display()));
+            }
+            AgentsMdChange::BecameUnreadable { path, .. } => {
+                stale.push(format!("- {} (unreadable)", path.display()));
+            }
+            AgentsMdChange::Added { path } | AgentsMdChange::BecameReadable { path } => {
+                fresh.push(format!("- {}", path.display()));
+            }
+        }
+    }
+    let mut sections = Vec::new();
+    if !stale.is_empty() {
+        sections.push(format!(
+            "The AGENTS.md instruction file(s) below changed on disk after they were injected into the system prompt:\n{}\nRead the current file(s) and follow the latest contents; the copies injected in the system prompt are stale.",
+            stale.join("\n")
+        ));
+    }
+    if !fresh.is_empty() {
+        // v2 `agentsMdChangeText`'s added section, verbatim.
+        sections.push(format!(
+            "The following AGENTS.md file(s) exist in your workspace but were not included in your system prompt:\n{}\nRead them before making changes in those directories.",
+            fresh.join("\n")
+        ));
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 #[cfg(test)]

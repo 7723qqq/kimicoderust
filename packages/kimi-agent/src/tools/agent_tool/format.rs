@@ -2,16 +2,11 @@ use super::defs::{SUBAGENT_STOPPED_MESSAGE, USER_INTERRUPTED_SUBAGENT_MESSAGE};
 use super::events::{emit_cancelled, emit_completed, emit_failed};
 use crate::turn_loop::types::LoopTurnStopReason;
 
-/// v2 `REPEAT_BREAKER_NOTICE`: a handoff, not a finished result.
 pub(super) const REPEAT_BREAKER_NOTICE: &str = "notice: The subagent was stopped by the repeat breaker after issuing the same tool call repeatedly. The summary below is its handoff, not a finished result.";
 
-/// v2 `NO_PARTIAL_OUTPUT`: the placeholder the failure shape prints when the
-/// subagent produced no text.
 pub(super) const NO_PARTIAL_OUTPUT: &str =
     "[partial output] none — the subagent wrote no text in this run before it ended.";
 
-/// v2 `resumeHint`: `prompt` is `"..."` on success (the caller writes the next
-/// prompt) and `"continue"` on failure.
 pub(super) fn resume_hint(agent_id: &str, prompt: &str) -> String {
     format!(
         "resume_hint: Continue with Agent(resume=\"{agent_id}\", prompt=\"{prompt}\"). \
@@ -20,7 +15,6 @@ redo any unfinished tool call if its result was lost."
     )
 }
 
-/// v2 `NEXT_STEP_BY_REASON`: what the parent should do next, per stop reason.
 pub(super) fn next_step(reason: &str) -> Option<&'static str> {
     const RESUME_NEXT_STEP: &str = "next_step: Resume to continue where it stopped, or take over the task yourself; if neither works, report the failure to the user.";
     match reason {
@@ -40,7 +34,6 @@ pub(super) fn next_step(reason: &str) -> Option<&'static str> {
     }
 }
 
-/// The v2 `SubagentStopReason` for a finished turn.
 pub(super) fn subagent_stop_reason(
     stop: &LoopTurnStopReason,
     user_cancelled: bool,
@@ -62,16 +55,10 @@ pub(super) fn subagent_stop_reason(
     }
 }
 
-/// A turn that ended cleanly enough to report as a completion. v2's lifecycle
-/// completion carries only the repeat-breaker stop code; every other failure
-/// arrives as a thrown error.
 pub(super) fn is_success_reason(reason: &str) -> bool {
     matches!(reason, "completed" | "repeat_breaker")
 }
 
-/// The report token for a native run failure (v2's error-code → token table):
-/// `AGENT_NO_FINAL_MESSAGE` has its own token, every other run failure is a
-/// plain `error`.
 pub(super) fn run_failure_reason(message: &str) -> &'static str {
     if message.starts_with(crate::subagent::manager::NO_FINAL_MESSAGE_PREFIX) {
         "no_final_message"
@@ -80,7 +67,6 @@ pub(super) fn run_failure_reason(message: &str) -> &'static str {
     }
 }
 
-/// The v2 success shape (`formatForegroundAgentSuccess`).
 pub(super) fn format_success(agent_id: &str, profile: &str, summary: &str, reason: &str) -> String {
     let mut text = format!(
         "agent_id: {agent_id}\nactual_subagent_type: {profile}\nstatus: completed\nstop_reason: {reason}"
@@ -100,12 +86,6 @@ pub(super) fn format_success(agent_id: &str, profile: &str, summary: &str, reaso
     text
 }
 
-/// The v2 failure shape (`formatForegroundAgentFailure`).
-///
-/// The message is the error the turn ended with; `partial_output` is what the
-/// subagent wrote before it stopped (v2 prints `NO_PARTIAL_OUTPUT` when there is
-/// none), and a cancelled turn omits the resume hint because resuming it is not
-/// the next step.
 pub(super) fn format_failure(
     agent_id: &str,
     profile: &str,
@@ -128,12 +108,6 @@ pub(super) fn format_failure(
     text
 }
 
-/// Report a finished foreground turn — the fresh-spawn and resume arms share
-/// this. An aborted turn is a stop, not a completion: the v2 stopped message
-/// leads (a user interrupt emits `subagent.cancelled`, anything else
-/// `subagent.failed` — silently dropping the event would strand the
-/// `subagent.started` the spawn already sent) and the turn's partial output
-/// rides below it. Anything else reports the summary as a completion.
 pub(super) fn report_foreground_turn(
     callbacks: &dyn crate::callbacks::HostCallbacks,
     agent_id: &str,
@@ -162,14 +136,6 @@ pub(super) fn report_foreground_turn(
     (content, true)
 }
 
-/// The `subagent error:` text for a failed turn.
-///
-/// v2 throws a typed error carrying that error's own message: the step cap
-/// says how many steps it spent and carries **no** config advice (unlike the
-/// main-turn message), a filtered response keeps the provider sentence, and a
-/// token cap names the reason. Anything v2 does not word gets the stopped
-/// sentence, and a reason longer than v2's 2,000-character budget is cut with
-/// its `… [truncated]` marker.
 pub(super) fn failure_message(stop: &LoopTurnStopReason, steps: u32, interrupted: bool) -> String {
     let message = match stop {
         LoopTurnStopReason::Aborted if interrupted => USER_INTERRUPTED_SUBAGENT_MESSAGE.to_string(),
@@ -186,8 +152,6 @@ pub(super) fn failure_message(stop: &LoopTurnStopReason, steps: u32, interrupted
     truncate_reason(&message)
 }
 
-/// v2 `truncateReason`: cut at 2,000 UTF-16 code units, the way JS `length`
-/// counts them, and mark the cut.
 pub(super) fn truncate_reason(reason: &str) -> String {
     const REASON_MAX_CHARS: usize = 2000;
     if reason.encode_utf16().count() <= REASON_MAX_CHARS {
@@ -205,10 +169,6 @@ pub(super) fn truncate_reason(reason: &str) -> String {
     format!("{}… [truncated]", &reason[..cut])
 }
 
-/// A background task's output for a stopped subagent: the v2 stopped message
-/// with the partial output appended — TaskOutput renders this verbatim, which
-/// is the "stopped task's partial output comes back marked as stopped"
-/// contract. The lifecycle event keeps the bare v2 message.
 pub(super) fn stopped_task_output(
     message: &str,
     turn: &crate::turn_loop::types::TurnResult,
@@ -219,21 +179,6 @@ pub(super) fn stopped_task_output(
     }
 }
 
-/// Fire-and-forget subagent lifecycle event to the host (v2
-/// `mirrorAgentRun` event surface: `SubagentSpawned` / `SubagentStarted` /
-/// `SubagentCompleted` / `SubagentFailed`; the adapter maps them onto the
-/// host's event dispatcher).
-/// The `agent_call` display a host renders instead of the raw argument string
-/// (v2 `AgentTool.resolveExecution` / `AgentSwarmTool.resolveExecution`
-/// `display`).
-///
-/// The two tools that declare one upstream are `Agent` and `AgentSwarm`; v2
-/// labels a swarm by its size, which is what tells the reader the call fans out
-/// rather than spawning a single child. Other tools declare a display upstream
-/// too, but this port never constructed one for any of them — populating those
-/// is a separate, wider piece of work and is recorded as such in ROADMAP.
-///
-/// `None` means "no display", which every host already handles.
 pub fn agent_call_display(name: &str, args: &serde_json::Value) -> Option<serde_json::Value> {
     let normalized = name.to_ascii_lowercase().replace('_', "");
     let args = args.as_object()?;
@@ -243,7 +188,6 @@ pub fn agent_call_display(name: &str, args: &serde_json::Value) -> Option<serde_
         .unwrap_or_default();
     match normalized.as_str() {
         "agentswarm" => {
-            // v2 counts the RAW argument lengths, not the filtered ones.
             let items = args
                 .get("items")
                 .and_then(|value| value.as_array())
