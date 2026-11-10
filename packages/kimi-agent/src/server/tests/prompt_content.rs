@@ -78,7 +78,7 @@ fn prompt_content_compresses_an_over_budget_inline_image_with_a_caption() {
         crate::rpc::types::ContentBlock::Text { text, .. } => {
             assert!(
                 text.starts_with(
-                    "<system>Image compressed to fit model limits: original 4000x3000,"
+                    "<system>Image compressed to fit model limits: original 4000x3000 image/png ("
                 )
             );
             assert!(text.contains("call Read on that path"));

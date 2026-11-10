@@ -13,6 +13,7 @@
 
 use std::fmt::Write as _;
 
+use base64::Engine as _;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -403,6 +404,7 @@ pub fn mcp_result_to_output(
     let mut texts: Vec<String> = Vec::new();
     let mut parts: Vec<ContentBlock> = Vec::new();
     let mut notices: Vec<String> = Vec::new();
+    let mut captions: Vec<String> = Vec::new();
     // payload -> the id it was preserved under, so a repeat of the same
     // original reuses the stored copy instead of sending the bytes again.
     let mut preserved: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -413,13 +415,35 @@ pub fn mcp_result_to_output(
             break;
         }
         let mut converted = convert_block(block, provider_type);
+        let compression = converted.inline_url.as_ref().and_then(|(mime, payload)| {
+            if !mime.starts_with("image/") {
+                return None;
+            }
+            let bytes = decode_base64(payload).ok()?;
+            let result = crate::native::image_compress::compress_image(
+                &bytes,
+                mime,
+                &crate::llm::prompt_media::prompt_compress_config_for(provider_type),
+            )?;
+            result.changed.then_some((bytes, result))
+        });
 
         // Preserve the original before anything below can cap or drop it.
         let mut media_ref: Option<ContentBlock> = None;
+        let mut original_path = None;
+        let original_mime = converted
+            .inline_url
+            .as_ref()
+            .map(|(mime, _)| strip_mime_params(mime));
         if let Some((mime, payload)) = converted.inline_url.take() {
             let mime = strip_mime_params(&mime);
             let already_saved = preserved.get(&payload).cloned();
             if let Some(file_id) = already_saved {
+                original_path = files.and_then(|files| {
+                    files
+                        .blob_path(&file_id)
+                        .map(|path| path.to_string_lossy().to_string())
+                });
                 media_ref =
                     media_kind_of(&mime).map(|kind| ContentBlock::MediaRef { file_id, kind });
                 if media_ref.is_none() {
@@ -431,6 +455,7 @@ pub fn mcp_result_to_output(
                         .and_then(|bytes| save_attachment(&bytes, &mime, files).map(|s| (bytes, s)))
                     {
                         Ok((bytes, saved)) => {
+                            original_path = saved.path.clone();
                             notices.push(attachment_notice(&saved, &mime, bytes.len()));
                             if let Some(kind) = media_kind_of(&mime) {
                                 preserved.insert(payload.clone(), saved.file_id.clone());
@@ -451,8 +476,14 @@ pub fn mcp_result_to_output(
                         }
                     },
                     None => {
-                        // No store: the media can still ride inline for the
-                        // families the wire carries as a URL.
+                        if let Some((bytes, _)) = &compression {
+                            original_path = crate::native::image_originals::persist_original_image(
+                                bytes,
+                                &mime,
+                                &crate::native::image_originals::PersistOriginalImageOptions::default(),
+                            )
+                            .map(|path| path.to_string_lossy().to_string());
+                        }
                         media_ref = converted.media.take();
                     }
                 }
@@ -475,6 +506,45 @@ pub fn mcp_result_to_output(
             }
         }
 
+        if let Some((original_bytes, compressed)) = compression {
+            let original_variant = crate::llm::prompt_media::ImageVariant {
+                width: compressed.original_width,
+                height: compressed.original_height,
+                byte_length: original_bytes.len(),
+                mime_type: original_mime.unwrap_or_default(),
+            };
+            let final_variant = crate::llm::prompt_media::ImageVariant {
+                width: compressed.width,
+                height: compressed.height,
+                byte_length: compressed.data.len(),
+                mime_type: compressed.mime_type.clone(),
+            };
+            captions.push(crate::llm::prompt_media::build_image_compression_caption(
+                &original_variant,
+                &final_variant,
+                original_path.as_deref(),
+            ));
+            converted.text = None;
+            let payload = base64::engine::general_purpose::STANDARD.encode(&compressed.data);
+            converted.media = Some(ContentBlock::ImageUrl {
+                url: data_url(&compressed.mime_type, &payload),
+                id: None,
+                name: None,
+            });
+            media_ref = match files {
+                Some(files) => {
+                    match save_attachment(&compressed.data, &compressed.mime_type, files) {
+                        Ok(saved) => Some(ContentBlock::MediaRef {
+                            file_id: saved.file_id,
+                            kind: MediaKind::Image,
+                        }),
+                        Err(_) => converted.media.take(),
+                    }
+                }
+                None => converted.media.take(),
+            };
+        }
+
         if let Some(text) = converted.text {
             parts.push(ContentBlock::Text {
                 text: text.clone(),
@@ -487,6 +557,7 @@ pub fn mcp_result_to_output(
         }
     }
 
+    let notices = captions.into_iter().chain(notices).collect::<Vec<_>>();
     wrap_media_only(&mut parts, qualified_tool_name);
 
     // v2 appends the extras before the attachment notices (`output.ts:220-228`
@@ -668,7 +739,6 @@ fn bound_notices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use serde_json::json;
 
     fn store() -> (tempfile::TempDir, FileStore) {
@@ -695,6 +765,24 @@ mod tests {
             structured_content: None,
             meta: None,
         }
+    }
+
+    fn large_png_block() -> (McpContent, Vec<u8>) {
+        let image = image::DynamicImage::new_rgb8(2200, 2200);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let bytes = bytes.into_inner();
+        let payload = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        (
+            McpContent {
+                content_type: "image".into(),
+                text: None,
+                mime_type: Some("image/png".into()),
+                data: Some(payload),
+                resource: None,
+            },
+            bytes,
+        )
     }
 
     /// Text reaches the model unchanged and nothing is preserved.
@@ -1005,6 +1093,67 @@ mod tests {
         assert!(output.truncated);
         // 40 originals plus the spilled details document.
         assert_eq!(files.list().unwrap().len(), 41);
+    }
+
+    #[test]
+    fn a_changed_image_preserves_the_original_and_references_the_compressed_copy() {
+        let (_dir, files) = store();
+        let (block, _) = large_png_block();
+        let output = mcp_result_to_output(
+            &result_with(vec![block]),
+            "mcp__srv__t",
+            Some(&files),
+            None,
+            None,
+        );
+
+        assert!(
+            output
+                .content
+                .contains("Image compressed to fit model limits")
+        );
+        assert!(
+            output
+                .content
+                .contains("The uncompressed original is saved at")
+        );
+        assert!(output.content.contains("Original attachment saved at:"));
+        assert_eq!(files.list().unwrap().len(), 2);
+        assert!(
+            output
+                .parts
+                .iter()
+                .any(|part| matches!(part, ContentBlock::MediaRef { .. }))
+        );
+    }
+
+    #[test]
+    fn a_changed_image_without_a_store_uses_the_originals_cache_and_sends_the_compressed_image() {
+        let (block, bytes) = large_png_block();
+        let output =
+            mcp_result_to_output(&result_with(vec![block]), "mcp__srv__t", None, None, None);
+        let hash = format!("{:x}", sha2::Sha256::digest(&bytes));
+        let original = crate::native::image_originals::original_image_cache_dir()
+            .join(format!("{}.png", &hash[..32]));
+
+        assert!(
+            output
+                .content
+                .contains("Image compressed to fit model limits")
+        );
+        assert!(
+            output
+                .content
+                .contains("The uncompressed original is saved at")
+        );
+        assert!(original.exists(), "missing original: {original:?}");
+        assert!(
+            output
+                .parts
+                .iter()
+                .any(|part| matches!(part, ContentBlock::ImageUrl { .. }))
+        );
+        let _ = std::fs::remove_file(original);
     }
 
     /// Without a store the conversion still accounts for every block: media

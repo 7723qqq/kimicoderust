@@ -1,4 +1,5 @@
 pub mod blobs;
+pub mod context_transcript;
 pub mod loop_fold;
 pub mod migration;
 
@@ -188,6 +189,7 @@ pub fn refuse_newer_wire_version(
 pub fn read_fold_rows(
     conn: &Connection,
     session_id: &str,
+    cache: &blobs::BlobCache,
 ) -> Result<(Vec<WireEventFoldRow>, usize), EventStoreError> {
     refuse_newer_wire_version(conn, session_id)?;
 
@@ -216,7 +218,7 @@ pub fn read_fold_rows(
                 // Restore the media the write dehydrated (v2 `rehydrateStates`
                 // → `blobService.loadParts`), so the folded projection carries
                 // the same content the model originally saw.
-                blobs::rehydrate_blob_refs(&mut payload, conn)?;
+                blobs::rehydrate_blob_refs(&mut payload, conn, cache)?;
                 fold_rows.push((event_type, payload, is_compaction));
             }
             Err(e) => {
@@ -466,9 +468,10 @@ pub fn repair_wire_journal(
 pub fn read_fold_rows_with_repair(
     conn: &Connection,
     session_id: &str,
+    cache: &blobs::BlobCache,
     backup_path: Option<&Path>,
 ) -> Result<(Vec<WireEventFoldRow>, usize, Option<WireRepairReport>), EventStoreError> {
-    let (fold_rows, dropped) = read_fold_rows(conn, session_id)?;
+    let (fold_rows, dropped) = read_fold_rows(conn, session_id, cache)?;
     if dropped == 0 {
         return Ok((fold_rows, dropped, None));
     }
@@ -512,6 +515,7 @@ fn add_wire_column(conn: &Connection, column: &str) -> Result<(), EventStoreErro
 
 pub struct SqliteEventStore {
     conn: Arc<Mutex<Connection>>,
+    blob_cache: blobs::BlobCache,
     /// Where the database lives, so a repair can leave the original wire log
     /// beside it (`<db>.<session>.wire.bak`). `None` for the in-memory store,
     /// which has no durable place to put a backup.
@@ -589,6 +593,7 @@ impl SqliteEventStore {
         add_wire_column(&conn, "min_protocol_version")?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            blob_cache: blobs::BlobCache::new(),
             path: Some(path),
         })
     }
@@ -615,6 +620,7 @@ impl SqliteEventStore {
         conn.execute_batch(blobs::BLOB_TABLE_SQL)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            blob_cache: blobs::BlobCache::new(),
             path: None,
         })
     }
@@ -1320,7 +1326,7 @@ impl EventStore for SqliteEventStore {
         // reference, which nothing can find or reclaim later.
         let tx = conn.unchecked_transaction()?;
         let mut payload = event.payload.clone();
-        blobs::offload_data_uris(&mut payload, &tx)?;
+        blobs::offload_data_uris(&mut payload, &tx, &self.blob_cache)?;
         let payload_str = serde_json::to_string(&payload)?;
         tx.execute(
             "INSERT INTO wire_events (id, session_id, event_type, payload, is_checkpoint, is_compaction, created_at, protocol_version, min_protocol_version)
@@ -1349,7 +1355,7 @@ impl EventStore for SqliteEventStore {
                 .path
                 .as_deref()
                 .map(|path| wire_backup_path(path, session_id));
-            read_fold_rows_with_repair(&conn, session_id, backup.as_deref())?.0
+            read_fold_rows_with_repair(&conn, session_id, &self.blob_cache, backup.as_deref())?.0
         };
 
         fold_wire_events(raw_rows.iter().map(|(t, p, c)| (t.as_str(), p, *c)))
@@ -2487,7 +2493,7 @@ mod tests {
 
         let (rows, dropped) = {
             let conn = store.conn.lock();
-            read_fold_rows(&conn, session).unwrap()
+            read_fold_rows(&conn, session, &store.blob_cache).unwrap()
         };
         assert_eq!(dropped, 0);
         let payload = &rows[0].1;
@@ -2516,7 +2522,7 @@ mod tests {
 
         let error = {
             let conn = store.conn.lock();
-            read_fold_rows(&conn, session).unwrap_err()
+            read_fold_rows(&conn, session, &store.blob_cache).unwrap_err()
         };
         assert!(
             error
@@ -2733,7 +2739,7 @@ mod tests {
 
         let (rows, dropped, report) = {
             let conn = store.conn.lock();
-            read_fold_rows_with_repair(&conn, session, Some(&unwritable))
+            read_fold_rows_with_repair(&conn, session, &store.blob_cache, Some(&unwritable))
                 .expect("a failed repair must not discard the folded projection")
         };
         assert_eq!(dropped, 1);

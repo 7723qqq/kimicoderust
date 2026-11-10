@@ -10,7 +10,6 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::native::event_store::{
     EventStore, EventStoreError, Message, RawWireEvent, WIRE_MIN_READER_VERSION,
@@ -85,6 +84,7 @@ fn encode_stored_json<T: Serialize>(
 fn dehydrate_state_value<'a>(
     value: &'a Value,
     conn: &rusqlite::Connection,
+    cache: &crate::native::event_store::blobs::BlobCache,
 ) -> rusqlite::Result<std::borrow::Cow<'a, Value>> {
     // Media-free documents — the overwhelming majority — are encoded straight
     // from the caller's borrow.
@@ -92,13 +92,17 @@ fn dehydrate_state_value<'a>(
         return Ok(std::borrow::Cow::Borrowed(value));
     }
     let mut owned = value.clone();
-    crate::native::event_store::blobs::offload_data_uris(&mut owned, conn)?;
+    crate::native::event_store::blobs::offload_data_uris(&mut owned, conn, cache)?;
     Ok(std::borrow::Cow::Owned(owned))
 }
 
 /// Expand the `blobref:` URLs a state document was written with.
-fn rehydrate_state_value(value: &mut Value, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    crate::native::event_store::blobs::rehydrate_blob_refs(value, conn)?;
+fn rehydrate_state_value(
+    value: &mut Value,
+    conn: &rusqlite::Connection,
+    cache: &crate::native::event_store::blobs::BlobCache,
+) -> rusqlite::Result<()> {
+    crate::native::event_store::blobs::rehydrate_blob_refs(value, conn, cache)?;
     Ok(())
 }
 
@@ -106,7 +110,12 @@ fn rehydrate_state_value(value: &mut Value, conn: &rusqlite::Connection) -> rusq
 ///
 /// A row that exists but does not parse is an error, not `null`: reporting
 /// `null` let the next write overwrite the only copy.
-fn read_state_entry(conn: &Connection, domain: &str, key: &str) -> rusqlite::Result<Option<Value>> {
+fn read_state_entry(
+    conn: &Connection,
+    cache: &crate::native::event_store::blobs::BlobCache,
+    domain: &str,
+    key: &str,
+) -> rusqlite::Result<Option<Value>> {
     let raw = {
         let mut stmt =
             conn.prepare("SELECT value FROM state_entries WHERE domain = ?1 AND key = ?2")?;
@@ -124,7 +133,7 @@ fn read_state_entry(conn: &Connection, domain: &str, key: &str) -> rusqlite::Res
     };
     match raw {
         Some(mut value) => {
-            rehydrate_state_value(&mut value, conn)?;
+            rehydrate_state_value(&mut value, conn, cache)?;
             Ok(Some(value))
         }
         None => Ok(None),
@@ -135,6 +144,7 @@ fn read_state_entry(conn: &Connection, domain: &str, key: &str) -> rusqlite::Res
 /// bytes with the row.
 fn write_state_entry(
     conn: &Connection,
+    cache: &crate::native::event_store::blobs::BlobCache,
     domain: &str,
     key: &str,
     value: &Value,
@@ -143,7 +153,7 @@ fn write_state_entry(
     // The offloaded blob bytes and the state row commit together, so a failed
     // write cannot leave media in `wire_blobs` that no row references.
     let tx = conn.unchecked_transaction()?;
-    let value = dehydrate_state_value(value, &tx)?;
+    let value = dehydrate_state_value(value, &tx, cache)?;
     let val_str = encode_stored_json(value.as_ref(), format!("state entry {domain}/{key}"))?;
     tx.execute(
         "INSERT INTO state_entries (domain, key, value, updated_at)
@@ -247,13 +257,14 @@ fn wire_export_line(
     event_type: &str,
     payload: &str,
     conn: &Connection,
+    cache: &crate::native::event_store::blobs::BlobCache,
 ) -> rusqlite::Result<String> {
     // A corrupt payload must not be exported as `"payload": null`: the bundle
     // would look complete while missing the record's content.
     let mut value: Value = serde_json::from_str(payload).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
     })?;
-    crate::native::event_store::blobs::rehydrate_blob_refs(&mut value, conn)?;
+    crate::native::event_store::blobs::rehydrate_blob_refs(&mut value, conn, cache)?;
     let mut record = match value {
         Value::Object(map) => map,
         other => {
@@ -266,39 +277,7 @@ fn wire_export_line(
     Ok(Value::Object(record).to_string())
 }
 
-/// Compute standard deterministic workspace ID `wd_<slug>_<hash12>`.
-pub fn encode_workdir_key(work_dir: &str) -> String {
-    let normalized = work_dir.replace('\\', "/");
-    let normalized = normalized.trim_end_matches('/');
-    let base = normalized.split('/').next_back().unwrap_or(normalized);
-
-    let mut slug = String::new();
-    for c in base.to_lowercase().chars() {
-        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
-            slug.push(c);
-        } else {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_matches('-').to_string();
-    let slug = if slug.len() > 40 {
-        slug[..40].trim_matches('-').to_string()
-    } else {
-        slug
-    };
-    let final_slug = if slug.is_empty() || slug == "." || slug == ".." {
-        "workspace".to_string()
-    } else {
-        slug
-    };
-
-    let mut hasher = Sha256::new();
-    hasher.update(normalized.as_bytes());
-    let hash = format!("{:x}", hasher.finalize());
-    let hash12 = &hash[..12];
-
-    format!("wd_{final_slug}_{hash12}")
-}
+pub use crate::_base::workdir_slug::encode_workdir_key;
 
 /// The identity of a workspace root, independent of how it was spelled.
 ///
@@ -936,6 +915,7 @@ pub struct SqliteSessionStore {
     /// macros). The value is that the next refactor cannot introduce a cascade
     /// by accident.
     conn: Mutex<Connection>,
+    blob_cache: crate::native::event_store::blobs::BlobCache,
     /// The file this store was opened from; `None` for an in-memory store.
     /// A caller that needs the registry later reopens the file instead of
     /// holding this handle (see `PluginManager`): a retained connection keeps a
@@ -1304,6 +1284,7 @@ impl SqliteSessionStore {
 
         Ok(Self {
             conn: Mutex::new(conn),
+            blob_cache: crate::native::event_store::blobs::BlobCache::new(),
             path,
         })
     }
@@ -1467,7 +1448,9 @@ impl SqliteSessionStore {
             };
             records
                 .into_iter()
-                .map(|(event_type, payload)| wire_export_line(&event_type, &payload, &conn))
+                .map(|(event_type, payload)| {
+                    wire_export_line(&event_type, &payload, &conn, &self.blob_cache)
+                })
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         Ok(Some(SessionExport {
@@ -2755,7 +2738,7 @@ impl SqliteSessionStore {
                     && map.get("isCustomTitle").and_then(Value::as_bool) == Some(true));
             map.insert("isCustomTitle".into(), Value::Bool(custom));
         }
-        let value = dehydrate_state_value(&metadata, &conn)?;
+        let value = dehydrate_state_value(&metadata, &conn, &self.blob_cache)?;
         let encoded =
             encode_stored_json(value.as_ref(), format!("state entry metadata/{session_id}"))?;
         conn.execute(
@@ -3184,7 +3167,7 @@ impl SqliteSessionStore {
     /// Put a key-value pair in a state domain (state bridge storage).
     pub fn put_state(&self, domain: &str, key: &str, value: &Value) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock();
-        write_state_entry(&conn, domain, key, value)
+        write_state_entry(&conn, &self.blob_cache, domain, key, value)
     }
 
     /// Put a session-scoped state entry: the `session_id` column names the
@@ -3202,7 +3185,7 @@ impl SqliteSessionStore {
         let conn = self.conn.lock();
         let now = chrono::Utc::now().timestamp_millis();
         let tx = conn.unchecked_transaction()?;
-        let value = dehydrate_state_value(value, &tx)?;
+        let value = dehydrate_state_value(value, &tx, &self.blob_cache)?;
         let val_str = encode_stored_json(value.as_ref(), format!("state entry {domain}/{key}"))?;
         tx.execute(
             "INSERT INTO state_entries (domain, key, value, updated_at, session_id)
@@ -3241,7 +3224,7 @@ impl SqliteSessionStore {
         })?;
         let mut entries = rows.collect::<Result<Vec<_>, rusqlite::Error>>()?;
         for (_, _, value) in &mut entries {
-            rehydrate_state_value(value, &conn)?;
+            rehydrate_state_value(value, &conn, &self.blob_cache)?;
         }
         Ok(entries)
     }
@@ -3249,7 +3232,7 @@ impl SqliteSessionStore {
     /// Get a value from a state domain.
     pub fn get_state(&self, domain: &str, key: &str) -> Result<Option<Value>, rusqlite::Error> {
         let conn = self.conn.lock();
-        read_state_entry(&conn, domain, key)
+        read_state_entry(&conn, &self.blob_cache, domain, key)
     }
 
     /// Apply an RFC 6902 JSON patch to a state entry.
@@ -3266,12 +3249,12 @@ impl SqliteSessionStore {
         patch: &crate::session::patch::JsonPatchSet,
     ) -> Result<(Value, crate::session::patch::JsonPatchSet), String> {
         let conn = self.conn.lock();
-        let mut val = read_state_entry(&conn, domain, key)
+        let mut val = read_state_entry(&conn, &self.blob_cache, domain, key)
             .map_err(|e| e.to_string())?
             .unwrap_or(Value::Null);
         let inverse = crate::session::patch::apply_patch(&mut val, patch)
             .map_err(|e| format!("failed to apply patch to {domain}/{key}: {e}"))?;
-        write_state_entry(&conn, domain, key, &val).map_err(|e| e.to_string())?;
+        write_state_entry(&conn, &self.blob_cache, domain, key, &val).map_err(|e| e.to_string())?;
         Ok((val, inverse))
     }
 
@@ -3317,7 +3300,7 @@ impl SqliteSessionStore {
         };
         match raw {
             Some(mut value) => {
-                rehydrate_state_value(&mut value, &conn)?;
+                rehydrate_state_value(&mut value, &conn, &self.blob_cache)?;
                 Ok(Some(value))
             }
             None => Ok(None),
@@ -3334,7 +3317,7 @@ impl SqliteSessionStore {
     ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock();
         let now = chrono::Utc::now().timestamp_millis();
-        let data = dehydrate_state_value(data, &conn)?;
+        let data = dehydrate_state_value(data, &conn, &self.blob_cache)?;
         let data_str =
             encode_stored_json(data.as_ref(), format!("checkpoint {session_id}/{name}"))?;
         conn.execute(
@@ -3710,7 +3693,11 @@ impl SqliteSessionStore {
         let tx = conn.unchecked_transaction()?;
         let payload_json = if payload_json.contains("data:") {
             let mut payload: serde_json::Value = serde_json::from_str(payload_json)?;
-            if crate::native::event_store::blobs::offload_data_uris(&mut payload, &tx)? {
+            if crate::native::event_store::blobs::offload_data_uris(
+                &mut payload,
+                &tx,
+                &self.blob_cache,
+            )? {
                 serde_json::to_string(&payload)?
             } else {
                 payload_json.to_string()
@@ -3770,7 +3757,11 @@ impl SqliteSessionStore {
         // Expand the media the write dehydrated, so a reader receives the same
         // content the model saw (v2 `rehydrateStates` → `loadParts`).
         for record in &mut records {
-            crate::native::event_store::blobs::rehydrate_blob_refs(&mut record.payload, &conn)?;
+            crate::native::event_store::blobs::rehydrate_blob_refs(
+                &mut record.payload,
+                &conn,
+                &self.blob_cache,
+            )?;
         }
         Ok(records)
     }
@@ -4029,9 +4020,10 @@ impl SqliteSessionStore {
                     %session_id,
                     "session is held by another process; skipping wire repair on this read"
                 );
-                crate::native::event_store::read_fold_rows(&conn, session_id)?.0
+                crate::native::event_store::read_fold_rows(&conn, session_id, &self.blob_cache)?.0
             } else {
-                read_fold_rows_with_repair(&conn, session_id, backup.as_deref())?.0
+                read_fold_rows_with_repair(&conn, session_id, &self.blob_cache, backup.as_deref())?
+                    .0
             }
         };
 
