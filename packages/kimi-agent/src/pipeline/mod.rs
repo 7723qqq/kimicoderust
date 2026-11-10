@@ -314,11 +314,22 @@ pub async fn build_engine_pipeline(
     // host. The wrapper always carries a local truncator (M2 切片 2): result
     // truncation + spill run in-process, no host finalize seam.
     let native_tool_count = Arc::new(AtomicU32::new(0));
-    let truncator = spec
-        .workspace_root
-        .as_deref()
-        .map(std::path::Path::new)
-        .map(|root| Arc::new(ToolResultTruncator::for_workspace(root)));
+    let truncator = match spec.workspace_root.as_deref().map(std::path::Path::new) {
+        Some(root) => match spec.session_id.as_deref() {
+            Some(session_id) => Some(Arc::new(
+                ToolResultTruncator::for_agent(
+                    root,
+                    session_id,
+                    spec.caller_agent_id.as_deref().unwrap_or("main"),
+                )
+                .map_err(|error| PipelineError {
+                    message: error.to_string(),
+                })?,
+            )),
+            None => Some(Arc::new(ToolResultTruncator::for_workspace(root))),
+        },
+        None => None,
+    };
     let policy_snapshot = spec.policy_snapshot.clone();
     let permission_engine = policy_snapshot.clone().map(|s| {
         // The engine's `GitCwdWriteApprove` gate needs the session workspace
@@ -556,6 +567,7 @@ pub async fn build_engine_pipeline(
                         runner.apply_background_limits(
                             spec.background.kill_grace_period_ms,
                             spec.background.max_running_tasks,
+                            spec.background.max_settled_tasks,
                             spec.background.keep_alive_on_exit,
                         );
                         toolset = toolset.with_task_runner(runner.clone());

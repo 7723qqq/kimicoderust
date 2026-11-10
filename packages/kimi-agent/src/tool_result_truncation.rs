@@ -1,26 +1,8 @@
-//! Local tool-result truncation (P26 batch 4).
-//!
-//! Mirrors `agent-core-v2/src/agent/toolResultTruncation/toolResultTruncationService.ts`
-//! so a natively-executed result that exceeds the per-call character cap
-//! gets the same shape the host path produces: per-line truncation, a
-//! spill-to-disk backup, and a pointer block the model reads.
-//!
-//! Strategy (same shape as the TS service):
-//!   1. Empty results are returned unchanged. Both success and error results
-//!      that exceed the character cap are shaped and spilled to prevent context blowup.
-//!   2. If raw text <= `DEFAULT_TOOL_RESULT_MAX_CHARS` (50_000) -> return
-//!      unchanged with original error flag preserved.
-//!   3. Else: shape per-line (2_000 char cap), save the retained prefix
-//!      to a file under `spill_dir`, replace the model-facing content
-//!      with a pointer block carrying a `Read`-able `output_path`, while preserving `is_error`.
-//!
-//! The defaults are the same constants the TS service uses; changing
-//! them here without the TS side will make the two paths diverge.
-
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::_base::text::code_points::{code_point_boundary_start, slice_on_code_point_boundary};
 use crate::turn_loop::types::ToolResultSpill;
 
 const DEFAULT_TOOL_RESULT_MAX_CHARS: usize = 50_000;
@@ -30,73 +12,114 @@ const TOOL_RESULT_PREVIEW_TAIL_CHARS: usize = 1_024;
 const TOOL_RESULT_MAX_LINE_CHARS: usize = 2_000;
 const TRUNCATION_MARKER: &str = "[...truncated]";
 
-/// A truncated tool result ready to enter the model context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizedToolResult {
     pub content: String,
     pub is_error: bool,
     pub note: Option<String>,
-    /// Path to the spill file when the original content was persisted
-    /// to disk; `None` when the content fit under the cap.
+
     pub spill_path: Option<String>,
-    /// `true` when the content was truncated (either per-line, by
-    /// spilling, or both). Mirrors the TS `truncated` field.
+
     pub truncated: bool,
 }
 
-/// Inputs the truncation service needs from the engine.
 pub struct TruncationRequest<'a> {
     pub tool_name: &'a str,
     pub tool_call_id: &'a str,
     pub content: &'a str,
     pub is_error: bool,
     pub note: Option<&'a str>,
-    /// Set when the tool already persisted its own output (v2
-    /// `ExecutableToolResult.spill`): the pointer then targets that file and
-    /// `suffix` is kept after it.
+
     pub spill: Option<&'a ToolResultSpill>,
 }
 
-/// Local tool result truncation. Holds the spill directory the caller
-/// chose (typically `<workspace>/.kimi/spill`); the service is stateless
-/// beyond that.
 pub struct ToolResultTruncator {
-    spill_dir: PathBuf,
+    spill_dir: std::sync::Arc<std::sync::Mutex<PathBuf>>,
 }
 
-/// How long a spilled tool result is kept under `<workspace>/.kimi/spill`.
-/// Pruned opportunistically whenever a truncator is rebuilt for the workspace
-/// (see [`ToolResultTruncator::for_workspace`]) — there is no background task.
 pub const SPILL_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 impl ToolResultTruncator {
     pub fn new(spill_dir: PathBuf) -> Self {
-        Self { spill_dir }
-    }
-
-    /// Construct a `ToolResultTruncator` rooted at `<workspace>/.kimi/spill`.
-    /// The directory is created on the first spill (not eagerly).
-    ///
-    /// Also reclaims disk from earlier sessions by pruning spill files older
-    /// than [`SPILL_RETENTION`]. This is the only caller of
-    /// [`ToolResultTruncator::cleanup_expired_spills`]; without it the spill
-    /// directory grew without bound. Best-effort: a prune failure is logged at
-    /// debug level and never affects a turn.
-    pub fn for_workspace(workspace_root: &Path) -> Self {
-        let truncator = Self::new(workspace_root.join(".kimi").join("spill"));
-        let pruned = truncator.cleanup_expired_spills(SPILL_RETENTION);
-        if pruned > 0 {
-            tracing::debug!(pruned, "pruned expired spill files");
+        Self {
+            spill_dir: std::sync::Arc::new(std::sync::Mutex::new(spill_dir)),
         }
-        truncator
     }
 
-    /// Apply the truncation policy. See module docs for the rules.
-    /// Whether this call reads back something this service spilled.
-    ///
-    /// v2 marks that result `spillExempt` (`readTool.ts`): the model asked for
-    /// a file this service wrote, so truncating it again would hand back a
-    /// pointer to a pointer and lose the tail it asked for.
+    fn spill_dir(&self) -> PathBuf {
+        self.spill_dir
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn set_agent(
+        &self,
+        workspace_root: &Path,
+        session_id: &str,
+        agent_id: &str,
+    ) -> std::io::Result<()> {
+        let next = Self::for_agent(workspace_root, session_id, agent_id)?;
+        *self
+            .spill_dir
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = next.spill_dir();
+        Ok(())
+    }
+
+    pub fn set_agent_in_home(
+        &self,
+        workspace_root: &Path,
+        session_id: &str,
+        agent_id: &str,
+        home: &Path,
+    ) {
+        *self
+            .spill_dir
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            agent_spill_dir(workspace_root, session_id, agent_id, home);
+    }
+
+    pub fn for_workspace(workspace_root: &Path) -> Self {
+        Self::new(workspace_root.join(".kimi").join("spill"))
+    }
+
+    pub fn for_agent(
+        workspace_root: &Path,
+        session_id: &str,
+        agent_id: &str,
+    ) -> std::io::Result<Self> {
+        let home = std::env::var_os("KIMI_CODE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .or_else(|| std::env::var_os("HOME"))
+                    .map(|home| PathBuf::from(home).join(".kimi-code"))
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "cannot resolve the home directory (KIMI_CODE_HOME / USERPROFILE / HOME unset)",
+                )
+            })?;
+        Ok(Self::for_agent_in_home(
+            workspace_root,
+            session_id,
+            agent_id,
+            &home,
+        ))
+    }
+
+    pub fn for_agent_in_home(
+        workspace_root: &Path,
+        session_id: &str,
+        agent_id: &str,
+        home: &Path,
+    ) -> Self {
+        Self::new(agent_spill_dir(workspace_root, session_id, agent_id, home))
+    }
+
     pub fn is_spill_read(&self, tool_name: &str, args: &serde_json::Value) -> bool {
         if !tool_name.eq_ignore_ascii_case("read") {
             return false;
@@ -104,19 +127,11 @@ impl ToolResultTruncator {
         let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
             return false;
         };
-        let requested = Path::new(path);
-        let resolved = requested
-            .canonicalize()
-            .unwrap_or_else(|_| requested.to_path_buf());
-        let spill = self
-            .spill_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.spill_dir.clone());
-        resolved.starts_with(&spill)
+        let requested = lexical_normalize(Path::new(path));
+        let spill = lexical_normalize(&self.spill_dir());
+        requested.starts_with(&spill)
     }
 
-    /// The result policy for one call: [`Self::truncate`], except that a read
-    /// of a spilled file comes back whole (v2 `truncateForModel` + `spillExempt`).
     pub fn truncate_call(
         &self,
         args: &serde_json::Value,
@@ -135,7 +150,6 @@ impl ToolResultTruncator {
     }
 
     pub fn truncate(&self, req: TruncationRequest<'_>) -> FinalizedToolResult {
-        // Empty results are never truncated.
         if req.content.is_empty() {
             return FinalizedToolResult {
                 content: req.content.to_string(),
@@ -146,7 +160,7 @@ impl ToolResultTruncator {
             };
         }
 
-        let raw_chars = req.content.chars().count();
+        let raw_chars = utf16_len(req.content);
         if raw_chars <= DEFAULT_TOOL_RESULT_MAX_CHARS {
             return FinalizedToolResult {
                 content: req.content.to_string(),
@@ -157,9 +171,6 @@ impl ToolResultTruncator {
             };
         }
 
-        // Decide how much to retain on disk. The TS service uses
-        // MAX_RETAINED_CHARS as a hard ceiling; below that, save the
-        // whole prefix; above, save the first 10 MB.
         let retained: String = if req.content.len() <= DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS {
             req.content.to_string()
         } else {
@@ -177,15 +188,11 @@ impl ToolResultTruncator {
             .spill
             .and_then(|spill| spill.suffix.as_deref())
             .unwrap_or("");
-        let preserved_chars = retained.chars().count();
+        let preserved_chars = utf16_len(&retained);
 
-        // Per-line shape: cap every line at 2_000 chars + marker.
         let shaped = shape_per_line(req.content, TOOL_RESULT_MAX_LINE_CHARS);
-        let shaped_chars = shaped.chars().count();
+        let shaped_chars = utf16_len(&shaped);
 
-        // A tool that already wrote its output owns the file; otherwise the
-        // truncator saves the retained text itself (v2
-        // `toolResultTruncationService.ts:73-76`).
         let saved: Option<(String, usize)> =
             match req.spill.and_then(|spill| spill.output_path.as_deref()) {
                 Some(path) => Some((path.to_string(), total_chars)),
@@ -197,9 +204,6 @@ impl ToolResultTruncator {
 
         let final_content = match &saved {
             Some((path, preserved)) if shaped_chars <= DEFAULT_TOOL_RESULT_MAX_CHARS => {
-                // Inline pointer appended to the shaped text. Lines already
-                // visible in the body are not repeated (v2
-                // `dropInlineSuffixLines`, `toolResultTruncationService.ts:90`).
                 let inline_suffix = drop_inline_suffix_lines(suffix, &shaped);
                 let pointer = render_appended_spill_pointer(
                     path,
@@ -210,19 +214,16 @@ impl ToolResultTruncator {
                 );
                 append_to_output(&shaped, &pointer)
             }
-            Some((path, preserved)) => {
-                // Persisted pointer replaces the body; head + tail preview.
-                render_persisted_pointer(
-                    req.tool_name,
-                    req.tool_call_id,
-                    &retained,
-                    path,
-                    *preserved,
-                    total_chars,
-                    suffix,
-                    false,
-                )
-            }
+            Some((path, preserved)) => render_persisted_pointer(
+                req.tool_name,
+                req.tool_call_id,
+                &retained,
+                path,
+                *preserved,
+                total_chars,
+                suffix,
+                false,
+            ),
             None => render_unpersisted_pointer(
                 req.tool_name,
                 req.tool_call_id,
@@ -242,8 +243,8 @@ impl ToolResultTruncator {
     }
 
     fn save_spill(&self, tool_name: &str, tool_call_id: &str, text: &str) -> Option<String> {
-        let dir = &self.spill_dir;
-        if let Err(e) = fs::create_dir_all(dir) {
+        let dir = self.spill_dir();
+        if let Err(e) = fs::create_dir_all(&dir) {
             eprintln!("[kimi-agent] spill dir create failed: {e}");
             return None;
         }
@@ -263,17 +264,15 @@ impl ToolResultTruncator {
             return None;
         }
         if let Err(e) = f.sync_all() {
-            // best-effort; not fatal
             eprintln!("[kimi-agent] spill file sync failed: {e}");
         }
         Some(path.to_string_lossy().into_owned())
     }
 
-    /// Prune spill files older than `max_age` to prevent workspace bloat.
     pub fn cleanup_expired_spills(&self, max_age: std::time::Duration) -> usize {
         let mut pruned = 0;
         let now = std::time::SystemTime::now();
-        if let Ok(entries) = fs::read_dir(&self.spill_dir) {
+        if let Ok(entries) = fs::read_dir(self.spill_dir()) {
             for entry in entries.flatten() {
                 if let Ok(meta) = entry.metadata()
                     && let Ok(modified) = meta.modified()
@@ -289,10 +288,48 @@ impl ToolResultTruncator {
     }
 }
 
-/// Cap each line at `max_chars` and append `[...truncated]` when the cap
-/// is hit. Mirrors the TS `shapeStringPerLine` helper.
+fn agent_spill_dir(
+    workspace_root: &Path,
+    session_id: &str,
+    agent_id: &str,
+    home: &Path,
+) -> PathBuf {
+    let workspace_id =
+        crate::_base::workdir_slug::encode_workdir_key(&workspace_root.to_string_lossy());
+    home.join("sessions")
+        .join(workspace_id)
+        .join(session_id)
+        .join("agents")
+        .join(agent_id)
+        .join("tool-results")
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    let mut normal_components = 0usize;
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            std::path::Component::RootDir => out.push(std::path::MAIN_SEPARATOR.to_string()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if normal_components > 0 {
+                    out.pop();
+                    normal_components -= 1;
+                } else if !out.has_root() {
+                    out.push("..");
+                }
+            }
+            std::path::Component::Normal(value) => {
+                out.push(value);
+                normal_components += 1;
+            }
+        }
+    }
+    out
+}
+
 fn shape_per_line(text: &str, max_chars: usize) -> String {
-    // Walk lines manually to preserve trailing line breaks.
     let mut out = String::with_capacity(text.len());
     let mut start = 0usize;
     let bytes = text.as_bytes();
@@ -311,14 +348,12 @@ fn shape_per_line(text: &str, max_chars: usize) -> String {
 }
 
 fn shape_line_into(out: &mut String, line: &str, max_chars: usize) {
-    if line.chars().count() > max_chars {
+    if utf16_len(line) > max_chars {
         let line_break = if line.ends_with('\n') { "\n" } else { "" };
         let suffix = format!("{TRUNCATION_MARKER}{line_break}");
-        let effective_max = max_chars.max(suffix.chars().count());
-        // Keep the first `effective_max - suffix.chars().count()` chars.
-        let keep = effective_max.saturating_sub(suffix.chars().count());
-        let truncated: String = line.chars().take(keep).collect();
-        out.push_str(&truncated);
+        let effective_max = max_chars.max(utf16_len(&suffix));
+        let keep = effective_max.saturating_sub(utf16_len(&suffix));
+        out.push_str(&slice_on_code_point_boundary(line, keep));
         out.push_str(&suffix);
     } else {
         out.push_str(line);
@@ -397,7 +432,7 @@ fn render_persisted_pointer(
         format!("tool_call_id: {tool_call_id}"),
         size_line,
     ];
-    if preserved_chars == preview_text.chars().count() {
+    if preserved_chars == utf16_len(preview_text) {
         lines.push(format!("output_size_bytes: {}", preview_text.len()));
     }
     lines.push(format!("output_path: {output_path}"));
@@ -436,9 +471,6 @@ fn render_unpersisted_pointer(
     lines.join("\n")
 }
 
-/// Keep only the suffix lines the shaped body does not already show, so the
-/// inline pointer never repeats a visible status line (v2
-/// `dropInlineSuffixLines`, `toolResultTruncationService.ts:327-332`).
 fn drop_inline_suffix_lines(suffix: &str, shaped_text: &str) -> String {
     if suffix.is_empty() {
         return String::new();
@@ -458,14 +490,14 @@ fn drop_inline_suffix_lines(suffix: &str, shaped_text: &str) -> String {
 }
 
 fn append_preview_lines(lines: &mut Vec<String>, preview_text: &str) {
-    let head: String = preview_text
-        .chars()
-        .take(TOOL_RESULT_PREVIEW_HEAD_CHARS)
-        .collect();
-    let head_len = head.chars().count();
-    let total_preview = preview_text.chars().count();
-    let tail_start = head_len.max(total_preview.saturating_sub(TOOL_RESULT_PREVIEW_TAIL_CHARS));
-    let tail: String = preview_text.chars().skip(tail_start).collect();
+    let head = slice_on_code_point_boundary(preview_text, TOOL_RESULT_PREVIEW_HEAD_CHARS);
+    let head_len = utf16_len(&head);
+    let total_preview = utf16_len(preview_text);
+    let tail_start = code_point_boundary_start(
+        preview_text,
+        head_len.max(total_preview.saturating_sub(TOOL_RESULT_PREVIEW_TAIL_CHARS)),
+    );
+    let tail = &preview_text[utf16_index_to_byte(preview_text, tail_start)..];
     lines.push(String::new());
     lines.push(format!("[preview: chars [0, {head_len})]"));
     lines.push(head);
@@ -476,8 +508,23 @@ fn append_preview_lines(lines: &mut Vec<String>, preview_text: &str) {
         }
         lines.push(String::new());
         lines.push(format!("[preview: chars [{tail_start}, {total_preview})]"));
-        lines.push(tail);
+        lines.push(tail.to_string());
     }
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn utf16_index_to_byte(text: &str, index: usize) -> usize {
+    let mut units = 0;
+    for (byte, ch) in text.char_indices() {
+        if units == index {
+            return byte;
+        }
+        units += ch.len_utf16();
+    }
+    text.len()
 }
 
 fn safe_stem(tool_name: &str, tool_call_id: &str) -> String {
@@ -491,7 +538,7 @@ fn safe_stem(tool_name: &str, tool_call_id: &str) -> String {
             }
         })
         .collect();
-    let trimmed: String = raw.trim_matches('_').chars().take(80).collect();
+    let trimmed = slice_on_code_point_boundary(raw.trim_matches('_'), 80);
     if trimmed.is_empty() {
         "tool-result".to_string()
     } else {
@@ -499,9 +546,6 @@ fn safe_stem(tool_name: &str, tool_call_id: &str) -> String {
     }
 }
 
-/// Cheap unique-ish suffix for the spill filename. Avoids pulling a UUID
-/// crate for what is essentially a debug aid; the file content is keyed
-/// on tool_name + tool_call_id + uuid-shaped suffix.
 fn short_uuid() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -521,11 +565,65 @@ mod tests {
         ToolResultTruncator::new(env::temp_dir().join("kimi-agent-truncation-test"))
     }
 
-    /// `for_workspace` is the only caller of the pruner: building a truncator
-    /// reclaims spills older than [`SPILL_RETENTION`] and keeps recent ones.
-    /// Without that call the spill directory grew without bound.
     #[test]
-    fn workspace_truncator_prunes_expired_spills() {
+    fn agent_truncator_uses_the_v2_scope_and_does_not_prune_existing_results() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = Path::new("C:\\work\\demo");
+        let spill = home
+            .path()
+            .join("sessions")
+            .join(crate::_base::workdir_slug::encode_workdir_key(
+                workspace.to_str().unwrap(),
+            ))
+            .join("session-1")
+            .join("agents")
+            .join("agent-1")
+            .join("tool-results");
+        std::fs::create_dir_all(&spill).unwrap();
+        let stale = spill.join("old.txt");
+        std::fs::write(&stale, "old").unwrap();
+
+        let truncator =
+            ToolResultTruncator::for_agent_in_home(workspace, "session-1", "agent-1", home.path());
+        let result_path = spill.join("result.txt");
+        assert!(truncator.is_spill_read(
+            "Read",
+            &serde_json::json!({"path": result_path.to_string_lossy()})
+        ));
+        assert!(truncator.is_spill_read(
+            "Read",
+            &serde_json::json!({"path": spill.join("nested").join("..").join("result.txt").to_string_lossy()})
+        ));
+        assert!(!truncator.is_spill_read(
+            "Read",
+            &serde_json::json!({"path": spill.join("..").join("tool-results-evil").to_string_lossy()})
+        ));
+        assert!(stale.exists());
+
+        truncator.set_agent_in_home(workspace, "session-2", "agent-2", home.path());
+        let redirected = home
+            .path()
+            .join("sessions")
+            .join(crate::_base::workdir_slug::encode_workdir_key(
+                workspace.to_str().unwrap(),
+            ))
+            .join("session-2")
+            .join("agents")
+            .join("agent-2")
+            .join("tool-results")
+            .join("result.txt");
+        assert!(truncator.is_spill_read(
+            "Read",
+            &serde_json::json!({"path": redirected.to_string_lossy()})
+        ));
+        assert!(!truncator.is_spill_read(
+            "Read",
+            &serde_json::json!({"path": result_path.to_string_lossy()})
+        ));
+    }
+
+    #[test]
+    fn workspace_truncator_does_not_prune_existing_spills() {
         let dir = tempfile::tempdir().unwrap();
         let spill = dir.path().join(".kimi").join("spill");
         std::fs::create_dir_all(&spill).unwrap();
@@ -548,8 +646,8 @@ mod tests {
         let _ = ToolResultTruncator::for_workspace(dir.path());
 
         assert!(
-            !stale.exists(),
-            "an expired spill is pruned when the truncator is built"
+            stale.exists(),
+            "an existing spill is not pruned when the truncator is built"
         );
         assert!(fresh.exists(), "a recent spill is kept");
     }
@@ -582,20 +680,16 @@ mod tests {
             note: Some("boom"),
             spill: None,
         });
-        // The key assertion: an oversized error output is never waved into the
-        // context unchecked — it is truncated and spilled to disk too
+
         assert!(r.truncated);
         assert!(r.spill_path.is_some());
-        // The key assertion: the original is_error and note fields pass through
-        // faithfully
+
         assert!(r.is_error);
         assert_eq!(r.note.as_deref(), Some("boom"));
     }
 
     #[test]
     fn large_single_line_uses_inline_pointer_when_shaped_fits() {
-        // 60_000 'a' chars on one line — per-line shape caps to ~2_000 chars,
-        // so the inline-pointer branch runs (shaped ≤ MAX_CHARS).
         let t = small();
         let long = "a".repeat(60_000);
         let r = t.truncate(TruncationRequest {
@@ -612,20 +706,17 @@ mod tests {
             std::path::Path::new(&path).is_file(),
             "spill file exists at {path}"
         );
-        // Inline pointer: "Per-line truncation occurred" + output_path.
+
         assert!(r.content.contains("Per-line truncation occurred"));
         assert!(r.content.contains("output_path:"));
         assert!(r.content.contains(&path));
-        // The retained text is in the spill file.
+
         let saved = fs::read_to_string(&path).unwrap();
         assert!(saved.chars().count() >= 50_000);
     }
 
     #[test]
     fn many_oversized_lines_use_persisted_pointer() {
-        // 30 lines × 2_000 chars = 60_000 raw chars. Per-line cap leaves each
-        // line ~2_020 chars after the marker, so the shaped text is well over
-        // 50_000 chars — the persisted-pointer branch must run.
         let t = small();
         let mut content = String::with_capacity(70_000);
         for _ in 0..30 {
@@ -643,7 +734,7 @@ mod tests {
         assert!(r.truncated);
         let path = r.spill_path.expect("spill path set");
         assert!(std::path::Path::new(&path).is_file());
-        // Persisted pointer: "Tool output exceeded" + tool metadata + preview.
+
         assert!(r.content.contains("Tool output exceeded"));
         assert!(r.content.contains("output_path:"));
         assert!(r.content.contains("tool_name: Read"));
@@ -657,10 +748,10 @@ mod tests {
     fn per_line_shape_caps_oversized_lines() {
         let t = small();
         let mut content = String::with_capacity(60_000);
-        // Add a 5_000-char single line — well over the 2_000 cap.
+
         content.push_str(&"y".repeat(5_000));
         content.push('\n');
-        // Then enough padding to force truncation overall.
+
         content.push_str(&"z".repeat(60_000));
         let r = t.truncate(TruncationRequest {
             tool_name: "Grep",
@@ -671,13 +762,12 @@ mod tests {
             spill: None,
         });
         assert!(r.truncated);
-        // The shaped text should contain the marker on the oversized line.
+
         assert!(r.content.contains(TRUNCATION_MARKER) || r.spill_path.is_some());
     }
 
     #[test]
     fn spill_failure_falls_back_to_unpersisted_pointer() {
-        // A path that cannot be created (parent is a file, not a dir).
         let blocker = env::temp_dir().join(format!("kimi-block-{}", short_uuid()));
         fs::write(&blocker, b"i am a file").unwrap();
         let bad = blocker.join("subdir").join("file.txt");
@@ -696,9 +786,6 @@ mod tests {
         fs::remove_file(&blocker).ok();
     }
 
-    /// A tool that already persisted its own output owns the pointer: the
-    /// truncator must not save a second copy, and the tool's suffix stays
-    /// after the pointer (v2 `spill.outputPath`, `toolResultTruncationService.ts:73-76`).
     #[test]
     fn a_tool_supplied_spill_path_is_used_instead_of_a_second_copy() {
         let dir = tempfile::tempdir().unwrap();
@@ -735,8 +822,6 @@ mod tests {
         );
     }
 
-    /// A saturating producer sets only `totalChars`: the pointer reports the
-    /// true size while the truncator still saves the retained text itself.
     #[test]
     fn a_spill_total_chars_reports_the_full_size() {
         let t = small();
@@ -764,8 +849,6 @@ mod tests {
         assert!(!r.content.contains("output_size_bytes:"));
     }
 
-    /// The persisted pointer keeps the suffix after the preview, so a trailing
-    /// status line is not lost behind head/tail elision.
     #[test]
     fn a_spill_suffix_survives_the_persisted_pointer() {
         let dir = tempfile::tempdir().unwrap();
@@ -799,10 +882,6 @@ mod tests {
     }
 }
 
-/// v2 exempts a read of a spilled file from truncation (`readTool.ts` sets
-/// `spillExempt`, `toolResultTruncationService.ts` returns the result
-/// untouched). Without it the model ends up with a pointer to a pointer and
-/// never sees the tail it asked for.
 #[test]
 fn reading_back_a_spilled_file_is_not_truncated_again() {
     let dir = tempfile::tempdir().unwrap();
@@ -831,7 +910,6 @@ fn reading_back_a_spilled_file_is_not_truncated_again() {
     assert!(!result.truncated);
     assert!(result.spill_path.is_none());
 
-    // A read of an ordinary file keeps the policy.
     let outside = dir.path().join("ordinary.txt");
     std::fs::write(&outside, &body).unwrap();
     let args = serde_json::json!({ "path": outside.to_string_lossy() });
@@ -849,4 +927,34 @@ fn reading_back_a_spilled_file_is_not_truncated_again() {
     );
     assert!(result.truncated);
     assert!(result.spill_path.is_some());
+}
+
+#[test]
+fn shaping_uses_utf16_units_without_splitting_pairs() {
+    assert_eq!(shape_per_line("😀😀", 3), TRUNCATION_MARKER);
+    assert_eq!(shape_per_line("a😀b", 4), "a😀b");
+}
+
+#[test]
+fn preview_uses_utf16_offsets_and_keeps_pairs_whole() {
+    let text = format!("{}😀{}", "a".repeat(4095), "z".repeat(1024));
+    let mut lines = Vec::new();
+    append_preview_lines(&mut lines, &text);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "[preview: chars [0, 4095)]"),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "[elided: chars [4095, 4097)]")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "[preview: chars [4097, 5121)]")
+    );
+    assert!(lines.iter().any(|line| line.starts_with('z')));
 }
