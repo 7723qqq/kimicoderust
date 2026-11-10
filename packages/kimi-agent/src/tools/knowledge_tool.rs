@@ -22,9 +22,6 @@ pub fn execute_knowledge(workspace_root: &Path, args: &Value) -> ExecutableToolR
         "add" => execute_add(args),
         "confirm" => execute_confirm(args),
         "reject" => execute_reject(args),
-        "remove" => execute_remove(args),
-        "stats" => execute_stats(),
-        "import" => execute_import(args),
         other => err_result(
             LocalizedText::with_params(
                 "engine.tools.knowledge.unknownAction",
@@ -235,98 +232,6 @@ fn execute_reject(args: &Value) -> ExecutableToolResult {
     }
 }
 
-fn execute_remove(args: &Value) -> ExecutableToolResult {
-    let Some(id) = args.get("id").and_then(|i| i.as_str()) else {
-        return err_result("Error: id is required for remove action.".into());
-    };
-    match knowledge::remove(id.to_string()) {
-        Ok(true) => ok_result(
-            LocalizedText::with_params("engine.tools.knowledge.removed", i18n_params!["id" => id])
-                .render(),
-        ),
-        Ok(false) => err_result(
-            LocalizedText::with_params(
-                "engine.tools.knowledge.entryNotFound",
-                i18n_params!["id" => id],
-            )
-            .render(),
-        ),
-        Err(e) => err_result(
-            LocalizedText::with_params(
-                "engine.tools.knowledge.removeFailed",
-                i18n_params!["e" => e],
-            )
-            .render(),
-        ),
-    }
-}
-
-fn execute_stats() -> ExecutableToolResult {
-    let json = match knowledge::stats() {
-        Ok(json) => json,
-        Err(e) => {
-            return err_result(
-                LocalizedText::with_params(
-                    "engine.tools.knowledge.statsFailed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-            );
-        }
-    };
-    let stats: Value = match serde_json::from_str(&json) {
-        Ok(stats) => stats,
-        Err(_) => return err_result("Knowledge stats returned invalid data.".into()),
-    };
-    let total = stats["total"].as_u64().unwrap_or(0);
-    let avg_confidence = stats["avg_confidence"].as_f64().unwrap_or(0.0);
-    ok_result(format!(
-        "Knowledge stats: {total} entries\nby category: {}\nby source: {}\navg confidence: {avg_confidence}",
-        render_counts(&stats["by_category"]),
-        render_counts(&stats["by_source"]),
-    ))
-}
-
-fn render_counts(map: &Value) -> String {
-    let mut pairs: Vec<(String, u64)> = map
-        .as_object()
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_u64().map(|n| (k.clone(), n)))
-                .collect()
-        })
-        .unwrap_or_default();
-    pairs.sort();
-    pairs
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn execute_import(args: &Value) -> ExecutableToolResult {
-    let Some(markdown) = args.get("markdown").and_then(|m| m.as_str()) else {
-        return err_result("Error: `markdown` is required for the import action.".into());
-    };
-    match knowledge::import(markdown.to_string()) {
-        Ok(json) => {
-            let entries: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-            let n = entries.len();
-            ok_result(format!(
-                "Imported {n} knowledge entr{}",
-                if n == 1 { "y" } else { "ies" }
-            ))
-        }
-        Err(e) => err_result(
-            LocalizedText::with_params(
-                "engine.tools.knowledge.importFailed",
-                i18n_params!["e" => e],
-            )
-            .render(),
-        ),
-    }
-}
-
 pub fn knowledge_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "Knowledge".into(),
@@ -336,7 +241,7 @@ pub fn knowledge_tool_def() -> crate::turn_loop::types::ToolInfo {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["search", "add", "confirm", "reject", "remove", "stats", "import"],
+                    "enum": ["search", "add", "confirm", "reject"],
                     "description": "The knowledge sub-command to run."
                 },
                 "query": {
@@ -353,7 +258,7 @@ pub fn knowledge_tool_def() -> crate::turn_loop::types::ToolInfo {
                 },
                 "id": {
                     "type": "string",
-                    "description": "Entry id for confirm/reject/remove."
+                    "description": "Entry id for confirm/reject."
                 },
                 "title": {
                     "type": "string",
@@ -367,10 +272,6 @@ pub fn knowledge_tool_def() -> crate::turn_loop::types::ToolInfo {
                 "content": {
                     "type": "string",
                     "description": "Entry content for add."
-                },
-                "markdown": {
-                    "type": "string",
-                    "description": "Markdown blocks (`# category:title` + `---` separated) to import."
                 }
             },
             "required": ["action"],
@@ -535,102 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_action_renders() {
-        let _guard = test_lock();
-        let ws = TestWorkspace::new();
-        let added = execute_knowledge(
-            ws.path(),
-            &json!({
-                "action": "add",
-                "title": "To remove",
-                "category": "pitfall",
-                "content": "Body."
-            }),
-        );
-        let id = extract_id(&added.content);
-        let removed = execute_knowledge(ws.path(), &json!({ "action": "remove", "id": id }));
-        assert!(!removed.is_error, "content: {}", removed.content);
-        assert_eq!(removed.content, format!("Removed entry {id}"));
-        drop(ws);
-    }
-
-    #[test]
     fn test_confirm_requires_id() {
         let _guard = test_lock();
         let ws = TestWorkspace::new();
         let result = execute_knowledge(ws.path(), &json!({ "action": "confirm" }));
         assert!(result.is_error);
         assert_eq!(result.content, "Error: id is required for confirm action.");
-        drop(ws);
-    }
-
-    #[test]
-    fn test_stats_renders_counts() {
-        let _guard = test_lock();
-        let ws = TestWorkspace::new();
-        execute_knowledge(
-            ws.path(),
-            &json!({ "action": "add", "title": "A", "category": "coding-style", "content": "One." }),
-        );
-        execute_knowledge(
-            ws.path(),
-            &json!({ "action": "add", "title": "B", "category": "pitfall", "content": "Two." }),
-        );
-        let result = execute_knowledge(ws.path(), &json!({ "action": "stats" }));
-        assert!(!result.is_error, "content: {}", result.content);
-        assert!(
-            result.content.contains("Knowledge stats: 2 entries"),
-            "content: {}",
-            result.content
-        );
-        assert!(
-            result
-                .content
-                .contains("by category: coding-style=1, pitfall=1"),
-            "content: {}",
-            result.content
-        );
-        assert!(
-            result.content.contains("by source: ai-learned=2"),
-            "content: {}",
-            result.content
-        );
-        assert!(
-            result.content.contains("avg confidence: 0.7"),
-            "content: {}",
-            result.content
-        );
-        drop(ws);
-    }
-
-    #[test]
-    fn test_import_renders_count_and_is_searchable() {
-        let _guard = test_lock();
-        let ws = TestWorkspace::new();
-        let md = "# coding-style:Imported Rule\ntags: rust\n\nBody here.\n---\n# pitfall:Second\nContent only.\n";
-        let result = execute_knowledge(ws.path(), &json!({ "action": "import", "markdown": md }));
-        assert!(!result.is_error, "content: {}", result.content);
-        assert_eq!(result.content, "Imported 2 knowledge entries");
-        let search = execute_knowledge(
-            ws.path(),
-            &json!({ "action": "search", "query": "imported" }),
-        );
-        assert!(!search.is_error, "content: {}", search.content);
-        assert!(
-            search.content.contains("Imported Rule"),
-            "content: {}",
-            search.content
-        );
-        drop(ws);
-    }
-
-    #[test]
-    fn test_import_requires_markdown() {
-        let _guard = test_lock();
-        let ws = TestWorkspace::new();
-        let result = execute_knowledge(ws.path(), &json!({ "action": "import" }));
-        assert!(result.is_error);
-        assert!(result.content.contains("markdown"));
         drop(ws);
     }
 
@@ -662,7 +473,7 @@ mod tests {
     fn test_db_created_under_workspace_dot_kimi_code() {
         let _guard = test_lock();
         let ws = TestWorkspace::new();
-        let result = execute_knowledge(ws.path(), &json!({ "action": "stats" }));
+        let result = execute_knowledge(ws.path(), &json!({ "action": "search", "query": "" }));
         assert!(!result.is_error, "content: {}", result.content);
         assert!(ws.path().join(".kimi-code").join("knowledge.db").exists());
         drop(ws);
@@ -697,6 +508,11 @@ mod tests {
             def.input_schema["properties"]["category"]["enum"][0],
             "coding-style"
         );
+        assert_eq!(
+            def.input_schema["properties"]["action"]["enum"],
+            serde_json::json!(["search", "add", "confirm", "reject"])
+        );
+        assert!(def.input_schema["properties"].get("markdown").is_none());
         assert!(def.description.contains("knowledge base"));
     }
 }

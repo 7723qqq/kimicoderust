@@ -20,13 +20,6 @@ When you need several files, prefer to read them in parallel: emit multiple `Rea
 - Large images are downsampled by default when automatic compression can safely fit them within model limits, which can blur fine detail (small text, dense UI). Compute absolute coordinates from the original dimensions reported in the `<system>` block, never by measuring the displayed copy. When the `<system>` tag reports downsampling and you need that detail, call Read again with the `region` parameter (original-image pixel coordinates) to view a crop at full fidelity, or set `full_resolution` to true when the whole file fits the per-image byte limit. Re-reading the same file without these parameters just reproduces the same downsampled image.
 - If automatic compression cannot safely produce an image within model limits, the tool returns an error and does not send the original image. Follow the error: use Bash or an available image-processing tool to create a smaller copy, then read that copy. Do not retry the unchanged file.
 - After a successful `Edit`/`Write`, do not re-read solely to prove the write landed.
-
-This engine's own additions, which v2 has no reason to state:
-
-- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public keys such as `id_rsa.pub` read normally.
-- UTF-16 LE/BE text (with or without a BOM) is detected and transcoded to UTF-8 for display; the status block names the detected encoding, and Edit/Write on such a file still expect UTF-8. Other encodings (for example GBK), binary files, and files containing NUL bytes are refused.
-- `line_offset` accepts a negative value to read from the end of the file (for example, -100 reads the last 100 lines).
-- Pure CRLF files are displayed with LF line endings; mixed or lone carriage returns are shown as `\r` and need exact escapes in a later Edit.
 "#;
 const GREP_DESCRIPTION: &str = r#"Search file contents using regular expressions (powered by ripgrep).
 
@@ -63,10 +56,6 @@ const EDIT_DESCRIPTION: &str = r#"Perform exact replacements in existing files.
 - Drop the line-number prefix and tab; match only file content.
 - `old_string` must be unique unless `replace_all` is set.
 - If `old_string` is ambiguous, add surrounding context.
-- Multiple Edit calls may run in one response only when they do not target the same file.
-- DO NOT issue consecutive Edit calls on the same file. A previous Edit can invalidate a later Edit's `old_string`, causing `old_string not found`. Read the file again before the next Edit.
-
-Line endings, which v2 does not have to state: for pure CRLF files Read shows LF, so write `old_string` and `new_string` with LF and Edit restores CRLF; for mixed endings Read shows carriage returns as \r and those positions need actual \r escapes.
 "#;
 const BASH_DESCRIPTION: &str = r#"Execute a `${SHELL_NAME}` command. Use this for shell semantics — pipes, env, and anything the dedicated tools do not cover.
 

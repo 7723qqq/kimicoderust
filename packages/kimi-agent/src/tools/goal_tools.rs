@@ -65,10 +65,16 @@ pub async fn execute_update_goal(
     if !matches!(status, "active" | "complete" | "blocked") {
         return err_result("Invalid goal status. Use `active`, `complete`, or `blocked`.".into());
     }
+    let mut value = serde_json::json!({ "action": "update", "status": status });
+    if status == "blocked"
+        && let Some(reason) = args.get("reason").and_then(|value| value.as_str())
+    {
+        value["reason"] = serde_json::Value::String(reason.to_string());
+    }
     let request = StateWriteRequest {
         domain: "goal".into(),
         key: "goal".into(),
-        value: serde_json::json!({ "action": "update", "status": status }),
+        value,
         undoable: false,
         turn_id: args
             .get("turn_id")
@@ -613,6 +619,25 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.stop_turn);
         assert!(result.content.starts_with("Goal completed successfully.\n"));
+    }
+
+    #[tokio::test]
+    async fn test_update_blocked_forwards_judge_reason() {
+        let (callbacks, _, write_received) = scripted(
+            Err("not used".into()),
+            write_ok(goal_wire("blocked", false)),
+        );
+        let result = execute_update_goal(
+            &callbacks,
+            "main",
+            &serde_json::json!({ "status": "blocked", "reason": "contradictory" }),
+        )
+        .await;
+        assert!(!result.is_error);
+        let request = write_received.lock().unwrap().clone().unwrap();
+        assert_eq!(request.value["action"], "update");
+        assert_eq!(request.value["status"], "blocked");
+        assert_eq!(request.value["reason"], "contradictory");
     }
 
     #[tokio::test]

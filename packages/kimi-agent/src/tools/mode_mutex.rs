@@ -76,10 +76,6 @@ pub fn exit_swarm_for_tower_enter(callbacks: &dyn HostCallbacks, agent_id: &str)
     crate::swarm::mode::set_swarm_mode(callbacks, agent_id, None)
 }
 
-/// v2 `AgentModeMutexService`'s `TowerModeEnter` handler: an active goal is
-/// paused (`goal.pauseGoal({ reason: 'Paused after tower mode entered' },
-/// 'system')`) so goal continuations cannot race the tower fleet. Returns
-/// whether a pause was written; an unreadable or inactive goal is a no-op.
 pub async fn pause_goal_for_tower_enter(callbacks: &dyn HostCallbacks) -> bool {
     let goal = match read_mode_state(callbacks, "goal").await {
         Ok(value) => value,
@@ -108,11 +104,6 @@ pub async fn pause_goal_for_tower_enter(callbacks: &dyn HostCallbacks) -> bool {
     callbacks.state_write(write).await.is_ok()
 }
 
-/// v2 `AgentModeMutexService`'s `GoalUpdated` handler: a goal that (re)becomes
-/// active evicts tower mode (`tower.exit('mode-mutex')`). The native engine
-/// has no tower mode flag, so the equivalent is pausing open missions — worker
-/// spawns and merges stay blocked until they are resumed. Returns the paused
-/// mission ids; a goal that is not active leaves the tower alone.
 pub async fn evict_tower_for_goal_activation(
     callbacks: &dyn HostCallbacks,
     workspace_root: &Path,

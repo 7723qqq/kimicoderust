@@ -955,9 +955,7 @@ Guidelines:
 - When no background tasks are running, WaitFor returns immediately without waiting.
 - Waiting has no side effects on the waited tasks: WaitFor never stops a task, and interrupting the wait (for example, a new user message) leaves every task running.
 - A finished task's result is delivered exactly once: tasks reported by WaitFor do not also produce an automatic completion notification.
-- You can only wait for background tasks started by this agent; task IDs belonging to other agents are unknown here.
-
-This engine's own addition: a steering message ends the wait early and reports it (`wait_status: interrupted`); the tasks keep running and still notify you when they finish."#;
+- You can only wait for background tasks started by this agent; task IDs belonging to other agents are unknown here."#;
 
 fn task_wait_def(name: &str) -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
@@ -981,6 +979,25 @@ fn task_wait_def(name: &str) -> crate::turn_loop::types::ToolInfo {
             "additionalProperties": false
         }),
     }
+}
+
+pub fn wait_for_flag(environment: Option<bool>, config: Option<bool>) -> bool {
+    environment.or(config).unwrap_or(true)
+}
+
+pub fn wait_for_enabled() -> bool {
+    let environment = std::env::var_os("KIMI_CODE_EXPERIMENTAL_WAIT_FOR")
+        .map(|_| crate::env::env_switch_default_on("KIMI_CODE_EXPERIMENTAL_WAIT_FOR"));
+    let config = crate::config::KimiConfig::discover()
+        .ok()
+        .and_then(|(config, _)| match config.experimental.get("wait_for") {
+            Some(crate::config::ExperimentalValue::Bool(value)) => Some(*value),
+            Some(crate::config::ExperimentalValue::String(value)) => {
+                crate::env::parse_bool_env(Some(value)).or(Some(true))
+            }
+            None => None,
+        });
+    wait_for_flag(environment, config)
 }
 
 pub fn wait_for_tool_def() -> crate::turn_loop::types::ToolInfo {
@@ -1537,7 +1554,7 @@ mod tests {
 
         let request = write_received.lock().unwrap().clone().unwrap();
         assert_eq!(request.value["action"], "stop");
-        assert!(request.value.get("reason").is_none());
+        assert_eq!(request.value["reason"], "user asked");
     }
 
     #[tokio::test]
@@ -2298,6 +2315,15 @@ mod tests {
             "Stopped by TaskStop"
         );
         assert!(def.description.contains("Stop a running background task"));
+    }
+
+    #[test]
+    fn wait_for_flag_defaults_on_and_honors_environment_then_config() {
+        assert!(wait_for_flag(None, None));
+        assert!(!wait_for_flag(Some(false), Some(true)));
+        assert!(wait_for_flag(Some(true), Some(false)));
+        assert!(!wait_for_flag(None, Some(false)));
+        assert!(wait_for_flag(None, Some(true)));
     }
 
     #[test]

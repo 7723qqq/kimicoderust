@@ -862,6 +862,99 @@ impl ServerEngine {
         })
     }
 
+    async fn publish_tool_pattern_warnings(&self, session_id: &str, profile_name: Option<&str>) {
+        let mut known = std::collections::HashSet::new();
+        for tool in crate::tools::tool_policy::native_tool_defs_with_notify(
+            self.spec.github_token.is_some(),
+            self.spec.tower_enabled,
+            self.spec.notify_user_enabled,
+            None,
+            None,
+        ) {
+            known.insert(tool.name);
+        }
+        let catalog = crate::prompt::ProfileCatalog::with_builtins();
+        for profile in catalog.list() {
+            known.extend(crate::tools::tool_policy::literal_tool_names(
+                &profile.tools,
+            ));
+        }
+        if self.spec.tool_select {
+            known.insert(crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME.to_string());
+        }
+        let callbacks = self.session_callbacks_for(session_id);
+        if let Ok(response) = callbacks.list_tools().await {
+            known.extend(response.tools.into_iter().map(|tool| tool.name));
+        }
+        if let Some(mcp) = self.mcp_manager_for(session_id) {
+            known.extend(
+                mcp.list_tool_infos()
+                    .await
+                    .into_iter()
+                    .map(|tool| tool.name),
+            );
+        }
+
+        let profile = match profile_name {
+            Some(name) => match catalog.get(name) {
+                Some(profile) => Some((profile.name.clone(), profile.tools.clone(), Vec::new())),
+                None => self
+                    .subagent_manager
+                    .get_definition(name)
+                    .await
+                    .map(|profile| (profile.name, profile.tools, profile.disallowed_tools)),
+            },
+            None => {
+                let profile = catalog.default_profile();
+                Some((profile.name.clone(), profile.tools.clone(), Vec::new()))
+            }
+        };
+        let mut checks = Vec::new();
+        if let Some((name, tools, disallowed)) = profile {
+            checks.push((format!("profile \"{name}\""), "tools", tools));
+            checks.push((format!("profile \"{name}\""), "disallowedTools", disallowed));
+        }
+        if let Some(filter) = self
+            .spec
+            .policy_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.tools_filter.as_ref())
+        {
+            checks.push((
+                "the global [tools] config".to_string(),
+                "enabled",
+                filter.enabled.clone(),
+            ));
+            checks.push((
+                "the global [tools] config".to_string(),
+                "disabled",
+                filter.disabled.clone(),
+            ));
+        }
+        let is_known = |name: &str| known.contains(name);
+        for (context, field, patterns) in checks {
+            for issue in
+                crate::tools::tool_policy::find_inactive_tool_patterns(&patterns, Some(&is_known))
+            {
+                let pattern = issue.pattern;
+                let message = match issue.kind {
+                    crate::tools::tool_policy::InactiveToolPatternKind::UnknownTool => format!(
+                        "Tool pattern \"{pattern}\" in {context} {field} does not match any registered or built-in tool; it will never activate anything."
+                    ),
+                    crate::tools::tool_policy::InactiveToolPatternKind::WildcardNotMcp => format!(
+                        "Tool pattern \"{pattern}\" in {context} {field} uses wildcards, which only match MCP tools (names starting with \"mcp__\"); it will never activate anything."
+                    ),
+                    crate::tools::tool_policy::InactiveToolPatternKind::IncompleteMcpName => {
+                        format!(
+                            "Tool pattern \"{pattern}\" in {context} {field} matches no tool; use \"{pattern}__*\" to match the whole MCP server."
+                        )
+                    }
+                };
+                self.publish_session_warning(session_id, "tool-pattern-no-match", &message);
+            }
+        }
+    }
+
     /// Publish an observable `warning` event on the session lane, once per
     /// distinct `(session, code, message)`. v2's `WarningIssued` is an
     /// observable agent event and its consumers treat repeats as noise; the
@@ -1877,6 +1970,8 @@ impl ServerEngine {
                 .get_or_insert_with(crate::tools::tool_policy::ToolsFilter::default);
             crate::tools::tool_policy::restrict_to_profile(&mut filter.enabled, &profile.tools);
         }
+        self.publish_tool_pattern_warnings(session_id, bound_profile.as_deref())
+            .await;
         spec
     }
 
@@ -3245,6 +3340,10 @@ impl ServerEngine {
         // that are not `NativeToolCallbacks` ignore it and the tool reports
         // `session_query.index_unavailable`.
         pipeline.callbacks.set_session_store(self.store.clone());
+        pipeline.callbacks.set_tool_select_persist_listener({
+            let persisted_heads = self.hub.persisted_heads();
+            std::sync::Arc::new(move |session_id, seq| persisted_heads.note(session_id, seq))
+        });
 
         // Micro compaction (v2 `AgentMicroCompactionService`): with the
         // `[experimental].micro_compaction` flag on, blank oversized old tool

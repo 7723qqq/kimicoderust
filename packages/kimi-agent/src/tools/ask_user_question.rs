@@ -38,6 +38,10 @@ pub async fn execute_ask_user_question(
         }
     }
 
+    if let Some(error) = question_uniqueness_error(args) {
+        return err_result(error);
+    }
+
     let Some(request) = parse_request(args) else {
         return err_result(
             "Invalid AskUserQuestion arguments: expected 1-4 questions, each with 2-4 options; question texts must be unique and option labels unique within each question."
@@ -55,6 +59,34 @@ pub async fn execute_ask_user_question(
             }
         }
     }
+}
+
+fn question_uniqueness_error(args: &Value) -> Option<String> {
+    const UNIQUENESS_MESSAGE: &str = "Question texts must be unique across questions, and option labels must be unique within each question.";
+    let questions = args.get("questions")?.as_array()?;
+    let mut texts = HashSet::new();
+    for question in questions {
+        let text = question.get("question")?.as_str()?;
+        if !texts.insert(text) {
+            return Some(format!(
+                "Invalid questions: duplicate question text {}. {UNIQUENESS_MESSAGE} Rephrase the duplicates and call the tool again.",
+                serde_json::to_string(text).ok()?
+            ));
+        }
+        let options = question.get("options")?.as_array()?;
+        let mut labels = HashSet::new();
+        for option in options {
+            let label = option.get("label")?.as_str()?;
+            if !labels.insert(label) {
+                return Some(format!(
+                    "Invalid questions: duplicate option label {} in question {}. {UNIQUENESS_MESSAGE} Rephrase the duplicates and call the tool again.",
+                    serde_json::to_string(label).ok()?,
+                    serde_json::to_string(text).ok()?
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn parse_request(args: &Value) -> Option<AskQuestionRequest> {
@@ -447,17 +479,6 @@ mod tests {
             serde_json::json!({ "questions": [{ "question": "q", "options": [{ "label": "a" }] }] }),
             serde_json::json!({
                 "questions": [
-                    { "question": "q", "options": [{ "label": "a" }, { "label": "b" }] },
-                    { "question": "q", "options": [{ "label": "c" }, { "label": "d" }] }
-                ]
-            }),
-            serde_json::json!({
-                "questions": [
-                    { "question": "q", "options": [{ "label": "a" }, { "label": "a" }] }
-                ]
-            }),
-            serde_json::json!({
-                "questions": [
                     { "question": "", "options": [{ "label": "a" }, { "label": "b" }] }
                 ]
             }),
@@ -475,6 +496,36 @@ mod tests {
             received.lock().unwrap().is_none(),
             "invalid args must not reach the host"
         );
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_values_return_the_specific_v2_errors() {
+        let (callbacks, received) = scripted(Ok(empty_response()));
+        let duplicate_question = serde_json::json!({
+            "questions": [
+                { "question": "q", "options": [{ "label": "a" }, { "label": "b" }] },
+                { "question": "q", "options": [{ "label": "c" }, { "label": "d" }] }
+            ]
+        });
+        let result = execute_ask_user_question(&callbacks, &duplicate_question).await;
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            "Invalid questions: duplicate question text \"q\". Question texts must be unique across questions, and option labels must be unique within each question. Rephrase the duplicates and call the tool again."
+        );
+
+        let duplicate_label = serde_json::json!({
+            "questions": [
+                { "question": "q", "options": [{ "label": "a" }, { "label": "a" }] }
+            ]
+        });
+        let result = execute_ask_user_question(&callbacks, &duplicate_label).await;
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            "Invalid questions: duplicate option label \"a\" in question \"q\". Question texts must be unique across questions, and option labels must be unique within each question. Rephrase the duplicates and call the tool again."
+        );
+        assert!(received.lock().unwrap().is_none());
     }
 
     #[tokio::test]

@@ -142,7 +142,7 @@ pub fn parse_skill_frontmatter(content: &str, fallback_name: &str) -> ParsedSkil
     // scanning the whole document would pick a frontmatter line such as
     // `name: s` as the skill's description, which is what happened when this
     // path fell back to the un-split text.
-    let Ok(parsed) = crate::frontmatter::parse_frontmatter(content) else {
+    let Ok(parsed) = crate::_base::text::frontmatter::parse_frontmatter(content) else {
         let body = body_of(content);
         return ParsedSkillMeta {
             description: first_prose_line(&body),
@@ -222,7 +222,7 @@ fn parse_skill_for_discovery(
     if require_frontmatter && content.lines().next().unwrap_or_default().trim() != "---" {
         return Err("Missing frontmatter".to_string());
     }
-    let parsed = crate::frontmatter::parse_frontmatter(content)
+    let parsed = crate::_base::text::frontmatter::parse_frontmatter(content)
         .map_err(|error| format!("Invalid frontmatter: {error}"))?;
     let meta = parse_skill_frontmatter(content, fallback_name);
     if !is_supported_skill_type(meta.skill_type.as_deref()) {
@@ -247,7 +247,7 @@ fn parse_skill_for_discovery(
 /// when there is no frontmatter. Used to recover a body even when the YAML
 /// between the fences failed to parse.
 fn body_of(content: &str) -> String {
-    crate::frontmatter::parse_frontmatter(content)
+    crate::_base::text::frontmatter::parse_frontmatter(content)
         .map(|parsed| parsed.body)
         .unwrap_or_else(|_| {
             // The YAML is unparseable but the fences may still be findable.
