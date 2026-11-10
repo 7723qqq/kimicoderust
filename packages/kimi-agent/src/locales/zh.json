@@ -699,6 +699,11 @@
     }
   },
   "engine": {
+    "toolsV2": {
+      "oldStringNotFound": "在 {{path}} 中未找到 old_string，文件内容可能已过时。请使用 Read 工具重新加载内容。",
+      "oldStringNotUnique": "old_string 在 {{path}} 中不唯一（找到 {{count}} 处）。要替换所有出现，请设置 replace_all=true。要仅替换一处，请在 old_string 中包含更多上下文。",
+      "editReplaced": "在 {{path}} 中替换了 {{count}} 处"
+    },
     "mcp": {
       "needsAuthHint": "MCP 服务器 \"{{name}}\" 需要 OAuth 授权，请运行 /mcp-config login {{name}}"
     },
@@ -811,10 +816,7 @@
         "notExist": "\"{{path}}\" 不存在。",
         "notUtf8": "\"{{path}}\" 不是可读的 UTF-8 文本，只能编辑文本文件。",
         "cannotReadDetail": "无法读取 \"{{path}}\"：{{e}}。",
-        "oldStringNotFound": "在 {{path}} 中找不到 old_string",
-        "oldStringMatchedMultiple": "old_string 在 {{path}} 中匹配了 {{occurrence_count}} 次（预期恰好 1 次；请扩大字符串范围或传入 replace_all）",
-        "cannotWrite": "\"{{path}}\" 写入失败：{{error}}",
-        "edited": "已编辑 {{path}}（{{occurrence_count}} {{occurrence_word}}）"
+        "cannotWrite": "\"{{path}}\" 写入失败：{{error}}"
       },
       "bash": {
         "commandFailed": "命令执行失败：{{e}}",
@@ -908,10 +910,7 @@
         "entryNotFound": "条目 {{id}} 不存在。",
         "confirmFailed": "知识库确认失败：{{e}}",
         "rejectedAndRemoved": "已拒绝并移除条目 {{id}}",
-        "removeFailed": "知识库移除失败：{{e}}",
-        "removed": "已移除条目 {{id}}",
-        "statsFailed": "知识库统计失败：{{e}}",
-        "importFailed": "知识库导入失败：{{e}}"
+        "removeFailed": "知识库移除失败：{{e}}"
       },
       "listDirectory": {
         "unreadableEntries": "（{{count}} 个条目无法读取）"

@@ -699,6 +699,11 @@
     }
   },
   "engine": {
+    "toolsV2": {
+      "oldStringNotFound": "old_string not found in {{path}}, the file contents may be out of date. Please use the Read Tool to reload the content.",
+      "oldStringNotUnique": "old_string is not unique in {{path}} (found {{count}} occurrences). To replace every occurrence, set replace_all=true. To replace only one occurrence, include more surrounding context in old_string.",
+      "editReplaced": "Replaced {{count}} {{occurrences}} in {{path}}"
+    },
     "mcp": {
       "needsAuthHint": "MCP server \"{{name}}\" needs OAuth — run /mcp-config login {{name}}"
     },
@@ -811,10 +816,7 @@
         "notExist": "\"{{path}}\" does not exist.",
         "notUtf8": "\"{{path}}\" is not readable as UTF-8 text. Only text files can be edited.",
         "cannotReadDetail": "\"{{path}}\" could not be read: {{e}}.",
-        "oldStringNotFound": "old_string not found in {{path}}",
-        "oldStringMatchedMultiple": "old_string matched {{occurrence_count}} times in {{path}} (expected exactly 1; widen the string or pass replace_all)",
-        "cannotWrite": "\"{{path}}\" could not be written: {{error}}",
-        "edited": "Edited {{path}} ({{occurrence_count}} {{occurrence_word}})"
+        "cannotWrite": "\"{{path}}\" could not be written: {{error}}"
       },
       "bash": {
         "commandFailed": "Command execution failed: {{e}}",
@@ -908,10 +910,7 @@
         "entryNotFound": "Entry {{id}} not found.",
         "confirmFailed": "Knowledge confirm failed: {{e}}",
         "rejectedAndRemoved": "Rejected and removed entry {{id}}",
-        "removeFailed": "Knowledge remove failed: {{e}}",
-        "removed": "Removed entry {{id}}",
-        "statsFailed": "Knowledge stats failed: {{e}}",
-        "importFailed": "Knowledge import failed: {{e}}"
+        "removeFailed": "Knowledge remove failed: {{e}}"
       },
       "listDirectory": {
         "unreadableEntries": "({{count}} entries could not be read)"

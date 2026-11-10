@@ -1,4 +1,5 @@
 use super::*;
+use crate::_base::text::{encoding, line_endings};
 
 const DEFAULT_MAX_CHARS: usize = 100_000;
 
@@ -303,15 +304,6 @@ impl NativeToolset {
             ));
         }
         let detection = encoding::detect_text_encoding(&header);
-        if detection.seems_binary {
-            return Some(err_result(
-                LocalizedText::with_params(
-                    "engine.tools.read.notUtf8",
-                    i18n_params!["path" => path],
-                )
-                .render(),
-            ));
-        }
 
         if tail_lines > 0 && detection.encoding == encoding::UtfTextEncoding::Utf8 {
             let counted = {
@@ -462,7 +454,7 @@ impl NativeToolset {
                 b
             })
             .collect();
-        let style = encoding::detect_line_ending_style(&window_bytes);
+        let style = line_endings::detect_line_ending_style(&window_bytes);
 
         if offset > total_lines && offset > 1 {
             return Some(err_result(
@@ -484,7 +476,7 @@ impl NativeToolset {
 
         for (i, raw) in all[start..end].iter().enumerate() {
             let mut rendered: String = (*raw).to_string();
-            if style == encoding::LineEndingStyle::CrLf && rendered.ends_with('\r') {
+            if style == line_endings::LineEndingStyle::CrLf && rendered.ends_with('\r') {
                 rendered.pop();
             }
             if i == 0 && column_offset > 0 {
@@ -495,8 +487,8 @@ impl NativeToolset {
                     rendered = rendered.chars().skip(column_offset).collect();
                 }
             }
-            if style == encoding::LineEndingStyle::Mixed {
-                rendered = encoding::make_carriage_returns_visible(&rendered);
+            if style == line_endings::LineEndingStyle::Mixed {
+                rendered = line_endings::make_carriage_returns_visible(&rendered);
             }
             let current_line_num = offset + i;
             let rendered_line = format!("{}\t{}", current_line_num, rendered);
@@ -640,7 +632,7 @@ impl NativeToolset {
                 );
             }
         }
-        if style == encoding::LineEndingStyle::Mixed {
+        if style == line_endings::LineEndingStyle::Mixed {
             parts.push(
                 "Mixed or lone carriage-return line endings are shown as \\r. Use exact \\r\\n or \\r escapes in Edit.old_string for those lines.".into(),
             );
@@ -912,7 +904,7 @@ impl NativeToolset {
             ));
         };
 
-        let view = crate::native::line_endings::to_model_text_view(&text);
+        let view = crate::_base::text::line_endings::to_model_text_view(&text);
         let line_ending_style = view.line_ending_style;
         let model_text = view.text;
         let occurrence_count = model_text.matches(old).count();
@@ -920,7 +912,7 @@ impl NativeToolset {
             if occurrence_count == 0 {
                 return Some(err_result(
                     LocalizedText::with_params(
-                        "engine.tools.edit.oldStringNotFound",
+                        "engine.toolsV2.oldStringNotFound",
                         i18n_params!["path" => path],
                     )
                     .render(),
@@ -931,7 +923,7 @@ impl NativeToolset {
             if occurrence_count == 0 {
                 return Some(err_result(
                     LocalizedText::with_params(
-                        "engine.tools.edit.oldStringNotFound",
+                        "engine.toolsV2.oldStringNotFound",
                         i18n_params!["path" => path],
                     )
                     .render(),
@@ -940,8 +932,8 @@ impl NativeToolset {
             if occurrence_count > 1 {
                 return Some(err_result(
                     LocalizedText::with_params(
-                        "engine.tools.edit.oldStringMatchedMultiple",
-                        i18n_params!["occurrence_count" => occurrence_count, "path" => path],
+                        "engine.toolsV2.oldStringNotUnique",
+                        i18n_params!["count" => occurrence_count, "path" => path],
                     )
                     .render(),
                 ));
@@ -949,7 +941,7 @@ impl NativeToolset {
             model_text.replacen(old, new, 1)
         };
         let updated_raw =
-            crate::native::line_endings::materialize_model_text(&updated, line_ending_style);
+            crate::_base::text::line_endings::materialize_model_text(&updated, line_ending_style);
 
         if let Err(error) = std::fs::write(&resolved, &updated_raw) {
             return Some(err_result(
@@ -963,17 +955,17 @@ impl NativeToolset {
 
         Self::record_file_history(&resolved, Some(text.as_str()), Some(updated_raw.as_str()));
 
-        let occurrence_word = if occurrence_count == 1 {
+        let occurrences = if occurrence_count == 1 {
             "occurrence"
         } else {
             "occurrences"
         };
         Some(ok_result(
             LocalizedText::with_params(
-                "engine.tools.edit.edited",
+                "engine.toolsV2.editReplaced",
                 i18n_params![
-                    "occurrence_count" => occurrence_count,
-                    "occurrence_word" => occurrence_word,
+                    "count" => occurrence_count,
+                    "occurrences" => occurrences,
                     "path" => path
                 ],
             )
