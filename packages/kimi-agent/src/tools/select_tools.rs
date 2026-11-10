@@ -42,6 +42,9 @@ pub const SELECT_TOOLS_PROVIDE_NAMES_OR_QUERY: &str = "Provide names to load or 
 
 pub const SELECT_TOOLS_UNAVAILABLE: &str = "select_tools is not available for the current model.";
 
+pub const NO_LOADABLE_TOOLS_MESSAGE: &str =
+    "No tools are currently available for dynamic loading in this session.";
+
 pub fn text_result(content: &str, is_error: bool) -> ExecutableToolResult {
     ExecutableToolResult {
         spill: None,
@@ -171,6 +174,34 @@ pub fn selection_environment_fingerprint(
         sorted_names(loadable_tools),
     ])
     .to_string()
+}
+
+pub fn selection_environment_for_tools(
+    policy: Option<&tool_policy::ToolsFilter>,
+    registered_tools: &[crate::tools::tool_select_ops::ToolSelectTool],
+) -> String {
+    let mut enabled = policy.map(|f| f.enabled.clone()).unwrap_or_default();
+    enabled.sort();
+    enabled.dedup();
+    let mut disabled = policy.map(|f| f.disabled.clone()).unwrap_or_default();
+    disabled.sort();
+    disabled.dedup();
+    let mut tools = registered_tools.iter().collect::<Vec<_>>();
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    let tools = tools
+        .into_iter()
+        .map(|tool| {
+            json!([
+                tool.name,
+                tool.description,
+                tool.parameters,
+                tool.source,
+                tool.disclosure,
+                tool.origin,
+            ])
+        })
+        .collect::<Vec<_>>();
+    json!([enabled, disabled, tools]).to_string()
 }
 
 pub fn evaluate_load_tools(
@@ -515,12 +546,9 @@ pub fn render_loadable_tools_announcement(
     }
 
     if !has_loadable {
-        sections.push(
-            "No tools are currently available for dynamic loading in this session. \
-Do not call select_tools or guess tool names; use the tools you already have. \
-Only a later <tools_added> announcement can make new tools loadable."
-                .into(),
-        );
+        sections.push(format!(
+            "{NO_LOADABLE_TOOLS_MESSAGE} Do not call select_tools or guess tool names; use the tools you already have. Only a later <tools_added> announcement can make new tools loadable."
+        ));
         return Some(sections.join("\n\n"));
     }
     sections.push(

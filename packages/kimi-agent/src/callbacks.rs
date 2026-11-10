@@ -223,6 +223,8 @@ pub trait HostCallbacks: Send + Sync {
     /// history.
     fn set_session_store(&self, _store: Arc<crate::session::sqlite_store::SqliteSessionStore>) {}
 
+    fn set_tool_select_persist_listener(&self, _listener: Arc<dyn Fn(&str, u64) + Send + Sync>) {}
+
     /// Release the steering prompts injected during the active turn. The
     /// engine-local steer queue (see `SteerQueueCallbacks`) serves this at
     /// every step head; the default answers with nothing.
@@ -721,6 +723,10 @@ impl HostCallbacks for NativeToolCallbacks {
 
     fn set_session_store(&self, store: Arc<crate::session::sqlite_store::SqliteSessionStore>) {
         self.toolset.set_session_store(store);
+    }
+
+    fn set_tool_select_persist_listener(&self, listener: Arc<dyn Fn(&str, u64) + Send + Sync>) {
+        self.toolset.set_tool_select_persist_listener(listener);
     }
 
     fn llm_chat(
@@ -1568,7 +1574,7 @@ impl HostCallbacks for NativeToolCallbacks {
                     }
                 }
             }
-            if let Some(mcp) = mcp_mgr {
+            if let Some(mcp) = &mcp_mgr {
                 // v2 awaits MCP readiness at `onWillBeginStep`
                 // (mcpService.ts:70-73): the tool table must not be assembled
                 // before the servers have answered, or the model would be
@@ -1635,11 +1641,72 @@ impl HostCallbacks for NativeToolCallbacks {
                     background_available,
                 );
             }
+            let disclosure_allowed = filter.as_ref().is_none_or(|policy| {
+                !policy.disabled.iter().any(|pattern| {
+                    pattern.eq_ignore_ascii_case(crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME)
+                })
+            });
+            let mut registry_tools = tools.clone();
+            if disclosure_allowed
+                && registry_tools
+                    .iter()
+                    .all(|tool| tool.name != crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME)
+            {
+                registry_tools.push(crate::turn_loop::types::ToolInfo {
+                    name: crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME.to_string(),
+                    description: crate::tools::select_tools::SELECT_TOOLS_DESCRIPTION.to_string(),
+                    input_schema: crate::tools::select_tools::select_tools_schema(),
+                });
+            }
+            let active_definitions = mcp_mgr
+                .as_ref()
+                .map(|mcp| mcp.active_definitions_blocking())
+                .unwrap_or_default();
+            let active = registry_tools
+                .iter()
+                .map(|tool| {
+                    if let Some(definition) = active_definitions
+                        .iter()
+                        .find(|definition| definition.name == tool.name)
+                    {
+                        crate::tools::tool_select_ops::tool_select_tool_from_definition(definition)
+                    } else {
+                        let source = if tool.name.starts_with("mcp__") {
+                            crate::tools::tool_select_ops::ToolSelectSource::Mcp
+                        } else if crate::tools::is_builtin_tool_name(&tool.name) {
+                            crate::tools::tool_select_ops::ToolSelectSource::Builtin
+                        } else {
+                            crate::tools::tool_select_ops::ToolSelectSource::User
+                        };
+                        crate::tools::tool_select_ops::tool_select_tool_from_info(
+                            tool, source, None,
+                        )
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut live = active
+                .iter()
+                .filter(|tool| tool.source != crate::tools::tool_select_ops::ToolSelectSource::Mcp)
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(mcp) = &mcp_mgr {
+                let reserved = live
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                live.extend(
+                    mcp.live_definitions_blocking()
+                        .iter()
+                        .filter(|definition| !reserved.contains(&definition.name))
+                        .map(crate::tools::tool_select_ops::tool_select_tool_from_definition),
+                );
+            }
+            let plan = toolset.reconcile_tool_select(&active, &live).await?;
             // Progressive tool disclosure (v2 `shapeTools`): with the
             // `tool_select` switch on and the model declaring
             // `dynamically_loaded_tools`, deferred MCP tools leave the table
             // and `select_tools` is advertised instead.
-            let tools = toolset.shape_tool_table(tools);
+            let tools = toolset.shape_tool_table_with_state(tools, &plan.state);
             Ok(ListToolsResponse { tools })
         })
     }

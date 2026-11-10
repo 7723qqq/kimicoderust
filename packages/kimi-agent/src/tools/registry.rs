@@ -21,7 +21,8 @@ impl ToolSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ToolDisclosure {
     #[default]
     Inline,
@@ -52,7 +53,7 @@ struct RegistryEntry {
     info: ToolDefinition,
 }
 
-fn canonical_value(value: &Value) -> Value {
+pub(crate) fn canonical_value(value: &Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.iter().map(canonical_value).collect()),
         Value::Object(map) => {

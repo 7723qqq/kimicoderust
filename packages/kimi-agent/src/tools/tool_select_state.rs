@@ -5,7 +5,46 @@ pub const LOADABLE_TOOLS_VARIANT: &str = "loadable-tools";
 
 pub const RETRIEVED_TOOLS_VARIANT: &str = "retrieved-tools";
 
+pub const DYNAMIC_TOOL_SCHEMA_VARIANT: &str = "dynamic_tool_schema";
+
+#[cfg(test)]
 const LEGACY_TOOL_SELECT_VARIANT: &str = "tool_select";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ToolSelectAnnouncementDisclosure {
+    Snapshot {
+        revision: usize,
+        tools: Vec<crate::tools::tool_select_ops::ToolSelectTool>,
+    },
+    Delta {
+        revision: usize,
+        added: Vec<crate::tools::tool_select_ops::ToolSelectTool>,
+        removed: Vec<crate::tools::tool_select_ops::ToolSelectTool>,
+    },
+}
+
+impl ToolSelectAnnouncementDisclosure {
+    pub fn revision(&self) -> usize {
+        match self {
+            Self::Snapshot { revision, .. } | Self::Delta { revision, .. } => *revision,
+        }
+    }
+}
+
+pub fn last_announcement_disclosure(
+    messages: &[LLMMessage],
+) -> Option<ToolSelectAnnouncementDisclosure> {
+    let message = messages.iter().rev().find(|message| {
+        message.origin.as_ref().is_some_and(|origin| {
+            origin.get("kind").and_then(|kind| kind.as_str()) == Some("injection")
+                && origin.get("variant").and_then(|variant| variant.as_str())
+                    == Some(LOADABLE_TOOLS_VARIANT)
+        })
+    })?;
+    let disclosure = message.origin.as_ref()?.get("disclosure")?.clone();
+    serde_json::from_value(disclosure).ok()
+}
 
 fn origin_variant(message: &LLMMessage) -> Option<&str> {
     let origin = message.origin.as_ref()?;
@@ -17,20 +56,11 @@ fn origin_variant(message: &LLMMessage) -> Option<&str> {
 }
 
 pub fn is_retrieved_tools_announcement(message: &LLMMessage) -> bool {
-    if origin_variant(message) == Some(RETRIEVED_TOOLS_VARIANT) {
-        return true;
-    }
-    matches!(
-        origin_variant(message),
-        Some(LOADABLE_TOOLS_VARIANT) | Some(LEGACY_TOOL_SELECT_VARIANT)
-    ) && message.content.contains("<tools_relevant>")
+    origin_variant(message) == Some(RETRIEVED_TOOLS_VARIANT)
 }
 
 fn is_added_removed_announcement(message: &LLMMessage) -> bool {
-    matches!(
-        origin_variant(message),
-        Some(LOADABLE_TOOLS_VARIANT) | Some(LEGACY_TOOL_SELECT_VARIANT)
-    )
+    origin_variant(message) == Some(LOADABLE_TOOLS_VARIANT)
 }
 
 pub fn is_loadable_tools_announcement(message: &LLMMessage) -> bool {
@@ -38,13 +68,92 @@ pub fn is_loadable_tools_announcement(message: &LLMMessage) -> bool {
 }
 
 pub fn strip_dynamic_tool_context(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
-    if !messages.iter().any(is_loadable_tools_announcement) {
+    let hidden_call_ids = messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .flat_map(|message| message.tool_calls.iter())
+        .filter(|call| call.name == crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME)
+        .map(|call| call.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let is_schema = |message: &LLMMessage| {
+        message.origin.as_ref().is_some_and(|origin| {
+            origin.get("kind").and_then(|kind| kind.as_str()) == Some("injection")
+                && origin.get("variant").and_then(|variant| variant.as_str())
+                    == Some(DYNAMIC_TOOL_SCHEMA_VARIANT)
+        })
+    };
+    if hidden_call_ids.is_empty()
+        && !messages
+            .iter()
+            .any(|message| is_loadable_tools_announcement(message) || is_schema(message))
+    {
         return messages;
     }
-    messages
-        .into_iter()
-        .filter(|message| !is_loadable_tools_announcement(message))
-        .collect()
+    let mut out = Vec::new();
+    for mut message in messages {
+        if is_loadable_tools_announcement(&message) {
+            let disclosure = message.origin.as_ref().and_then(|origin| {
+                if origin.get("kind").and_then(|kind| kind.as_str()) != Some("injection") {
+                    return None;
+                }
+                serde_json::from_value::<ToolSelectAnnouncementDisclosure>(
+                    origin.get("disclosure")?.clone(),
+                )
+                .ok()
+            });
+            if matches!(
+                disclosure,
+                Some(ToolSelectAnnouncementDisclosure::Snapshot { .. })
+            ) {
+                continue;
+            }
+            let (added, removed) = match disclosure {
+                Some(ToolSelectAnnouncementDisclosure::Delta { added, removed, .. }) => (
+                    added.into_iter().map(|tool| tool.name).collect(),
+                    removed.into_iter().map(|tool| tool.name).collect(),
+                ),
+                _ => (
+                    match_tool_name_blocks(&message.content, "tools_added"),
+                    match_tool_name_blocks(&message.content, "tools_removed"),
+                ),
+            };
+            message.content = crate::injection::wrap_system_reminder(
+                &render_runtime_tool_change_reminder(&added, &removed),
+            );
+            out.push(message);
+            continue;
+        }
+        if is_schema(&message) {
+            if !message.content.is_empty() || !message.tool_calls.is_empty() {
+                out.push(message);
+            }
+            continue;
+        }
+        if message.role == "tool" {
+            if message
+                .tool_call_id
+                .as_ref()
+                .is_none_or(|id| !hidden_call_ids.contains(id))
+            {
+                out.push(message);
+            }
+            continue;
+        }
+        if message.role != "assistant" {
+            out.push(message);
+            continue;
+        }
+        let original_len = message.tool_calls.len();
+        message
+            .tool_calls
+            .retain(|call| call.name != crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME);
+        if message.tool_calls.len() == original_len {
+            out.push(message);
+        } else if !message.tool_calls.is_empty() || !message.content.is_empty() {
+            out.push(message);
+        }
+    }
+    out
 }
 
 pub fn fold_announced_tool_names(messages: &[LLMMessage]) -> std::collections::HashSet<String> {
@@ -124,6 +233,27 @@ name.",
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn render_runtime_tool_change_reminder(added: &[String], removed: &[String]) -> String {
+    let mut sections = Vec::new();
+    if !added.is_empty() {
+        sections.push(format!(
+            "<tools_added>\n{}\n</tools_added>",
+            added.join("\n")
+        ));
+    }
+    if !removed.is_empty() {
+        sections.push(format!(
+            "<tools_removed>\n{}\n</tools_removed>",
+            removed.join("\n")
+        ));
+    }
+    sections.push(
+        "The available tools changed during this session. The current model cannot load runtime tool additions with select_tools. Do not call select_tools. Use the tool definitions provided in this request. Removed tools may be unavailable or fail when called."
+            .to_string(),
+    );
+    sections.join("\n\n")
 }
 
 pub fn strip_stale_retrieved_tools_announcements(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
@@ -232,12 +362,12 @@ mod tests {
     fn a_retrieved_block_is_recognized_by_content_and_stripped_to_the_last() {
         let messages = vec![
             announcement(
-                LOADABLE_TOOLS_VARIANT,
+                RETRIEVED_TOOLS_VARIANT,
                 "<tools_relevant>\nold — first\n</tools_relevant>",
             ),
             LLMMessage::user("continue"),
             announcement(
-                LOADABLE_TOOLS_VARIANT,
+                RETRIEVED_TOOLS_VARIANT,
                 "<tools_relevant>\nnew — second\n</tools_relevant>",
             ),
         ];
@@ -268,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn the_legacy_tool_select_variant_still_folds_and_strips() {
+    fn an_unknown_tool_select_variant_is_ignored() {
         let messages = vec![
             LLMMessage::user("hi"),
             announcement(
@@ -276,10 +406,105 @@ mod tests {
                 "<tools_added>\nA\n</tools_added>",
             ),
         ];
-        assert!(fold_announced_tool_names(&messages).contains("A"));
+        assert!(!fold_announced_tool_names(&messages).contains("A"));
         let stripped = strip_dynamic_tool_context(messages);
-        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped.len(), 2);
         assert_eq!(stripped[0].content, "hi");
+        assert!(stripped[1].content.contains("<tools_added>"));
+    }
+
+    #[test]
+    fn closed_disclosure_converts_deltas_and_hides_select_tools_exchanges() {
+        let select_call = crate::turn_loop::types::ToolCall {
+            id: "select-1".to_string(),
+            name: crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME.to_string(),
+            arguments: serde_json::json!({"names": ["mcp__s__alpha"]}),
+            extras: None,
+            args_parse_error: None,
+        };
+        let read_call = crate::turn_loop::types::ToolCall {
+            id: "read-1".to_string(),
+            name: "Read".to_string(),
+            arguments: serde_json::json!({}),
+            extras: None,
+            args_parse_error: None,
+        };
+        let snapshot = LLMMessage {
+            origin: Some(serde_json::json!({
+                "kind": "injection",
+                "variant": LOADABLE_TOOLS_VARIANT,
+                "disclosure": {"kind": "snapshot", "revision": 0, "tools": []}
+            })),
+            ..announcement(LOADABLE_TOOLS_VARIANT, "snapshot")
+        };
+        let delta = LLMMessage {
+            origin: Some(serde_json::json!({
+                "kind": "injection",
+                "variant": LOADABLE_TOOLS_VARIANT
+            })),
+            ..announcement(
+                LOADABLE_TOOLS_VARIANT,
+                "<tools_added>\nmcp__s__alpha\n</tools_added>\n\n<tools_removed>\nmcp__s__old\n</tools_removed>",
+            )
+        };
+        let schema = LLMMessage {
+            role: "system".into(),
+            content: String::new(),
+            origin: Some(serde_json::json!({
+                "kind": "injection",
+                "variant": "dynamic_tool_schema"
+            })),
+            ..Default::default()
+        };
+        let messages = vec![
+            snapshot,
+            delta,
+            schema,
+            LLMMessage {
+                role: "assistant".into(),
+                tool_calls: vec![select_call, read_call],
+                ..Default::default()
+            },
+            LLMMessage::tool_result("select-1", "Loaded"),
+            LLMMessage::tool_result("read-1", "contents"),
+        ];
+
+        let stripped = strip_dynamic_tool_context(messages);
+        assert_eq!(stripped.len(), 3);
+        assert!(stripped[0].content.contains(
+            "The available tools changed during this session. The current model cannot load runtime tool additions with select_tools."
+        ));
+        assert!(
+            stripped[0]
+                .content
+                .contains("<tools_added>\nmcp__s__alpha\n</tools_added>")
+        );
+        assert!(
+            stripped[0]
+                .content
+                .contains("<tools_removed>\nmcp__s__old\n</tools_removed>")
+        );
+        assert!(!stripped[0].content.contains("Use the select_tools tool"));
+        assert_eq!(stripped[1].tool_calls.len(), 1);
+        assert_eq!(stripped[1].tool_calls[0].id, "read-1");
+        assert_eq!(stripped[2].tool_call_id.as_deref(), Some("read-1"));
+    }
+
+    #[test]
+    fn retrieval_identity_uses_only_the_v2_variant_not_text_or_legacy_names() {
+        let loadable = announcement(
+            LOADABLE_TOOLS_VARIANT,
+            "<tools_relevant>\nmcp__s__alpha\n</tools_relevant>",
+        );
+        assert!(!is_retrieved_tools_announcement(&loadable));
+        assert!(is_loadable_tools_announcement(&loadable));
+
+        let legacy = announcement(
+            LEGACY_TOOL_SELECT_VARIANT,
+            "<tools_added>\nmcp__s__alpha\n</tools_added>",
+        );
+        assert!(!is_loadable_tools_announcement(&legacy));
+        assert!(fold_announced_tool_names(&[legacy]).is_empty());
     }
 
     #[test]
@@ -322,12 +547,12 @@ mod tests {
     fn shaping_keeps_only_the_newest_retrieval_block_when_enabled() {
         let messages = vec![
             announcement(
-                LOADABLE_TOOLS_VARIANT,
+                RETRIEVED_TOOLS_VARIANT,
                 "<tools_relevant>\nold\n</tools_relevant>",
             ),
             LLMMessage::user("hi"),
             announcement(
-                LOADABLE_TOOLS_VARIANT,
+                RETRIEVED_TOOLS_VARIANT,
                 "<tools_relevant>\nnew\n</tools_relevant>",
             ),
         ];
@@ -336,7 +561,17 @@ mod tests {
         assert!(shaped.last().unwrap().content.contains("new"));
 
         let stripped = shape_history(messages, false);
-        assert_eq!(stripped.len(), 1);
-        assert_eq!(stripped[0].content, "hi");
+        assert_eq!(stripped.len(), 3);
+        assert!(
+            stripped[0]
+                .content
+                .contains("The available tools changed during this session.")
+        );
+        assert_eq!(stripped[1].content, "hi");
+        assert!(
+            stripped[2]
+                .content
+                .contains("The available tools changed during this session.")
+        );
     }
 }

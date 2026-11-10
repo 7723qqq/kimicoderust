@@ -53,6 +53,12 @@ impl NativeToolset {
             turn_id: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             loaded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             selection_failures: Arc::new(std::sync::Mutex::new(Default::default())),
+            tool_select_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            tool_select_reconcile: Arc::new(tokio::sync::Mutex::new(())),
+            tool_select_notified_updates: Arc::new(std::sync::Mutex::new(Default::default())),
+            tool_select_pending_reminders: Arc::new(std::sync::Mutex::new(Vec::new())),
+            tool_select_last_disclosure: Arc::new(std::sync::Mutex::new(None)),
+            tool_select_persist_listener: Arc::new(std::sync::Mutex::new(None)),
             wait_tally: Arc::new(std::sync::Mutex::new(Default::default())),
             progress_tracker: Arc::new(std::sync::Mutex::new(Default::default())),
             tools_filter: None,
@@ -81,16 +87,25 @@ impl NativeToolset {
         self
     }
 
-    /// The plugin-contributed skill roots this toolset scans (v2
-    /// `manager.pluginSkillRoots`), carrying each plugin's `sessionStart`
-    /// declaration. The turn loop reads the session-start skills from here so
-    /// the prompt, the `Skill` tool and the injection agree on one catalog.
     pub fn plugin_skill_dirs(&self) -> &[crate::skills::PluginSkillDir] {
         &self.plugin_skill_dirs
     }
 
-    /// The session this toolset serves, when the host bound one (v2
-    /// `ISessionContext.sessionId`).
+    pub fn skill_scan_roots(&self) -> crate::skills::SkillScanRoots {
+        crate::skills::SkillScanRoots {
+            root: Some(self.root.clone()),
+            extra_dirs: self.skill_dirs.clone(),
+            plugin_dirs: self.plugin_skill_dirs.clone(),
+            merge_all_available_skills: self.merge_all_available_skills,
+        }
+    }
+
+    pub fn skill_listing_outcome(&self) -> crate::primitives::read::ReadOutcome<String> {
+        self.skill_scan_roots()
+            .catalog_outcome()
+            .map(|skills| crate::prompt::skills_renderer::render_skills_markdown(&skills))
+    }
+
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
@@ -146,6 +161,23 @@ impl NativeToolset {
         &self.root
     }
 
+    pub fn workspace_roots(
+        &self,
+    ) -> Result<crate::environment::WorkspaceRoots, crate::environment::EnvironmentError> {
+        crate::environment::WorkspaceRoots::new(self.root.clone(), self.extra_roots.clone())
+    }
+
+    pub fn start_agents_md_watch(
+        &self,
+        root: &std::path::Path,
+    ) -> crate::environment::AgentsMdWatch {
+        crate::environment::AgentsMdWatch::start(root, None, super::user_home_dir().as_deref())
+    }
+
+    pub fn user_home_dir(&self) -> Option<PathBuf> {
+        super::user_home_dir()
+    }
+
     pub fn with_image_limits(
         mut self,
         read_byte_budget: Option<u64>,
@@ -177,6 +209,96 @@ impl NativeToolset {
             && self.declares_capability("tool_use")
     }
 
+    pub async fn reconcile_tool_select(
+        &self,
+        active: &[crate::tools::tool_select_ops::ToolSelectTool],
+        live: &[crate::tools::tool_select_ops::ToolSelectTool],
+    ) -> Result<crate::tools::tool_select_ops::ToolSelectReconcilePlan, String> {
+        let _serial = self.tool_select_reconcile.lock().await;
+        let agent_id = self.effective_caller_agent_id();
+        let persistence = self
+            .session_store()
+            .zip(self.session_id.as_deref().map(str::to_string));
+        let state = match &persistence {
+            Some((store, session_id)) => crate::tools::tool_select_ops::restore_tool_select_state(
+                store, session_id, &agent_id,
+            )?,
+            None => self
+                .tool_select_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+        };
+        let notified = self
+            .tool_select_notified_updates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let plan = crate::tools::tool_select_ops::plan_tool_select_reconcile(
+            &state, &agent_id, active, live, &notified,
+        );
+        let mut persisted_seq = None;
+        if let Some((store, session_id)) = &persistence {
+            if let Some(event) = &plan.initialized {
+                persisted_seq = Some(
+                    crate::tools::tool_select_ops::persist_tool_select_initialized(
+                        store, session_id, event,
+                    )?,
+                );
+            }
+            if let Some(event) = &plan.changed {
+                persisted_seq = Some(
+                    crate::tools::tool_select_ops::persist_tool_select_tools_changed(
+                        store, session_id, event,
+                    )?,
+                );
+            }
+        }
+        if let (Some(seq), Some(listener)) = (
+            persisted_seq,
+            self.tool_select_persist_listener
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+        ) {
+            listener(self.session_id.as_deref().unwrap_or_default(), seq);
+        }
+        *self
+            .tool_select_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = plan.state.clone();
+        self.tool_select_notified_updates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(plan.updates.iter().map(|update| update.signature.clone()));
+        self.tool_select_pending_reminders
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(plan.updates.iter().map(|update| {
+                format!(
+                    "Tool \"{}\" has an update, but the update is not applied in this session. Continue using the currently registered version.",
+                    update.name
+                )
+            }));
+        Ok(plan)
+    }
+
+    pub fn take_tool_update_pending_reminders(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .tool_select_pending_reminders
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )
+    }
+
+    pub fn set_tool_select_persist_listener(&self, listener: Arc<dyn Fn(&str, u64) + Send + Sync>) {
+        *self
+            .tool_select_persist_listener
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(listener);
+    }
+
     pub fn record_initial_tool_table_ref(&self, tools: &[crate::turn_loop::types::ToolInfo]) {
         let mut snapshot = self
             .initial_tool_names
@@ -188,18 +310,7 @@ impl NativeToolset {
     }
 
     pub fn seed_loaded_tools_from_history(&self, history: &[crate::turn_loop::types::LLMMessage]) {
-        if !self.supports_dynamic_tool_loading() {
-            return;
-        }
-        let announced = crate::tools::tool_select_state::fold_announced_tool_names(history);
-        if announced.is_empty() {
-            return;
-        }
-        let mut loaded = self
-            .loaded_tools
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        loaded.extend(announced);
+        let _ = history;
     }
 
     pub fn is_dynamic_tool_loaded(&self, name: &str) -> bool {
@@ -213,60 +324,71 @@ impl NativeToolset {
         &self,
         history: &[crate::turn_loop::types::LLMMessage],
     ) -> Option<String> {
-        if !self.supports_dynamic_tool_loading() {
+        self.take_last_announcement_disclosure();
+        if !self.tool_select_enabled {
             return None;
         }
-
-        let entries: Vec<crate::tools::tool_retriever::ToolSearchEntry> = self
-            .mcp_manager
-            .as_ref()
-            .map(|mcp| mcp.deferred_tool_infos_blocking())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(name, _, _)| {
-                self.tools_filter
-                    .as_ref()
-                    .is_none_or(|filter| filter.allows(name))
-            })
-            .map(|(name, description, schema)| {
-                let parameter_names = schema
-                    .get("properties")
-                    .and_then(serde_json::Value::as_object)
-                    .map(|properties| properties.keys().cloned().collect())
-                    .unwrap_or_default();
-                crate::tools::tool_retriever::ToolSearchEntry {
-                    name,
-                    description,
-                    source: "mcp".into(),
-                    parameter_names,
-                }
-            })
-            .collect();
-        if entries.is_empty() {
-            return self.empty_disclosure_announcement(history);
-        }
-
-        let loaded = self.active_loaded_tool_names();
-        let candidates: Vec<crate::tools::tool_retriever::ToolSearchEntry> = entries
-            .iter()
-            .filter(|entry| !loaded.contains(&entry.name))
-            .cloned()
-            .collect();
-
-        if entries.len() >= RETRIEVAL_MIN_TOOLS {
+        self.ensure_tool_select_state_for_announcement();
+        let state = self
+            .tool_select_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        state.initial.as_ref()?;
+        self.selection_failures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .reset_if_environment_changed(
+                crate::tools::select_tools::selection_environment_for_tools(
+                    self.tools_filter.as_ref(),
+                    &state.current,
+                ),
+            );
+        let revision = state.changes.len();
+        let loadable = self.loadable_tool_entries(&state);
+        let result = if loadable.len() >= RETRIEVAL_MIN_TOOLS {
+            let loaded = self
+                .loaded_tools
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let candidates = loadable
+                .iter()
+                .filter(|tool| !loaded.contains(&tool.name))
+                .cloned()
+                .collect::<Vec<_>>();
             if candidates.is_empty() {
                 return None;
             }
             let query =
                 crate::tools::tool_select_state::latest_user_query(history).unwrap_or_default();
+            let search_entries = candidates
+                .iter()
+                .map(|tool| crate::tools::tool_retriever::ToolSearchEntry {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    source: match tool.source {
+                        crate::tools::tool_select_ops::ToolSelectSource::Builtin => "builtin",
+                        crate::tools::tool_select_ops::ToolSelectSource::User => "user",
+                        crate::tools::tool_select_ops::ToolSelectSource::Mcp => "mcp",
+                    }
+                    .to_string(),
+                    parameter_names: tool
+                        .parameters
+                        .get("properties")
+                        .and_then(serde_json::Value::as_object)
+                        .map(|properties| properties.keys().cloned().collect())
+                        .unwrap_or_default(),
+                })
+                .collect::<Vec<_>>();
             let ranked = crate::tools::tool_retriever::rank_tools_by_query(
-                &candidates,
+                &search_entries,
                 &query,
                 RETRIEVAL_TOP_K,
             );
-
-            let selected: Vec<crate::tools::tool_retriever::ToolSearchHit> = if ranked.is_empty() {
-                candidates
+            let matched = !query.trim().is_empty() && ranked.iter().any(|hit| hit.score > 0.0);
+            let selected = if ranked.is_empty() {
+                search_entries
                     .iter()
                     .take(RETRIEVAL_TOP_K)
                     .map(|entry| crate::tools::tool_retriever::ToolSearchHit {
@@ -274,78 +396,338 @@ impl NativeToolset {
                         description: entry.description.clone(),
                         score: 0.0,
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             } else {
                 ranked
             };
-            let announcement = crate::tools::tool_select_state::render_retrieved_tools_announcement(
+            let content = crate::tools::tool_select_state::render_retrieved_tools_announcement(
                 &selected,
                 candidates.len(),
             );
-            let previous =
-                crate::tools::tool_select_state::last_retrieved_announcement_text(history);
-            if previous.as_deref() == Some(announcement.as_str()) {
+            if crate::tools::tool_select_state::last_retrieved_announcement_text(history).as_deref()
+                == Some(content.as_str())
+            {
                 return None;
             }
-            return Some(announcement);
-        }
-
-        let mut loadable: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-        loadable.sort();
-        let loadable_set: std::collections::HashSet<&str> =
-            loadable.iter().map(String::as_str).collect();
-        let announced = crate::tools::tool_select_state::fold_announced_tool_names(history);
-        let added: Vec<String> = loadable
-            .iter()
-            .filter(|name| !announced.contains(*name))
-            .cloned()
-            .collect();
-        let mut removed: Vec<String> = announced
-            .iter()
-            .filter(|name| !loadable_set.contains(name.as_str()))
-            .cloned()
-            .collect();
-        removed.sort();
-        crate::tools::select_tools::render_loadable_tools_announcement(
-            &added,
-            &removed,
-            !loadable.is_empty(),
-        )
+            if let Some(callbacks) = &self.callbacks {
+                callbacks.telemetry(serde_json::json!({
+                    "event": "tool_retrieval",
+                    "mode": "announce",
+                    "catalog_size": loadable.len(),
+                    "candidate_count": candidates.len(),
+                    "selected_count": selected.len(),
+                    "query_chars": query.encode_utf16().count(),
+                    "matched": matched,
+                }));
+            }
+            Some((
+                content,
+                crate::tools::tool_select_state::ToolSelectAnnouncementDisclosure::Snapshot {
+                    revision,
+                    tools: loadable.clone(),
+                },
+            ))
+        } else {
+            let last = crate::tools::tool_select_state::last_announcement_disclosure(history);
+            let last_revision = last.as_ref().map(|disclosure| disclosure.revision());
+            if last_revision.is_none_or(|last| last > revision) {
+                self.legacy_disclosure_announcement(&state, history, revision)
+                    .or_else(|| {
+                        let tools = state
+                            .current
+                            .iter()
+                            .filter(|tool| {
+                                self.is_dynamically_loadable(&state, tool)
+                                    && self
+                                        .tools_filter
+                                        .as_ref()
+                                        .is_none_or(|filter| filter.allows(&tool.name))
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        Some(Self::snapshot_disclosure_announcement(tools, revision))
+                    })
+            } else {
+                let mut delta = None;
+                for index in last_revision.unwrap()..revision {
+                    let change = state.changes.get(index)?;
+                    let added = change
+                        .added
+                        .iter()
+                        .filter(|tool| self.is_dynamically_loadable(&state, tool))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let removed = change
+                        .removed
+                        .iter()
+                        .filter(|tool| {
+                            self.is_dynamically_loadable(&state, tool)
+                                || !change.added.iter().any(|next| {
+                                    next.name == tool.name
+                                        && !self.is_dynamically_loadable(&state, next)
+                                })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if added.is_empty() && removed.is_empty() {
+                        continue;
+                    }
+                    let has_loadable = state
+                        .current
+                        .iter()
+                        .any(|tool| self.is_dynamically_loadable(&state, tool));
+                    delta = Some(Self::delta_disclosure_announcement(
+                        added,
+                        removed,
+                        has_loadable,
+                        index + 1,
+                    ));
+                    break;
+                }
+                delta.or_else(|| self.legacy_disclosure_announcement(&state, history, revision))
+            }
+        };
+        let (content, disclosure) = result?;
+        *self
+            .tool_select_last_disclosure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(serde_json::to_value(disclosure).ok()?);
+        Some(content)
     }
 
-    fn empty_disclosure_announcement(
-        &self,
-        history: &[crate::turn_loop::types::LLMMessage],
-    ) -> Option<String> {
-        let empty =
-            crate::tools::select_tools::render_loadable_tools_announcement(&[], &[], false)?;
-        let last = history.iter().rev().find(|message| {
-            crate::tools::tool_select_state::is_loadable_tools_announcement(message)
-        });
-        if last.is_some_and(|message| message.content.contains(&empty)) {
-            return None;
-        }
-        Some(empty)
-    }
-
-    fn active_loaded_tool_names(&self) -> std::collections::HashSet<String> {
-        let loadable = self
-            .mcp_manager
-            .as_ref()
-            .map(|mcp| mcp.deferred_tool_names_blocking())
-            .unwrap_or_default();
-        self.loaded_tools
+    pub fn take_last_announcement_disclosure(&self) -> Option<serde_json::Value> {
+        self.tool_select_last_disclosure
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+
+    fn ensure_tool_select_state_for_announcement(&self) {
+        if self.session_store().is_some()
+            || self
+                .tool_select_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .initial
+                .is_some()
+        {
+            return;
+        }
+        let active = self
+            .mcp_manager
+            .as_ref()
+            .map(|mcp| {
+                mcp.active_definitions_blocking()
+                    .iter()
+                    .map(crate::tools::tool_select_ops::tool_select_tool_from_definition)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let live = self
+            .mcp_manager
+            .as_ref()
+            .map(|mcp| {
+                mcp.live_definitions_blocking()
+                    .iter()
+                    .map(crate::tools::tool_select_ops::tool_select_tool_from_definition)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let notified = self
+            .tool_select_notified_updates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let plan = crate::tools::tool_select_ops::plan_tool_select_reconcile(
+            &crate::tools::tool_select_ops::ToolSelectModelState::default(),
+            &self.effective_caller_agent_id(),
+            &active,
+            &live,
+            &notified,
+        );
+        *self
+            .tool_select_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = plan.state;
+        self.tool_select_notified_updates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(plan.updates.iter().map(|update| update.signature.clone()));
+        self.tool_select_pending_reminders
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(plan.updates.iter().map(|update| {
+                format!(
+                    "Tool \"{}\" has an update, but the update is not applied in this session. Continue using the currently registered version.",
+                    update.name
+                )
+            }));
+    }
+
+    pub(crate) fn is_dynamically_loadable(
+        &self,
+        state: &crate::tools::tool_select_ops::ToolSelectModelState,
+        tool: &crate::tools::tool_select_ops::ToolSelectTool,
+    ) -> bool {
+        tool.disclosure == Some(crate::tools::registry::ToolDisclosure::Deferred)
+            || (tool.origin == crate::tools::tool_select_ops::ToolSelectOrigin::Runtime
+                && !state.initial.as_ref().is_some_and(|initial| {
+                    initial.iter().any(|initial_tool| {
+                        initial_tool.name == tool.name
+                            && initial_tool.disclosure
+                                != Some(crate::tools::registry::ToolDisclosure::Deferred)
+                    })
+                }))
+    }
+
+    pub(crate) fn loadable_tool_entries(
+        &self,
+        state: &crate::tools::tool_select_ops::ToolSelectModelState,
+    ) -> Vec<crate::tools::tool_select_ops::ToolSelectTool> {
+        state
+            .current
             .iter()
-            .filter(|name| loadable.contains(*name))
-            .filter(|name| {
-                self.tools_filter
-                    .as_ref()
-                    .is_none_or(|filter| filter.allows(name))
+            .filter(|tool| {
+                self.is_dynamically_loadable(state, tool)
+                    && self
+                        .tools_filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.allows(&tool.name))
             })
             .cloned()
             .collect()
+    }
+
+    fn snapshot_disclosure_announcement(
+        mut tools: Vec<crate::tools::tool_select_ops::ToolSelectTool>,
+        revision: usize,
+    ) -> (
+        String,
+        crate::tools::tool_select_state::ToolSelectAnnouncementDisclosure,
+    ) {
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let has_loadable = !names.is_empty();
+        let content = crate::tools::select_tools::render_loadable_tools_announcement(
+            &names,
+            &[],
+            has_loadable,
+        )
+        .expect("a snapshot always renders");
+        (
+            content,
+            crate::tools::tool_select_state::ToolSelectAnnouncementDisclosure::Snapshot {
+                revision,
+                tools,
+            },
+        )
+    }
+
+    fn delta_disclosure_announcement(
+        added: Vec<crate::tools::tool_select_ops::ToolSelectTool>,
+        removed: Vec<crate::tools::tool_select_ops::ToolSelectTool>,
+        has_loadable: bool,
+        revision: usize,
+    ) -> (
+        String,
+        crate::tools::tool_select_state::ToolSelectAnnouncementDisclosure,
+    ) {
+        let added_names = added
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let removed_names = removed
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let content = crate::tools::select_tools::render_loadable_tools_announcement(
+            &added_names,
+            &removed_names,
+            has_loadable,
+        )
+        .expect("a non-empty delta always renders");
+        (
+            content,
+            crate::tools::tool_select_state::ToolSelectAnnouncementDisclosure::Delta {
+                revision,
+                added,
+                removed,
+            },
+        )
+    }
+
+    fn legacy_disclosure_announcement(
+        &self,
+        state: &crate::tools::tool_select_ops::ToolSelectModelState,
+        history: &[crate::turn_loop::types::LLMMessage],
+        revision: usize,
+    ) -> Option<(
+        String,
+        crate::tools::tool_select_state::ToolSelectAnnouncementDisclosure,
+    )> {
+        let announced = crate::tools::tool_select_state::fold_announced_tool_names(history);
+        let loadable = self.loadable_tool_entries(state);
+        let loadable_names = loadable
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let added = loadable
+            .iter()
+            .filter(|tool| !announced.contains(&tool.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let known = state
+            .current
+            .iter()
+            .chain(state.initial.iter().flatten())
+            .chain(
+                state
+                    .changes
+                    .iter()
+                    .flat_map(|change| change.added.iter().chain(change.removed.iter())),
+            )
+            .collect::<Vec<_>>();
+        let mut removed_names = announced
+            .iter()
+            .filter(|name| !loadable_names.contains(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        removed_names.sort();
+        let removed = removed_names
+            .iter()
+            .filter_map(|name| {
+                known
+                    .iter()
+                    .find(|tool| tool.name == *name)
+                    .map(|tool| (*tool).clone())
+            })
+            .collect::<Vec<_>>();
+        if !added.is_empty() || !removed.is_empty() {
+            return Some(Self::delta_disclosure_announcement(
+                added,
+                removed,
+                !loadable.is_empty(),
+                revision,
+            ));
+        }
+        if !loadable.is_empty() {
+            return None;
+        }
+        let last = history.iter().rev().find(|message| {
+            crate::tools::tool_select_state::is_loadable_tools_announcement(message)
+        });
+        if last.is_some_and(|message| {
+            message
+                .content
+                .contains(crate::tools::select_tools::NO_LOADABLE_TOOLS_MESSAGE)
+        }) {
+            return None;
+        }
+        Some(Self::snapshot_disclosure_announcement(Vec::new(), revision))
     }
 
     pub fn observe_progress(&self, receipt: &crate::turn_loop::progress_track::ToolReceipt) -> u32 {
@@ -622,6 +1004,104 @@ impl NativeToolset {
             });
         }
         tools
+    }
+
+    pub fn shape_tool_table_with_state(
+        &self,
+        tools: Vec<crate::turn_loop::types::ToolInfo>,
+        state: &crate::tools::tool_select_ops::ToolSelectModelState,
+    ) -> Vec<crate::turn_loop::types::ToolInfo> {
+        use crate::tools::tool_select_ops::{ToolSelectOrigin, ToolSelectTool};
+
+        let disclosure = self.supports_dynamic_tool_loading();
+        let initial = state.initial.clone().unwrap_or_else(|| {
+            tools
+                .iter()
+                .map(|tool| {
+                    let source = if tool.name.starts_with("mcp__") {
+                        crate::tools::tool_select_ops::ToolSelectSource::Mcp
+                    } else if crate::tools::is_builtin_tool_name(&tool.name) {
+                        crate::tools::tool_select_ops::ToolSelectSource::Builtin
+                    } else {
+                        crate::tools::tool_select_ops::ToolSelectSource::User
+                    };
+                    crate::tools::tool_select_ops::tool_select_tool_from_info(tool, source, None)
+                })
+                .collect()
+        });
+        let current_by_name = state
+            .current
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool))
+            .collect::<std::collections::HashMap<_, _>>();
+        let initial_names = initial
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let mut capable = initial
+            .iter()
+            .map(|tool| {
+                current_by_name
+                    .get(tool.name.as_str())
+                    .map(|current| (*current).clone())
+                    .unwrap_or_else(|| tool.clone())
+            })
+            .collect::<Vec<_>>();
+        if disclosure {
+            capable.extend(
+                state
+                    .current
+                    .iter()
+                    .filter(|tool| {
+                        tool.origin == ToolSelectOrigin::Runtime
+                            && !initial_names.contains(tool.name.as_str())
+                    })
+                    .cloned(),
+            );
+        }
+        capable.sort_by(|left, right| left.name.cmp(&right.name));
+        let loaded = self
+            .loaded_tools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let is_dynamic = |tool: &ToolSelectTool| {
+            tool.disclosure == Some(crate::tools::registry::ToolDisclosure::Deferred)
+                || (tool.origin == ToolSelectOrigin::Runtime
+                    && !initial.iter().any(|initial_tool| {
+                        initial_tool.name == tool.name
+                            && initial_tool.disclosure
+                                != Some(crate::tools::registry::ToolDisclosure::Deferred)
+                    }))
+        };
+        capable
+            .into_iter()
+            .filter(|tool| {
+                let is_select = tool.name == crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME;
+                let active = self.tools_filter.as_ref().is_none_or(|policy| {
+                    if is_select && disclosure {
+                        !policy.disabled.iter().any(|pattern| {
+                            pattern.eq_ignore_ascii_case(
+                                crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME,
+                            )
+                        })
+                    } else {
+                        policy.allows(&tool.name)
+                    }
+                });
+                active && (disclosure || !is_select)
+            })
+            .filter(|tool| {
+                !disclosure
+                    || tool.name == crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME
+                    || !is_dynamic(tool)
+                    || loaded.contains(&tool.name)
+            })
+            .map(|tool| crate::turn_loop::types::ToolInfo {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.parameters,
+            })
+            .collect()
     }
 
     pub async fn full_tool_catalogue(&self) -> std::collections::HashSet<String> {

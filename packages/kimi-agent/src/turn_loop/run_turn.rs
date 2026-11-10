@@ -1847,6 +1847,15 @@ fn run_turn_inner<'a>(
                 }
             }
 
+            let step_tool_defs = if input.llm.transport() != "host-proxy" {
+                match callbacks.list_tools().await {
+                    Ok(response) => response.tools,
+                    Err(_) => tool_defs.clone(),
+                }
+            } else {
+                tool_defs.clone()
+            };
+
             // ── Injection pass ───────────────────────────────────────────
             // Mirror v2's `onWillBeginStep` injection gate: build this
             // step's reminders (date change, workspace AGENTS.md, …) and
@@ -1896,29 +1905,46 @@ fn run_turn_inner<'a>(
                     // list has to forget the passes the splice undid.
                     injection_registry.clear_injected();
                 }
-                for (variant, text) in injection_registry.build_injections_rearmed(
+                let mut injections = injection_registry.build_injections_rearmed(
                     is_new_turn,
                     rearm_this_step,
                     &step_access,
                     &messages,
-                ) {
-                    messages.push(crate::injection::injection_message_named(text, &variant));
+                );
+                if let Some(toolset) = &input.toolset {
+                    let pending = toolset
+                        .take_tool_update_pending_reminders()
+                        .into_iter()
+                        .map(|text| {
+                            (
+                                "tool_update_pending".to_string(),
+                                crate::injection::wrap_system_reminder(&text),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let position = injections
+                        .iter()
+                        .position(|(variant, _)| {
+                            variant == crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT
+                        })
+                        .unwrap_or(injections.len());
+                    injections.splice(position..position, pending);
+                }
+                for (variant, text) in injections {
+                    let mut message = crate::injection::injection_message_named(text, &variant);
+                    if variant == crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT
+                        && let Some(toolset) = &input.toolset
+                        && let Some(disclosure) = toolset.take_last_announcement_disclosure()
+                        && let Some(origin) = message
+                            .origin
+                            .as_mut()
+                            .and_then(|origin| origin.as_object_mut())
+                    {
+                        origin.insert("disclosure".to_string(), disclosure);
+                    }
+                    messages.push(message);
                 }
             }
-
-            // M1d: pull the host's current tool table before each LLM call so
-            // mid-turn registry changes (feature tools, MCP reconnects) reach
-            // the model. Host-proxy mode rebuilds tools host-side per call and
-            // never consults the engine's table; a host without the seam (or a
-            // failed pull) falls back to the turn-start snapshot.
-            let step_tool_defs = if input.llm.transport() != "host-proxy" {
-                match callbacks.list_tools().await {
-                    Ok(response) => response.tools,
-                    Err(_) => tool_defs.clone(),
-                }
-            } else {
-                tool_defs.clone()
-            };
 
             // Delegate LLM call (with retry) to turn_step module.
             // Convert the 'static error to the turn's 'a-bounded error type.
@@ -2877,11 +2903,10 @@ fn run_turn_inner<'a>(
                                 continue;
                             }
                             if verdict.impossible {
-                                // v2 blocks with the judge's reason; the state
-                                // bridge's update action carries no reason
-                                // field, so only the status is recorded here.
-                                tool_calls[index].arguments =
-                                    serde_json::json!({ "status": "blocked" });
+                                tool_calls[index].arguments = serde_json::json!({
+                                    "status": "blocked",
+                                    "reason": verdict.reason,
+                                });
                                 continue;
                             }
                             // The host still sees the call start/complete so
@@ -3247,103 +3272,6 @@ fn run_turn_inner<'a>(
                             .count()
                     });
 
-                    // Derive what the AGENTS.md reminder needs from the accesses
-                    // already computed above, exactly as v2's
-                    // `targetDirsFromAccesses` does (`agentsMdReminderService.ts:284-306`):
-                    // a file tool contributes its *parent directory*, a tree
-                    // search contributes the root itself, and an AGENTS.md the
-                    // call just read is recorded separately so the reminder does
-                    // not tell the model to go read a file it already has. A
-                    // Bash call contributes its own `cwd` argument, which v2 adds
-                    // whether or not any operand resolves (`:255-262, 274-276`).
-                    step_access = crate::injection::StepAccess::default();
-                    for call in &scheduled {
-                        let name = call.tool_call.name.to_ascii_lowercase();
-                        if name == "bash" {
-                            let arguments = &call.tool_call.arguments;
-                            let cwd_arg = arguments.get("cwd").and_then(|value| value.as_str());
-                            if let Some(cwd) = cwd_arg {
-                                step_access.declared_cwds.push(cwd.to_string());
-                            }
-                            // v2's other half (`extractBashTargetDirs`): the
-                            // directories a Bash call's listing operands
-                            // resolve to. The engine parses bash itself
-                            // (`tools::bash_target_dirs`); a host that supplies
-                            // its own parser overrides it through
-                            // `host/parse_bash`. Either way a command that
-                            // fails to parse contributes nothing beyond the
-                            // declared cwd — v2's own fallback shape
-                            // (`!parsed.ok || parsed.hasError` → cwd only),
-                            // never an error into the turn.
-                            if let Some(command) =
-                                arguments.get("command").and_then(|value| value.as_str())
-                            {
-                                // Same base the call will execute in: a
-                                // relative `cwd` is resolved against the
-                                // session's execution root, not the engine
-                                // process's working directory.
-                                let execution_cwd = input
-                                    .toolset
-                                    .as_ref()
-                                    .map(|toolset| toolset.execution_root())
-                                    .or_else(|| std::env::current_dir().ok())
-                                    .unwrap_or_else(|| std::path::PathBuf::from("."));
-                                let effective_cwd = match cwd_arg {
-                                    Some(cwd) if !cwd.is_empty() => {
-                                        let candidate = std::path::Path::new(cwd);
-                                        if candidate.is_absolute() {
-                                            candidate.to_path_buf()
-                                        } else {
-                                            execution_cwd.join(candidate)
-                                        }
-                                    }
-                                    _ => execution_cwd,
-                                };
-                                let home = std::env::var_os("USERPROFILE")
-                                    .or_else(|| std::env::var_os("HOME"))
-                                    .map(std::path::PathBuf::from)
-                                    .unwrap_or_else(|| effective_cwd.clone());
-                                let operands = if callbacks.supports_parse_bash() {
-                                    callbacks
-                                        .parse_bash(crate::rpc::types::ParseBashRequest {
-                                            command: command.to_string(),
-                                            cwd: effective_cwd.to_string_lossy().into_owned(),
-                                            home: home.to_string_lossy().into_owned(),
-                                        })
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                } else {
-                                    crate::tools::bash_target_dirs::bash_target_dirs(
-                                        command,
-                                        &effective_cwd.to_string_lossy(),
-                                        &home.to_string_lossy(),
-                                    )
-                                };
-                                if let Some(dirs) = operands {
-                                    step_access
-                                        .dirs
-                                        .extend(dirs.into_iter().map(std::path::PathBuf::from));
-                                }
-                            }
-                            continue;
-                        }
-                        let targets_file = matches!(name.as_str(), "read" | "edit" | "write");
-                        for access in &call.accesses {
-                            let crate::turn_loop::types::ToolResourceAccess::File(access) = access
-                            else {
-                                continue;
-                            };
-                            let accessed = std::path::PathBuf::from(&access.path);
-                            if targets_file {
-                                if let Some(parent) = accessed.parent() {
-                                    step_access.dirs.push(parent.to_path_buf());
-                                }
-                            } else {
-                                step_access.dirs.push(accessed);
-                            }
-                        }
-                    }
                     turn_watch_state.set_phase(TurnPhase::Tools);
                     // The scheduler answers exactly the calls it was handed, so
                     // its outcome is indexed by *scheduled* call, not by call
@@ -3392,6 +3320,7 @@ fn run_turn_inner<'a>(
                     let mut executed_durations = executed_durations.into_iter();
                     let mut results = Vec::with_capacity(tool_calls.len());
                     let mut durations_ms = Vec::with_capacity(tool_calls.len());
+                    let mut executed_call_indices = Vec::new();
                     for (index, refusal) in refusals.iter().enumerate() {
                         // v2 `prepareSkippedToolCall` runs for every call after
                         // the predicted stop, including one the preflight would
@@ -3441,7 +3370,96 @@ fn run_turn_inner<'a>(
                                         .next()
                                         .expect("the scheduler answers every scheduled call"),
                                 );
-                                durations_ms.push(executed_durations.next().flatten());
+                                let duration = executed_durations.next().flatten();
+                                if duration.is_some() {
+                                    executed_call_indices.push(index);
+                                }
+                                durations_ms.push(duration);
+                            }
+                        }
+                    }
+
+                    step_access = crate::injection::StepAccess::default();
+                    for index in executed_call_indices.iter().copied() {
+                        if dedupe_plan
+                            .original_of
+                            .get(index)
+                            .is_some_and(|original| *original != index)
+                        {
+                            continue;
+                        }
+                        let call = &tool_calls[index];
+                        let name = call.name.to_ascii_lowercase();
+                        if name == "bash" {
+                            let arguments = &call.arguments;
+                            let cwd_arg = arguments.get("cwd").and_then(|value| value.as_str());
+                            if let Some(cwd) = cwd_arg {
+                                step_access.declared_cwds.push(cwd.to_string());
+                            }
+                            if let Some(command) =
+                                arguments.get("command").and_then(|value| value.as_str())
+                            {
+                                let execution_cwd = input
+                                    .toolset
+                                    .as_ref()
+                                    .map(|toolset| toolset.execution_root())
+                                    .or_else(|| std::env::current_dir().ok())
+                                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                                let effective_cwd = match cwd_arg {
+                                    Some(cwd) if !cwd.is_empty() => {
+                                        let candidate = std::path::Path::new(cwd);
+                                        if candidate.is_absolute() {
+                                            candidate.to_path_buf()
+                                        } else {
+                                            execution_cwd.join(candidate)
+                                        }
+                                    }
+                                    _ => execution_cwd,
+                                };
+                                let home = std::env::var_os("USERPROFILE")
+                                    .or_else(|| std::env::var_os("HOME"))
+                                    .map(std::path::PathBuf::from)
+                                    .unwrap_or_else(|| effective_cwd.clone());
+                                let operands = if callbacks.supports_parse_bash() {
+                                    callbacks
+                                        .parse_bash(crate::rpc::types::ParseBashRequest {
+                                            command: command.to_string(),
+                                            cwd: effective_cwd.to_string_lossy().into_owned(),
+                                            home: home.to_string_lossy().into_owned(),
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                } else {
+                                    crate::tools::bash_target_dirs::bash_target_dirs(
+                                        command,
+                                        &effective_cwd.to_string_lossy(),
+                                        &home.to_string_lossy(),
+                                    )
+                                };
+                                if let Some(dirs) = operands {
+                                    step_access
+                                        .dirs
+                                        .extend(dirs.into_iter().map(std::path::PathBuf::from));
+                                }
+                            }
+                            continue;
+                        }
+                        let targets_file = matches!(name.as_str(), "read" | "edit" | "write");
+                        for access in
+                            tool_scheduler::infer_tool_accesses(&call.name, &call.arguments)
+                        {
+                            let crate::turn_loop::types::ToolResourceAccess::File(access) = access
+                            else {
+                                continue;
+                            };
+                            let accessed = std::path::PathBuf::from(&access.path);
+                            if targets_file {
+                                if let Some(parent) = accessed.parent() {
+                                    step_access.dirs.push(parent.to_path_buf());
+                                }
+                            } else {
+                                step_access.dirs.push(accessed);
                             }
                         }
                     }
@@ -3459,7 +3477,7 @@ fn run_turn_inner<'a>(
                     // were then refused or failed, so the model never learned
                     // the file exists.
                     for (index, result) in results.iter().enumerate() {
-                        if result.is_error {
+                        if result.is_error || !executed_call_indices.contains(&index) {
                             continue;
                         }
                         let Some(call) = tool_calls.get(index) else {

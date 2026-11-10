@@ -46,13 +46,7 @@ fn resolution_failure(tool_name: &str, args: &Value) -> Option<String> {
     let has_column = args
         .get("column_offset")
         .is_some_and(|value| !value.is_null());
-    if has_column
-        && args
-            .get("line_offset")
-            .and_then(Value::as_i64)
-            .unwrap_or(1)
-            < 0
-    {
+    if has_column && args.get("line_offset").and_then(Value::as_i64).unwrap_or(1) < 0 {
         return Some(
             "column_offset is only supported for forward reads. Use a positive line_offset or the forward Next Read arguments."
                 .to_string(),
@@ -136,7 +130,8 @@ mod tests {
 
     #[test]
     fn non_read_tools_never_fail_resolution() {
-        let resolution = resolve_tool_execution("Bash", &serde_json::json!({ "command": "" }), None);
+        let resolution =
+            resolve_tool_execution("Bash", &serde_json::json!({ "command": "" }), None);
         assert!(resolution.error.is_none());
         assert_eq!(resolution.accesses.len(), 1);
     }

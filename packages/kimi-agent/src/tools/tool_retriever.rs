@@ -153,10 +153,13 @@ fn document_tokens(entry: &ToolSearchEntry) -> Vec<String> {
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-    let lowered: String = text.chars().flat_map(char::to_lowercase).collect();
+    let normalized = icu_normalizer::ComposingNormalizer::new_nfkc()
+        .normalize(text)
+        .into_owned()
+        .to_lowercase();
     let mut tokens = Vec::new();
     let mut word = String::new();
-    for ch in lowered.chars() {
+    for ch in normalized.chars() {
         if ch.is_alphanumeric() {
             word.push(ch);
         } else {
@@ -273,6 +276,15 @@ mod tests {
         let all = catalogue();
         assert_eq!(rank_tools_by_query(&all, "file", 0).len(), 1);
         assert!(rank_tools_by_query(&all, "", 500).len() <= 50);
+    }
+
+    #[test]
+    fn compatibility_characters_are_nfkc_folded_before_matching() {
+        let hits = rank_tools_by_query(&catalogue(), "ＣＲＥＡＴＥ ｐｕｌｌ ｒｅｑｕｅｓｔ", 10);
+        assert_eq!(
+            hits.first().map(|hit| hit.name.as_str()),
+            Some("mcp__github__create_pr")
+        );
     }
 
     #[test]

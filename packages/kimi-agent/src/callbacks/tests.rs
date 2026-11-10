@@ -521,6 +521,7 @@ async fn test_tower_tool_table_follows_the_experiment_flag() {
 
 #[tokio::test]
 async fn test_sandbox_policy_enforcement() {
+    let _lock = reason_lock().await;
     use crate::tools::sandbox::SandboxExecutionPolicy;
 
     // 1. ReadOnly 模式阻断 Write 与 Edit
@@ -2387,6 +2388,71 @@ async fn test_initial_tool_snapshot_filters_late_mcp_additions_without_disclosur
         !second.tools.iter().any(|t| t.name == "mcp__late__tool"),
         "a runtime-only addition must stay out without dynamic loading"
     );
+}
+
+#[tokio::test]
+async fn list_tools_persists_initial_and_runtime_registry_origins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::session::sqlite_store::SqliteSessionStore::in_memory().unwrap());
+    store.create_session("tool-select", None).unwrap();
+    let mcp_mgr = Arc::new(crate::mcp::McpManager::new());
+    let toolset = Arc::new(
+        NativeToolset::new(tmp.path().to_str().unwrap(), None)
+            .unwrap()
+            .with_mcp(mcp_mgr.clone())
+            .with_session_id("tool-select")
+            .with_session_store(store.clone()),
+    );
+    let callbacks = NativeToolCallbacks {
+        inner: Arc::new(HostWithToolsCallbacks { tools: vec![] }),
+        toolset,
+        native_count: Arc::new(AtomicU32::new(0)),
+        truncator: None,
+        permission_engine: None,
+        plan_guard: None,
+        stale_guard: None,
+        goal_guard: None,
+        hook_guard: None,
+        agent_tool_veto: None,
+        tools_veto: None,
+        todo_tool_veto: None,
+        tower_worktree_root: None,
+        tower_enabled: false,
+        notify_user_enabled: true,
+        before_execute: None,
+        sandbox_policy: None,
+    };
+
+    callbacks.list_tools().await.unwrap();
+    mcp_mgr
+        .add_client(crate::mcp::McpClient::mock("late"))
+        .await;
+    callbacks.list_tools().await.unwrap();
+
+    let state = crate::tools::tool_select_ops::restore_tool_select_state(
+        &store,
+        "tool-select",
+        crate::callbacks::MAIN_AGENT_ID,
+    )
+    .unwrap();
+    let initial = state
+        .initial
+        .expect("the first table initializes durable state");
+    assert!(
+        !initial
+            .iter()
+            .any(|tool| tool.name == "mcp__late__late_sample_tool")
+    );
+    let runtime = state
+        .current
+        .iter()
+        .find(|tool| tool.name == "mcp__late__late_sample_tool")
+        .expect("the late MCP tool joins the current registry");
+    assert_eq!(
+        runtime.origin,
+        crate::tools::tool_select_ops::ToolSelectOrigin::Runtime
+    );
+    assert_eq!(state.changes.len(), 1);
 }
 
 /// The model-facing seam must re-advertise a loaded deferred tool with its

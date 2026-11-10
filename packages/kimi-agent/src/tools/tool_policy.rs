@@ -263,10 +263,6 @@ pub fn resolve_active_tool_names(policy: &ToolActivationPolicy) -> Option<Vec<St
     )
 }
 
-/// Narrow an allowlist to what a bound agent profile permits. An empty
-/// allowlist adopts the profile's list outright; a non-empty one keeps only
-/// entries the profile also allows. MCP entries compare as globs, other names
-/// exactly (v2 `resolveActiveToolNames` composed with the session filter).
 pub fn restrict_to_profile(enabled: &mut Vec<String>, profile_tools: &[String]) {
     if profile_tools.is_empty() {
         return;
@@ -394,7 +390,9 @@ pub fn native_tool_defs_with_notify(
     defs.push(crate::tools::task_tools::task_list_tool_def());
     defs.push(crate::tools::task_tools::task_output_tool_def());
     defs.push(crate::tools::task_tools::task_stop_tool_def());
-    defs.push(crate::tools::task_tools::wait_for_tool_def());
+    if crate::tools::task_tools::wait_for_enabled() {
+        defs.push(crate::tools::task_tools::wait_for_tool_def());
+    }
     defs.push(crate::tools::skill::skill_tool_def());
     defs.push(crate::tools::knowledge_tool::knowledge_tool_def());
 

@@ -75,25 +75,24 @@ pub fn tool_side_effect(tool_name: &str) -> Option<ToolSideEffect> {
     }
     match name.as_str() {
         "read" | "grep" | "glob" | "fetchurl" | "fetch_url" | "websearch" | "web_search"
-        | "lsp" | "invokesubagent" | "invoke_subagent" | "managesubagents"
-        | "manage_subagents" | "definesubagent" | "define_subagent" | "askuserquestion"
-        | "ask_user_question" | "getgoal" | "get_goal" | "todolist" | "todo_list"
-        | "cronlist" | "cron_list" | "updategoal" | "update_goal" | "setgoalbudget"
-        | "set_goal_budget" | "tasklist" | "task_list" | "taskoutput" | "task_output"
-        | "taskwait" | "task_wait" | "exitplanmode" | "exit_plan_mode" | "enterspecmode"
-        | "enter_spec_mode" | "exitspecmode" | "exit_spec_mode" | "creategoal"
-        | "create_goal" | "skill" | "sessionquery" | "session_query" | "notifyuser"
-        | "notify_user" | "agent" | "agentswarm" | "agent_swarm" | "waitfor" | "wait_for"
-        | "towerinit" | "tower_init" | "towerplan" | "tower_plan" | "towerspawn"
-        | "tower_spawn" | "towersend" | "tower_send" | "towerinbox" | "tower_inbox"
-        | "towerfinding" | "tower_finding" | "towerreview" | "tower_review"
-        | "towermission" | "tower_mission" | "towerstatus" | "tower_status"
-        | "select_tools" => Some(ToolSideEffect::Read),
+        | "lsp" | "invokesubagent" | "invoke_subagent" | "managesubagents" | "manage_subagents"
+        | "definesubagent" | "define_subagent" | "askuserquestion" | "ask_user_question"
+        | "getgoal" | "get_goal" | "todolist" | "todo_list" | "cronlist" | "cron_list"
+        | "updategoal" | "update_goal" | "setgoalbudget" | "set_goal_budget" | "tasklist"
+        | "task_list" | "taskoutput" | "task_output" | "taskwait" | "task_wait"
+        | "exitplanmode" | "exit_plan_mode" | "enterspecmode" | "enter_spec_mode"
+        | "exitspecmode" | "exit_spec_mode" | "creategoal" | "create_goal" | "skill"
+        | "sessionquery" | "session_query" | "notifyuser" | "notify_user" | "agent"
+        | "agentswarm" | "agent_swarm" | "waitfor" | "wait_for" | "towerinit" | "tower_init"
+        | "towerplan" | "tower_plan" | "towerspawn" | "tower_spawn" | "towersend"
+        | "tower_send" | "towerinbox" | "tower_inbox" | "towerfinding" | "tower_finding"
+        | "towerreview" | "tower_review" | "towermission" | "tower_mission" | "towerstatus"
+        | "tower_status" | "select_tools" => Some(ToolSideEffect::Read),
         "write" | "edit" | "knowledge" | "memory" | "taskstop" | "task_stop" | "croncreate"
         | "cron_create" | "crondelete" | "cron_delete" | "towermerge" | "tower_merge"
         | "towerteardown" | "tower_teardown" => Some(ToolSideEffect::Write),
         "bash" | "powershell" | "workflow" => Some(ToolSideEffect::Shell),
-        "runcode" | "run_code" => Some(ToolSideEffect::Execute),
+        "run_code" => Some(ToolSideEffect::Execute),
         _ => None,
     }
 }
@@ -360,11 +359,13 @@ mod tests {
     use super::*;
 
     fn write_access(path: &str) -> ToolAccesses {
-        vec![ToolResourceAccess::File(crate::turn_loop::types::ToolFileAccess {
-            operation: FileOperation::Write,
-            path: path.to_string(),
-            recursive: false,
-        })]
+        vec![ToolResourceAccess::File(
+            crate::turn_loop::types::ToolFileAccess {
+                operation: FileOperation::Write,
+                path: path.to_string(),
+                recursive: false,
+            },
+        )]
     }
 
     #[test]
@@ -395,11 +396,7 @@ mod tests {
     #[test]
     fn test_write_guard_workspace_write_allows_inside() {
         let policy = SandboxExecutionPolicy::workspace_write("/workspace");
-        assert!(
-            policy
-                .sandbox_write_guard("/workspace/sub/a.txt")
-                .is_none()
-        );
+        assert!(policy.sandbox_write_guard("/workspace/sub/a.txt").is_none());
         let denial = policy.sandbox_write_guard("/other/a.txt").unwrap();
         assert!(denial.contains("outside the workspace root"));
     }
@@ -463,7 +460,9 @@ mod tests {
     #[test]
     fn test_undeclared_tools_fail_closed() {
         let policy = SandboxExecutionPolicy::read_only("/workspace");
-        let denial = policy.sandbox_tool_veto("mcp__x__y", None, &ToolAccesses::new()).unwrap();
+        let denial = policy
+            .sandbox_tool_veto("mcp__x__y", None, &ToolAccesses::new())
+            .unwrap();
         assert!(denial.contains("does not declare whether it has side effects"));
     }
 
@@ -477,7 +476,11 @@ mod tests {
 
         let policy = SandboxExecutionPolicy::workspace_write("/workspace");
         let denial = policy
-            .sandbox_tool_veto("PowerShell", tool_side_effect("PowerShell"), &ToolAccesses::new())
+            .sandbox_tool_veto(
+                "PowerShell",
+                tool_side_effect("PowerShell"),
+                &ToolAccesses::new(),
+            )
             .unwrap();
         assert!(denial.contains("none is available on this host"));
     }
@@ -486,7 +489,11 @@ mod tests {
     fn test_code_execution_is_refused() {
         let policy = SandboxExecutionPolicy::workspace_write("/workspace");
         let denial = policy
-            .sandbox_tool_veto("run_code", tool_side_effect("run_code"), &ToolAccesses::new())
+            .sandbox_tool_veto(
+                "run_code",
+                tool_side_effect("run_code"),
+                &ToolAccesses::new(),
+            )
             .unwrap();
         assert!(denial.contains("blocks code execution"));
     }
@@ -496,17 +503,29 @@ mod tests {
         let policy = SandboxExecutionPolicy::workspace_write("/workspace");
         assert!(
             policy
-                .sandbox_tool_veto("Write", tool_side_effect("Write"), &write_access("/workspace/a"))
+                .sandbox_tool_veto(
+                    "Write",
+                    tool_side_effect("Write"),
+                    &write_access("/workspace/a")
+                )
                 .is_none()
         );
         let denial = policy
-            .sandbox_tool_veto("Write", tool_side_effect("Write"), &write_access("/other/a"))
+            .sandbox_tool_veto(
+                "Write",
+                tool_side_effect("Write"),
+                &write_access("/other/a"),
+            )
             .unwrap();
         assert!(denial.contains("outside the workspace root"));
 
         let policy = SandboxExecutionPolicy::read_only("/workspace");
         let denial = policy
-            .sandbox_tool_veto("Write", tool_side_effect("Write"), &write_access("/workspace/a"))
+            .sandbox_tool_veto(
+                "Write",
+                tool_side_effect("Write"),
+                &write_access("/workspace/a"),
+            )
             .unwrap();
         assert!(denial.contains("blocks writes to the filesystem"));
 
