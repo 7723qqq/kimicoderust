@@ -342,6 +342,7 @@ impl HttpServer {
         self.task_runner.apply_background_limits(
             config.background.kill_grace_period_ms,
             config.resolve_background_max_running_tasks(),
+            config.resolve_max_settled_tasks(),
             config.background.keep_alive_on_exit,
         );
         let warnings = config.config_warnings.clone();

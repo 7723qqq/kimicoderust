@@ -486,6 +486,7 @@ fn background_limits_from_wire_drops_only_meaningless_zeroes() {
         BackgroundLimits {
             kill_grace_period_ms: Some(250),
             max_running_tasks: None,
+            max_settled_tasks: None,
             bash_auto_background_on_timeout: Some(false),
             bash_task_timeout_s: Some(0),
             keep_alive_on_exit: None,
@@ -616,7 +617,7 @@ async fn emit_progress_reports_on_the_running_tasks_lane() {
 async fn background_limits_cap_concurrent_tasks() {
     // `[background].max_running_tasks`: the cap refuses a spawn rather
     // than queueing it, and frees up once a task settles.
-    let runner = Arc::new(TaskRunner::new(None).with_background_limits(None, Some(1), None));
+    let runner = Arc::new(TaskRunner::new(None).with_background_limits(None, Some(1), None, None));
     // A oneshot (not a Notify): the release must not race the task's
     // first poll, or the wait never ends.
     let (release, held) = tokio::sync::oneshot::channel::<()>();
@@ -640,6 +641,95 @@ async fn background_limits_cap_concurrent_tasks() {
     runner
         .spawn_task("t3".into(), "third".into(), async { "x".to_string() })
         .expect("the slot frees up when the task settles");
+}
+
+#[tokio::test]
+async fn settled_tasks_move_to_ghosts_beyond_the_configured_limit() {
+    let (_tmp, runner) = runner();
+    assert_eq!(runner.max_settled.load(Ordering::Relaxed), 200);
+    runner.apply_background_limits(None, None, Some(2), None);
+    for (id, output) in [
+        ("task-1", "first"),
+        ("task-2", "second"),
+        ("task-3", "third"),
+    ] {
+        runner
+            .spawn_task(
+                id.to_string(),
+                id.to_string(),
+                async move { output.to_string() },
+            )
+            .unwrap();
+        assert!(matches!(
+            runner.wait(id, 2000).await,
+            TaskWaitResult::Completed(_)
+        ));
+    }
+    assert_eq!(runner.tasks.lock().unwrap().len(), 2);
+    assert_eq!(runner.ghosts.lock().unwrap().len(), 1);
+    let ghost = runner.entry("task-1").unwrap();
+    assert_eq!(ghost["status"], "completed");
+    assert!(ghost.get("output").is_none());
+    assert!(
+        runner
+            .list()
+            .iter()
+            .any(|entry| entry["taskId"] == "task-1")
+    );
+    assert!(matches!(
+        runner.wait("task-1", 1000).await,
+        TaskWaitResult::Completed(_)
+    ));
+    assert_eq!(runner.get_output("task-1").as_deref(), Some("first"));
+    let tail = runner.read_output_tail("task-1", 3).unwrap();
+    assert_eq!(tail.offset, 2);
+    assert_eq!(tail.data, b"rst");
+    assert!(runner.stop("task-1", None).await.is_err());
+}
+
+#[tokio::test]
+async fn settled_eviction_never_removes_a_running_task() {
+    let runner = Arc::new(TaskRunner::new(None).with_background_limits(None, None, Some(1), None));
+    runner
+        .spawn_task(
+            "running".to_string(),
+            "running".to_string(),
+            std::future::pending::<String>(),
+        )
+        .unwrap();
+    for id in ["settled-1", "settled-2"] {
+        runner
+            .spawn_task(id.to_string(), id.to_string(), async { "done".to_string() })
+            .unwrap();
+        assert!(matches!(
+            runner.wait(id, 2000).await,
+            TaskWaitResult::Completed(_)
+        ));
+    }
+    assert_eq!(runner.entry("running").unwrap()["status"], "running");
+    assert!(runner.tasks.lock().unwrap().contains_key("running"));
+    assert!(runner.ghosts.lock().unwrap().contains_key("settled-1"));
+    runner.stop("running", None).await.unwrap();
+}
+
+#[tokio::test]
+async fn output_tail_falls_back_to_aligned_in_memory_preview() {
+    let runner = Arc::new(TaskRunner::new(None));
+    runner
+        .spawn_task("task-1".to_string(), "task".to_string(), async {
+            format!("a{}", "😀".repeat(3))
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.wait("task-1", 2000).await,
+        TaskWaitResult::Completed(_)
+    ));
+    let tail = runner.read_output_tail("task-1", 5).unwrap();
+    assert_eq!(tail.offset, 0);
+    assert_eq!(tail.data, "😀".as_bytes());
+    let missing = runner.read_output_tail("missing", 5).unwrap();
+    assert_eq!(missing.offset, 0);
+    assert!(missing.data.is_empty());
 }
 
 #[tokio::test]

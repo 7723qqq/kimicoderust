@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read as _, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -63,6 +63,33 @@ pub const TASK_OUTPUT_PREVIEW_BYTES: usize = 32 * 1024;
 /// this engine receives one finished `String`, so the two ceilings are
 /// enforced in different places. **They must stay equal.**
 pub const MAX_PERSISTED_TASK_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+const OUTPUT_TAIL_ALIGN_BYTES: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskOutputTail {
+    pub offset: usize,
+    pub data: Vec<u8>,
+}
+
+pub(crate) fn align_to_character_start(buffer: &[u8], offset: usize) -> usize {
+    let mut index = offset;
+    while index < buffer.len() && (buffer[index] & 0b1100_0000) == 0b1000_0000 {
+        index += 1;
+    }
+    index
+}
+
+fn read_file_range(path: &Path, start: usize, end: usize) -> std::io::Result<Vec<u8>> {
+    if end < start {
+        return Ok(Vec::new());
+    }
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start as u64))?;
+    let mut data = Vec::with_capacity(end - start + 1);
+    file.take((end - start + 1) as u64).read_to_end(&mut data)?;
+    Ok(data)
+}
 
 /// The last [`MAX_PERSISTED_TASK_OUTPUT_BYTES`] of an output, cut on a
 /// character boundary.
@@ -1275,10 +1302,16 @@ impl StateStore {
         else {
             return Err(format!("State write error: [-32002] Task not found: {id}"));
         };
+        let reason = value
+            .get("reason")
+            .and_then(|reason| reason.as_str())
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("Stopped by TaskStop");
         let mut entry = tasks[index].clone();
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("status".into(), json!("killed"));
-            obj.insert("stopReason".into(), json!("Stopped by TaskStop"));
+            obj.insert("stopReason".into(), json!(reason));
             obj.insert("endedAt".into(), json!(now_ms()));
         }
         tasks[index] = entry.clone();
@@ -1484,12 +1517,9 @@ impl StateStore {
     /// exists.
     pub fn read_task_output(&self, task_id: &str, max_preview_bytes: usize) -> Option<Value> {
         let path = self.task_output_path(task_id);
-        let data = match fs::read(&path) {
-            Ok(data) => data,
-            // No log yet is the ordinary case for a task that never wrote one.
+        let total_bytes = match fs::metadata(&path) {
+            Ok(metadata) => metadata.len() as usize,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-            // Any other failure is not "no output": reporting it as absent
-            // would tell the model the task produced nothing.
             Err(error) => {
                 tracing::warn!(
                     task_id,
@@ -1499,17 +1529,56 @@ impl StateStore {
                 return None;
             }
         };
-        let preview_limit = max_preview_bytes.min(data.len());
-        let preview_offset = data.len() - preview_limit;
-        let preview = String::from_utf8_lossy(&data[preview_offset..]).into_owned();
+        let preview_bytes = max_preview_bytes.min(total_bytes);
+        let from = total_bytes - preview_bytes;
+        let start = from.saturating_sub(OUTPUT_TAIL_ALIGN_BYTES);
+        let window = if preview_bytes == 0 || total_bytes == 0 {
+            Vec::new()
+        } else {
+            match read_file_range(&path, start, total_bytes - 1) {
+                Ok(window) => window,
+                Err(error) => {
+                    tracing::warn!(
+                        task_id,
+                        path = %path.display(),
+                        "task output exists but could not be read: {error}"
+                    );
+                    return None;
+                }
+            }
+        };
+        let offset = align_to_character_start(&window, from - start);
+        let preview = String::from_utf8_lossy(&window[offset..]).into_owned();
         Some(json!({
             "outputPath": path.to_string_lossy(),
-            "outputSizeBytes": data.len(),
-            "previewBytes": preview_limit,
-            "truncated": preview_offset > 0,
+            "outputSizeBytes": total_bytes,
+            "previewBytes": preview_bytes,
+            "truncated": preview_bytes < total_bytes,
             "fullOutputAvailable": true,
             "preview": preview,
         }))
+    }
+
+    pub fn read_task_output_tail(
+        &self,
+        task_id: &str,
+        max_bytes: usize,
+    ) -> std::io::Result<Option<TaskOutputTail>> {
+        let path = self.task_output_path(task_id);
+        let size = match fs::metadata(&path) {
+            Ok(metadata) => metadata.len() as usize,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let offset = size.saturating_sub(max_bytes);
+        if offset == size {
+            return Ok(Some(TaskOutputTail {
+                offset,
+                data: Vec::new(),
+            }));
+        }
+        let data = read_file_range(&path, offset, size - 1)?;
+        Ok(Some(TaskOutputTail { offset, data }))
     }
 
     /// Pause a goal that was active when the engine last stopped, without
@@ -2545,10 +2614,13 @@ mod tests {
         assert!(err.contains("-32002"));
         // Stop marks the task killed.
         let outcome = store
-            .apply_write("task", &json!({ "action": "stop", "id": "task-1" }))
+            .apply_write(
+                "task",
+                &json!({ "action": "stop", "id": "task-1", "reason": "custom stop reason" }),
+            )
             .unwrap();
         assert_eq!(outcome.response["status"], "killed");
-        assert_eq!(outcome.response["stopReason"], "Stopped by TaskStop");
+        assert_eq!(outcome.response["stopReason"], "custom stop reason");
         store.write_domain("task", &outcome.stored).unwrap();
         // Wait on the terminal task returns its entry.
         let outcome = store
@@ -2996,6 +3068,40 @@ mod tests {
         assert_eq!(snapshot["previewBytes"], 1024);
         assert_eq!(snapshot["truncated"], true);
         assert_eq!(snapshot["preview"], "x".repeat(1024));
+    }
+
+    #[test]
+    fn task_output_preview_aligns_to_a_character_start() {
+        let (_tmp, store) = store();
+        store.write_task_output("task-1", &format!("a{}", "😀".repeat(3)));
+        let snapshot = store.read_task_output("task-1", 5).unwrap();
+        assert_eq!(snapshot["outputSizeBytes"], 13);
+        assert_eq!(snapshot["previewBytes"], 5);
+        assert_eq!(snapshot["truncated"], true);
+        assert_eq!(snapshot["preview"], "😀");
+    }
+
+    #[test]
+    fn task_output_raw_tail_preserves_the_byte_offset_and_partial_character() {
+        let (_tmp, store) = store();
+        let output = format!("a{}", "😀".repeat(3));
+        store.write_task_output("task-1", &output);
+        let tail = store.read_task_output_tail("task-1", 5).unwrap().unwrap();
+        assert_eq!(tail.offset, 8);
+        assert_eq!(tail.data, output.as_bytes()[8..]);
+        let empty = store.read_task_output_tail("task-1", 0).unwrap().unwrap();
+        assert_eq!(empty.offset, 13);
+        assert!(empty.data.is_empty());
+        let whole = store.read_task_output_tail("task-1", 100).unwrap().unwrap();
+        assert_eq!(whole.offset, 0);
+        assert_eq!(whole.data, output.as_bytes());
+        assert!(
+            store
+                .read_task_output_tail("missing", 10)
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.read_task_output_tail("bad\0", 10).is_err());
     }
 
     #[test]

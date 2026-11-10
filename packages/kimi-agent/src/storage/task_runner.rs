@@ -19,7 +19,7 @@
 //! every waiter — including waiters that register after the task already
 //! settled — so a wait can never miss the completion.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -34,12 +34,14 @@ use tokio::task::JoinHandle;
 
 use crate::primitives::deadline::Deadline;
 use crate::primitives::read::ReadOutcome;
-use crate::storage::StateStore;
+use crate::storage::state_store::align_to_character_start;
+use crate::storage::{StateStore, TaskOutputTail};
 use crate::turn_loop::types::LLMMessage;
 
 /// The grace period [`TaskRunner::stop`] waits for a task to settle at
 /// its next cooperative point before returning (v2 `SIGTERM_GRACE_MS`).
 const STOP_GRACE: Duration = Duration::from_secs(5);
+const MAX_SETTLED_TASK_ENTRIES: usize = 200;
 
 const PARTIAL_OUTPUT_MAX_CHARS: usize = 32 * 1024;
 const PARTIAL_OUTPUT_NOTICE: &str = "[partial output] The subagent did not finish this run. Below is the text it wrote before it ended; it is incomplete and unverified.";
@@ -329,6 +331,7 @@ pub struct BackgroundLimits {
     /// `max_running_tasks`: cap on concurrently running tasks; `Some(0)` (and
     /// `None`) mean unlimited.
     pub max_running_tasks: Option<u32>,
+    pub max_settled_tasks: Option<u32>,
     /// `bash_auto_background_on_timeout`: migrate a timed-out foreground Bash
     /// call to the background instead of killing it.
     pub bash_auto_background_on_timeout: Option<bool>,
@@ -358,6 +361,7 @@ impl BackgroundLimits {
             max_running_tasks: max_running_tasks
                 .filter(|value| *value > 0)
                 .and_then(|value| u32::try_from(value).ok()),
+            max_settled_tasks: None,
             bash_auto_background_on_timeout,
             bash_task_timeout_s,
             keep_alive_on_exit,
@@ -370,6 +374,8 @@ impl BackgroundLimits {
 /// [`StateStore`] when one is attached.
 pub struct TaskRunner {
     tasks: Mutex<HashMap<String, TaskEntry>>,
+    ghosts: Mutex<HashMap<String, Value>>,
+    settled_order: Mutex<VecDeque<String>>,
     /// Serializes task.json read-modify-write cycles so concurrent
     /// settles cannot lose each other's updates.
     persist_lock: Mutex<()>,
@@ -408,6 +414,7 @@ pub struct TaskRunner {
     /// Cap on concurrently running tasks
     /// (`[background].max_running_tasks`); `0` is unlimited.
     max_running: AtomicUsize,
+    max_settled: AtomicUsize,
     /// Wakes idle session pumps when a completion notification is queued:
     /// v2's `loop.notify` starts a turn in a session that is not running one.
     /// A watch channel, not `Notify` — the runner is process-wide, and
@@ -641,6 +648,8 @@ impl TaskRunner {
     pub fn new(store: Option<StateStore>) -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),
+            ghosts: Mutex::new(HashMap::new()),
+            settled_order: Mutex::new(VecDeque::new()),
             persist_lock: Mutex::new(()),
             store,
             pending_notifications: Mutex::new(Vec::new()),
@@ -651,6 +660,7 @@ impl TaskRunner {
             kill_grace: Mutex::new(STOP_GRACE),
             keep_alive_on_exit: Mutex::new(false),
             max_running: AtomicUsize::new(0),
+            max_settled: AtomicUsize::new(MAX_SETTLED_TASK_ENTRIES),
             notification_bell: tokio::sync::watch::channel(0).0,
         }
     }
@@ -663,15 +673,22 @@ impl TaskRunner {
         self,
         kill_grace_period_ms: Option<u64>,
         max_running_tasks: Option<u32>,
+        max_settled_tasks: Option<u32>,
         keep_alive_on_exit: Option<bool>,
     ) -> Self {
-        self.apply_background_limits(kill_grace_period_ms, max_running_tasks, keep_alive_on_exit);
+        self.apply_background_limits(
+            kill_grace_period_ms,
+            max_running_tasks,
+            max_settled_tasks,
+            keep_alive_on_exit,
+        );
         self
     }
     pub fn apply_background_limits(
         &self,
         kill_grace_period_ms: Option<u64>,
         max_running_tasks: Option<u32>,
+        max_settled_tasks: Option<u32>,
         keep_alive_on_exit: Option<bool>,
     ) {
         if let Some(ms) = kill_grace_period_ms.filter(|ms| *ms > 0) {
@@ -682,6 +699,12 @@ impl TaskRunner {
             .map(usize::try_from)
         {
             self.max_running.store(cap, Ordering::Relaxed);
+        }
+        if let Some(Ok(cap)) = max_settled_tasks
+            .filter(|cap| *cap > 0)
+            .map(usize::try_from)
+        {
+            self.max_settled.store(cap, Ordering::Relaxed);
         }
         if let Some(value) = keep_alive_on_exit {
             *self
@@ -897,6 +920,10 @@ impl TaskRunner {
         let spawn_agent_id = entry.agent_id.clone();
         let spawn_timeout = meta.timeout_ms.map(Duration::from_millis);
         tasks.insert(id.clone(), entry);
+        self.ghosts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         let runner = Arc::clone(self);
         let task_id = id.clone();
         let handle = tokio::spawn(async move {
@@ -1256,12 +1283,54 @@ impl TaskRunner {
     /// still running (or unknown), or when a stopped subagent produced no
     /// public assistant text.
     pub fn get_output(&self, id: &str) -> Option<String> {
-        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = tasks.get(id)?;
-        if entry.status == TaskStatus::Running {
+        {
+            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = tasks.get(id) {
+                if entry.status == TaskStatus::Running {
+                    return None;
+                }
+                return entry.output.clone();
+            }
+        }
+        if !self
+            .ghosts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(id)
+        {
             return None;
         }
-        entry.output.clone()
+        self.store
+            .as_ref()?
+            .read_task_output(id, usize::MAX)?
+            .get("preview")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    pub fn read_output_tail(&self, id: &str, max_bytes: usize) -> std::io::Result<TaskOutputTail> {
+        if let Some(store) = &self.store
+            && let Some(tail) = store.read_task_output_tail(id, max_bytes)?
+        {
+            return Ok(tail);
+        }
+        let output = {
+            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+            tasks.get(id).and_then(|entry| entry.output.clone())
+        };
+        let Some(output) = output else {
+            return Ok(TaskOutputTail {
+                offset: 0,
+                data: Vec::new(),
+            });
+        };
+        let bytes = output.into_bytes();
+        let preview_bytes = max_bytes.min(bytes.len());
+        let offset = align_to_character_start(&bytes, bytes.len() - preview_bytes);
+        Ok(TaskOutputTail {
+            offset: 0,
+            data: bytes[offset..].to_vec(),
+        })
     }
 
     /// Request a cooperative stop: sets the task's cancel flag and wakes
@@ -1419,7 +1488,14 @@ impl TaskRunner {
         let done = {
             let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = tasks.get(id) else {
-                return TaskWaitResult::NotFound;
+                return self
+                    .ghosts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(id)
+                    .cloned()
+                    .map(TaskWaitResult::Completed)
+                    .unwrap_or(TaskWaitResult::NotFound);
             };
             if entry.status != TaskStatus::Running {
                 return TaskWaitResult::Completed(self.entry_wire(entry));
@@ -1488,7 +1564,9 @@ impl TaskRunner {
     /// snapshot is omitted (TaskList does not carry output).
     pub fn list(&self) -> Vec<Value> {
         let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let ghosts = self.ghosts.lock().unwrap_or_else(|e| e.into_inner());
         let mut entries: Vec<Value> = tasks.values().map(|entry| self.entry_wire(entry)).collect();
+        entries.extend(ghosts.values().cloned());
         for entry in &mut entries {
             if let Some(obj) = entry.as_object_mut() {
                 obj.remove("output");
@@ -1508,7 +1586,14 @@ impl TaskRunner {
     /// `None` for an unknown id.
     pub fn entry(&self, id: &str) -> Option<Value> {
         let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        tasks.get(id).map(|entry| self.entry_wire(entry))
+        if let Some(entry) = tasks.get(id) {
+            return Some(self.entry_wire(entry));
+        }
+        self.ghosts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
     }
 
     /// Settle a task from its spawned wrapper: record the terminal
@@ -1539,6 +1624,9 @@ impl TaskRunner {
             let Some(entry) = tasks.get_mut(id) else {
                 return;
             };
+            if entry.status != TaskStatus::Running {
+                return;
+            }
             entry.status = status;
             entry.ended_at = Some(now_ms());
             let partial = if entry.kind == "subagent" && status != TaskStatus::Completed {
@@ -1714,6 +1802,36 @@ impl TaskRunner {
             if let Some(sink) = sink {
                 sink(session_id.as_deref());
             }
+        }
+        self.record_settled_task(id);
+    }
+
+    fn record_settled_task(&self, id: &str) {
+        let mut settled_order = self.settled_order.lock().unwrap_or_else(|e| e.into_inner());
+        settled_order.push_back(id.to_string());
+        let max_settled = self.max_settled.load(Ordering::Relaxed);
+        while settled_order.len() > max_settled {
+            let Some(oldest) = settled_order.pop_front() else {
+                break;
+            };
+            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(entry) = tasks.get(&oldest) else {
+                continue;
+            };
+            if entry.status == TaskStatus::Running {
+                continue;
+            }
+            let mut ghost = self.entry_wire(entry);
+            if let Some(object) = ghost.as_object_mut() {
+                object.remove("output");
+                object.remove("outputPath");
+            }
+            let entry = tasks.remove(&oldest).unwrap();
+            self.ghosts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(oldest, ghost);
+            drop(entry);
         }
     }
 

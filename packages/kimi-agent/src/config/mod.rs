@@ -2403,6 +2403,7 @@ impl KimiConfig {
         crate::storage::BackgroundLimits {
             kill_grace_period_ms: self.resolve_kill_grace_period_ms(),
             max_running_tasks: self.resolve_background_max_running_tasks(),
+            max_settled_tasks: self.resolve_max_settled_tasks(),
             bash_auto_background_on_timeout: self.resolve_bash_auto_background_on_timeout(),
             bash_task_timeout_s: self.resolve_bash_task_timeout_s(),
             keep_alive_on_exit: self.resolve_keep_alive_on_exit(),

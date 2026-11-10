@@ -359,6 +359,7 @@ pub async fn start_repl(
         crate::storage::task_runner::TaskRunner::for_workspace(&workspace)?.with_background_limits(
             config.background.kill_grace_period_ms,
             config.resolve_background_max_running_tasks(),
+            config.resolve_max_settled_tasks(),
             config.background.keep_alive_on_exit,
         ),
     );
@@ -443,7 +444,11 @@ pub async fn start_repl(
     // session mode is the value every unbound agent inherits.
     permission_engine.set_agent_permission_modes(subagent_manager.permission_modes());
     subagent_manager.broadcast_permission_mode(permission_engine.mode());
-    let tool_truncator = Arc::new(ToolResultTruncator::for_workspace(&workspace));
+    let tool_truncator = Arc::new(ToolResultTruncator::for_agent(
+        &workspace,
+        &current_session_id,
+        "main",
+    )?);
     // `TaskStarted` / `Notification` hook dispatch on the same guard.
     task_runner.set_hook_guard(hook_guard.clone());
 
@@ -563,7 +568,7 @@ pub async fn start_repl(
         toolset: toolset.clone(),
         native_count,
         permission_engine: Some(permission_engine),
-        truncator: Some(tool_truncator),
+        truncator: Some(tool_truncator.clone()),
         plan_guard: Some(Arc::new(move |tool_name, args| {
             let store = plan_guard_store.clone();
             let tool_name = tool_name.to_string();
@@ -766,6 +771,11 @@ pub async fn start_repl(
                             Ok(history) => {
                                 current_session_id = id.to_string();
                                 engine_session.set_history(history);
+                                tool_truncator.set_agent(
+                                    &workspace,
+                                    &current_session_id,
+                                    "main",
+                                )?;
                                 // The transcript was replaced: old undo anchors
                                 // no longer name a cut point (v2 ContextClear).
                                 state_store.clear_turn_anchors();
@@ -798,6 +808,7 @@ pub async fn start_repl(
                 "/new" => {
                     current_session_id = format!("session-{}", fastrand::u64(..));
                     engine_session.clear_history();
+                    tool_truncator.set_agent(&workspace, &current_session_id, "main")?;
                     state_store.clear_turn_anchors();
                     total_usage = TokenUsage::default();
                     println!("Started new session: {current_session_id}");
