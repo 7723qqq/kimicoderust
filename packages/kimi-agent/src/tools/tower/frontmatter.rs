@@ -37,19 +37,21 @@ fn quote_if_needed(value: &str) -> String {
 }
 
 pub fn parse_frontmatter(text: &str) -> (BTreeMap<String, String>, String) {
-    let Ok(parsed) = crate::frontmatter::parse_frontmatter(text) else {
+    let Ok(parsed) = crate::_base::text::frontmatter::parse_frontmatter(text) else {
         return (BTreeMap::new(), text.to_string());
     };
     let fields = parsed
         .data
+        .as_object()
         .into_iter()
+        .flatten()
         .map(|(key, value)| {
             let rendered = match value {
-                serde_json::Value::String(s) => s,
+                serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Null => String::new(),
                 other => other.to_string(),
             };
-            (key, rendered)
+            (key.clone(), rendered)
         })
         .collect();
     (fields, parsed.body.trim().to_string())

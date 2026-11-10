@@ -10,14 +10,15 @@
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
-use crate::native::encoding::{
-    LegacyTextEncoding, TRANSCODE_MAX_BYTES, UtfTextEncoding, decode_gbk, decode_utf_text,
-    decode_utf8_lenient, detect_legacy_text_encoding, detect_text_encoding,
-};
-use crate::native::file_type::{FileKind, MEDIA_SNIFF_BYTES, detect_file_type};
-use crate::native::line_endings::{
+use crate::_base::text::encoding::{UtfTextEncoding, decode_utf_text, detect_text_encoding};
+use crate::_base::text::line_endings::{
     LineEndingFlags, LineEndingStyle, make_carriage_returns_visible,
 };
+use crate::native::encoding::{
+    LegacyTextEncoding, TRANSCODE_MAX_BYTES, decode_gbk, decode_utf8_lenient,
+    detect_legacy_text_encoding,
+};
+use crate::native::file_type::{FileKind, MEDIA_SNIFF_BYTES, detect_file_type};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};

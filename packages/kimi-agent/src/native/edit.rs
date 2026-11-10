@@ -6,7 +6,7 @@
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
-use crate::native::line_endings::{materialize_model_text, to_model_text_view};
+use crate::_base::text::line_endings::{materialize_model_text, to_model_text_view};
 use std::fs;
 use std::path::Path;
 

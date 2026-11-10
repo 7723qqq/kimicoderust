@@ -3,6 +3,7 @@
 //! Shared library entry point for both the CLI binary (stdio JSON-RPC)
 //! and the napi-rs native addon (direct Node.js integration).
 
+pub mod _base;
 pub mod acp;
 pub mod callbacks;
 pub mod compaction;
@@ -12,7 +13,6 @@ pub mod default_workspace;
 pub use kimi_core::env;
 pub mod environment;
 pub mod events;
-pub use kimi_core::frontmatter;
 pub mod goal;
 pub mod hooks;
 pub mod i18n;

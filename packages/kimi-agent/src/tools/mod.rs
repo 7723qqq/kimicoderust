@@ -8,10 +8,6 @@ use serde_json::Value;
 use crate::i18n::{LocalizedText, i18n_params};
 use crate::native::shell_path_bridge::ShellPathBridge;
 
-/// One structured progress update from a running tool (v2 `ToolUpdate`,
-/// `toolContract.ts:57-66`). `kind` is one of `stdout` / `stderr` /
-/// `progress` / `status` / `custom`; `replace` tells the host renderer to
-/// replace the previous line instead of appending.
 #[derive(Debug, Clone)]
 pub struct ToolUpdate<'a> {
     pub kind: &'a str,
@@ -23,8 +19,6 @@ pub struct ToolUpdate<'a> {
 }
 
 impl<'a> ToolUpdate<'a> {
-    /// A plain stdout/stderr chunk: the only shape the native shell tools
-    /// produce (v2 bashTool/powershellTool `onUpdate({ kind, text })`).
     pub fn text(kind: &'a str, text: &'a str) -> Self {
         Self {
             kind,
@@ -121,7 +115,6 @@ pub mod core_tool_defs;
 pub mod create_goal;
 pub mod cron_tools;
 mod dispatch;
-pub mod encoding;
 pub mod exit_plan_mode;
 pub mod external_hooks;
 pub mod fetch_url;
@@ -178,6 +171,7 @@ pub mod tool_dedupe;
 pub mod tool_display;
 pub mod tool_policy;
 pub mod tool_retriever;
+pub mod tool_select_ops;
 pub mod tool_select_state;
 mod toolset;
 pub mod tower;
@@ -249,7 +243,6 @@ pub const NATIVE_TOOL_NAMES: &[&str] = &[
     "memory",
     "workflow",
     "run_code",
-    "runcode",
     "sessionquery",
     "session_query",
     "notifyuser",
@@ -436,6 +429,19 @@ pub struct NativeToolset {
     loaded_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 
     selection_failures: Arc<std::sync::Mutex<crate::tools::select_tools::SelectionFailureTracker>>,
+
+    tool_select_state: Arc<std::sync::Mutex<crate::tools::tool_select_ops::ToolSelectModelState>>,
+
+    tool_select_reconcile: Arc<tokio::sync::Mutex<()>>,
+
+    tool_select_notified_updates: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+
+    tool_select_pending_reminders: Arc<std::sync::Mutex<Vec<String>>>,
+
+    tool_select_last_disclosure: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+
+    tool_select_persist_listener:
+        Arc<std::sync::Mutex<Option<Arc<dyn Fn(&str, u64) + Send + Sync>>>>,
 
     wait_tally: Arc<std::sync::Mutex<crate::tools::task_tools::WaitTally>>,
 
