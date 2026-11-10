@@ -1,55 +1,30 @@
-//! The `[secondary_model]` subagent model pool (v2
-//! `session/subagent/configSection.ts`).
-//!
-//! The host resolves the pool from `config.toml` (aliases, hints, the
-//! default alias) and — because only the host knows provider credentials —
-//! hands the engine one ready-built LLM per alias. The engine owns the
-//! user-visible semantics from there: which models the `Agent` / `AgentSwarm`
-//! tools advertise, how an explicit `model` argument resolves, and the error
-//! texts a bad choice produces. v2 #4418 removed `force` and the implicit
-//! `primary` choice: a lone entry pins every spawn, and the pool only ever
-//! offers its own entries.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::rpc::types::{SecondaryModelEntry, SecondaryModelPool};
 use crate::turn_loop::types::LLM;
 
-/// The reserved alias that always binds the caller's own model.
 pub const PRIMARY_MODEL_CHOICE: &str = "primary";
 
-/// Where a subagent's bound model came from (v2 `SubagentModelSource`).
-/// Inheritance has no binding in the engine — an unbound instance already
-/// runs on the session LLM — so only the bound sources appear here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentModelSource {
-    /// Tower only (v2 `resolveSubagentBindingWithPrimary`): the reviewer
-    /// passed `primary` and binds the caller's own model and effort. Agent
-    /// and AgentSwarm no longer offer the choice (v2 #4418).
     PrimaryOverride,
-    /// The requested alias, or the pool's default model.
+
     SecondaryPool,
 }
 
-/// One resolved subagent binding: the LLM to run with plus provenance.
 #[derive(Clone)]
 pub struct SubagentBinding {
     pub llm: Arc<dyn LLM>,
     pub source: SubagentModelSource,
 }
 
-/// Tower's post-#4418 binding: unlike Agent / AgentSwarm, Tower still offers
-/// `primary`, and reviewers default to it even when a pool is configured.
 #[derive(Clone)]
 pub struct TowerModelBinding {
     pub llm: Arc<dyn LLM>,
     pub model: String,
 }
 
-/// The pool plus its live LLMs. The caller passes the session's own LLM at
-/// resolve time, because `primary` (and the inherited fallback) bind it and
-/// the session LLM is built after the pool.
 pub struct SecondaryModelRuntime {
     config: SecondaryModelPool,
     llms: HashMap<String, Arc<dyn LLM>>,
@@ -60,18 +35,14 @@ impl SecondaryModelRuntime {
         Self { config, llms }
     }
 
-    /// Whether the tool schema advertises the `model` parameter (v2
-    /// `exposesSubagentModelChoice`): only a pool with a real choice does —
-    /// a single entry (or a lone `default_model`) pins every spawn, so the
-    /// parameter is hidden.
+    pub fn config(&self) -> &SecondaryModelPool {
+        &self.config
+    }
+
     pub fn exposes_choice(&self) -> bool {
         self.config.models.len() > 1
     }
 
-    /// The pool listing appended to the `Agent` / `AgentSwarm` descriptions
-    /// (v2 `buildSubagentModelDescriptions`): pool entries only, default
-    /// first — v2 #4418 removed the implicit `primary` line; the caller's
-    /// own model is offered by naming its alias in the pool.
     pub fn description(&self) -> String {
         let mut lines = vec!["Available models (pass via model):".to_string()];
         let default_model = self.config.default_model.as_str();
@@ -87,7 +58,7 @@ impl SecondaryModelRuntime {
                 format!("- {}{marker}: {}", entry.alias, entry.hint)
             }
         };
-        // v2 lists the default alias first, then the rest in configured order.
+
         if let Some(entry) = self
             .config
             .models
@@ -107,9 +78,6 @@ impl SecondaryModelRuntime {
         lines.join("\n")
     }
 
-    /// Tower-only model description (v2
-    /// `buildSubagentModelDescriptionsWithPrimary`): every configured pool,
-    /// including a single-entry pool, offers its entries plus `primary`.
     pub fn tower_description(&self) -> String {
         let primary_label = self
             .config
@@ -124,9 +92,6 @@ impl SecondaryModelRuntime {
         )
     }
 
-    /// Resolve Tower's model choice (v2 `resolveSubagentBindingWithPrimary`).
-    /// The caller's LLM is passed explicitly so `primary` is a real binding,
-    /// not a sentinel that can accidentally fall back to the pool default.
     pub fn resolve_tower(
         &self,
         primary: Arc<dyn LLM>,
@@ -169,8 +134,6 @@ impl SecondaryModelRuntime {
         })
     }
 
-    /// Tower's no-pool arm: omission and `primary` bind the caller; any other
-    /// explicit alias is rejected before spawn side effects.
     pub fn resolve_tower_without_pool(
         primary: Arc<dyn LLM>,
         reviewer: bool,
@@ -191,13 +154,6 @@ impl SecondaryModelRuntime {
         })
     }
 
-    /// Resolve a spawn's model binding (v2 `resolveSubagentBinding`, post
-    /// #4418): the pool's own entries only — an explicit `model` must name
-    /// one, and `primary` is just an invalid alias here. Tower uses the
-    /// independent [`Self::resolve_tower`] variant above.
-    ///
-    /// Errors mirror v2's `CONFIG_INVALID` texts so the model sees the same
-    /// guidance: they name the offending value and list the available choices.
     pub fn resolve(&self, requested: Option<&str>) -> Result<SubagentBinding, String> {
         if self.llms.contains_key(PRIMARY_MODEL_CHOICE) {
             return Err(format!(
@@ -227,18 +183,10 @@ impl SecondaryModelRuntime {
         })
     }
 
-    /// The pool's default model, for engine-side background work that must
-    /// not spend the session model's budget. `None` when the default alias
-    /// has no built LLM.
     pub fn default_llm(&self) -> Option<Arc<dyn LLM>> {
         self.llms.get(self.config.default_model.as_str()).cloned()
     }
 
-    /// Validate an explicit `model` argument when no pool is configured (v2
-    /// `bindSubagentModel`'s no-pool arm): omitting the parameter inherits
-    /// the caller's model, and ANY value — `primary` included — is the v2
-    /// `CONFIG_INVALID` text. No binding is returned: an unbound instance
-    /// already runs on the session LLM.
     pub fn resolve_without_pool(requested: Option<&str>) -> Result<(), String> {
         match requested {
             None => Ok(()),
@@ -392,8 +340,6 @@ mod tests {
         assert!(error.contains("omit the model parameter"), "{error}");
     }
 
-    /// v2 #4418: `primary` is no longer an implicit choice on the generic
-    /// Agent path — with a pool it is just an invalid alias there.
     #[test]
     fn primary_is_an_invalid_alias_now() {
         let pool = pool_runtime();
@@ -415,8 +361,6 @@ mod tests {
         assert!(error.contains("fast, strong"), "{error}");
     }
 
-    /// v2 #4418: a single-entry pool pins every spawn, so the `model`
-    /// parameter is hidden; only a real choice advertises it.
     #[test]
     fn a_single_entry_pool_hides_the_model_parameter() {
         assert!(!runtime(vec![entry("only", "")]).exposes_choice());
@@ -426,8 +370,7 @@ mod tests {
     #[test]
     fn description_marks_default_and_lists_pool_entries_only() {
         let mut pool = pool_runtime();
-        // The configured order puts the non-default entry first; v2 still
-        // lists the default alias first.
+
         pool.config.models = vec![
             entry("strong", "Pick this for hard problems."),
             entry("fast", "Cheap and quick."),
@@ -446,9 +389,6 @@ mod tests {
         assert!(default_line < strong_line, "{description}");
     }
 
-    /// v2 #4418's no-pool arm: omitting `model` inherits the caller's model,
-    /// and any explicit value — `primary` included — is the CONFIG_INVALID
-    /// text.
     #[test]
     fn without_a_pool_every_explicit_model_is_rejected() {
         assert!(SecondaryModelRuntime::resolve_without_pool(None).is_ok());
