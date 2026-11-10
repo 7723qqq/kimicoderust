@@ -1,50 +1,34 @@
-//! MCP OAuth 2.1 authorization-code + PKCE for the standalone server.
-//!
-//! The native host runs the browser round trip itself (`mcp-oauth.ts`): a
-//! loopback listener in the same process that started the login. A standalone
-//! server has no JS host, so it hosts the redirect as an HTTP route and does
-//! the exchange here. Discovery (RFC 9728 / RFC 8414 / OIDC), dynamic client
-//! registration (RFC 7591), PKCE S256 and the RFC 8707 resource indicator
-//! mirror that host flow.
-
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use super::{McpOAuthTokens, canonical_mcp_oauth_resource};
 
-/// Bound on one discovery/registration/token HTTP call.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A pending flow expires after this long; the login has to finish inside one
-/// sitting (v2's host flow uses 5 minutes for the callback, 15 here because a
-/// headless server may have to wait for a human to find the URL).
 const FLOW_TTL: Duration = Duration::from_secs(15 * 60);
 
-/// A finished flow's result stays pollable this long.
 const RESULT_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// The endpoints discovery found for one MCP server's authorization server.
 #[derive(Debug, Clone)]
 pub struct DiscoveredAuthServer {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub registration_endpoint: Option<String>,
-    /// RFC 8707 resource indicator: the MCP server URL without its fragment.
+
     pub resource: String,
-    /// Scope the protected-resource metadata advertises, when it does.
+
     pub scope: Option<String>,
 }
 
-/// One started authorization-code flow, held until the browser comes back.
 #[derive(Debug, Clone)]
 pub struct PendingAuthCodeFlow {
     pub flow_id: String,
-    /// The MCP server's name (the credential store key's first half).
+
     pub name: String,
     pub server_url: String,
     pub resource: String,
@@ -64,7 +48,6 @@ impl PendingAuthCodeFlow {
     }
 }
 
-/// The `auth:begin-auth-code` response.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthCodeStart {
     pub flow_id: String,
@@ -74,10 +57,8 @@ pub struct AuthCodeStart {
     pub expires_in: u64,
 }
 
-/// What polling `auth:complete-auth-code` learns about one flow.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AuthCodeStatus {
-    /// The callback has run (successfully or not).
     pub done: bool,
     pub authenticated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,11 +67,6 @@ pub struct AuthCodeStatus {
     pub error: Option<String>,
 }
 
-/// Pending flows, shared by the begin/complete/cancel routes and the callback.
-///
-/// Keyed two ways: the browser only knows `state`, the client polling for the
-/// result only knows `flow_id`. Results outlive the pending entry so a client
-/// that polls after the exchange still sees the outcome.
 #[derive(Default)]
 pub struct AuthCodeRegistry {
     pending_by_state: Mutex<HashMap<String, PendingAuthCodeFlow>>,
@@ -99,11 +75,6 @@ pub struct AuthCodeRegistry {
 }
 
 impl AuthCodeRegistry {
-    /// Discover, register a public PKCE client, and mint one flow.
-    ///
-    /// `redirect_uri` must point back at this server's callback route; the
-    /// route handler derives it from the request's `Host` unless the caller
-    /// supplies one (an HTTPS proxy needs the caller's spelling).
     pub async fn begin(
         &self,
         client: &reqwest::Client,
@@ -119,15 +90,21 @@ impl AuthCodeRegistry {
                 "MCP OAuth authorization server offers no dynamic client registration".into(),
             );
         };
-        let (client_id, client_secret) =
-            register_client(client, registration_endpoint, redirect_uri, client_name).await?;
+        let scope = scope
+            .map(str::to_string)
+            .or_else(|| discovered.scope.clone());
+        let (client_id, client_secret) = register_client(
+            client,
+            registration_endpoint,
+            redirect_uri,
+            client_name,
+            scope.as_deref(),
+        )
+        .await?;
         let code_verifier = random_b64url(64)?;
         let code_challenge = pkce_challenge(&code_verifier);
         let state = random_b64url(32)?;
         let flow_id = random_b64url(16)?;
-        let scope = scope
-            .map(str::to_string)
-            .or_else(|| discovered.scope.clone());
         let authorization_url = authorization_url(
             &discovered.authorization_endpoint,
             &client_id,
@@ -169,8 +146,6 @@ impl AuthCodeRegistry {
         })
     }
 
-    /// Take the pending flow the browser's `state` names. Single use: the
-    /// entry is removed here, so a replayed callback cannot exchange twice.
     pub async fn take_by_state(&self, state: &str) -> Option<PendingAuthCodeFlow> {
         let mut pending = self.pending_by_state.lock().await;
         prune_expired(&mut pending);
@@ -179,7 +154,6 @@ impl AuthCodeRegistry {
         Some(flow)
     }
 
-    /// Record the outcome of a callback and drop any still-pending entry.
     pub async fn finish(&self, flow_id: &str, status: AuthCodeStatus) {
         if let Some(state) = self.state_by_flow.lock().await.remove(flow_id) {
             self.pending_by_state.lock().await.remove(&state);
@@ -189,7 +163,6 @@ impl AuthCodeRegistry {
         results.insert(flow_id.to_string(), (status, Instant::now()));
     }
 
-    /// Poll one flow: pending, succeeded, or failed (including "unknown").
     pub async fn status(&self, flow_id: &str) -> AuthCodeStatus {
         {
             let mut results = self.results.lock().await;
@@ -219,7 +192,6 @@ impl AuthCodeRegistry {
         }
     }
 
-    /// Drop a pending flow (the client cancelled the login).
     pub async fn cancel(&self, flow_id: &str) -> bool {
         let Some(state) = self.state_by_flow.lock().await.remove(flow_id) else {
             return false;
@@ -240,7 +212,6 @@ impl AuthCodeRegistry {
     }
 }
 
-/// Exchange one callback code and return the flow plus the grant to persist.
 pub async fn exchange_code(
     client: &reqwest::Client,
     flow: &PendingAuthCodeFlow,
@@ -301,9 +272,6 @@ pub async fn exchange_code(
     })
 }
 
-/// RFC 9728 protected-resource metadata (optional), then RFC 8414 / OIDC
-/// authorization-server metadata. The path-aware well-known variant is tried
-/// before the origin-level one, so an AS mounted under a path is found.
 pub async fn discover_authorization_server(
     client: &reqwest::Client,
     server_url: &str,
@@ -376,6 +344,44 @@ pub async fn discover_authorization_server(
             else {
                 continue;
             };
+            let advertised_offline = metadata
+                .get("scopes_supported")
+                .and_then(|value| value.as_array())
+                .is_some_and(|scopes| {
+                    scopes
+                        .iter()
+                        .any(|scope| scope.as_str() == Some("offline_access"))
+                });
+            let scope = if advertised_offline {
+                let protected_scopes = protected_resource
+                    .as_ref()
+                    .and_then(|value| value.get("scopes_supported"))
+                    .and_then(|value| value.as_array());
+                let mut scopes = protected_scopes
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|value| value.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| {
+                        scope
+                            .as_deref()
+                            .map(|value| {
+                                value
+                                    .split_whitespace()
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    });
+                if !scopes.iter().any(|value| value == "offline_access") {
+                    scopes.push("offline_access".into());
+                }
+                Some(scopes.join(" "))
+            } else {
+                scope
+            };
             return Ok(DiscoveredAuthServer {
                 authorization_endpoint: authorization_endpoint.to_string(),
                 token_endpoint: token_endpoint.to_string(),
@@ -391,23 +397,27 @@ pub async fn discover_authorization_server(
     Err(format!("MCP OAuth discovery failed for {server_url}"))
 }
 
-/// RFC 7591 dynamic client registration for a public PKCE client.
 pub async fn register_client(
     client: &reqwest::Client,
     registration_endpoint: &str,
     redirect_uri: &str,
     client_name: &str,
+    scope: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
+    let mut registration = serde_json::json!({
+        "client_name": client_name,
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    });
+    if let Some(scope) = scope.filter(|scope| !scope.is_empty()) {
+        registration["scope"] = serde_json::Value::String(scope.to_string());
+    }
     let response = client
         .post(registration_endpoint)
         .header("accept", "application/json")
-        .json(&serde_json::json!({
-            "client_name": client_name,
-            "redirect_uris": [redirect_uri],
-            "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
-        }))
+        .json(&registration)
         .timeout(DISCOVERY_TIMEOUT)
         .send()
         .await
@@ -435,7 +445,6 @@ pub async fn register_client(
     ))
 }
 
-/// The authorization URL the browser opens.
 pub fn authorization_url(
     endpoint: &str,
     client_id: &str,
@@ -464,7 +473,6 @@ pub fn authorization_url(
     Ok(url.to_string())
 }
 
-/// PKCE S256 challenge for one verifier (RFC 7636 §4.2).
 pub fn pkce_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     base64_url(&digest)
@@ -474,8 +482,220 @@ fn base64_url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// PKCE verifiers and callback states must be unpredictable: a failed RNG
-/// fails the login rather than falling back to any deterministic value.
+const SUCCESS_HTML: &str = concat!(
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Authorized</title></head>",
+    "<body style=\"font-family:system-ui,sans-serif;padding:2rem;\">",
+    "<h1>Sign-in complete</h1>",
+    "<p>You can close this tab and return to the application.</p>",
+    "</body></html>"
+);
+
+const ERROR_HTML: &str = concat!(
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>OAuth error</title></head>",
+    "<body style=\"font-family:system-ui,sans-serif;padding:2rem;\">",
+    "<h1>Sign-in failed</h1>",
+    "<p>The authorization server reported an error. Return to the application for details.</p>",
+    "</body></html>"
+);
+
+#[derive(Debug, Clone)]
+pub struct CallbackResult {
+    pub code: String,
+    pub state: Option<String>,
+}
+
+pub struct CallbackListener {
+    redirect_uri: String,
+    outcome: watch::Receiver<Option<Result<CallbackResult, String>>>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl CallbackListener {
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    pub fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        self.cancel.clone()
+    }
+
+    pub async fn wait(&mut self) -> Result<CallbackResult, String> {
+        loop {
+            if let Some(result) = self.outcome.borrow().clone() {
+                return result;
+            }
+            self.outcome
+                .changed()
+                .await
+                .map_err(|_| "OAuth callback listener closed".to_string())?;
+        }
+    }
+}
+
+impl Drop for CallbackListener {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+pub async fn start_callback_listener() -> Result<CallbackListener, String> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|error| format!("failed to start OAuth callback listener: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("failed to start OAuth callback listener: {error}"))?;
+    let expected_host = address.to_string();
+    let redirect_uri = format!("http://{expected_host}/callback");
+    let (outcome_tx, outcome_rx) = watch::channel(None);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_task = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                _ = cancel_task.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            let Ok((mut socket, _)) = accepted else {
+                break;
+            };
+            let handled = tokio::select! {
+                _ = cancel_task.cancelled() => break,
+                handled = handle_callback_request(&mut socket, &expected_host) => handled,
+            };
+            if let Some(outcome) = handled {
+                outcome_tx.send_replace(Some(outcome));
+                break;
+            }
+        }
+    });
+    Ok(CallbackListener {
+        redirect_uri,
+        outcome: outcome_rx,
+        cancel,
+    })
+}
+
+async fn handle_callback_request(
+    socket: &mut tokio::net::TcpStream,
+    expected_host: &str,
+) -> Option<Result<CallbackResult, String>> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = vec![0u8; 16 * 1024];
+    let mut total = 0;
+    let header_end = loop {
+        let read = socket.read(&mut buffer[total..]).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        total += read;
+        if let Some(position) = buffer[..total]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            break position;
+        }
+        if total == buffer.len() {
+            return None;
+        }
+    };
+    let head = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut lines = head.lines();
+    let request = lines.next().unwrap_or_default();
+    let mut request_parts = request.split_whitespace();
+    let method = request_parts.next().unwrap_or_default();
+    let target = request_parts.next().unwrap_or_default();
+    let host = lines.find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("host")
+            .then(|| value.trim().to_string())
+    });
+    if method != "GET" || host.as_deref() != Some(expected_host) {
+        write_callback_response(socket, "404 Not Found", "", "")
+            .await
+            .ok()?;
+        return None;
+    }
+    let Ok(url) = url::Url::parse(&format!("http://localhost{target}")) else {
+        write_callback_response(socket, "404 Not Found", "", "")
+            .await
+            .ok()?;
+        return None;
+    };
+    if url.path() != "/callback" {
+        write_callback_response(socket, "404 Not Found", "", "")
+            .await
+            .ok()?;
+        return None;
+    }
+    if let Some((_, error)) = url.query_pairs().find(|(key, _)| key == "error") {
+        let description = url
+            .query_pairs()
+            .find(|(key, _)| key == "error_description")
+            .map(|(_, value)| value.into_owned())
+            .unwrap_or_default();
+        write_callback_response(
+            socket,
+            "400 Bad Request",
+            "text/html; charset=utf-8",
+            ERROR_HTML,
+        )
+        .await
+        .ok()?;
+        let suffix = if description.is_empty() {
+            String::new()
+        } else {
+            format!(" — {description}")
+        };
+        return Some(Err(format!("OAuth error: {error}{suffix}")));
+    }
+    let code = url
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned());
+    let Some(code) = code.filter(|code| !code.is_empty()) else {
+        write_callback_response(
+            socket,
+            "400 Bad Request",
+            "text/html; charset=utf-8",
+            ERROR_HTML,
+        )
+        .await
+        .ok()?;
+        return Some(Err("OAuth callback missing authorization code".into()));
+    };
+    let state = url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .map(|(_, value)| value.into_owned());
+    write_callback_response(socket, "200 OK", "text/html; charset=utf-8", SUCCESS_HTML)
+        .await
+        .ok()?;
+    Some(Ok(CallbackResult { code, state }))
+}
+
+async fn write_callback_response(
+    socket: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let content_type = if content_type.is_empty() {
+        String::new()
+    } else {
+        format!("Content-Type: {content_type}\r\n")
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\n{content_type}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    socket.write_all(response.as_bytes()).await?;
+    socket.flush().await
+}
+
 fn random_b64url(len: usize) -> Result<String, String> {
     let mut bytes = vec![0u8; len];
     getrandom::fill(&mut bytes)

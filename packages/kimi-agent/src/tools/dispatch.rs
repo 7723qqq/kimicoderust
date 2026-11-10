@@ -18,6 +18,32 @@ impl NativeToolset {
     }
 
     async fn tool_registration(&self, tool_name: &str) -> select_tools::ToolRegistration {
+        if self.supports_dynamic_tool_loading() {
+            let state = self
+                .tool_select_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            if state.initial.is_some() {
+                let Some(info) = state.current.iter().find(|tool| tool.name == tool_name) else {
+                    return select_tools::ToolRegistration::Missing;
+                };
+                if info.source == crate::tools::tool_select_ops::ToolSelectSource::Mcp {
+                    let available = match &self.mcp_manager {
+                        Some(mcp) => mcp.is_tool_available(tool_name).await,
+                        None => false,
+                    };
+                    if !available {
+                        return select_tools::ToolRegistration::Missing;
+                    }
+                }
+                return if self.is_dynamically_loadable(&state, info) {
+                    select_tools::ToolRegistration::Deferred
+                } else {
+                    select_tools::ToolRegistration::Inline
+                };
+            }
+        }
         if is_builtin_tool_name(tool_name) {
             return select_tools::ToolRegistration::Inline;
         }
@@ -196,8 +222,6 @@ impl NativeToolset {
                 let result =
                     goal_tools::execute_update_goal(callbacks, caller.as_str(), args).await;
                 if !result.is_error {
-                    // v2's `GoalUpdated` handler: a goal that (re)becomes active
-                    // evicts an active tower (`tower.exit('mode-mutex')`).
                     let _ =
                         mode_mutex::evict_tower_for_goal_activation(callbacks, &self.root).await;
                 }
@@ -221,6 +245,11 @@ impl NativeToolset {
                 Some(task_tools::execute_task_stop(callbacks, args).await)
             }
             "taskwait" | "task_wait" | "waitfor" | "wait_for" => {
+                if !task_tools::wait_for_enabled() {
+                    return Some(err_result(
+                        "WaitFor is disabled: the wait_for experimental flag is off.".into(),
+                    ));
+                }
                 let callbacks = self.callbacks.as_deref()?;
                 let runner = self.task_runner.as_deref();
                 let steer = self.effective_steer();
@@ -359,43 +388,100 @@ impl NativeToolset {
                             true,
                         ));
                     }
-                    let entries: Vec<crate::tools::tool_retriever::ToolSearchEntry> = self
-                        .mcp_manager
-                        .as_ref()
-                        .map(|mcp| {
-                            mcp.deferred_tool_infos_blocking()
-                                .into_iter()
-                                .map(|(name, description, schema)| {
-                                    let parameter_names = schema
-                                        .get("properties")
-                                        .and_then(Value::as_object)
-                                        .map(|properties| properties.keys().cloned().collect())
-                                        .unwrap_or_default();
-                                    crate::tools::tool_retriever::ToolSearchEntry {
-                                        name,
-                                        description,
-                                        source: "mcp".into(),
-                                        parameter_names,
+                    let state = self
+                        .tool_select_state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone();
+                    let entries: Vec<crate::tools::tool_retriever::ToolSearchEntry> = if state
+                        .initial
+                        .is_some()
+                    {
+                        self.loadable_tool_entries(&state)
+                            .into_iter()
+                            .map(|tool| crate::tools::tool_retriever::ToolSearchEntry {
+                                name: tool.name,
+                                description: tool.description,
+                                source: match tool.source {
+                                    crate::tools::tool_select_ops::ToolSelectSource::Builtin => {
+                                        "builtin"
                                     }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                                    crate::tools::tool_select_ops::ToolSelectSource::User => "user",
+                                    crate::tools::tool_select_ops::ToolSelectSource::Mcp => "mcp",
+                                }
+                                .into(),
+                                parameter_names: tool
+                                    .parameters
+                                    .get("properties")
+                                    .and_then(Value::as_object)
+                                    .map(|properties| properties.keys().cloned().collect())
+                                    .unwrap_or_default(),
+                            })
+                            .collect()
+                    } else {
+                        self.mcp_manager
+                            .as_ref()
+                            .map(|mcp| {
+                                mcp.deferred_tool_infos_blocking()
+                                    .into_iter()
+                                    .map(|(name, description, schema)| {
+                                        let parameter_names = schema
+                                            .get("properties")
+                                            .and_then(Value::as_object)
+                                            .map(|properties| properties.keys().cloned().collect())
+                                            .unwrap_or_default();
+                                        crate::tools::tool_retriever::ToolSearchEntry {
+                                            name,
+                                            description,
+                                            source: "mcp".into(),
+                                            parameter_names,
+                                        }
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
                     let hits =
                         crate::tools::tool_retriever::rank_tools_by_query(&entries, query, 10);
+                    if let Some(callbacks) = &self.callbacks {
+                        callbacks.telemetry(serde_json::json!({
+                            "event": "tool_retrieval",
+                            "mode": "search",
+                            "catalog_size": entries.len(),
+                            "candidate_count": entries.len(),
+                            "selected_count": hits.len(),
+                            "query_chars": query.encode_utf16().count(),
+                            "matched": !hits.is_empty(),
+                        }));
+                    }
                     return Some(select_tools::text_result(
                         &select_tools::search_output(query, &hits),
                         false,
                     ));
                 }
 
-                let registered = self.full_tool_catalogue().await;
+                let state = self
+                    .tool_select_state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let registered = if state.initial.is_some() {
+                    state.current.iter().map(|tool| tool.name.clone()).collect()
+                } else {
+                    self.full_tool_catalogue().await
+                };
 
-                let loadable: std::collections::HashSet<String> = self
-                    .mcp_manager
-                    .as_ref()
-                    .map(|mcp| mcp.deferred_tool_names_blocking())
-                    .unwrap_or_default();
+                let loadable: std::collections::HashSet<String> = if state.initial.is_some() {
+                    self.loadable_tool_entries(&state)
+                        .into_iter()
+                        .map(|tool| tool.name)
+                        .collect()
+                } else {
+                    self.mcp_manager
+                        .as_ref()
+                        .map(|mcp| mcp.deferred_tool_names_blocking())
+                        .unwrap_or_default()
+                };
 
                 let mut loaded = self.loaded_tools.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -403,13 +489,19 @@ impl NativeToolset {
                     .selection_failures
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                tracker.reset_if_environment_changed(
+                let environment = if state.initial.is_some() {
+                    select_tools::selection_environment_for_tools(
+                        self.tools_filter.as_ref(),
+                        &state.current,
+                    )
+                } else {
                     select_tools::selection_environment_fingerprint(
                         self.tools_filter.as_ref(),
                         &registered,
                         &loadable,
-                    ),
-                );
+                    )
+                };
+                tracker.reset_if_environment_changed(environment);
                 Some(select_tools::execute_select_tools(
                     args,
                     &loadable,
@@ -525,7 +617,7 @@ impl NativeToolset {
                     display: None,
                 })
             }
-            "run_code" | "runcode" => Some(run_code::execute_run_code(args).await),
+            "run_code" => Some(run_code::execute_run_code(args).await),
             "towerinit" | "tower_init" => {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
@@ -562,8 +654,6 @@ impl NativeToolset {
                             );
                         }
                     }
-                    // v2's `TowerModeEnter` handler: an active goal is paused so
-                    // goal continuations cannot race the tower fleet.
                     mode_mutex::pause_goal_for_tower_enter(callbacks).await;
                 }
                 Some(result)
@@ -725,11 +815,13 @@ impl NativeToolset {
             }
             _ => {
                 if let Some(ref mcp) = self.mcp_manager
-                    && mcp.handles(tool_name).await
+                    && (mcp.handles(tool_name).await || mcp.is_removed_tool(tool_name).await)
                 {
                     let cancelled = self.effective_parent_cancel();
                     let probe = move || cancelled.as_ref().is_some_and(|cancel| cancel.triggered());
-                    return mcp.call_tool(tool_name, args, Some(&probe)).await;
+                    return mcp
+                        .call_tool_streaming(tool_name, args, Some(&probe), on_update)
+                        .await;
                 }
                 None
             }

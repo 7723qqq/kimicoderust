@@ -1,10 +1,3 @@
-//! MCP Streamable HTTP transport (`transport = "http"`).
-//!
-//! Mirrors the v2 `HttpMcpClient` / `StreamableHTTPClientTransport` wire
-//! behavior (`mcpCore/client-http.ts`): every JSON-RPC message is POSTed to
-//! the server URL, the reply may be a single JSON body or an SSE stream, and
-//! a `Mcp-Session-Id` handed back by the server is echoed on later requests.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,7 +13,6 @@ use super::client_shared::{Budget, WeakEvidenceListener, fire_or_buffer_weak_evi
 use super::errors::McpError;
 use crate::primitives::teardown::{Disposer, Ledger, TeardownReason};
 
-/// Protocol version that introduced the Streamable HTTP transport.
 pub const STREAMABLE_HTTP_PROTOCOL_VERSION: &str = "2025-03-26";
 const SESSION_ID_HEADER: &str = "mcp-session-id";
 
@@ -28,46 +20,33 @@ pub struct McpHttpTransport {
     url: String,
     headers: HashMap<String, String>,
     client: reqwest::Client,
-    /// `Mcp-Session-Id` returned by the server, echoed on every later request.
-    /// Shared with the standalone GET stream task.
+
     session_id: Arc<Mutex<Option<String>>>,
     next_id: AtomicU64,
-    /// Per-request timeout resolved from `toolTimeoutMs`; `None` keeps the
-    /// shared built-in default (`client_shared::DEFAULT_REQUEST_TIMEOUT`).
+
     request_timeout: Option<Duration>,
-    /// Set by an explicit `shutdown`; no new request or stream may start
-    /// afterwards, and the open stream is aborted.
+
     closed: Arc<AtomicBool>,
-    /// Weak session-evidence listener, at most one (v2
-    /// `SessionEvidenceListener`). Weak evidence means the resumable stream
-    /// gave up: the session may still answer, so the manager probes it.
+
     weak_evidence: WeakEvidenceListener,
-    /// Signal buffered before a listener registers, replayed on registration
-    /// (v2 `pendingSessionEvidence`, client-http.ts:43).
+
     pending_weak_evidence: Arc<Mutex<Option<String>>>,
-    /// The standalone GET SSE stream (v2 `_startOrAuthSse`). Spawned only when
-    /// the server answers `notifications/initialized` with 202.
+
     stream: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// Stops the stream task when the transport shuts down.
+
     stream_stop: tokio::sync::watch::Sender<()>,
-    /// Owns the close steps in reverse execution order (v2 `client-http.ts:86-90`:
-    /// mark closed, stop the stream, abort it). A ledger makes the close
-    /// idempotent and guarantees every step runs even if an earlier one fails.
+
     dispose: Mutex<Ledger>,
 }
 
 impl McpHttpTransport {
     pub async fn connect(url: &str, headers: HashMap<String, String>) -> Result<Self, McpError> {
-        // Fail at connect time on a non-http(s) or unparseable URL instead of
-        // at first call.
         client_shared::validate_http_url(url).map_err(McpError::transport)?;
         let client = client_shared::build_http_client(false).map_err(McpError::transport)?;
         let (stream_stop, _) = tokio::sync::watch::channel(());
         let closed = Arc::new(AtomicBool::new(false));
         let stream: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
-        // Registered in reverse execution order: the ledger drains backwards,
-        // so the transport is marked closed first, then the stream is
-        // signalled, then its task is aborted.
+
         let mut dispose = Ledger::new("mcp-http-transport");
         {
             let stream = Arc::clone(&stream);
@@ -129,8 +108,6 @@ impl McpHttpTransport {
         })
     }
 
-    /// Register the weak-evidence listener; a signal buffered before
-    /// registration is replayed so it is never dropped.
     pub async fn on_weak_evidence(&self, listener: Box<dyn Fn(String) + Send + Sync>) {
         let pending = self.pending_weak_evidence.lock().await.take();
         if let Some(reason) = pending {
@@ -140,13 +117,10 @@ impl McpHttpTransport {
         *self.weak_evidence.lock().await = Some(listener);
     }
 
-    /// Apply a per-request timeout (v2 `buildRequestOptions(toolCallTimeoutMs)`).
     pub fn set_request_timeout(&mut self, timeout: Option<Duration>) {
         self.request_timeout = timeout;
     }
 
-    /// Mark the transport closed. In-flight POSTs finish their own round trip;
-    /// the standalone GET stream is aborted and no new request may start.
     pub async fn shutdown(&self) {
         self.dispose
             .lock()
@@ -155,8 +129,6 @@ impl McpHttpTransport {
             .await;
     }
 
-    /// Open the standalone GET SSE stream (v2 `_startOrAuthSse`,
-    /// streamableHttp.js:78-112), at most once per transport.
     async fn start_stream(&self) {
         let mut slot = self.stream.lock().await;
         if slot.is_some() {
@@ -182,8 +154,6 @@ impl McpHttpTransport {
         }
     }
 
-    /// POST one JSON-RPC envelope, recording the session id and bounding the
-    /// round trip with the caller's deadline.
     async fn post(&self, payload: &Value, budget: Budget) -> Result<reqwest::Response, McpError> {
         let mut req = self
             .client
@@ -217,7 +187,6 @@ impl McpHttpTransport {
         Ok(resp)
     }
 
-    /// POST one JSON-RPC message and return its `result`.
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value, McpError> {
         self.ensure_open()?;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -257,9 +226,6 @@ impl McpHttpTransport {
         }
     }
 
-    /// POST a JSON-RPC notification (no id). Streamable HTTP servers answer
-    /// these with 2xx (often 202 Accepted with an empty body); the body is
-    /// intentionally not read as a JSON-RPC response.
     pub async fn send_notification(&self, method: &str, params: Value) -> Result<(), McpError> {
         self.ensure_open()?;
         let payload = serde_json::json!({
@@ -276,9 +242,7 @@ impl McpHttpTransport {
                 format!("MCP notification failed with status HTTP {status}"),
             ));
         }
-        // v2 starts the standalone stream only when the server accepts the
-        // `initialized` notification with 202 Accepted
-        // (streamableHttp.js:370-377); any other 2xx means no server stream.
+
         if method == "notifications/initialized" && status.as_u16() == 202 {
             self.start_stream().await;
         }
@@ -286,10 +250,6 @@ impl McpHttpTransport {
     }
 }
 
-/// v2 SDK `StreamableHTTPClientTransport` reconnection defaults
-/// (streamableHttp.js:6-11): 1 s initial, ×1.5 per attempt, 30 s cap, 2
-/// retries. Exhausting them is what the manager sees as weak evidence
-/// (`Maximum reconnection attempts (N) exceeded.`).
 const STREAM_INITIAL_DELAY_MS: u64 = 1_000;
 const STREAM_DELAY_GROW_FACTOR: f64 = 1.5;
 const STREAM_MAX_DELAY_MS: u64 = 30_000;
@@ -300,8 +260,6 @@ fn stream_retry_delay(attempt: u32) -> Duration {
     Duration::from_millis((delay.min(STREAM_MAX_DELAY_MS as f64)) as u64)
 }
 
-/// Everything the stream task needs, cloned out of the transport when the
-/// stream starts.
 struct StreamContext {
     url: String,
     headers: HashMap<String, String>,
@@ -313,11 +271,6 @@ struct StreamContext {
     pending: Arc<Mutex<Option<String>>>,
 }
 
-/// Read the standalone GET SSE stream, reconnecting on a drop with the SDK's
-/// backoff and giving up with weak evidence once the attempts are exhausted
-/// (v2 `_handleSseStream` + `_scheduleReconnection`,
-/// streamableHttp.js:120-245). A 405 means the server does not offer the
-/// optional stream at all, which is not an error.
 async fn run_sse_stream(mut context: StreamContext) {
     let mut attempts: u32 = 0;
     let mut last_event_id: Option<String> = None;
@@ -340,8 +293,6 @@ async fn run_sse_stream(mut context: StreamContext) {
         match request.send().await {
             Ok(resp) if resp.status().as_u16() == 405 => return,
             Ok(resp) if resp.status().is_success() => {
-                // A live stream resets the counter, exactly as the SDK does by
-                // restarting at attempt 0 after every successful open.
                 attempts = 0;
                 let mut stream = resp.bytes_stream().eventsource();
                 loop {
@@ -396,9 +347,6 @@ async fn run_sse_stream(mut context: StreamContext) {
     }
 }
 
-/// Answer a server-initiated request on the GET stream: `ping` with an empty
-/// result, anything else with JSON-RPC "method not found" — the same answers
-/// the SDK client gives when no handler is registered for the method.
 async fn reply_to_server_message(
     http: &reqwest::Client,
     url: &str,
@@ -434,7 +382,7 @@ async fn reply_to_server_message(
     if let Some(session) = session_id.lock().await.clone() {
         request = request.header(SESSION_ID_HEADER, session);
     }
-    // Fire and forget: a slow reply must not stall reading the stream.
+
     tokio::spawn(async move {
         if let Ok(resp) = request.json(&payload).send().await {
             let _ = resp.bytes().await;
@@ -446,8 +394,6 @@ fn timeout_message(wait: Duration) -> String {
     format!("MCP request timed out after {}ms", wait.as_millis())
 }
 
-/// Read the SSE stream until the message answering `id` arrives; unrelated
-/// notifications are ignored, mirroring the SDK transport.
 async fn read_sse_response(
     resp: reqwest::Response,
     id: u64,
@@ -491,8 +437,6 @@ pub(crate) mod test_helpers {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
-    /// One recorded request, so tests can assert header propagation and the
-    /// initialize/initialized request sequence.
     #[derive(Debug, Clone)]
     pub struct RecordedRequest {
         pub method: String,
@@ -501,17 +445,6 @@ pub(crate) mod test_helpers {
         pub authorization: Option<String>,
     }
 
-    /// Spawn a mock Streamable HTTP server.
-    ///
-    /// `mode` selects the response framing: `"json"` replies with a JSON body,
-    /// `"sse"` replies with an SSE stream, `"status"` fails every request with
-    /// HTTP 500, `"hang"` accepts the connection without ever replying,
-    /// `"bad-schema"` advertises a tool whose inputSchema is not an object,
-    /// `"401-on-call"` completes the handshake normally but rejects every
-    /// `tools/call` with HTTP 401, and `"image"` answers `tools/call` with an
-    /// image content block instead of text.
-    ///
-    /// The returned vector records every request in arrival order.
     pub async fn spawn_mock_http_server(
         mode: &'static str,
     ) -> (
@@ -588,12 +521,42 @@ pub(crate) mod test_helpers {
                                     .await;
                                 return;
                             }
-                            // The standalone GET SSE stream (`_startOrAuthSse`):
-                            // a server that does not offer it answers 405, which
-                            // the transport treats as "no stream" rather than as
-                            // evidence. `sse-500` refuses it repeatedly so the
-                            // reconnection ladder runs out; `sse-open` keeps a
-                            // live, empty stream open.
+                            let request_path = head
+                                .lines()
+                                .next()
+                                .and_then(|line| line.split_whitespace().nth(1))
+                                .unwrap_or_default();
+                            if mode == "oauth-flow" {
+                                let base = format!("http://{addr}");
+                                let payload = match request_path {
+                                    "/.well-known/oauth-authorization-server" => Some(format!(
+                                        r#"{{"authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token","registration_endpoint":"{base}/register"}}"#
+                                    )),
+                                    "/register" => Some(
+                                        r#"{"client_id":"client-abc","client_secret":"secret-1"}"#
+                                            .to_string(),
+                                    ),
+                                    "/token" => Some(
+                                        r#"{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600}"#
+                                            .to_string(),
+                                    ),
+                                    _ => None,
+                                };
+                                if let Some(payload) = payload {
+                                    let response = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                                        payload.len()
+                                    );
+                                    let _ = socket.write_all(response.as_bytes()).await;
+                                    return;
+                                }
+                            }
+
+
+
+
+
+
                             if head.starts_with("GET ") {
                                 match mode {
                                     "sse-500" => {
@@ -628,7 +591,12 @@ pub(crate) mod test_helpers {
                                 }
                                 return;
                             }
-                            if mode == "401" {
+                            if mode == "401"
+                                || (mode == "oauth"
+                                    && authorization.as_deref() != Some("Bearer oauth-token"))
+                                || (mode == "oauth-flow"
+                                    && authorization.as_deref() != Some("Bearer at-1"))
+                            {
                                 let _ = socket
                                     .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
                                     .await;
@@ -649,8 +617,8 @@ pub(crate) mod test_helpers {
                                 authorization,
                             });
 
-                            // Notifications (e.g. notifications/initialized)
-                            // get a 202 with no body.
+
+
                             if json.get("id").is_none() {
                                 let _ = socket
                                     .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
@@ -665,10 +633,10 @@ pub(crate) mod test_helpers {
                                     .await;
                                 return;
                             }
-                            // v2 `withTimeout` wraps connect **and** discovery
-                            // (connection-manager.ts:594-611): a handshake that
-                            // answers but never lists tools must still hit the
-                            // startup budget.
+
+
+
+
                             if mode == "hang-tools" && method == "tools/list" {
                                 tokio::time::sleep(Duration::from_secs(30)).await;
                                 return;
@@ -726,9 +694,9 @@ pub(crate) mod test_helpers {
                             };
                             let payload =
                                 json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string();
-                            // A handshake slow enough that a removal can land
-                            // between "attempt started" and "handshake done"
-                            // (v2's in-flight-invalidation case).
+
+
+
                             if mode == "slow-initialize" && method == "initialize" {
                                 tokio::time::sleep(Duration::from_millis(300)).await;
                             }
@@ -770,8 +738,6 @@ mod tests {
     use crate::mcp::client::McpClient;
     use serde_json::json;
 
-    /// The close path owns every step exactly once: a second shutdown must not
-    /// re-run the stream abort / stop signal and must stay closed.
     #[tokio::test]
     async fn shutdown_is_idempotent_and_marks_closed() {
         let transport = McpHttpTransport::connect("http://127.0.0.1:1/mcp", HashMap::new())
@@ -789,7 +755,6 @@ mod tests {
         );
     }
 
-    /// A JSON-framed reply is unwrapped and the session id is echoed.
     #[tokio::test]
     async fn test_http_transport_json_roundtrip() {
         let (url, seen, _shutdown) = spawn_mock_http_server("json").await;
@@ -809,8 +774,6 @@ mod tests {
         assert!(!res.is_error);
         assert_eq!(res.content[0].text.as_deref(), Some("ok"));
 
-        // initialize carried no session id; the initialized notification and
-        // every later request echo the one the server handed back.
         let requests = seen.lock().await.clone();
         assert!(requests.iter().any(|r| r.method == "initialize"));
         assert!(
@@ -842,7 +805,6 @@ mod tests {
         );
     }
 
-    /// An SSE-framed reply is read until the matching message arrives.
     #[tokio::test]
     async fn test_http_transport_sse_roundtrip() {
         let (url, _seen, _shutdown) = spawn_mock_http_server("sse").await;
@@ -859,7 +821,6 @@ mod tests {
         assert_eq!(res.content[0].text.as_deref(), Some("ok"));
     }
 
-    /// A non-2xx reply surfaces the status instead of a parse error.
     #[tokio::test]
     async fn test_http_transport_status_error() {
         let (url, _seen, _shutdown) = spawn_mock_http_server("status").await;
@@ -875,8 +836,6 @@ mod tests {
         assert!(matches!(err, McpError::HttpStatus { status: 500, .. }));
     }
 
-    /// A server that accepts the connection but never replies must fail with
-    /// the resolved per-request timeout.
     #[tokio::test]
     async fn test_http_transport_timeout() {
         let (url, _seen, _shutdown) = spawn_mock_http_server("hang").await;
@@ -892,7 +851,6 @@ mod tests {
         assert!(matches!(err, McpError::Timeout(_)));
     }
 
-    /// A malformed URL fails at connect time.
     #[tokio::test]
     async fn test_http_transport_rejects_invalid_url() {
         let err = match McpHttpTransport::connect("not-a-url", HashMap::new()).await {
@@ -911,8 +869,6 @@ mod tests {
         assert!(err.to_string().contains("unsupported scheme"), "{err}");
     }
 
-    /// The handshake is `initialize` (request, with id) immediately followed
-    /// by `notifications/initialized` (notification, no id).
     #[tokio::test]
     async fn test_http_handshake_sends_initialized_notification() {
         let (url, seen, _shutdown) = spawn_mock_http_server("json").await;
@@ -943,10 +899,6 @@ mod tests {
         );
     }
 
-    /// v2 `_scheduleReconnection` (streamableHttp.js:139-160): the standalone
-    /// GET stream reconnects twice (1 s, then 1.5 s) and, when it still cannot
-    /// get through, reports weak evidence — the signal that parks the entry in
-    /// `probing` instead of failing it outright.
     #[tokio::test]
     async fn test_http_stream_reports_weak_evidence_when_reconnection_gives_up() {
         let (url, _seen, _shutdown) = spawn_mock_http_server("sse-500").await;
@@ -969,8 +921,6 @@ mod tests {
         client.close().await;
     }
 
-    /// A server that does not offer the optional stream answers 405, which is
-    /// not evidence of a dead session: no weak signal, no retries.
     #[tokio::test]
     async fn test_http_stream_absent_is_not_weak_evidence() {
         let (url, _seen, _shutdown) = spawn_mock_http_server("json").await;
@@ -994,8 +944,6 @@ mod tests {
         client.close().await;
     }
 
-    /// While the GET stream is open the session is healthy: no weak signal is
-    /// reported, and closing the client ends the stream task silently.
     #[tokio::test]
     async fn test_http_stream_keeps_a_live_session_silent() {
         let (url, _seen, _shutdown) = spawn_mock_http_server("sse-open").await;

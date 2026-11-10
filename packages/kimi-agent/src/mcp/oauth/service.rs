@@ -1,28 +1,24 @@
-//! MCP OAuth token access with single-flight refresh.
-
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
+use super::auth_code::{
+    AuthCodeRegistry, AuthCodeStart, AuthCodeStatus, exchange_code, start_callback_listener,
+};
 use super::store::McpOAuthFileStore;
 
-/// Refresh this long before the recorded expiry so a token cannot lapse
-/// mid-request.
 const REFRESH_SKEW_MS: i64 = 60_000;
 
-/// File suffix of the token record (v2 `TOKENS_SUFFIX`, provider.ts:21). The
-/// same store also holds client/discovery/meta records, so tokens must not
-/// claim the bare key.
 const TOKENS_SUFFIX: &str = "-tokens";
 
 fn tokens_key(key: &str) -> String {
     format!("{key}{TOKENS_SUFFIX}")
 }
 
-/// One server's OAuth credentials (v2 keeps the SDK `OAuthTokens` plus the
-/// provider it came from in the same document).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpOAuthTokens {
     pub access_token: String,
@@ -30,23 +26,18 @@ pub struct McpOAuthTokens {
     pub refresh_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<i64>,
-    /// Token endpoint used to refresh; recorded when the login flow completes.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    /// Client secret issued by dynamic registration, when the authorization
-    /// server is confidential rather than a public PKCE client.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
-    /// RFC 8707 resource indicator this grant was issued for; replayed on
-    /// refresh so the AS can keep the token audience.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
-    /// When this grant was obtained, stamped on write. Two consumers: the
-    /// concurrent-grant window ([`is_concurrent_grant`]) and the
-    /// compare-and-clear in [`McpOAuthService::clear_tokens_if_current`]
-    /// (v2 `StoredMcpOAuthTokens.obtained_at`, oauth/service.ts:680-688).
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obtained_at_ms: Option<i64>,
 }
@@ -59,10 +50,6 @@ impl McpOAuthTokens {
         }
     }
 
-    /// Whether two records describe the same grant. `obtained_at_ms` is
-    /// deliberately excluded: it records when the record was written, not
-    /// which credential it holds, so a re-stamp must not defeat the
-    /// compare-and-clear below.
     fn same_grant(&self, other: &Self) -> bool {
         self.access_token == other.access_token
             && self.refresh_token == other.refresh_token
@@ -70,7 +57,6 @@ impl McpOAuthTokens {
     }
 }
 
-/// The stored-grant state exposed to the host's auth-status surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpOAuthTokenState {
     pub has_tokens: bool,
@@ -79,17 +65,8 @@ pub struct McpOAuthTokenState {
     pub access_token: Option<String>,
 }
 
-/// How recently a grant must have been obtained to count as a login landing
-/// concurrently with the connection that reports a 401 (v2
-/// `CONCURRENT_GRANT_GRACE_MS`, oauth/service.ts:681).
 const CONCURRENT_GRANT_GRACE_MS: i64 = 10_000;
 
-/// A grant obtained within the grace window — and at or after the connection
-/// that is now reporting a 401 — is another login landing concurrently, not
-/// the credential this call was rejected with, so it must not be flipped to
-/// `needs-auth` or invalidated (v2 `isConcurrentGrant`, oauth/service.ts:683-688).
-/// A future timestamp (negative age) fails the window: the clock moved, and
-/// trusting it would protect a credential that never worked.
 fn is_concurrent_grant(tokens: &McpOAuthTokens, now: i64, connected_at_ms: Option<i64>) -> bool {
     let Some(obtained_at) = tokens.obtained_at_ms else {
         return false;
@@ -108,15 +85,126 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Reads credentials from the encrypted store and refreshes them on demand.
-///
-/// Concurrent callers for the same key share one refresh: the first takes the
-/// per-key lock and refreshes, the rest wait and then re-read the store
-/// (v2 `IMcpOAuthService`'s single-flight refresh).
+struct ActiveAuthorization {
+    start: AuthCodeStart,
+    result: watch::Sender<Option<Result<(), String>>>,
+    callback: watch::Sender<bool>,
+    attached: AtomicUsize,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+#[derive(Debug)]
+pub enum BeginAuthorizationError {
+    AlreadyAuthorized,
+    Failed(String),
+}
+
+struct AuthorizationWait {
+    key: String,
+    active: Arc<ActiveAuthorization>,
+    waiter: tokio_util::sync::CancellationToken,
+    detached: AtomicBool,
+}
+
+fn detach_authorization_wait(wait: &AuthorizationWait) -> bool {
+    if wait.detached.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    wait.waiter.cancel();
+    let last = wait.active.attached.fetch_sub(1, Ordering::SeqCst) == 1;
+    if last && wait.active.result.borrow().is_none() {
+        wait.active.cancel.cancel();
+    }
+    last
+}
+
+pub struct AuthorizationFlowHandle {
+    pub wait_id: String,
+    pub authorization_url: String,
+    server_name: String,
+    wait: Arc<AuthorizationWait>,
+    service: Weak<McpOAuthService>,
+}
+
+impl AuthorizationFlowHandle {
+    pub async fn complete(
+        &mut self,
+        cancelled: Option<&(dyn Fn() -> bool + Sync)>,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        if self.wait.detached.load(Ordering::SeqCst) {
+            return Err("OAuth flow already completed or cancelled".into());
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut result = self.wait.active.result.subscribe();
+        let mut callback = self.wait.active.callback.subscribe();
+        let outcome = loop {
+            if let Some(outcome) = result.borrow().clone() {
+                break outcome;
+            }
+            let callback_settled = *callback.borrow();
+            tokio::select! {
+                changed = result.changed() => {
+                    if changed.is_err() {
+                        break Err("OAuth callback listener closed".into());
+                    }
+                }
+                _ = callback.changed() => {}
+                _ = self.wait.waiter.cancelled() => {
+                    break Err("OAuth authorization wait cancelled".into());
+                }
+                _ = tokio::time::sleep_until(deadline), if !callback_settled => {
+                    break Err("OAuth callback timed out".into());
+                }
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    if cancelled.is_some_and(|probe| probe()) {
+                        break Err("OAuth authorization wait cancelled".into());
+                    }
+                }
+            }
+        };
+        self.detach();
+        outcome.map_err(|error| format!("OAuth flow for \"{}\" failed: {error}", self.server_name))
+    }
+
+    fn detach(&mut self) {
+        let last = detach_authorization_wait(&self.wait);
+        let Some(service) = self.service.upgrade() else {
+            return;
+        };
+        let wait_id = self.wait_id.clone();
+        let key = self.wait.key.clone();
+        let active = self.wait.active.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                service.authorization_waits.lock().await.remove(&wait_id);
+                if last {
+                    let mut flows = service.authorizations.lock().await;
+                    if flows
+                        .get(&key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &active))
+                    {
+                        flows.remove(&key);
+                    }
+                }
+            });
+        }
+    }
+}
+
+impl Drop for AuthorizationFlowHandle {
+    fn drop(&mut self) {
+        self.detach();
+    }
+}
+
 pub struct McpOAuthService {
     store: Arc<McpOAuthFileStore>,
     client: reqwest::Client,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    auth_code: Arc<AuthCodeRegistry>,
+    authorizations: Mutex<HashMap<String, Arc<ActiveAuthorization>>>,
+    authorization_waits: Mutex<HashMap<String, Arc<AuthorizationWait>>>,
 }
 
 impl McpOAuthService {
@@ -125,16 +213,158 @@ impl McpOAuthService {
             store,
             client: reqwest::Client::new(),
             locks: Mutex::new(HashMap::new()),
+            auth_code: Arc::new(AuthCodeRegistry::default()),
+            authorizations: Mutex::new(HashMap::new()),
+            authorization_waits: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Whether the store holds credentials for this key.
+    pub async fn begin_authorization(
+        self: &Arc<Self>,
+        server_name: &str,
+        server_url: &str,
+        client_name: &str,
+    ) -> Result<AuthorizationFlowHandle, BeginAuthorizationError> {
+        let key = super::mcp_oauth_store_key(server_name, server_url)
+            .map_err(BeginAuthorizationError::Failed)?;
+        if self.access_token(&key).await.is_some() {
+            return Err(BeginAuthorizationError::AlreadyAuthorized);
+        }
+        let mut flows = self.authorizations.lock().await;
+        if let Some(active) = flows.get(&key).cloned()
+            && active.result.borrow().is_none()
+        {
+            return Ok(self.attach_authorization(server_name, key, active).await);
+        }
+        flows.remove(&key);
+        let mut listener = start_callback_listener()
+            .await
+            .map_err(BeginAuthorizationError::Failed)?;
+        let start = self
+            .auth_code
+            .begin(
+                &self.client,
+                server_name,
+                server_url,
+                listener.redirect_uri(),
+                None,
+                client_name,
+            )
+            .await
+            .map_err(|error| {
+                BeginAuthorizationError::Failed(format!(
+                    "failed to start OAuth flow for \"{server_name}\": {error}"
+                ))
+            })?;
+        let (result_tx, _) = watch::channel(None);
+        let (callback_tx, _) = watch::channel(false);
+        let active = Arc::new(ActiveAuthorization {
+            start: start.clone(),
+            result: result_tx,
+            callback: callback_tx,
+            attached: AtomicUsize::new(0),
+            cancel: listener.cancellation_token(),
+        });
+        flows.insert(key.clone(), active.clone());
+        let service = self.clone();
+        let active_task = active.clone();
+        let start_task = start.clone();
+        let key_task = key.clone();
+        tokio::spawn(async move {
+            let callback = tokio::select! {
+                _ = active_task.cancel.cancelled() => {
+                    Err("OAuth authorization wait cancelled".to_string())
+                }
+                result = listener.wait() => result,
+            };
+            active_task.callback.send_replace(true);
+            let outcome = match callback {
+                Ok(callback) => {
+                    if callback.state.as_deref() != Some(start_task.state.as_str()) {
+                        Err("OAuth state mismatch — possible CSRF; refusing token exchange".into())
+                    } else {
+                        match service.auth_code.take_by_state(&start_task.state).await {
+                            Some(flow) if flow.flow_id == start_task.flow_id => {
+                                match exchange_code(&service.client, &flow, &callback.code).await {
+                                    Ok(tokens) => service.store_tokens(&key_task, &tokens),
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            _ => Err(
+                                "OAuth state mismatch — possible CSRF; refusing token exchange"
+                                    .into(),
+                            ),
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            service
+                .auth_code
+                .finish(
+                    &start_task.flow_id,
+                    AuthCodeStatus {
+                        done: true,
+                        authenticated: outcome.is_ok(),
+                        key: outcome.as_ref().ok().map(|_| key_task.clone()),
+                        error: outcome.as_ref().err().cloned(),
+                    },
+                )
+                .await;
+            active_task.result.send_replace(Some(outcome));
+            active_task.cancel.cancel();
+        });
+        Ok(self.attach_authorization(server_name, key, active).await)
+    }
+
+    async fn attach_authorization(
+        self: &Arc<Self>,
+        server_name: &str,
+        key: String,
+        active: Arc<ActiveAuthorization>,
+    ) -> AuthorizationFlowHandle {
+        active.attached.fetch_add(1, Ordering::SeqCst);
+        let wait_id = ulid::Ulid::new().to_string();
+        let wait = Arc::new(AuthorizationWait {
+            key,
+            active: active.clone(),
+            waiter: tokio_util::sync::CancellationToken::new(),
+            detached: AtomicBool::new(false),
+        });
+        self.authorization_waits
+            .lock()
+            .await
+            .insert(wait_id.clone(), wait.clone());
+        AuthorizationFlowHandle {
+            wait_id,
+            authorization_url: active.start.authorization_url.clone(),
+            server_name: server_name.to_string(),
+            wait,
+            service: Arc::downgrade(self),
+        }
+    }
+
+    pub async fn cancel_authorization_wait(&self, wait_id: &str) -> bool {
+        let Some(wait) = self.authorization_waits.lock().await.remove(wait_id) else {
+            return false;
+        };
+        let last = detach_authorization_wait(&wait);
+        if last {
+            let mut flows = self.authorizations.lock().await;
+            if flows
+                .get(&wait.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &wait.active))
+            {
+                flows.remove(&wait.key);
+            }
+        }
+        true
+    }
+
     pub fn has_tokens(&self, key: &str) -> bool {
         self.read_tokens(key).is_some()
     }
 
-    /// Tokens under the v2 name, falling back to the bare-key file this
-    /// engine wrote before the suffix port (so an existing login survives).
     fn read_tokens(&self, key: &str) -> Option<McpOAuthTokens> {
         self.store
             .read::<McpOAuthTokens>(&tokens_key(key))
@@ -147,8 +377,6 @@ impl McpOAuthService {
         Ok(suffixed || legacy)
     }
 
-    /// Every credential key the store holds (the `auth-statuses` surface).
-    /// Non-token records (`-meta`, `-client`, `-discovery`) are not keys.
     pub fn list_keys(&self) -> Vec<String> {
         let mut keys: Vec<String> = self
             .store
@@ -172,8 +400,6 @@ impl McpOAuthService {
         keys
     }
 
-    /// Persist freshly obtained credentials (login completion). The grant is
-    /// stamped with its obtain time unless the caller already recorded one.
     pub fn store_tokens(&self, key: &str, tokens: &McpOAuthTokens) -> Result<(), String> {
         let mut stamped = tokens.clone();
         if stamped.obtained_at_ms.is_none() {
@@ -182,15 +408,10 @@ impl McpOAuthService {
         self.store.write(&tokens_key(key), &stamped)
     }
 
-    /// The clock the concurrent-grant window compares against (v2 `now()`,
-    /// oauth/service.ts:520-522).
     pub fn now(&self) -> i64 {
         now_ms()
     }
 
-    /// The stored grant for this key, plus whether it looks like a login that
-    /// landed concurrently with the connection reporting a 401 (v2
-    /// `peekRejectedGrant`, oauth/service.ts:511-523).
     pub fn peek_rejected_grant(
         &self,
         key: &str,
@@ -201,10 +422,6 @@ impl McpOAuthService {
         Some((tokens, concurrent))
     }
 
-    /// Drop the stored grant only while it is still the rejected one, so a
-    /// login that landed after the 401 survives (v2 `clearTokensIfCurrent`,
-    /// oauth/provider.ts:264-269). Missing credentials, or a grant that has
-    /// since changed, report `false` without touching the store.
     pub fn clear_tokens_if_current(
         &self,
         key: &str,
@@ -219,15 +436,10 @@ impl McpOAuthService {
         self.remove_tokens(key)
     }
 
-    /// Drop one server's credentials (`auth:cancel` / `auth:reset`).
     pub fn remove(&self, key: &str) -> Result<bool, String> {
         self.remove_tokens(key)
     }
 
-    /// The stored grant's state without refreshing it (the host's auth-status
-    /// surface: `oauth-authorized` / `oauth-expired`). `access_token` is the
-    /// stored value even when expired; callers that need a usable token go
-    /// through [`Self::access_token`].
     pub fn token_state(&self, key: &str) -> McpOAuthTokenState {
         let Some(tokens) = self.read_tokens(key) else {
             return McpOAuthTokenState {
@@ -248,8 +460,6 @@ impl McpOAuthService {
         }
     }
 
-    /// The access token for this key, refreshing it when expired. `None` means
-    /// the server must be treated as needing authentication.
     pub async fn access_token(&self, key: &str) -> Option<String> {
         let tokens = self.read_tokens(key)?;
         if !tokens.is_expired(now_ms()) {
@@ -265,7 +475,6 @@ impl McpOAuthService {
         };
         let _guard = lock.lock().await;
 
-        // Another caller may have refreshed while we waited for the lock.
         let tokens = self.read_tokens(key)?;
         if !tokens.is_expired(now_ms()) {
             return Some(tokens.access_token);
@@ -325,7 +534,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Minimal token endpoint: counts requests and answers with `body`.
     async fn spawn_token_endpoint(
         body: &'static str,
     ) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
@@ -419,8 +627,6 @@ mod tests {
         );
         assert_eq!(hits.load(Ordering::SeqCst), 1);
 
-        // The refreshed credentials were persisted, so the next call is served
-        // from the store without another round trip.
         assert_eq!(
             service.access_token("srv").await.as_deref(),
             Some("new-token")
@@ -431,8 +637,6 @@ mod tests {
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
     }
 
-    /// Two callers that race on an expired token share one refresh
-    /// (v2's single-flight refresh).
     #[tokio::test]
     async fn test_concurrent_callers_share_one_refresh() {
         let (url, hits, _shutdown) =
@@ -460,7 +664,6 @@ mod tests {
         );
     }
 
-    /// A refresh without a refresh token or endpoint fails closed.
     #[tokio::test]
     async fn test_refresh_without_material_returns_none() {
         let dir = tempfile::tempdir().unwrap();
@@ -497,8 +700,6 @@ mod tests {
         }
     }
 
-    /// The store stamps the obtain time on write, so the concurrency window
-    /// has something to compare (v2 `StoredMcpOAuthTokens.obtained_at`).
     #[test]
     fn test_store_tokens_stamps_obtained_at_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -510,8 +711,6 @@ mod tests {
         let obtained = stamped.obtained_at_ms.expect("write must stamp a grant");
         assert!((now_ms() - obtained).abs() < 5_000);
 
-        // An explicit stamp is preserved: the login flow records the moment
-        // the provider issued the grant, not the moment it was persisted.
         let earlier = now_ms() - 30_000;
         service
             .store_tokens("srv", &grant("b", Some(earlier)))
@@ -525,8 +724,6 @@ mod tests {
         );
     }
 
-    /// The host's auth-status classifier reads the stored grant through this
-    /// view: presence, refreshability and expiry, without forcing a refresh.
     #[test]
     fn test_token_state_reports_stored_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -550,49 +747,43 @@ mod tests {
         assert!(state.has_tokens && state.expired && !state.has_refresh_token);
     }
 
-    /// v2 `isConcurrentGrant` (oauth/service.ts:683-688): a grant is
-    /// concurrent only inside the grace window, never in the future, and never
-    /// when it predates the connection that is reporting the 401.
     #[test]
     fn test_concurrent_grant_window() {
         let now = now_ms();
-        // Inside the window and after the connection → concurrent.
+
         assert!(is_concurrent_grant(
             &grant("a", Some(now - 5_000)),
             now,
             Some(now - 20_000)
         ));
-        // Inside the window with no recorded connection time → concurrent.
+
         assert!(is_concurrent_grant(
             &grant("a", Some(now - 5_000)),
             now,
             None
         ));
-        // Outside the window → the credential the call was rejected with.
+
         assert!(!is_concurrent_grant(
             &grant("a", Some(now - 60_000)),
             now,
             Some(now - 120_000)
         ));
-        // Obtained before the connection it would protect → not concurrent.
+
         assert!(!is_concurrent_grant(
             &grant("a", Some(now - 5_000)),
             now,
             Some(now - 1_000)
         ));
-        // A future stamp fails the window: the clock moved.
+
         assert!(!is_concurrent_grant(
             &grant("a", Some(now + 5_000)),
             now,
             Some(now - 1_000)
         ));
-        // No stamp at all → nothing to protect.
+
         assert!(!is_concurrent_grant(&grant("a", None), now, None));
     }
 
-    /// v2 `clearTokensIfCurrent` (oauth/provider.ts:264-269): only the grant
-    /// that was rejected is dropped, so a login landing after the 401 owns the
-    /// store and survives.
     #[test]
     fn test_clear_tokens_if_current() {
         let dir = tempfile::tempdir().unwrap();
@@ -603,7 +794,6 @@ mod tests {
             .unwrap();
         let rejected = store.read::<McpOAuthTokens>("srv-tokens").unwrap();
 
-        // A newer login replaced the record between the 401 and the cleanup.
         service
             .store_tokens("srv", &grant("renewed", None))
             .unwrap();
@@ -616,16 +806,12 @@ mod tests {
             "renewed"
         );
 
-        // Matching the stored record drops it, and a second attempt is a no-op
-        // rather than an error.
         let stored = store.read::<McpOAuthTokens>("srv-tokens").unwrap();
         assert!(service.clear_tokens_if_current("srv", &stored).unwrap());
         assert!(!service.has_tokens("srv"));
         assert!(!service.clear_tokens_if_current("srv", &stored).unwrap());
     }
 
-    /// The rejected-grant peek reports the stored record together with its
-    /// concurrency verdict (v2 `peekRejectedGrant`).
     #[test]
     fn test_peek_rejected_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -635,15 +821,13 @@ mod tests {
 
         service.store_tokens("srv", &grant("fresh", None)).unwrap();
         let now = now_ms();
-        // Obtained after the connection → a login landing concurrently with it.
+
         let (tokens, concurrent) = service
             .peek_rejected_grant("srv", Some(now - 1_000))
             .unwrap();
         assert_eq!(tokens.access_token, "fresh");
         assert!(concurrent);
 
-        // Inside the window but older than the connection → the credential
-        // that connection was built with, not a concurrent login.
         service
             .store_tokens("srv", &grant("old", Some(now - 5_000)))
             .unwrap();
@@ -651,5 +835,131 @@ mod tests {
             .peek_rejected_grant("srv", Some(now - 1_000))
             .unwrap();
         assert!(!concurrent);
+    }
+
+    #[tokio::test]
+    async fn joined_cancellation_leaves_the_shared_authorization_alive() {
+        let (base, log) = crate::mcp::oauth::auth_code::test_helpers::spawn_mock_as().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(McpOAuthFileStore::new(dir.path()));
+        let service = Arc::new(McpOAuthService::new(store));
+        let server_url = format!("{base}/mcp");
+        let mut first = service
+            .begin_authorization("srv", &server_url, "Kimi Code")
+            .await
+            .unwrap();
+        let mut second = service
+            .begin_authorization("srv", &server_url, "Kimi Code")
+            .await
+            .unwrap();
+        assert_eq!(first.authorization_url, second.authorization_url);
+        assert_ne!(first.wait_id, second.wait_id);
+        assert!(service.cancel_authorization_wait(&second.wait_id).await);
+        let error = second
+            .complete(None, Duration::from_secs(10))
+            .await
+            .expect_err("a cancelled handle cannot complete again");
+        assert!(error.contains("already completed or cancelled"), "{error}");
+
+        let parsed = url::Url::parse(&first.authorization_url).unwrap();
+        let params: HashMap<String, String> = parsed
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        let completion =
+            tokio::spawn(async move { first.complete(None, Duration::from_secs(10)).await });
+        let response = reqwest::Client::new()
+            .get(format!(
+                "{}?code=the-code&state={}",
+                params["redirect_uri"], params["state"]
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        completion.await.unwrap().unwrap();
+        let key = crate::mcp::oauth::mcp_oauth_store_key("srv", &server_url).unwrap();
+        assert_eq!(service.access_token(&key).await.as_deref(), Some("at-1"));
+        assert_eq!(
+            log.lock()
+                .await
+                .iter()
+                .filter(|request| request.starts_with("POST /token "))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_last_waiter_starts_a_fresh_authorization() {
+        let (base, _log) = crate::mcp::oauth::auth_code::test_helpers::spawn_mock_as().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(McpOAuthFileStore::new(dir.path()));
+        let service = Arc::new(McpOAuthService::new(store));
+        let server_url = format!("{base}/mcp");
+        let first = service
+            .begin_authorization("srv", &server_url, "Kimi Code")
+            .await
+            .unwrap();
+        let second = service
+            .begin_authorization("srv", &server_url, "Kimi Code")
+            .await
+            .unwrap();
+        assert!(service.cancel_authorization_wait(&first.wait_id).await);
+        assert!(service.cancel_authorization_wait(&second.wait_id).await);
+
+        let third = service
+            .begin_authorization("srv", &server_url, "Kimi Code")
+            .await
+            .unwrap();
+        assert_ne!(third.authorization_url, first.authorization_url);
+        assert!(service.cancel_authorization_wait(&third.wait_id).await);
+    }
+
+    #[tokio::test]
+    async fn callback_timeout_does_not_limit_an_in_flight_token_exchange() {
+        let (base, _log, exchange_started, release_exchange) =
+            crate::mcp::oauth::auth_code::test_helpers::spawn_gated_exchange_as().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(McpOAuthFileStore::new(dir.path()));
+        let service = Arc::new(McpOAuthService::new(store));
+        let server_url = format!("{base}/mcp");
+        let mut flow = service
+            .begin_authorization("srv", &server_url, "Kimi Code")
+            .await
+            .unwrap();
+        let parsed = url::Url::parse(&flow.authorization_url).unwrap();
+        let params: HashMap<String, String> = parsed
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        let completion =
+            tokio::spawn(async move { flow.complete(None, Duration::from_millis(50)).await });
+        let response = reqwest::Client::new()
+            .get(format!(
+                "{}?code=the-code&state={}",
+                params["redirect_uri"], params["state"]
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        tokio::time::timeout(Duration::from_secs(2), exchange_started.notified())
+            .await
+            .expect("the token exchange starts");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let finished_early = completion.is_finished();
+        release_exchange.notify_one();
+        assert!(
+            !finished_early,
+            "the callback deadline must stop at callback receipt"
+        );
+        tokio::time::timeout(Duration::from_secs(2), completion)
+            .await
+            .expect("the released exchange completes")
+            .unwrap()
+            .unwrap();
+        let key = crate::mcp::oauth::mcp_oauth_store_key("srv", &server_url).unwrap();
+        assert_eq!(service.access_token(&key).await.as_deref(), Some("at-1"));
     }
 }

@@ -275,7 +275,7 @@ impl McpClient {
     pub fn client_info(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.client_name,
-            "version": env!("CARGO_PKG_VERSION")
+            "version": crate::_base::version::get_core_version()
         })
     }
 
@@ -961,6 +961,14 @@ mod tests {
     /// v2 `resolveClientName` (connection-manager.ts:834) with the builtin
     /// fallback (`client-shared.ts:7`): the host identity wins, a blank one
     /// does not shadow the builtin.
+    #[test]
+    fn a_client_announces_the_core_version() {
+        assert_eq!(
+            McpClient::mock("s").client_info()["version"],
+            serde_json::Value::from("0.0.0")
+        );
+    }
+
     #[test]
     fn a_client_announces_the_host_identity_or_the_builtin_name() {
         assert_eq!(
