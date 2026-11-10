@@ -1,6 +1,11 @@
 {
   "note": "Hardcoded prose literals in packages/kimi-agent that are allowed to stay English. Two-way ratchet: a new unrecorded literal fails, and so does a recorded one that is gone or has moved onto the catalog seam. Re-record with `bun run scan:hardcoded:rust -- --update`; re-seed categories with `-- --seed`. `reason` must be one of the CATEGORY values documented in scripts/scan-hardcoded-rust.mjs. `deferred` is the only category that means a real TODO.",
   "entries": {
+    "packages/kimi-agent/src/_base/text/frontmatter.rs:Missing closing frontmatter fence": {
+      "file": "packages/kimi-agent/src/_base/text/frontmatter.rs",
+      "text": "Missing closing frontmatter fence",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/acp/builtin_commands.rs:<optional custom summarization instructions>": {
       "file": "packages/kimi-agent/src/acp/builtin_commands.rs",
       "text": "<optional custom summarization instructions>",
@@ -3497,6 +3502,36 @@
       "text": "application/json, text/event-stream",
       "reason": "wire-token"
     },
+    "packages/kimi-agent/src/mcp/manager.rs:in a browser, sign in, and approve the client.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "in a browser, sign in, and approve the client.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:the local callback listener.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "the local callback listener.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:1. The tool prints an authorization URL.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "1. The tool prints an authorization URL.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:2. **You must show that URL to the user verbatim** and ask them to open it": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "2. **You must show that URL to the user verbatim** and ask them to open it",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:3. The tool blocks (up to 15 minutes) until the browser redirects back to": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "3. The tool blocks (up to 15 minutes) until the browser redirects back to",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:4. On success, the client reconnects the MCP server and the real tools": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "4. On success, the client reconnects the MCP server and the real tools",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/mcp/manager.rs:\"{}\" -> {} (collides with a same-server tool)": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "\"{}\" -> {} (collides with a same-server tool)",
@@ -3507,15 +3542,45 @@
       "text": "\"{}\" -> {} (collides with server \"{other_server}\")",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/manager.rs:Already authorized; reconnecting {server_name}…": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "Already authorized; reconnecting {server_name}…",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:Authenticate with MCP server \"{name}\" via OAuth.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "Authenticate with MCP server \"{name}\" via OAuth.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:Authorized — reconnecting {server_name}…": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "Authorized — reconnecting {server_name}…",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/mcp/manager.rs:Bearer {token}": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "Bearer {token}",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/manager.rs:Calling this tool starts the authorization flow:": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "Calling this tool starts the authorization flow:",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:Discovering OAuth metadata for {server_name}…": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "Discovering OAuth metadata for {server_name}…",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/mcp/manager.rs:Invalid inputSchema for MCP tool \"{}\": schema must be a JSON object": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "Invalid inputSchema for MCP tool \"{}\": schema must be a JSON object",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:MCP OAuth is not configured": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "MCP OAuth is not configured",
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/mcp/manager.rs:MCP execution error: {e}": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
@@ -3539,6 +3604,16 @@
       "text": "MCP server \"{name}\" closed unexpectedly {detail}",
       "reason": "diagnostic",
       "note": "v2 formatUnexpectedCloseError with the transport reason appended; shown on the failed MCP entry."
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:MCP server \"{server_name}\" already had valid OAuth credentials. Reconnected; real tools are available now.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "MCP server \"{server_name}\" already had valid OAuth credentials. Reconnected; real tools are available now.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:MCP server \"{server_name}\" authenticated successfully. The real MCP tools have replaced this synthetic authenticate tool.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "MCP server \"{server_name}\" authenticated successfully. The real MCP tools have replaced this synthetic authenticate tool.",
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/mcp/manager.rs:MCP server \"{}\" failed to connect": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
@@ -3570,6 +3645,11 @@
       "text": "MCP server closed during the handshake",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/mcp/manager.rs:MCP server for tool \"{tool_name}\" has been removed (plugin uninstalled or config deleted). Do not call this tool again.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "MCP server for tool \"{tool_name}\" has been removed (plugin uninstalled or config deleted). Do not call this tool again.",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/mcp/manager.rs:MCP server is disabled: {name}": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "MCP server is disabled: {name}",
@@ -3584,6 +3664,26 @@
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "MCP {transport} bearer token env var \"{var}\" is not set or is empty",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:OAuth flow for MCP server \"{server_name}\" did not complete: {error}{suffix}": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "OAuth flow for MCP server \"{server_name}\" did not complete: {error}{suffix}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:Open this URL in your browser to authorize \"{server_name}\": {authorization_url} Waiting for the OAuth callback (timeout 15 min). If you cancel, call this tool again to restart the flow.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "Open this URL in your browser to authorize \"{server_name}\": {authorization_url} Waiting for the OAuth callback (timeout 15 min). If you cancel, call this tool again to restart the flow.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:Take no arguments. Treat the URL as sensitive — do not modify it or strip": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "Take no arguments. Treat the URL as sensitive — do not modify it or strip",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/mcp/manager.rs:This server requires an OAuth login that has not yet been completed.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "This server requires an OAuth login that has not yet been completed.",
+      "reason": "model-input"
     },
     "packages/kimi-agent/src/mcp/manager.rs:Timed out after {}ms": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
@@ -3611,6 +3711,11 @@
       "text": "mcp server unavailable",
       "reason": "diagnostic"
     },
+    "packages/kimi-agent/src/mcp/manager.rs:query parameters.": {
+      "file": "packages/kimi-agent/src/mcp/manager.rs",
+      "text": "query parameters.",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/mcp/manager.rs:server closed unexpectedly": {
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "server closed unexpectedly",
@@ -3620,6 +3725,61 @@
       "file": "packages/kimi-agent/src/mcp/manager.rs",
       "text": "{error} stderr: {}",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:400 Bad Request": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "400 Bad Request",
+      "reason": "wire-token"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:404 Not Found": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "404 Not Found",
+      "reason": "wire-token"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:<!doctype html><html><head><meta charset=\"utf-8\"><title>Authorized</title></head>": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Authorized</title></head>",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:<!doctype html><html><head><meta charset=\"utf-8\"><title>OAuth error</title></head>": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "<!doctype html><html><head><meta charset=\"utf-8\"><title>OAuth error</title></head>",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:<body style=\"font-family:system-ui,sans-serif;padding:2rem;\">": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "<body style=\"font-family:system-ui,sans-serif;padding:2rem;\">",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:<h1>Sign-in complete</h1>": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "<h1>Sign-in complete</h1>",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:<h1>Sign-in failed</h1>": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "<h1>Sign-in failed</h1>",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:<p>The authorization server reported an error. Return to the application for details.</p>": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "<p>The authorization server reported an error. Return to the application for details.</p>",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:<p>You can close this tab and return to the application.</p>": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "<p>You can close this tab and return to the application.</p>",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:Content-Type: {content_type}\\r": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "Content-Type: {content_type}\\r",
+      "reason": "format-scaffolding"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:HTTP/1.1 {status}\\r {content_type}Content-Length: {}\\r Connection: close\\r \\r {body}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "HTTP/1.1 {status}\\r {content_type}Content-Length: {}\\r Connection: close\\r \\r {body}",
+      "reason": "format-scaffolding"
     },
     "packages/kimi-agent/src/mcp/oauth/auth_code.rs:Invalid MCP server url: {error}": {
       "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
@@ -3690,6 +3850,31 @@
       "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
       "text": "MCP OAuth token response is not JSON: {error}",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:OAuth callback listener closed": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "OAuth callback listener closed",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:OAuth callback missing authorization code": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "OAuth callback missing authorization code",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:OAuth error: {error}{suffix}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "OAuth error: {error}{suffix}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:failed to start OAuth callback listener: {error}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "failed to start OAuth callback listener: {error}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/auth_code.rs:text/html; charset=utf-8": {
+      "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
+      "text": "text/html; charset=utf-8",
+      "reason": "wire-token"
     },
     "packages/kimi-agent/src/mcp/oauth/auth_code.rs:the authorization request expired": {
       "file": "packages/kimi-agent/src/mcp/oauth/auth_code.rs",
@@ -3785,6 +3970,36 @@
       "file": "packages/kimi-agent/src/mcp/oauth/mod.rs",
       "text": "Invalid MCP OAuth store key: \"{name}\"",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/mcp/oauth/service.rs:OAuth authorization wait cancelled": {
+      "file": "packages/kimi-agent/src/mcp/oauth/service.rs",
+      "text": "OAuth authorization wait cancelled",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/service.rs:OAuth callback listener closed": {
+      "file": "packages/kimi-agent/src/mcp/oauth/service.rs",
+      "text": "OAuth callback listener closed",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/service.rs:OAuth flow already completed or cancelled": {
+      "file": "packages/kimi-agent/src/mcp/oauth/service.rs",
+      "text": "OAuth flow already completed or cancelled",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/service.rs:OAuth flow for \"{}\" failed: {error}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/service.rs",
+      "text": "OAuth flow for \"{}\" failed: {error}",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/service.rs:OAuth state mismatch — possible CSRF; refusing token exchange": {
+      "file": "packages/kimi-agent/src/mcp/oauth/service.rs",
+      "text": "OAuth state mismatch — possible CSRF; refusing token exchange",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/mcp/oauth/service.rs:failed to start OAuth flow for \"{server_name}\": {error}": {
+      "file": "packages/kimi-agent/src/mcp/oauth/service.rs",
+      "text": "failed to start OAuth flow for \"{server_name}\": {error}",
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/mcp/output.rs:<mcp-result-extras> {extras} </mcp-result-extras>": {
       "file": "packages/kimi-agent/src/mcp/output.rs",
@@ -6099,6 +6314,21 @@
       "reason": "deferred",
       "note": "UNREVIEWED — needs a category"
     },
+    "packages/kimi-agent/src/server/engine.rs:Tool pattern \"{pattern}\" in {context} {field} does not match any registered or built-in tool; it will never activate anything.": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "Tool pattern \"{pattern}\" in {context} {field} does not match any registered or built-in tool; it will never activate anything.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/engine.rs:Tool pattern \"{pattern}\" in {context} {field} matches no tool; use \"{pattern}__*\" to match the whole MCP server.": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "Tool pattern \"{pattern}\" in {context} {field} matches no tool; use \"{pattern}__*\" to match the whole MCP server.",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/engine.rs:Tool pattern \"{pattern}\" in {context} {field} uses wildcards, which only match MCP tools (names starting with \"mcp__\"); it will never activate anything.": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "Tool pattern \"{pattern}\" in {context} {field} uses wildcards, which only match MCP tools (names starting with \"mcp__\"); it will never activate anything.",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/engine.rs:could not persist compaction usage": {
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "could not persist compaction usage",
@@ -6161,6 +6391,11 @@
       "text": "no model is bound to this session; compact requires a model to write the summary",
       "reason": "diagnostic"
     },
+    "packages/kimi-agent/src/server/engine.rs:profile \"{name}\"": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "profile \"{name}\"",
+      "reason": "deferred"
+    },
     "packages/kimi-agent/src/server/engine.rs:prompt cache read collapsed": {
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "prompt cache read collapsed",
@@ -6184,6 +6419,11 @@
     "packages/kimi-agent/src/server/engine.rs:status payload is always an object": {
       "file": "packages/kimi-agent/src/server/engine.rs",
       "text": "status payload is always an object",
+      "reason": "deferred"
+    },
+    "packages/kimi-agent/src/server/engine.rs:the global [tools] config": {
+      "file": "packages/kimi-agent/src/server/engine.rs",
+      "text": "the global [tools] config",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/server/engine.rs:todo state is unreadable; this summary shows no items": {
@@ -8392,6 +8632,16 @@
       "text": "Turn exceeded maxSteps={steps}. If max_steps_per_turn is too small, raise it in config.toml (loop_control.max_steps_per_turn), or run \"/update-config\" to update it, then \"/reload\".",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/session/mod.rs:The AGENTS.md instruction file(s) below changed on disk after they were injected into the system prompt: {} Read the current file(s) and follow the latest contents; the copies injected in the system prompt are stale.": {
+      "file": "packages/kimi-agent/src/session/mod.rs",
+      "text": "The AGENTS.md instruction file(s) below changed on disk after they were injected into the system prompt: {} Read the current file(s) and follow the latest contents; the copies injected in the system prompt are stale.",
+      "reason": "model-input"
+    },
+    "packages/kimi-agent/src/session/mod.rs:The following AGENTS.md file(s) exist in your workspace but were not included in your system prompt: {} Read them before making changes in those directories.": {
+      "file": "packages/kimi-agent/src/session/mod.rs",
+      "text": "The following AGENTS.md file(s) exist in your workspace but were not included in your system prompt: {} Read them before making changes in those directories.",
+      "reason": "model-input"
+    },
     "packages/kimi-agent/src/session/mod.rs:a session release waiter had already given up": {
       "file": "packages/kimi-agent/src/session/mod.rs",
       "text": "a session release waiter had already given up",
@@ -9771,10 +10021,11 @@
       "text": "output_size_chars: {total_chars} (only the first {preserved_chars} characters were preserved)",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tool_result_truncation.rs:pruned expired spill files": {
+    "packages/kimi-agent/src/tool_result_truncation.rs:cannot resolve the home directory (KIMI_CODE_HOME / USERPROFILE / HOME unset)": {
       "file": "packages/kimi-agent/src/tool_result_truncation.rs",
-      "text": "pruned expired spill files",
-      "reason": "diagnostic"
+      "text": "cannot resolve the home directory (KIMI_CODE_HOME / USERPROFILE / HOME unset)",
+      "reason": "diagnostic",
+      "note": "v2 bootstrap home resolution cannot construct an agent-scoped spill path without a home directory"
     },
     "packages/kimi-agent/src/tool_result_truncation.rs:tool_call_id: {tool_call_id}": {
       "file": "packages/kimi-agent/src/tool_result_truncation.rs",
@@ -10260,6 +10511,21 @@
       "text": "Invalid AskUserQuestion arguments: expected 1-4 questions, each with 2-4 options; question texts must be unique and option labels unique within each question.",
       "reason": "deferred"
     },
+    "packages/kimi-agent/src/tools/ask_user_question.rs:Invalid questions: duplicate option label {} in question {}. {UNIQUENESS_MESSAGE} Rephrase the duplicates and call the tool again.": {
+      "file": "packages/kimi-agent/src/tools/ask_user_question.rs",
+      "text": "Invalid questions: duplicate option label {} in question {}. {UNIQUENESS_MESSAGE} Rephrase the duplicates and call the tool again.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/ask_user_question.rs:Invalid questions: duplicate question text {}. {UNIQUENESS_MESSAGE} Rephrase the duplicates and call the tool again.": {
+      "file": "packages/kimi-agent/src/tools/ask_user_question.rs",
+      "text": "Invalid questions: duplicate question text {}. {UNIQUENESS_MESSAGE} Rephrase the duplicates and call the tool again.",
+      "reason": "tool-protocol"
+    },
+    "packages/kimi-agent/src/tools/ask_user_question.rs:Question texts must be unique across questions, and option labels must be unique within each question.": {
+      "file": "packages/kimi-agent/src/tools/ask_user_question.rs",
+      "text": "Question texts must be unique across questions, and option labels must be unique within each question.",
+      "reason": "tool-protocol"
+    },
     "packages/kimi-agent/src/tools/ask_user_question.rs:Set true to ask in the background and return immediately with a background task_id; you are notified automatically when the user answers — do not poll with TaskOutput while the question is pending.": {
       "file": "packages/kimi-agent/src/tools/ask_user_question.rs",
       "text": "Set true to ask in the background and return immediately with a background task_id; you are notified automatically when the user answers — do not poll with TaskOutput while the question is pending.",
@@ -10368,11 +10634,6 @@
       "text": "- Command availability depends on the host; run `which <command>` before relying on an uncommon one. For GitHub work (PRs, issues, CI runs, API queries), prefer the `gh` CLI when installed.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- DO NOT issue consecutive Edit calls on the same file. A previous Edit can invalidate a later Edit's `old_string`, causing `old_string not found`. Read the file again before the next Edit.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- DO NOT issue consecutive Edit calls on the same file. A previous Edit can invalidate a later Edit's `old_string`, causing `old_string not found`. Read the file again before the next Edit.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Do not add an agent name or source prefix; the UI supplies it.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Do not add an agent name or source prefix; the UI supplies it.",
@@ -10418,19 +10679,9 @@
       "text": "- If the status block reports an incomplete range, continue with its `Next Read` arguments exactly. Do not answer from a partial page when the task requires the remaining content.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Multiple Edit calls may run in one response only when they do not target the same file.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Multiple Edit calls may run in one response only when they do not target the same file.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Output is `<line-number>\\t<content>` per line. A `<system>` status block may follow; it is not part of the file.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- Output is `<line-number>\\t<content>` per line. A `<system>` status block may follow; it is not part of the file.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Pure CRLF files are displayed with LF line endings; mixed or lone carriage returns are shown as `\\r` and need exact escapes in a later Edit.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Pure CRLF files are displayed with LF line endings; mixed or lone carriage returns are shown as `\\r` and need exact escapes in a later Edit.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Read before overwriting an existing file.": {
@@ -10448,19 +10699,9 @@
       "text": "- Results are bounded by `max_chars`: 100000 by default, up to 500000, and by about 500000 divided by four estimated tokens.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public keys such as `id_rsa.pub` read normally.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- Sensitive files (`.env` files, credential stores, SSH private keys, and similar secrets) are refused. Templates and public keys are exempt: `.env.example` / `.env.sample` / `.env.template` and public keys such as `id_rsa.pub` read normally.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- This tool informs the end user; it does not automatically send a message to your parent agent. Keep all important findings in your final reply or final handoff to the parent.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- This tool informs the end user; it does not automatically send a message to your parent agent. Keep all important findings in your final reply or final handoff to the parent.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- UTF-16 LE/BE text (with or without a BOM) is detected and transcoded to UTF-8 for display; the status block names the detected encoding, and Edit/Write on such a file still expect UTF-8. Other encodings (for example GBK), binary files, and files containing NUL bytes are refused.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- UTF-16 LE/BE text (with or without a BOM) is detected and transcoded to UTF-8 for display; the status block names the detected encoding, and Edit/Write on such a file still expect UTF-8. Other encodings (for example GBK), binary files, and files containing NUL bytes are refused.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- Use Write only for new files, complete replacements, or content with little continuity.": {
@@ -10536,11 +10777,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `hover` — type information and documentation at the position.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "- `hover` — type information and documentation at the position.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:- `line_offset` accepts a negative value to read from the end of the file (for example, -100 reads the last 100 lines).": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "- `line_offset` accepts a negative value to read from the end of the file (for example, -100 reads the last 100 lines).",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:- `ls` / `find` (list files) → `Glob`": {
@@ -10716,11 +10952,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Limit output to the first N lines/entries after offset. Defaults to 250. Pass 0 for unlimited.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "Limit output to the first N lines/entries after offset. Defaults to 250. Pass 0 for unlimited.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:Line endings, which v2 does not have to state: for pure CRLF files Read shows LF, so write `old_string` and `new_string` with LF and Edit restores CRLF; for mixed endings Read shows carriage returns as \\r and those positions need actual \\r escapes.": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "Line endings, which v2 does not have to state: for pure CRLF files Read shows LF, so write `old_string` and `new_string` with LF and Edit restores CRLF; for mixed endings Read shows carriage returns as \\r and those positions need actual \\r escapes.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Maximum characters in the returned text, including line numbers and status. Omit for the configured default; requests above the configured maximum are capped.": {
@@ -10933,11 +11164,6 @@
     "packages/kimi-agent/src/tools/core_tool_defs.rs:The working directory in which to run the command. When omitted, the command runs in the session's working directory.": {
       "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
       "text": "The working directory in which to run the command. When omitted, the command runs in the session's working directory.",
-      "reason": "model-input"
-    },
-    "packages/kimi-agent/src/tools/core_tool_defs.rs:This engine's own additions, which v2 has no reason to state:": {
-      "file": "packages/kimi-agent/src/tools/core_tool_defs.rs",
-      "text": "This engine's own additions, which v2 has no reason to state:",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/core_tool_defs.rs:Top edge of the crop, in original-image pixels.": {
@@ -11219,6 +11445,11 @@
       "file": "packages/kimi-agent/src/tools/dispatch.rs",
       "text": "The session_query tool is available to the main agent only.",
       "reason": "model-input"
+    },
+    "packages/kimi-agent/src/tools/dispatch.rs:WaitFor is disabled: the wait_for experimental flag is off.": {
+      "file": "packages/kimi-agent/src/tools/dispatch.rs",
+      "text": "WaitFor is disabled: the wait_for experimental flag is off.",
+      "reason": "tool-protocol"
     },
     "packages/kimi-agent/src/tools/dispatch.rs:{} Mode mutex: spec mode could not be exited ({error}); treat spec mode as still active.": {
       "file": "packages/kimi-agent/src/tools/dispatch.rs",
@@ -12183,9 +12414,9 @@
       "text": "Entry content for add.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/knowledge_tool.rs:Entry id for confirm/reject/remove.": {
+    "packages/kimi-agent/src/tools/knowledge_tool.rs:Entry id for confirm/reject.": {
       "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
-      "text": "Entry id for confirm/reject/remove.",
+      "text": "Entry id for confirm/reject.",
       "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/knowledge_tool.rs:Entry title for add.": {
@@ -12198,11 +12429,6 @@
       "text": "Error: `action` is required for the Knowledge tool.",
       "reason": "deferred"
     },
-    "packages/kimi-agent/src/tools/knowledge_tool.rs:Error: `markdown` is required for the import action.": {
-      "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
-      "text": "Error: `markdown` is required for the import action.",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/tools/knowledge_tool.rs:Error: id is required for confirm action.": {
       "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
       "text": "Error: id is required for confirm action.",
@@ -12211,11 +12437,6 @@
     "packages/kimi-agent/src/tools/knowledge_tool.rs:Error: id is required for reject action.": {
       "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
       "text": "Error: id is required for reject action.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/knowledge_tool.rs:Error: id is required for remove action.": {
-      "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
-      "text": "Error: id is required for remove action.",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/knowledge_tool.rs:Error: title, content, and category are required for add action.": {
@@ -12233,35 +12454,15 @@
       "text": "File path scope for search.",
       "reason": "model-input"
     },
-    "packages/kimi-agent/src/tools/knowledge_tool.rs:Imported {n} knowledge entr{}": {
-      "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
-      "text": "Imported {n} knowledge entr{}",
-      "reason": "deferred"
-    },
     "packages/kimi-agent/src/tools/knowledge_tool.rs:Knowledge search returned invalid results.": {
       "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
       "text": "Knowledge search returned invalid results.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/knowledge_tool.rs:Knowledge stats returned invalid data.": {
-      "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
-      "text": "Knowledge stats returned invalid data.",
-      "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/knowledge_tool.rs:Knowledge stats: {total} entries by category: {} by source: {} avg confidence: {avg_confidence}": {
-      "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
-      "text": "Knowledge stats: {total} entries by category: {} by source: {} avg confidence: {avg_confidence}",
       "reason": "deferred"
     },
     "packages/kimi-agent/src/tools/knowledge_tool.rs:Learned: [{category}] {title} (id: {id}, confidence: 0.7)": {
       "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
       "text": "Learned: [{category}] {title} (id: {id}, confidence: 0.7)",
       "reason": "deferred"
-    },
-    "packages/kimi-agent/src/tools/knowledge_tool.rs:Markdown blocks (`# category:title` + `---` separated) to import.": {
-      "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
-      "text": "Markdown blocks (`# category:title` + `---` separated) to import.",
-      "reason": "model-input"
     },
     "packages/kimi-agent/src/tools/knowledge_tool.rs:No matching knowledge entries found.": {
       "file": "packages/kimi-agent/src/tools/knowledge_tool.rs",
@@ -13137,6 +13338,18 @@
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
       "text": "<tools_removed> {} </tools_removed>",
       "reason": "deferred"
+    },
+    "packages/kimi-agent/src/tools/select_tools.rs:No tools are currently available for dynamic loading in this session.": {
+      "file": "packages/kimi-agent/src/tools/select_tools.rs",
+      "text": "No tools are currently available for dynamic loading in this session.",
+      "reason": "model-input",
+      "note": "v2 dynamicTools.ts NO_LOADABLE_TOOLS_MESSAGE; model-facing empty-catalog announcement"
+    },
+    "packages/kimi-agent/src/tools/select_tools.rs:{NO_LOADABLE_TOOLS_MESSAGE} Do not call select_tools or guess tool names; use the tools you already have. Only a later <tools_added> announcement can make new tools loadable.": {
+      "file": "packages/kimi-agent/src/tools/select_tools.rs",
+      "text": "{NO_LOADABLE_TOOLS_MESSAGE} Do not call select_tools or guess tool names; use the tools you already have. Only a later <tools_added> announcement can make new tools loadable.",
+      "reason": "model-input",
+      "note": "v2 dynamicTools.ts renderLoadableToolsAnnouncement empty-catalog guidance"
     },
     "packages/kimi-agent/src/tools/select_tools.rs:Already available: {}": {
       "file": "packages/kimi-agent/src/tools/select_tools.rs",
@@ -14049,11 +14262,6 @@
       "text": "The wait ended before the task finished — a timeout is not an error. Prefer continuing with other work over waiting again; completion arrives via automatic notification.",
       "reason": "tool-protocol"
     },
-    "packages/kimi-agent/src/tools/task_tools.rs:This engine's own addition: a steering message ends the wait early and reports it (`wait_status: interrupted`); the tasks keep running and still notify you when they finish.": {
-      "file": "packages/kimi-agent/src/tools/task_tools.rs",
-      "text": "This engine's own addition: a steering message ends the wait early and reports it (`wait_status: interrupted`); the tasks keep running and still notify you when they finish.",
-      "reason": "model-input"
-    },
     "packages/kimi-agent/src/tools/task_tools.rs:Use TaskOutput with one of the task_id values above to read the full output.": {
       "file": "packages/kimi-agent/src/tools/task_tools.rs",
       "text": "Use TaskOutput with one of the task_id values above to read the full output.",
@@ -14592,6 +14800,42 @@
       "text": "{block} {guidance} A newer <tools_relevant> block replaces older ones.",
       "reason": "deferred",
       "note": "UNREVIEWED — needs a category"
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:<tools_added> {} </tools_added>": {
+      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
+      "text": "<tools_added> {} </tools_added>",
+      "reason": "format-scaffolding",
+      "note": "v2 dynamicTools.ts renderRuntimeToolChangeReminder added-name block"
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:<tools_removed> {} </tools_removed>": {
+      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
+      "text": "<tools_removed> {} </tools_removed>",
+      "reason": "format-scaffolding",
+      "note": "v2 dynamicTools.ts renderRuntimeToolChangeReminder removed-name block"
+    },
+    "packages/kimi-agent/src/tools/tool_select_state.rs:The available tools changed during this session. The current model cannot load runtime tool additions with select_tools. Do not call select_tools. Use the tool definitions provided in this request. Removed tools may be unavailable or fail when called.": {
+      "file": "packages/kimi-agent/src/tools/tool_select_state.rs",
+      "text": "The available tools changed during this session. The current model cannot load runtime tool additions with select_tools. Do not call select_tools. Use the tool definitions provided in this request. Removed tools may be unavailable or fail when called.",
+      "reason": "model-input",
+      "note": "v2 dynamicTools.ts renderRuntimeToolChangeReminder; disclosure-closed model guidance"
+    },
+    "packages/kimi-agent/src/tools/toolset.rs:Tool \"{}\" has an update, but the update is not applied in this session. Continue using the currently registered version.": {
+      "file": "packages/kimi-agent/src/tools/toolset.rs",
+      "text": "Tool \"{}\" has an update, but the update is not applied in this session. Continue using the currently registered version.",
+      "reason": "model-input",
+      "note": "v2 toolSelectService.ts notifyUpdatedTools tool_update_pending reminder"
+    },
+    "packages/kimi-agent/src/tools/toolset.rs:a snapshot always renders": {
+      "file": "packages/kimi-agent/src/tools/toolset.rs",
+      "text": "a snapshot always renders",
+      "reason": "diagnostic",
+      "note": "internal invariant: empty snapshots render the empty-catalog text and non-empty snapshots render added names"
+    },
+    "packages/kimi-agent/src/tools/toolset.rs:a non-empty delta always renders": {
+      "file": "packages/kimi-agent/src/tools/toolset.rs",
+      "text": "a non-empty delta always renders",
+      "reason": "diagnostic",
+      "note": "internal invariant: a delta is constructed only with at least one added or removed name"
     },
     "packages/kimi-agent/src/tools/tower/bash_guard.rs:`git clean` with force and -x/-X is not allowed when its scope covers the tower main checkout — it would delete .tower/comms, the tower protocol state, which git does not track and cannot restore. Run the clean inside your own tower worktree or a temporary `git worktree add` checkout instead; {TOWER_GUARD_ESCAPE}": {
       "file": "packages/kimi-agent/src/tools/tower/bash_guard.rs",
