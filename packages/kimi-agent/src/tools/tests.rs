@@ -340,11 +340,23 @@ async fn disclosure_shapes_the_tool_table_and_announces_on_new_turns() {
         crate::injection::wrap_system_reminder(&first),
         crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
     )];
-    assert!(ts.take_disclosure_announcement(&history).is_none());
+    let second = ts
+        .take_disclosure_announcement(&history)
+        .expect("legacy history falls back to a snapshot");
+    assert!(second.contains("mcp__github__github_sample_tool"));
+    let disclosure = ts
+        .take_last_announcement_disclosure()
+        .expect("the fallback records a snapshot disclosure");
+    assert_eq!(disclosure["kind"], "snapshot");
+    assert!(disclosure["tools"].as_array().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| tool["name"] == "mcp__github__github_sample_tool")
+    }));
 }
 
 #[tokio::test]
-async fn a_resumed_session_restores_its_loaded_deferred_tools() {
+async fn an_announcement_only_history_does_not_restore_loaded_tools() {
     let (_dir, ts) = setup();
     let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
     manager
@@ -390,12 +402,12 @@ async fn a_resumed_session_restores_its_loaded_deferred_tools() {
     )];
     ts.seed_loaded_tools_from_history(&history);
 
-    assert!(ts.is_dynamic_tool_loaded("mcp__github__github_sample_tool"));
+    assert!(!ts.is_dynamic_tool_loaded("mcp__github__github_sample_tool"));
     assert!(
-        table()
+        !table()
             .iter()
             .any(|tool| tool.name == "mcp__github__github_sample_tool"),
-        "the resumed session must expose the tool it had loaded"
+        "an announcement alone must not expose the tool as loaded"
     );
 }
 
@@ -454,9 +466,13 @@ async fn a_large_deferred_catalogue_announces_a_ranked_slice() {
     let mut repeated_history = history;
     repeated_history.push(crate::injection::injection_message_named(
         crate::injection::wrap_system_reminder(&announcement),
-        crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+        crate::tools::tool_select_state::RETRIEVED_TOOLS_VARIANT,
     ));
-    assert!(ts.take_disclosure_announcement(&repeated_history).is_none());
+    let repeated = ts.take_disclosure_announcement(&repeated_history);
+    assert!(
+        repeated.is_none(),
+        "the same retrieved announcement is not emitted twice"
+    );
 }
 
 #[tokio::test]
@@ -536,7 +552,7 @@ async fn disclosure_readvertises_the_loaded_tool_schema() {
 }
 
 #[tokio::test]
-async fn disclosure_stays_off_without_capability_or_flag() {
+async fn disclosure_announcement_does_not_require_model_capabilities() {
     let (_dir, ts) = setup();
     let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
     manager
@@ -553,20 +569,60 @@ async fn disclosure_stays_off_without_capability_or_flag() {
     manager
         .add_client(crate::mcp::client::McpClient::mock("github"))
         .await;
-
-    let ts = ts.with_mcp(manager.clone()).with_tool_select_enabled(true);
+    let ts = ts.with_mcp(manager).with_tool_select_enabled(true);
     let shaped = ts.shape_tool_table(vec![tool_info("mcp__github__github_sample_tool")]);
     assert_eq!(shaped.len(), 1);
     assert_eq!(shaped[0].name, "mcp__github__github_sample_tool");
-    assert!(ts.take_disclosure_announcement(&[]).is_none());
+    assert!(!ts.supports_dynamic_tool_loading());
+    assert!(ts.take_disclosure_announcement(&[]).is_some());
+}
 
+#[tokio::test]
+async fn disclosure_announcement_does_not_require_tool_use_capability() {
+    let (_dir, ts) = setup();
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    manager
+        .configure(
+            "github",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_client(crate::mcp::client::McpClient::mock("github"))
+        .await;
     let ts = ts
+        .with_mcp(manager)
         .with_model_capabilities(Some(vec!["dynamically_loaded_tools".into()]))
         .with_tool_select_enabled(true);
     assert!(!ts.supports_dynamic_tool_loading());
-    assert!(ts.take_disclosure_announcement(&[]).is_none());
+    assert!(ts.take_disclosure_announcement(&[]).is_some());
+}
 
+#[tokio::test]
+async fn disclosure_announcement_stays_off_without_the_flag() {
+    let (_dir, ts) = setup();
+    let manager = std::sync::Arc::new(crate::mcp::McpManager::new());
+    manager
+        .configure(
+            "github",
+            crate::mcp::manager::McpServerRecipe::Mock,
+            crate::mcp::manager::McpServerOptions {
+                deferred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_client(crate::mcp::client::McpClient::mock("github"))
+        .await;
     let ts = ts
+        .with_mcp(manager)
         .with_model_capabilities(Some(vec![
             "tool_use".into(),
             "dynamically_loaded_tools".into(),
@@ -574,6 +630,7 @@ async fn disclosure_stays_off_without_capability_or_flag() {
         .with_tool_select_enabled(false);
     let shaped = ts.shape_tool_table(vec![tool_info("mcp__github__github_sample_tool")]);
     assert_eq!(shaped[0].name, "mcp__github__github_sample_tool");
+    assert!(!ts.supports_dynamic_tool_loading());
     assert!(ts.take_disclosure_announcement(&[]).is_none());
 }
 

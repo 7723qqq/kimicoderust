@@ -1,9 +1,6 @@
-use super::test_helpers::spawn_mock_as;
+use super::test_helpers::{spawn_mock_as, spawn_offline_mock_as};
 use super::*;
 
-/// Discovery to registration to PKCE to code exchange, end to end against a
-/// mock AS. The authorization URL carries every parameter the AS needs, and the
-/// token request replays the verifier and the resource indicator.
 #[tokio::test]
 async fn discovers_registers_and_exchanges_a_code() {
     let (base, log) = spawn_mock_as().await;
@@ -70,9 +67,6 @@ async fn discovers_registers_and_exchanges_a_code() {
     assert!(token_request.contains("resource="));
 }
 
-/// Polling a flow reports pending until the callback finishes it, and an
-/// unknown id is a finished-with-error answer rather than "still pending"
-/// forever.
 #[tokio::test]
 async fn status_reports_pending_then_the_result() {
     let (base, _log) = spawn_mock_as().await;
@@ -117,7 +111,6 @@ async fn status_reports_pending_then_the_result() {
     assert!(unknown.error.unwrap().contains("unknown or expired"));
 }
 
-/// The RFC 7636 appendix B verifier/challenge pair.
 #[test]
 fn pkce_challenge_matches_the_rfc_example() {
     assert_eq!(
@@ -126,7 +119,36 @@ fn pkce_challenge_matches_the_rfc_example() {
     );
 }
 
-/// A server with no AS metadata is refused with the discovery error.
+#[tokio::test]
+async fn offline_access_is_added_to_the_resource_scope_and_registration() {
+    let (base, log) = spawn_offline_mock_as().await;
+    let registry = AuthCodeRegistry::default();
+    let server_url = format!("{base}/mcp");
+    let start = registry
+        .begin(
+            &reqwest::Client::new(),
+            "srv",
+            &server_url,
+            &format!("{base}/callback"),
+            None,
+            "Kimi Code",
+        )
+        .await
+        .expect("begin");
+    let url = url::Url::parse(&start.authorization_url).unwrap();
+    let params: std::collections::HashMap<String, String> = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    assert_eq!(params["scope"], "openid offline_access");
+    let requests = log.lock().await;
+    let registration = requests
+        .iter()
+        .find(|request| request.starts_with("POST /register "))
+        .unwrap();
+    assert!(registration.contains(r#""scope":"openid offline_access""#));
+}
+
 #[tokio::test]
 async fn discovery_failure_is_reported() {
     let client = reqwest::Client::new();

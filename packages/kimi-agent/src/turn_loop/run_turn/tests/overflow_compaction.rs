@@ -50,25 +50,23 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
                     // injected after u3) + prefixed summary + continuation.
                     // The completed-turn assistant messages (a1, a2) are
                     // covered by the summary instead of riding the tail.
-                    assert_eq!(params.messages.len(), 7);
+                    assert_eq!(params.messages.len(), 5);
                     assert_eq!(params.messages[0].role, "system");
-                    assert_eq!(params.messages[1].content, "u1");
-                    assert_eq!(params.messages[2].content, "u2");
-                    assert_eq!(params.messages[3].content, "u3");
+                    assert_eq!(params.messages[1].content, "u1\n\nu2\n\nu3");
                     assert!(
-                        params.messages[4].content.starts_with(
+                        params.messages[2].content.starts_with(
                             "<system-reminder>
 "
                         ),
                         "the reminder injected after the last user input is the in-flight turn"
                     );
                     assert!(
-                        params.messages[5]
+                        params.messages[3]
                             .content
                             .contains(crate::compaction::COMPACTION_SUMMARY_PREFIX),
                         "the summary must ride the compaction prefix"
                     );
-                    let summary_message = &params.messages[5];
+                    let summary_message = &params.messages[3];
                     assert!(
                         summary_message
                             .content
@@ -81,7 +79,7 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
                         "v2 wraps the summary in a system-reminder"
                     );
                     assert_eq!(
-                        params.messages[6].content,
+                        params.messages[4].content,
                         crate::compaction::COMPACTION_CONTINUATION_TEXT,
                         "continuation note closes the compacted shape"
                     );

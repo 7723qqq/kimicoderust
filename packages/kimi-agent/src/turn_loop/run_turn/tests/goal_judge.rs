@@ -351,4 +351,9 @@ async fn an_impossible_verdict_blocks_the_goal() {
         "an impossible verdict must rewrite complete to blocked: {:?}",
         executed[0]
     );
+    assert_eq!(
+        executed[0]["arguments"]["reason"], "contradictory",
+        "the judge reason must reach markBlocked: {:?}",
+        executed[0]
+    );
 }

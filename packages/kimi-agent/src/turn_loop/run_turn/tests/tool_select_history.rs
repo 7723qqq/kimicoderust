@@ -40,16 +40,12 @@ impl LLM for CapturingLlm {
     }
 }
 
-/// v2 `shapeHistory` (`toolSelectService.ts:125-130`): a model without
-/// dynamic tool loading must not see a prior `<tools_added>` announcement
-/// telling it to call `select_tools`, so the announcement is stripped before
-/// the provider sees it.
 #[tokio::test]
-async fn an_unsupported_prior_announcement_is_stripped_from_history() {
+async fn an_unsupported_prior_announcement_becomes_a_runtime_reminder() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let dir = tempfile::tempdir().unwrap();
-    // No `dynamically_loaded_tools` capability and the flag off: unsupported.
+
     let toolset =
         Arc::new(crate::tools::NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -67,7 +63,7 @@ async fn an_unsupported_prior_announcement_is_stripped_from_history() {
                 crate::injection::wrap_system_reminder(
                     "<tools_added>\nmcp__srv__search\n</tools_added>",
                 ),
-                crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+                crate::tools::tool_select_state::RETRIEVED_TOOLS_VARIANT,
             ),
             LLMMessage::user("hello"),
         ],
@@ -90,11 +86,15 @@ async fn an_unsupported_prior_announcement_is_stripped_from_history() {
     run_turn(input, &callbacks).await.unwrap();
     let requests = requests.lock().unwrap();
     let sent = requests.first().expect("one provider request");
+    let expected = crate::injection::wrap_system_reminder(
+        &crate::tools::tool_select_state::render_runtime_tool_change_reminder(
+            &["mcp__srv__search".to_string()],
+            &[],
+        ),
+    );
     assert!(
-        !sent
-            .iter()
-            .any(|message| message.content.contains("<tools_added>")),
-        "the stale announcement must be stripped: {sent:?}"
+        sent.iter().any(|message| message.content == expected),
+        "the stale announcement becomes a runtime reminder: {sent:?}"
     );
     assert!(
         sent.iter().any(|message| message.content == "hello"),
@@ -102,15 +102,12 @@ async fn an_unsupported_prior_announcement_is_stripped_from_history() {
     );
 }
 
-/// v2 `shapeHistory`: with dynamic loading on, only the newest
-/// `<tools_relevant>` block survives; an older one would describe a stale
-/// catalogue.
 #[tokio::test]
 async fn only_the_newest_retrieved_announcement_survives_shaping() {
     fn retrieved(text: &str) -> LLMMessage {
         crate::injection::injection_message_named(
             crate::injection::wrap_system_reminder(text),
-            crate::tools::tool_select_state::LOADABLE_TOOLS_VARIANT,
+            crate::tools::tool_select_state::RETRIEVED_TOOLS_VARIANT,
         )
     }
     let messages = vec![
@@ -122,4 +119,106 @@ async fn only_the_newest_retrieved_announcement_survives_shaping() {
     assert_eq!(shaped.len(), 2);
     assert!(shaped[1].content.contains("new — second"));
     assert!(!shaped.iter().any(|m| m.content.contains("old — first")));
+}
+
+struct PreparingCallbacks {
+    inner: Arc<dyn HostCallbacks>,
+    toolset: Arc<crate::tools::NativeToolset>,
+}
+
+impl HostCallbacks for PreparingCallbacks {
+    fn llm_chat(
+        &self,
+        request: types::LlmChatRequest,
+    ) -> BoxFuture<'static, Result<types::LlmChatResponse, String>> {
+        self.inner.llm_chat(request)
+    }
+
+    fn execute_tool(
+        &self,
+        request: types::ToolExecuteRequest,
+    ) -> BoxFuture<'static, Result<types::ToolExecuteResponse, String>> {
+        self.inner.execute_tool(request)
+    }
+
+    fn check_permission(
+        &self,
+        request: types::PermissionCheckRequest,
+    ) -> BoxFuture<'static, Result<types::PermissionDecision, String>> {
+        self.inner.check_permission(request)
+    }
+
+    fn list_tools(&self) -> BoxFuture<'static, Result<types::ListToolsResponse, String>> {
+        let toolset = self.toolset.clone();
+        Box::pin(async move {
+            let active = vec![crate::tools::tool_select_ops::ToolSelectTool {
+                name: "mcp__s__alpha".to_string(),
+                description: "old".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                source: crate::tools::tool_select_ops::ToolSelectSource::Mcp,
+                disclosure: Some(crate::tools::registry::ToolDisclosure::Inline),
+                origin: crate::tools::tool_select_ops::ToolSelectOrigin::Initial,
+            }];
+            let mut live = active.clone();
+            live[0].description = "new".to_string();
+            toolset.reconcile_tool_select(&active, &live).await?;
+            Ok(types::ListToolsResponse { tools: vec![] })
+        })
+    }
+}
+
+#[tokio::test]
+async fn pending_tool_updates_land_in_the_same_steps_injection_pass() {
+    let server = Arc::new(RpcServer::new());
+    let dir = tempfile::tempdir().unwrap();
+    let toolset =
+        Arc::new(crate::tools::NativeToolset::new(dir.path().to_str().unwrap(), None).unwrap());
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(PreparingCallbacks {
+        inner: rpc_callbacks(server),
+        toolset: toolset.clone(),
+    });
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let llm = CapturingLlm {
+        requests: requests.clone(),
+    };
+    let input = RunTurnInput {
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: "tool-update-pending".into(),
+        llm: &llm,
+        messages: vec![LLMMessage::user("hello")],
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 1,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: None,
+        media_dropped: None,
+        media_recovery: None,
+        toolset: Some(toolset),
+    };
+
+    run_turn(input, &callbacks).await.unwrap();
+    let requests = requests.lock().unwrap();
+    let sent = requests.first().unwrap();
+    let reminder = sent
+        .iter()
+        .find(|message| {
+            message
+                .origin
+                .as_ref()
+                .and_then(|origin| origin.get("variant"))
+                == Some(&serde_json::Value::String(
+                    "tool_update_pending".to_string(),
+                ))
+        })
+        .expect("the update reminder lands before this step's request");
+    assert!(reminder.content.contains(
+        "Tool \"mcp__s__alpha\" has an update, but the update is not applied in this session."
+    ));
 }

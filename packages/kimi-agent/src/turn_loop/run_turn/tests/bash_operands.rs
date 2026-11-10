@@ -242,8 +242,39 @@ async fn bash_operands_resolve_without_a_host_parser() {
     assert!(reminder.content.contains("sub"), "{reminder:?}");
 }
 
-/// The failure arm the reminder rides on: a command the parser rejects
-/// contributes nothing beyond the declared cwd, and the turn still runs.
+#[tokio::test]
+async fn an_executed_error_result_still_contributes_its_operand_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub").join("AGENTS.md"), "sub rules").unwrap();
+    let _cwd = crate::test_support::CwdScope::enter(root).await;
+    let server = Arc::new(RpcServer::new());
+    RpcServer::register_arc(&server, types::methods::HOST_EXECUTE_TOOL, |_params| {
+        Box::pin(async move {
+            let resp = ToolExecuteResponse {
+                delivery: None,
+                stop_turn: false,
+                content: "failed but executed".into(),
+                is_error: true,
+                note: None,
+            };
+            serde_json::to_value(&resp).map_err(|e| JsonRpcError::internal_error(e.to_string()))
+        })
+    });
+    let callbacks = rpc_callbacks(server);
+    let captured: Arc<Mutex<Vec<Vec<LLMMessage>>>> = Arc::new(Mutex::new(Vec::new()));
+    let llm = BashThenStopLlm {
+        bash_args: serde_json::json!({ "command": "ls sub" }),
+        requests: captured.clone(),
+    };
+
+    run_turn(bash_turn_input(&llm), &callbacks).await.unwrap();
+    let captured = captured.lock().unwrap();
+    let reminder = reminder_in(&captured[1]).expect("an executed error still probes");
+    assert!(reminder.content.contains("sub"), "{reminder:?}");
+}
+
 #[tokio::test]
 async fn a_command_that_does_not_parse_keeps_the_cwd_only_reminder() {
     let tmp = tempfile::tempdir().unwrap();
@@ -339,6 +370,7 @@ async fn owned_tower_bash_deletion_returns_a_guard_veto_before_execution() {
     let root = tmp.path();
     let comms = root.join(".tower/comms");
     std::fs::create_dir_all(&comms).unwrap();
+    std::fs::write(root.join("AGENTS.md"), "root rules").unwrap();
     std::fs::write(
         comms.join("state.json"),
         r#"{"sessionId":"session-1","missions":[],"roster":{"agents":[]}}"#,
@@ -390,6 +422,7 @@ async fn owned_tower_bash_deletion_returns_a_guard_veto_before_execution() {
         follow_up.content
     );
     assert!(!follow_up.content.contains("stub"), "{}", follow_up.content);
+    assert!(reminder_in(&captured[1]).is_none());
 }
 
 // ── D14(a): hard-failure observation sink ──────────────────────────────────

@@ -2,9 +2,6 @@ use super::*;
 use crate::mcp::sse::test_helpers::spawn_mock_mcp_sse_server;
 use serde_json::json;
 
-/// v2 `resolveDeferred` (`connection-manager.ts:244-250`): the declaration
-/// wins, a positive threshold defers at or above the count, and `0` disables
-/// automatic deferral.
 #[test]
 fn auto_defer_threshold_resolution_matches_v2() {
     assert!(!resolve_deferred(Some(false), 100, 24, Some(true)));
@@ -20,7 +17,6 @@ fn auto_defer_threshold_resolution_matches_v2() {
     );
 }
 
-/// v2 `parseAutoDeferToolThresholdEnv`: integers only, capped at 1e6.
 #[test]
 fn auto_defer_threshold_env_parsing_matches_v2() {
     assert_eq!(parse_auto_defer_tool_threshold(Some("16")), Some(16));
@@ -38,13 +34,10 @@ async fn test_mcp_manager_discovery_and_call() {
     let client = McpClient::mock("github");
     manager.add_client(client).await;
 
-    // Only the qualified name exists: plain aliases were removed
-    // (last-writer-wins across servers could misroute a model call).
     assert!(manager.handles("mcp__github__github_sample_tool").await);
     assert!(!manager.handles("github_sample_tool").await);
     assert!(!manager.handles("nonexistent_tool").await);
 
-    // 1. Call via the qualified name
     let res_qualified = manager
         .call_tool(
             "mcp__github__github_sample_tool",
@@ -65,20 +58,15 @@ async fn test_mcp_manager_discovery_and_call() {
         res_qualified.note
     );
 
-    // 2. A bare tool name is not routable to an MCP server
     let res_plain = manager
         .call_tool("github_sample_tool", &json!({ "query": "kimi" }), None)
         .await;
     assert!(res_plain.is_none(), "plain tool names must not be routed");
 
-    // 3. Call unknown tool returns None
     let res_missing = manager.call_tool("unknown_tool", &json!({}), None).await;
     assert!(res_missing.is_none());
 }
 
-/// v2 #4719 / #4733: a same-name MCP tool whose definition changed is held
-/// pending. The running session keeps the active definition it was shown;
-/// a new session (list_live) would see the replacement.
 #[tokio::test]
 async fn a_changed_same_name_mcp_tool_stays_pinned_for_this_session() {
     let manager = McpManager::new();
@@ -133,7 +121,6 @@ async fn test_mcp_manager_list_tool_infos() {
     let mut infos = manager.list_tool_infos().await;
     infos.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // Only the namespaced form is exposed to the model, aliases are not leaked
     assert_eq!(infos.len(), 2);
     assert_eq!(infos[0].name, "mcp__github__github_sample_tool");
     assert_eq!(infos[0].description, "Sample mock MCP tool");
@@ -154,14 +141,13 @@ async fn test_mcp_manager_list_tool_infos() {
 #[tokio::test]
 async fn test_mcp_manager_server_entries() {
     let manager = McpManager::new();
-    // Add in reverse alphabetical order to verify alphabetical sorting
+
     manager.add_client(McpClient::mock("zeta")).await;
     manager.add_client(McpClient::mock("alpha")).await;
 
     let entries = manager.server_entries().await;
     assert_eq!(entries.len(), 2);
 
-    // Verify sorted by server name
     assert_eq!(entries[0].name, "alpha");
     assert_eq!(entries[0].transport, "mock");
     assert_eq!(entries[0].status, "connected");
@@ -189,13 +175,11 @@ async fn test_mcp_manager_with_sse_client_and_call_tool() {
     let manager = McpManager::new();
     manager.add_client(client).await;
 
-    // Discovered tools are indexed by qualified name only (no plain alias)
     assert!(!manager.handles("calculate").await);
     assert!(manager.handles("mcp__calc_server__calculate").await);
     assert!(!manager.handles("echo").await);
     assert!(manager.handles("mcp__calc_server__echo").await);
 
-    // Call tool over SSE
     let res = manager
         .call_tool(
             "mcp__calc_server__calculate",
@@ -209,7 +193,6 @@ async fn test_mcp_manager_with_sse_client_and_call_tool() {
     assert_eq!(res.content, "result: 42");
     assert!(res.note.is_none(), "note = {:?}", res.note);
 
-    // Application-level error tool call
     let err_res = manager
         .call_tool("mcp__calc_server__trigger_tool_error", &json!({}), None)
         .await
@@ -232,13 +215,12 @@ async fn test_mcp_manager_spawn_from_config() {
             env: None,
             url: Some(sse_url),
             headers: None,
-            // The mock speaks legacy HTTP+SSE, which is opt-in now that a
-            // bare url defaults to Streamable HTTP.
+
             transport: Some("sse".into()),
             ..Default::default()
         },
     );
-    // Invalid/unreachable SSE endpoint
+
     configs.insert(
         "invalid_sse".to_string(),
         crate::config::McpServerConfig {
@@ -251,7 +233,7 @@ async fn test_mcp_manager_spawn_from_config() {
             ..Default::default()
         },
     );
-    // Invalid stdio command
+
     configs.insert(
         "invalid_stdio".to_string(),
         crate::config::McpServerConfig {
@@ -267,8 +249,7 @@ async fn test_mcp_manager_spawn_from_config() {
     let manager = std::sync::Arc::new(McpManager::new());
     let config = crate::config::KimiConfig {
         mcp_servers: configs,
-        // This test is about the connect-failure status; the startup retry
-        // has its own tests.
+
         mcp: crate::config::McpConfig {
             reconnect_retry_enabled: Some(false),
             ..Default::default()
@@ -277,13 +258,10 @@ async fn test_mcp_manager_spawn_from_config() {
     };
     manager.spawn_from_config(&config).await;
 
-    // The valid server connects and registers tools; invalid ones are gracefully skipped
     assert!(manager.handles("mcp__valid_sse__calculate").await);
     assert!(!manager.handles("mcp__invalid_sse__calculate").await);
     assert!(!manager.handles("mcp__invalid_stdio__calculate").await);
 
-    // Failed servers surface as failed entries with their spawn error
-    // instead of being silently skipped (v2 marks failed entries).
     let entries = manager.server_entries().await;
     assert_eq!(entries.len(), 3, "all configured servers must be visible");
     let by_name = |name: &str| entries.iter().find(|e| e.name == name).unwrap();
@@ -294,15 +272,12 @@ async fn test_mcp_manager_spawn_from_config() {
     assert!(by_name("invalid_stdio").error.is_some());
 }
 
-/// `spawn_from_config` connects servers in parallel (v2 `connectAllNow` +
-/// `Promise.allSettled`): two servers that each time out after 300ms must
-/// finish in ~300ms total, not the ~600ms a serial loop would take.
 #[tokio::test]
 async fn test_spawn_from_config_parallel() {
     let spawn_hanging = || async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // Accept and hold every connection open without ever responding.
+
         tokio::spawn(async move {
             let mut held = Vec::new();
             while let Ok((socket, _)) = listener.accept().await {
@@ -337,8 +312,7 @@ async fn test_spawn_from_config_parallel() {
     let manager = std::sync::Arc::new(McpManager::new());
     let config = crate::config::KimiConfig {
         mcp_servers: configs,
-        // This test is about the connect-failure status; the startup retry
-        // has its own tests.
+
         mcp: crate::config::McpConfig {
             reconnect_retry_enabled: Some(false),
             ..Default::default()
@@ -349,7 +323,6 @@ async fn test_spawn_from_config_parallel() {
     manager.spawn_from_config(&config).await;
     let elapsed = start.elapsed();
 
-    // Parallel: ~300ms (the slowest server). Serial would be ~600ms.
     assert!(
         elapsed < Duration::from_millis(550),
         "parallel connect took {elapsed:?}, expected ~300ms"
@@ -361,16 +334,11 @@ async fn test_spawn_from_config_parallel() {
     }
 }
 
-/// `connect_all` starts the connects and returns without waiting for them
-/// (v2 `connectAll`, connection-manager.ts:170-181). Session creation uses
-/// it so a slow server no longer blocks the session; the readiness it
-/// flips is what the tool table awaits instead.
 #[tokio::test]
 async fn test_connect_all_returns_before_the_connects_settle() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    // Accept and hold every connection open without ever responding, so
-    // the connect can only end through its startup timeout.
+
     tokio::spawn(async move {
         let mut held = Vec::new();
         while let Ok((socket, _)) = listener.accept().await {
@@ -404,17 +372,11 @@ async fn test_connect_all_returns_before_the_connects_settle() {
         "readiness settled before the connect could time out"
     );
 
-    // Once settled, waiting again is free.
     let after = std::time::Instant::now();
     manager.wait_for_initial_load().await;
     assert!(after.elapsed() < Duration::from_millis(50));
 }
 
-/// A manager that never started an initial load must not block a consumer
-/// awaiting readiness. The server/REPL path connects through
-/// `spawn_from_config` (which awaits its own connects) and the napi path
-/// can register clients directly, so readiness has to start as "nothing to
-/// wait for" — otherwise `list_tools` would hang forever on those managers.
 #[tokio::test]
 async fn test_wait_for_initial_load_returns_without_a_load() {
     let manager = McpManager::new();
@@ -425,9 +387,6 @@ async fn test_wait_for_initial_load_returns_without_a_load() {
     assert!(start.elapsed() < Duration::from_millis(100));
 }
 
-/// Reconnecting a server whose endpoint died must surface `failed` with
-/// the error instead of pretending to be connected (v2 marks failed
-/// entries, connection-manager.ts:366-372).
 #[tokio::test]
 async fn test_reconnect_marks_failed_when_endpoint_dies() {
     let (sse_url, shutdown) = spawn_mock_mcp_sse_server(None, None, None).await;
@@ -441,8 +400,7 @@ async fn test_reconnect_marks_failed_when_endpoint_dies() {
             env: None,
             url: Some(sse_url),
             headers: None,
-            // The mock speaks legacy HTTP+SSE, which is opt-in now that a
-            // bare url defaults to Streamable HTTP.
+
             transport: Some("sse".into()),
             ..Default::default()
         },
@@ -450,8 +408,7 @@ async fn test_reconnect_marks_failed_when_endpoint_dies() {
     let manager = std::sync::Arc::new(McpManager::new());
     let config = crate::config::KimiConfig {
         mcp_servers: configs,
-        // This test is about the connect-failure status; the startup retry
-        // has its own tests.
+
         mcp: crate::config::McpConfig {
             reconnect_retry_enabled: Some(false),
             ..Default::default()
@@ -461,7 +418,6 @@ async fn test_reconnect_marks_failed_when_endpoint_dies() {
     manager.spawn_from_config(&config).await;
     assert_eq!(manager.server_entries().await[0].status, "connected");
 
-    // Kill the mock server, then reconnect against the stored recipe.
     let _ = shutdown.send(());
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(manager.reconnect("srv").await.is_err());
@@ -470,23 +426,17 @@ async fn test_reconnect_marks_failed_when_endpoint_dies() {
     assert!(entry.error.is_some());
 }
 
-/// Reconnecting an unconfigured server is an error, matching the TS
-/// manager's unknown-name behavior.
 #[tokio::test]
 async fn test_reconnect_unknown_server_errors() {
     let manager = McpManager::new();
     assert!(manager.reconnect("nope").await.is_err());
 }
 
-/// A session surfaces the roster's degradations at startup: a server that
-/// failed to connect, and one waiting on authorization. A healthy roster
-/// and a deliberately disabled server produce nothing.
 #[tokio::test]
 async fn test_session_warnings_report_failed_and_needs_auth_servers() {
     let manager = McpManager::new();
     assert!(manager.session_warnings().await.is_empty());
 
-    // A stdio command that cannot spawn: the connect fails outright.
     manager
         .configure(
             "broken",
@@ -507,7 +457,6 @@ async fn test_session_warnings_report_failed_and_needs_auth_servers() {
     assert_eq!(warnings[0].severity, "warning");
     assert!(warnings[0].message.contains("broken"), "{warnings:?}");
 
-    // A disabled server is the user's own choice, not a warning.
     manager
         .configure(
             "off",
@@ -527,8 +476,6 @@ async fn test_session_warnings_report_failed_and_needs_auth_servers() {
     );
 }
 
-/// Reconnecting a disabled server is an error (v2 throws
-/// `MCP_SERVER_DISABLED`, connection-manager.ts:146-164).
 #[tokio::test]
 async fn test_reconnect_disabled_server_errors() {
     let manager = McpManager::new();
@@ -552,9 +499,6 @@ async fn test_reconnect_disabled_server_errors() {
     assert_eq!(err, "MCP server is disabled: off");
 }
 
-/// A panicking status listener must not break the connection manager or
-/// prevent other listeners from receiving the entry (v2 wraps listener
-/// calls in try/catch, connection-manager.ts:435-441).
 #[tokio::test]
 async fn test_panicking_listener_does_not_break_emit() {
     let manager = McpManager::new();
@@ -582,11 +526,6 @@ async fn test_panicking_listener_does_not_break_emit() {
     assert_eq!(statuses[1], "connected");
 }
 
-/// `reconnect_after_current` waits for any in-flight reconnect, then
-/// starts a fresh one (v2 `reconnectAfterCurrent`,
-/// connection-manager.ts:297-301). A completed reconnect clears its
-/// in-flight marker, so a later `reconnect` reconnects instead of
-/// returning on a stale notify.
 #[tokio::test]
 async fn test_reconnect_after_current_reconnects() {
     let manager = McpManager::new();
@@ -596,14 +535,12 @@ async fn test_reconnect_after_current_reconnects() {
         .expect("mock server connects");
     assert_eq!(manager.server_entries().await[0].status, "connected");
 
-    // No in-flight reconnect: reconnect_after_current just reconnects.
     manager
         .reconnect_after_current("mock")
         .await
         .expect("reconnect succeeds");
     assert_eq!(manager.server_entries().await[0].status, "connected");
 
-    // The in-flight marker was cleared, so a plain reconnect also works.
     manager
         .reconnect("mock")
         .await
@@ -611,8 +548,6 @@ async fn test_reconnect_after_current_reconnects() {
     assert_eq!(manager.server_entries().await[0].status, "connected");
 }
 
-/// Qualified names are sanitized before they reach the model
-/// (v2 `tool-naming.ts` `qualifyMcpToolName`).
 #[tokio::test]
 async fn test_qualified_tool_names_are_sanitized() {
     let manager = McpManager::new();
@@ -628,9 +563,6 @@ async fn test_qualified_tool_names_are_sanitized() {
     assert_eq!(infos[0].name, "mcp__My_Search__My_Search_sample_tool");
 }
 
-/// `enabledTools` / `disabledTools` filter what the model sees, while
-/// inspection still reports every advertised tool (v2
-/// `computeEnabledNames` / `rawTools`).
 #[tokio::test]
 async fn test_tool_filter_limits_model_visibility() {
     let (sse_url, _shutdown) = spawn_mock_mcp_sse_server(None, None, None).await;
@@ -671,10 +603,6 @@ async fn test_tool_filter_limits_model_visibility() {
     );
 }
 
-/// A qualified tool name that duplicates another tool of the same server
-/// is dropped (v2 `registerMcpServer` same-server collision,
-/// mcpService.ts:186-215). "My Tool" and "My_Tool" both sanitize to
-/// `mcp__srv__My_Tool`.
 #[tokio::test]
 async fn test_same_server_tool_collision_drops_losing_tool() {
     let manager = McpManager::new();
@@ -700,10 +628,6 @@ async fn test_same_server_tool_collision_drops_losing_tool() {
     assert_eq!(infos[0].description, "first", "the first registration wins");
 }
 
-/// A qualified tool name already registered by another server is dropped
-/// (v2 `registerMcpServer` other-server collision). Server names that
-/// sanitize identically ("My Server" vs "My_Server") collide on the same
-/// qualified prefix.
 #[tokio::test]
 async fn test_cross_server_tool_collision_drops_losing_tool() {
     let manager = McpManager::new();
@@ -725,9 +649,6 @@ async fn test_cross_server_tool_collision_drops_losing_tool() {
     assert_eq!(infos[0].description, "calc");
 }
 
-/// Two servers exposing a tool with the same plain name both keep their
-/// distinct qualified names, and each qualified call routes to its own
-/// server (regression for the last-writer-wins plain alias).
 #[tokio::test]
 async fn test_same_tool_name_on_two_servers_routes_by_qualified_name() {
     let manager = McpManager::new();
@@ -769,8 +690,6 @@ async fn test_same_tool_name_on_two_servers_routes_by_qualified_name() {
     assert!(beta.note.is_none(), "note = {:?}", beta.note);
 }
 
-/// `enabled: false` keeps the server listed as `disabled` and never
-/// connects it (v2 connection-manager.ts:193-204).
 #[tokio::test]
 async fn test_disabled_server_is_listed_without_connecting() {
     let mut configs = HashMap::new();
@@ -802,8 +721,6 @@ async fn test_disabled_server_is_listed_without_connecting() {
     assert!(!manager.handles("mcp__off__anything").await);
 }
 
-/// A dead client hides its tools and zeroes `toolCount` (v2
-/// `watchForUnexpectedClose` + `toPublicEntry`).
 #[tokio::test]
 async fn test_closed_client_hides_tools_and_zeroes_count() {
     let manager = McpManager::new();
@@ -827,9 +744,6 @@ async fn test_closed_client_hides_tools_and_zeroes_count() {
     );
 }
 
-/// A stdio child that dies after the handshake must flip the entry to
-/// `failed` and notify status listeners (v2 `watchForUnexpectedClose`,
-/// connection-manager.ts:321-341).
 #[tokio::test]
 async fn test_unexpected_close_marks_failed_and_emits() {
     let init = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
@@ -837,15 +751,7 @@ async fn test_unexpected_close_marks_failed_and_emits() {
     let dir = std::env::temp_dir();
     let (cmd, args, script) = if cfg!(windows) {
         let path = dir.join(format!("kimi_mcp_die_mgr_{}.bat", std::process::id()));
-        // Only the first `set /p` is safe as a barrier: the client writes
-        // `initialize` and then waits for its reply, so exactly one line
-        // is in flight. After that reply it writes
-        // `notifications/initialized` and `tools/list` back to back, and a
-        // later `set /p` can swallow both — the third read then blocked
-        // forever and the connect hit the 30s startup timeout (flaky under
-        // a loaded suite). Waiting instead is deterministic: the wait
-        // outlasts the client's own write, so `tools/list` is registered
-        // before its reply is echoed and the reply can never be dropped.
+
         std::fs::write(
                 &path,
                 format!(
@@ -860,9 +766,7 @@ async fn test_unexpected_close_marks_failed_and_emits() {
         )
     } else {
         let path = dir.join(format!("kimi_mcp_die_mgr_{}.sh", std::process::id()));
-        // Answer each request as it arrives, then die: a script that echoes
-        // both responses up front races the client's second write, and the
-        // unmatched response is dropped, so the handshake never completes.
+
         std::fs::write(
             &path,
             format!(
@@ -898,9 +802,6 @@ async fn test_unexpected_close_marks_failed_and_emits() {
         .await
         .expect("server connects");
 
-    // The entry arrives only after the spawned process is reaped, so the
-    // budget must cover process startup+exit under scheduler load (a 5s
-    // window flaked when a second test suite ran concurrently).
     let entry = tokio::time::timeout(Duration::from_secs(30), rx)
         .await
         .expect("unexpected close must notify listeners")
@@ -920,8 +821,6 @@ async fn test_unexpected_close_marks_failed_and_emits() {
     let _ = std::fs::remove_file(script);
 }
 
-/// v2 precedence: per-server → env → `[mcp]` section → 30s default
-/// (connection-manager.ts:310-314, 389-390).
 #[test]
 fn test_timeout_resolution_precedence() {
     assert_eq!(resolve_startup_timeout(Some(5), Some(6), Some(7)), 5);
@@ -938,7 +837,6 @@ fn test_timeout_resolution_precedence() {
     assert_eq!(resolve_tool_timeout(None, None, None), None);
 }
 
-/// `[mcp]` defaults apply when the server declares no timeout of its own.
 #[tokio::test]
 async fn test_global_defaults_apply_to_servers_without_timeouts() {
     let manager = McpManager::new();
@@ -958,9 +856,6 @@ async fn test_global_defaults_apply_to_servers_without_timeouts() {
     assert_eq!(resolved.tool, Some(Duration::from_millis(3_000)));
 }
 
-/// `on_status_change` fans the public entry out on every status transition
-/// (v2 `onStatusChange` + `emit`, connection-manager.ts:360-378): a mock
-/// server goes `pending` on configure then `connected` after discovery.
 #[tokio::test]
 async fn test_on_status_change_fires_on_transitions() {
     let manager = McpManager::new();
@@ -985,14 +880,11 @@ async fn test_on_status_change_fires_on_transitions() {
         assert_eq!(entries[1].tool_count, 1);
     }
 
-    // Unsubscribing stops further notifications.
     assert!(manager.unsubscribe_status(sub));
     manager.mark_removed("mock").await;
     assert_eq!(seen.lock().unwrap().len(), 2, "no emit after unsubscribe");
 }
 
-/// The resolved tool timeout reaches the client (v2 passes
-/// `toolCallTimeoutMs` into every client).
 #[tokio::test]
 async fn test_tool_timeout_reaches_client() {
     let manager = McpManager::new();
@@ -1015,14 +907,11 @@ async fn test_tool_timeout_reaches_client() {
     assert_eq!(client.tool_timeout(), Some(Duration::from_millis(1_500)));
 }
 
-/// A server that accepts the connection but never answers the handshake
-/// must fail with the v2 timeout text instead of hanging the caller
-/// (connection-manager.ts:594-611).
 #[tokio::test]
 async fn test_startup_timeout_marks_failed() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    // Accept and hold every connection open without ever responding.
+
     tokio::spawn(async move {
         let mut held = Vec::new();
         while let Ok((socket, _)) = listener.accept().await {
@@ -1031,8 +920,7 @@ async fn test_startup_timeout_marks_failed() {
     });
 
     let manager = McpManager::new();
-    // This test is about the connect-failure status; the startup retry has its
-    // own tests.
+
     manager.set_defaults(crate::config::McpConfig {
         reconnect_retry_enabled: Some(false),
         ..Default::default()
@@ -1061,9 +949,6 @@ async fn test_startup_timeout_marks_failed() {
     assert_eq!(entries[0].tool_count, 0);
 }
 
-/// v2 `rescheduleRetries` (connection-manager.ts:501-505): a policy change
-/// moves the due time of a pending retry and keeps its streak, so tightening
-/// the knob takes effect instead of waiting out the old schedule.
 #[tokio::test]
 async fn rescheduling_retries_moves_the_due_time_and_keeps_the_streak() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -1089,7 +974,6 @@ async fn rescheduling_retries_moves_the_due_time_and_keeps_the_streak() {
         .and_then(|entry| entry.next_retry_at);
     assert!(before.is_some(), "a transient failure schedules a retry");
 
-    // The host tightens the knobs; the already-scheduled wait moves with it.
     manager.set_defaults(crate::config::McpConfig {
         reconnect_retry_enabled: Some(true),
         reconnect_initial_delay_ms: Some(1),
@@ -1110,9 +994,6 @@ async fn rescheduling_retries_moves_the_due_time_and_keeps_the_streak() {
     manager.shutdown().await;
 }
 
-/// v2 "isolates permanent startup and discovery failures without retry or
-/// blocking the rest": a server that can never start lands `failed` with no
-/// retry, and its neighbour still connects in the same load.
 #[tokio::test]
 async fn a_permanent_failure_does_not_block_the_other_servers() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -1154,10 +1035,6 @@ async fn a_permanent_failure_does_not_block_the_other_servers() {
     manager.shutdown().await;
 }
 
-/// v2 "markRemoved tombstones the entry" (connection-manager.test.ts:195-241):
-/// the entry stays listed as `removed` with no tools, `reconnect` refuses it
-/// (it resolves through the live view, hence "Unknown MCP server"), a missing
-/// name reports `false`, and a fresh `configure` revives it.
 #[tokio::test]
 async fn mark_removed_tombstones_the_entry_until_a_fresh_connect() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -1177,6 +1054,17 @@ async fn mark_removed_tombstones_the_entry_until_a_fresh_connect() {
     assert_eq!(entry.status, "removed");
     assert_eq!(entry.tool_count, 0);
     assert!(manager.clients.read().await.get("mock").is_none());
+    let tool_name = "mcp__mock__mock_sample_tool";
+    assert!(manager.is_removed_tool(tool_name).await);
+    let removed = manager
+        .call_tool(tool_name, &json!({}), None)
+        .await
+        .expect("a removed tool keeps its callable tombstone");
+    assert!(removed.is_error);
+    assert_eq!(
+        removed.content,
+        "MCP server for tool \"mcp__mock__mock_sample_tool\" has been removed (plugin uninstalled or config deleted). Do not call this tool again."
+    );
 
     let err = manager
         .reconnect("mock")
@@ -1186,18 +1074,21 @@ async fn mark_removed_tombstones_the_entry_until_a_fresh_connect() {
     assert_eq!(status_of(&manager, "mock").await, "removed");
     assert!(!manager.mark_removed("missing").await);
 
-    // A fresh configuration is what revives it (v2 `connect`/`upsert`).
     manager
         .configure("mock", McpServerRecipe::Mock, McpServerOptions::default())
         .await
         .expect("a fresh connect revives the server");
     assert_eq!(status_of(&manager, "mock").await, "connected");
+    assert!(!manager.is_removed_tool(tool_name).await);
+    assert!(
+        manager
+            .call_tool(tool_name, &json!({}), None)
+            .await
+            .is_some_and(|result| !result.is_error)
+    );
     manager.shutdown().await;
 }
 
-/// v2 "markRemoved … in-flight connects invalidated": a handshake that lands
-/// after the removal is discarded — the entry keeps its tombstone and no
-/// client is registered.
 #[tokio::test]
 async fn a_handshake_that_lands_after_removal_does_not_revive_the_entry() {
     let (url, _seen, _shutdown) =
@@ -1222,7 +1113,7 @@ async fn a_handshake_that_lands_after_removal_does_not_revive_the_entry() {
                 .await
         })
     };
-    // The mock holds `initialize` for 300 ms; the removal lands inside it.
+
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     assert!(manager.mark_removed("slow").await);
 
@@ -1239,10 +1130,6 @@ async fn a_handshake_that_lands_after_removal_does_not_revive_the_entry() {
     manager.shutdown().await;
 }
 
-/// v2 `withTimeout` wraps connect **and** discovery
-/// (connection-manager.ts:594-611): a server that answers `initialize` but
-/// never returns `tools/list` must fail on the startup budget instead of
-/// hanging until the caller gives up.
 #[tokio::test]
 async fn a_hanging_tools_list_fails_on_the_startup_budget() {
     let (url, seen, _shutdown) =
@@ -1273,7 +1160,7 @@ async fn a_hanging_tools_list_fails_on_the_startup_budget() {
         started.elapsed() < std::time::Duration::from_secs(5),
         "the startup budget, not the caller's patience, must end the connect"
     );
-    // The handshake itself succeeded — discovery is the half that timed out.
+
     let methods: Vec<String> = seen
         .lock()
         .await
@@ -1284,8 +1171,6 @@ async fn a_hanging_tools_list_fails_on_the_startup_budget() {
     assert!(methods.iter().any(|method| method == "tools/list"));
 }
 
-/// A Streamable HTTP server is discovered through the `http` recipe
-/// (v2 `HttpMcpClient`).
 #[tokio::test]
 async fn test_http_recipe_discovers_tools() {
     let (url, _seen, _shutdown) =
@@ -1318,8 +1203,6 @@ async fn test_http_recipe_discovers_tools() {
     assert_eq!(res.content, "ok");
 }
 
-/// A bare `url` defaults to Streamable HTTP; legacy SSE needs an explicit
-/// transport (v2 config preprocess, config-schema.ts:58-65).
 #[test]
 fn test_recipe_from_config_transport_defaults() {
     let url_only = crate::config::McpServerConfig {
@@ -1358,8 +1241,6 @@ fn test_recipe_from_config_transport_defaults() {
     assert!(recipe_from_config(&unknown).is_none());
 }
 
-/// `shutdown` closes every client and forgets all entries
-/// (v2 `shutdown`, connection-manager.ts:303-308).
 #[tokio::test]
 async fn test_shutdown_closes_every_server() {
     let manager = McpManager::new();
@@ -1381,8 +1262,6 @@ async fn test_shutdown_closes_every_server() {
     }
 }
 
-/// `mark_removed` keeps the entry visible with status `removed` and drops
-/// its tools (v2 `markRemoved`, connection-manager.ts:221-232).
 #[tokio::test]
 async fn test_mark_removed_keeps_entry_without_tools() {
     let manager = McpManager::new();
@@ -1402,8 +1281,6 @@ async fn test_mark_removed_keeps_entry_without_tools() {
     assert!(!manager.mark_removed("never-configured").await);
 }
 
-/// A tool whose inputSchema is not a JSON object fails the whole server
-/// (v2 `assertMcpInputSchema`, mcpCore/types.ts:44-55).
 #[tokio::test]
 async fn test_invalid_input_schema_fails_the_server() {
     let (url, _seen, _shutdown) =
@@ -1432,14 +1309,10 @@ async fn test_invalid_input_schema_fails_the_server() {
     assert!(!manager.handles("mcp__bad-schema__echo").await);
 }
 
-/// `bearerTokenEnvVar` resolves to an `Authorization: Bearer …` header at
-/// connect time, replacing any static Authorization header
-/// (v2 `buildMcpRemoteHeaders`, client-remote.ts:9-23).
 #[tokio::test]
 async fn test_bearer_token_env_var_is_sent() {
     let var = format!("KIMI_TEST_MCP_BEARER_{}", std::process::id());
-    // SAFETY: the variable name is unique to this test process and no
-    // other test reads it.
+
     unsafe { std::env::set_var(&var, "s3cret") };
 
     let (url, seen, _shutdown) =
@@ -1468,12 +1341,9 @@ async fn test_bearer_token_env_var_is_sent() {
         );
     }
 
-    // SAFETY: see above.
     unsafe { std::env::remove_var(&var) };
 }
 
-/// A missing or empty bearer token variable fails the server with the v2
-/// message (client-remote.ts:12-16).
 #[tokio::test]
 async fn test_missing_bearer_token_env_var_fails_the_server() {
     let (url, _seen, _shutdown) =
@@ -1500,14 +1370,8 @@ async fn test_missing_bearer_token_env_var_fails_the_server() {
     assert_eq!(entries[0].error.as_deref(), Some(err.as_str()));
 }
 
-/// A 401 marks the server `needs-auth` instead of `failed`, and an OAuth
-/// credential from the store is injected as a bearer token
-/// (v2 `shouldMarkNeedsAuth` + `resolveOAuthProvider`).
 #[tokio::test]
 async fn test_oauth_token_injection_and_needs_auth_status() {
-    // 1. No credentials + 401 → needs-auth. The OAuth service must be
-    // installed for the flip (v2 `shouldMarkNeedsAuth` returns false when
-    // `oauthService === undefined`).
     let (url, _seen, _shutdown) =
         crate::mcp::http::test_helpers::spawn_mock_http_server("401").await;
     let manager = McpManager::new();
@@ -1529,7 +1393,6 @@ async fn test_oauth_token_injection_and_needs_auth_status() {
     let entries = manager.server_entries().await;
     assert_eq!(entries[0].status, "needs-auth");
 
-    // 2. With stored credentials the token is sent.
     let (url, seen, _shutdown) =
         crate::mcp::http::test_helpers::spawn_mock_http_server("json").await;
     let dir = tempfile::tempdir().unwrap();
@@ -1572,17 +1435,241 @@ async fn test_oauth_token_injection_and_needs_auth_status() {
     );
 }
 
-/// v2's two remaining `needs-auth` edges (`shouldMarkNeedsAuth` +
-/// `peekRejectedGrant`):
-///
-/// - without an OAuth service a 401 is `failed`, not `needs-auth` — no login
-///   could supply a token, so "run /mcp-config login" would be a lie;
-/// - a stored grant the server rejects flips the entry to `needs-auth` **and**
-///   drops the stale record, so the next connect does not replay it
-///   (v2 "flips cached OAuth credentials that require reauth into needs-auth").
+#[tokio::test]
+async fn needs_auth_registers_the_synthetic_authenticate_tool_with_its_disclosure() {
+    for deferred in [false, true] {
+        let (url, _seen, _shutdown) =
+            crate::mcp::http::test_helpers::spawn_mock_http_server("401").await;
+        let manager = McpManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::mcp::oauth::McpOAuthFileStore::new(dir.path()));
+        manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(store)));
+        manager
+            .configure(
+                "auth-srv",
+                McpServerRecipe::Http {
+                    url,
+                    headers: HashMap::new(),
+                    bearer_token_env_var: None,
+                },
+                McpServerOptions {
+                    deferred: Some(deferred),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("401 must fail the connect");
+
+        let name = "mcp__auth-srv__authenticate";
+        let definitions = manager.active_definitions_blocking();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name, name);
+        assert_eq!(definitions[0].source, ToolSource::Mcp);
+        assert_eq!(
+            definitions[0].disclosure,
+            if deferred {
+                ToolDisclosure::Deferred
+            } else {
+                ToolDisclosure::Inline
+            }
+        );
+        assert_eq!(
+            definitions[0].input_schema,
+            json!({"type":"object","properties":{},"additionalProperties":false})
+        );
+        assert_eq!(
+            definitions[0].description,
+            "Authenticate with MCP server \"auth-srv\" via OAuth.\n\nThis server requires an OAuth login that has not yet been completed. Calling this tool starts the authorization flow:\n\n  1. The tool prints an authorization URL.\n  2. **You must show that URL to the user verbatim** and ask them to open it\n     in a browser, sign in, and approve the client.\n  3. The tool blocks (up to 15 minutes) until the browser redirects back to\n     the local callback listener.\n  4. On success, the client reconnects the MCP server and the real tools\n     replace this synthetic tool.\n\nTake no arguments. Treat the URL as sensitive — do not modify it or strip\nquery parameters."
+        );
+        assert!(manager.handles(name).await);
+        assert!(manager.is_tool_available(name).await);
+        assert_eq!(manager.list_tool_infos().await.len(), 1);
+        assert_eq!(manager.deferred_tool_names().await.contains(name), deferred);
+    }
+}
+
+#[tokio::test]
+async fn authenticate_with_an_already_valid_grant_reconnects_and_restores_real_tools() {
+    let (url, seen, _shutdown) =
+        crate::mcp::http::test_helpers::spawn_mock_http_server("oauth").await;
+    let manager = McpManager::new();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::mcp::oauth::McpOAuthFileStore::new(dir.path()));
+    manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(
+        store.clone(),
+    )));
+    manager
+        .configure(
+            "oauth-srv",
+            McpServerRecipe::Http {
+                url: url.clone(),
+                headers: HashMap::new(),
+                bearer_token_env_var: None,
+            },
+            McpServerOptions::default(),
+        )
+        .await
+        .expect_err("the first unauthenticated connect is rejected");
+    let key = crate::mcp::oauth::mcp_oauth_store_key("oauth-srv", &url).unwrap();
+    store
+        .write(
+            &key,
+            &crate::mcp::oauth::McpOAuthTokens {
+                access_token: "oauth-token".into(),
+                refresh_token: None,
+                expires_at_ms: None,
+                token_endpoint: None,
+                client_id: None,
+                client_secret: None,
+                resource: None,
+                obtained_at_ms: None,
+            },
+        )
+        .unwrap();
+
+    let result = manager
+        .call_tool("mcp__oauth-srv__authenticate", &json!({}), None)
+        .await
+        .expect("the synthetic tool is callable");
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "MCP server \"oauth-srv\" already had valid OAuth credentials. Reconnected; real tools are available now."
+    );
+    assert_eq!(manager.server_entries().await[0].status, "connected");
+    assert!(manager.handles("mcp__oauth-srv__echo").await);
+    assert!(!manager.handles("mcp__oauth-srv__authenticate").await);
+    assert!(
+        seen.lock()
+            .await
+            .iter()
+            .any(|request| request.authorization.as_deref() == Some("Bearer oauth-token"))
+    );
+}
+
+#[tokio::test]
+async fn authenticate_streams_the_url_completes_the_callback_and_reconnects() {
+    let (url, _seen, _shutdown) =
+        crate::mcp::http::test_helpers::spawn_mock_http_server("oauth-flow").await;
+    let manager = Arc::new(McpManager::new());
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::mcp::oauth::McpOAuthFileStore::new(dir.path()));
+    manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(
+        store.clone(),
+    )));
+    manager
+        .configure(
+            "flow-srv",
+            McpServerRecipe::Http {
+                url: url.clone(),
+                headers: HashMap::new(),
+                bearer_token_env_var: None,
+            },
+            McpServerOptions::default(),
+        )
+        .await
+        .expect_err("the first unauthenticated connect is rejected");
+    let toolset = crate::tools::NativeToolset::new(dir.path().to_string_lossy().as_ref(), None)
+        .unwrap()
+        .with_mcp(manager.clone());
+    let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let updates_in_call = updates.clone();
+    let on_update = move |update: &crate::tools::ToolUpdate<'_>| {
+        updates_in_call.lock().unwrap().push((
+            update.kind.to_string(),
+            update.text.to_string(),
+            update.custom_kind.map(str::to_string),
+            update.custom_data.cloned(),
+        ));
+    };
+    let mut call = tokio::spawn(async move {
+        toolset
+            .execute_tool_streaming(
+                Some("auth-call"),
+                "mcp__flow-srv__authenticate",
+                &json!({}),
+                Some(&on_update),
+            )
+            .await
+    });
+    let updates_wait = updates.clone();
+    let custom = tokio::select! {
+        result = &mut call => panic!("authenticate finished without an authorization URL: {result:?}"),
+        () = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+            panic!("timed out waiting for the authorization URL")
+        }
+        data = async move {
+            loop {
+                let found = updates_wait.lock().unwrap().iter().find_map(|(_, _, kind, data)| {
+                    if kind.as_deref() == Some("mcp.oauth.authorization_url") {
+                        data.clone()
+                    } else {
+                        None
+                    }
+                });
+                if let Some(data) = found {
+                    return data;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        } => data,
+    };
+    assert_eq!(custom["serverName"], "flow-srv");
+    assert!(custom["waitId"].as_str().is_some_and(|id| !id.is_empty()));
+    let authorization_url = custom["authorizationUrl"].as_str().unwrap();
+    let parsed = url::Url::parse(authorization_url).unwrap();
+    assert_eq!(parsed.path(), "/authorize");
+    let params: HashMap<String, String> = parsed
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let redirect_uri = params["redirect_uri"].clone();
+    let callback = format!("{redirect_uri}?code=the-code&state={}", params["state"]);
+    let now = chrono::Utc::now().timestamp_millis();
+    let expires_at = custom["expiresAt"].as_i64().unwrap();
+    assert!(expires_at > now);
+    assert!(expires_at <= now + 15 * 60 * 1000);
+
+    let response = reqwest::Client::new().get(callback).send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("Sign-in complete"));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+        .await
+        .expect("callback completion finishes the tool")
+        .unwrap()
+        .expect("the synthetic tool is callable");
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(
+        result.content,
+        "MCP server \"flow-srv\" authenticated successfully. The real MCP tools have replaced this synthetic authenticate tool."
+    );
+    assert_eq!(manager.server_entries().await[0].status, "connected");
+    assert!(manager.handles("mcp__flow-srv__echo").await);
+    assert!(!manager.handles("mcp__flow-srv__authenticate").await);
+    let key = crate::mcp::oauth::mcp_oauth_store_key("flow-srv", &url).unwrap();
+    assert_eq!(
+        store
+            .read::<crate::mcp::oauth::McpOAuthTokens>(&format!("{key}-tokens"))
+            .map(|tokens| tokens.access_token),
+        Some("at-1".to_string())
+    );
+    let updates = updates.lock().unwrap();
+    assert_eq!(updates[0].0, "status");
+    assert_eq!(updates[0].1, "Discovering OAuth metadata for flow-srv…");
+    assert!(
+        updates
+            .iter()
+            .any(|(_, text, _, _)| text.contains(authorization_url))
+    );
+    assert!(
+        updates
+            .iter()
+            .any(|(_, text, _, _)| text == "Authorized — reconnecting flow-srv…")
+    );
+}
+
 #[tokio::test]
 async fn a_401_without_oauth_fails_and_a_rejected_grant_flips_to_needs_auth() {
-    // 1. No OAuth service installed: the 401 stays a plain failure.
     let (url, _seen, _shutdown) =
         crate::mcp::http::test_helpers::spawn_mock_http_server("401").await;
     let manager = McpManager::new();
@@ -1604,13 +1691,6 @@ async fn a_401_without_oauth_fails_and_a_rejected_grant_flips_to_needs_auth() {
         "without an OAuth service the 401 cannot be repaired by logging in"
     );
 
-    // 2. A stored grant the server rejects: the startup path lands needs-auth
-    //    with the login hint. v2's startup transition (`failureTarget` →
-    //    `needsAuth`, connection-manager.ts:594) does **not** invalidate the
-    //    stored grant — only the runtime `markNeedsAuth` path does, through
-    //    `peekRejectedGrant` + `invalidateTokensIfCurrent` (:452-473). The
-    //    fork keeps the same asymmetry; the tool-call test below covers the
-    //    invalidating path.
     let (url, _seen, _shutdown) =
         crate::mcp::http::test_helpers::spawn_mock_http_server("401").await;
     let dir = tempfile::tempdir().unwrap();
@@ -1668,14 +1748,10 @@ async fn a_401_without_oauth_fails_and_a_rejected_grant_flips_to_needs_auth() {
     );
 }
 
-/// v2 client-http.test.ts "strips case-variant authorization headers before
-/// injecting the bearer": HTTP header names are case-insensitive, so a static
-/// `authorization` must not survive next to the injected `Authorization`.
 #[test]
 fn a_bearer_env_token_strips_case_variant_authorization_headers() {
     let var = format!("KIMI_TEST_MCP_BEARER_CASE_{}", std::process::id());
-    // SAFETY: the variable name is unique to this test process and no other
-    // test reads it.
+
     unsafe { std::env::set_var(&var, "s3cret") };
     let headers = HashMap::from([
         ("Authorization".to_string(), "Bearer upper".to_string()),
@@ -1699,14 +1775,10 @@ fn a_bearer_env_token_strips_case_variant_authorization_headers() {
         Some("Bearer s3cret")
     );
     assert_eq!(resolved.get("X-Api-Key").map(String::as_str), Some("kept"));
-    // SAFETY: see above.
+
     unsafe { std::env::remove_var(&var) };
 }
 
-/// A 401 on a *tool call* — the handshake already succeeded — flips the
-/// server to `needs-auth`, drops its tools, clears the rejected grant and
-/// hands the caller an actionable message (v2 `markNeedsAuth` from the
-/// tool wrapper, connection-manager.ts:307-347 + tools/mcp.ts:78-91, #3846).
 #[tokio::test]
 async fn test_tool_call_401_flips_server_to_needs_auth() {
     let (url, _seen, _shutdown) =
@@ -1714,8 +1786,7 @@ async fn test_tool_call_401_flips_server_to_needs_auth() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(crate::mcp::oauth::McpOAuthFileStore::new(dir.path()));
     let key = crate::mcp::oauth::mcp_oauth_store_key("stale-srv", &url).unwrap();
-    // Obtained well before this connection, so it is the credential the
-    // 401 rejects rather than a login landing alongside the connect.
+
     store
         .write(
             &key,
@@ -1760,10 +1831,9 @@ async fn test_tool_call_401_flips_server_to_needs_auth() {
         "unexpected content: {}",
         result.content
     );
-    assert!(
-        result.content.contains("/mcp-config login stale-srv"),
-        "the message must name the remedy: {}",
-        result.content
+    assert_eq!(
+        result.content,
+        "MCP server \"stale-srv\" rejected the call with 401 Unauthorized and is now marked needs-auth. Call the mcp__stale-srv__authenticate tool to complete the OAuth login, then retry the original call."
     );
 
     let entries = manager.server_entries().await;
@@ -1781,8 +1851,6 @@ async fn test_tool_call_401_flips_server_to_needs_auth() {
         "the rejected grant must not be replayed on the next connect"
     );
 
-    // A second call finds no tool at all: the flip dropped both the client
-    // and the cached tool, so the model cannot retry into the dead server.
     assert!(
         manager
             .call_tool("mcp__stale-srv__echo", &json!({}), None)
@@ -1792,9 +1860,39 @@ async fn test_tool_call_401_flips_server_to_needs_auth() {
     assert_eq!(manager.server_entries().await[0].status, "needs-auth");
 }
 
-/// A grant obtained moments ago — at or after this connection — is a login
-/// landing concurrently, so the old connection's 401 must neither flip the
-/// entry nor invalidate that credential (v2 `isConcurrentGrant`).
+#[tokio::test]
+async fn tool_call_401_points_to_the_synthetic_authenticate_tool() {
+    let (url, _seen, _shutdown) =
+        crate::mcp::http::test_helpers::spawn_mock_http_server("401-on-call").await;
+    let manager = McpManager::new();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::mcp::oauth::McpOAuthFileStore::new(dir.path()));
+    manager.set_oauth_service(Arc::new(crate::mcp::oauth::McpOAuthService::new(store)));
+    manager
+        .configure(
+            "auth-srv",
+            McpServerRecipe::Http {
+                url,
+                headers: HashMap::new(),
+                bearer_token_env_var: None,
+            },
+            McpServerOptions::default(),
+        )
+        .await
+        .expect("the handshake succeeds before the rejected call");
+
+    let result = manager
+        .call_tool("mcp__auth-srv__echo", &json!({}), None)
+        .await
+        .expect("the rejected call returns a tool result");
+    assert!(result.is_error);
+    assert_eq!(
+        result.content,
+        "MCP server \"auth-srv\" rejected the call with 401 Unauthorized and is now marked needs-auth. Call the mcp__auth-srv__authenticate tool to complete the OAuth login, then retry the original call."
+    );
+    assert!(manager.handles("mcp__auth-srv__authenticate").await);
+}
+
 #[tokio::test]
 async fn test_concurrent_grant_survives_a_call_401() {
     let (url, _seen, _shutdown) =
@@ -1820,7 +1918,6 @@ async fn test_concurrent_grant_survives_a_call_401() {
         .expect("an unauthenticated handshake still succeeds");
     assert!(manager.handles("mcp__racing-srv__echo").await);
 
-    // The user completes the OAuth login while this connection is live.
     store
         .write(
             &key,
@@ -1863,9 +1960,6 @@ async fn test_concurrent_grant_survives_a_call_401() {
     );
 }
 
-/// An image an MCP server returns is preserved into the attachment store
-/// and handed to the model as a reference the resolver can inline, instead
-/// of being flattened into a text preview (v2 #3688).
 #[tokio::test]
 async fn test_mcp_media_is_preserved_and_delivered_as_a_reference() {
     let (url, _seen, _shutdown) =
@@ -1912,9 +2006,6 @@ async fn test_mcp_media_is_preserved_and_delivered_as_a_reference() {
     );
 }
 
-/// v2 `shouldMarkNeedsAuth` decision matrix (connection-manager.ts:383-393):
-/// only remote servers without a static credential flip to `needs-auth`,
-/// and only on a classified HTTP 401 (never on message text sniffing).
 #[test]
 fn test_should_mark_needs_auth_matrix() {
     let http = McpServerRecipe::Http {
@@ -1939,29 +2030,22 @@ fn test_should_mark_needs_auth_matrix() {
         bearer_token_env_var: Some("KIMI_MCP_TOKEN".into()),
     };
 
-    // No OAuth service installed → never needs-auth.
     assert!(!should_mark_needs_auth(&http, false, false, true));
-    // stdio servers never participate in the OAuth flow.
+
     assert!(!should_mark_needs_auth(&stdio, false, true, true));
-    // A pinned static credential means the 401 is a bad header.
+
     assert!(!should_mark_needs_auth(&with_headers, false, true, true));
     assert!(!should_mark_needs_auth(&with_bearer, false, true, true));
-    // Remote without credentials + a classified 401 → needs-auth.
+
     assert!(should_mark_needs_auth(&http, false, true, true));
-    // Non-401 failures (500, connection refused, timeout, …) stay failed,
-    // even if their text happens to contain "401" or "Unauthorized".
+
     assert!(!should_mark_needs_auth(&http, false, true, false));
-    // v2 `config.headers !== undefined && config.auth !== 'oauth'`: an
-    // explicit `auth = "oauth"` says the extra headers are unrelated to the
-    // credential, so the 401 still means "log in".
+
     assert!(should_mark_needs_auth(&with_headers, true, true, true));
-    // A bearer env var is a static credential either way — no flip.
+
     assert!(!should_mark_needs_auth(&with_bearer, true, true, true));
 }
 
-/// A static `headers` block on a 401 server must surface `failed`, not
-/// `needs-auth` — the real error is a bad header, not a missing OAuth
-/// token (v2 `shouldMarkNeedsAuth` headers exemption).
 #[tokio::test]
 async fn test_static_headers_401_is_failed_not_needs_auth() {
     let (url, _seen, _shutdown) =
@@ -1986,13 +2070,10 @@ async fn test_static_headers_401_is_failed_not_needs_auth() {
     );
 }
 
-/// A pinned `bearerTokenEnvVar` on a 401 server must surface `failed`, not
-/// `needs-auth` (v2 `shouldMarkNeedsAuth` bearer exemption).
 #[tokio::test]
 async fn test_bearer_env_var_401_is_failed_not_needs_auth() {
     let var = format!("KIMI_TEST_MCP_BEARER_401_{}", std::process::id());
-    // SAFETY: the variable name is unique to this test process and no
-    // other test reads it.
+
     unsafe { std::env::set_var(&var, "bad-token") };
 
     let (url, _seen, _shutdown) =
@@ -2016,12 +2097,9 @@ async fn test_bearer_env_var_401_is_failed_not_needs_auth() {
         "a pinned bearer token must not flip the entry to needs-auth"
     );
 
-    // SAFETY: see above.
     unsafe { std::env::remove_var(&var) };
 }
 
-/// v2 #4210: a server that declares no `deferred` inherits the `[mcp]
-/// defaultDeferred` section value; an explicit per-server value wins over it.
 #[tokio::test]
 async fn test_default_deferred_applies_and_a_per_server_value_wins() {
     let manager = McpManager::new();
@@ -2066,9 +2144,6 @@ async fn test_default_deferred_applies_and_a_per_server_value_wins() {
     );
 }
 
-/// v2 `McpConnectionManagerOptions.stdioCwd`: a stdio server whose config omits
-/// `cwd` starts in the manager's default — the workspace — and an explicit
-/// `cwd` still wins over it.
 #[test]
 fn the_default_stdio_cwd_fills_a_missing_one() {
     let manager = McpManager::new();
@@ -2095,11 +2170,6 @@ async fn status_of(manager: &McpManager, name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// v2 `failureTarget` + `retryOrFailed`: a transient startup failure schedules
-/// a retry and a due retry walks the entry back through the connect attempt
-/// into `connected`, clearing the streak; a configuration failure never
-/// retries. The scheduled entry is public `failed` plus `nextRetryAt`
-/// (v2 `publicStatusByState`), never a status of its own.
 #[tokio::test]
 async fn a_transient_startup_failure_schedules_a_retry() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -2108,8 +2178,7 @@ async fn a_transient_startup_failure_schedules_a_retry() {
         reconnect_max_delay_ms: Some(1),
         ..Default::default()
     });
-    // A retrying entry needs the scheduler that acts on its due time: without
-    // it the policy reports `failed` on purpose.
+
     manager.start_retry_ticker();
     manager
         .configure("flaky", McpServerRecipe::Mock, McpServerOptions::default())
@@ -2140,7 +2209,6 @@ async fn a_transient_startup_failure_schedules_a_retry() {
         assert_eq!(state.retry_streak, 1);
     }
 
-    // The 1 ms delay jitters down to 0, so the entry is already due.
     manager.retry_due_servers().await;
     let entry = manager
         .server_entries()
@@ -2162,11 +2230,6 @@ async fn a_transient_startup_failure_schedules_a_retry() {
     manager.shutdown().await;
 }
 
-/// v2 suppresses the status events of the retry cycle itself: a due retry does
-/// not flash `pending` (`retryDue`, connection-manager.ts:600-601) and a retry
-/// that fails again does not re-emit `failed` — the public entry was already
-/// failed. A listener sees `pending, connected, failed, connected`, which is
-/// exactly what the v2 weak-evidence test asserts.
 #[tokio::test]
 async fn an_automatic_retry_does_not_re_emit_pending_or_failed() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -2196,13 +2259,10 @@ async fn an_automatic_retry_does_not_re_emit_pending_or_failed() {
         .expect("a status event");
     assert_eq!(first.status, "failed");
 
-    // A second failure lands in retry-waiting again; the public entry stays
-    // `failed`, so v2 emits nothing.
     manager
         .mark_connect_failure("flaky", &failure, "Timed out after 100ms")
         .await;
-    // The 1 ms delay jitters down to 0: the retry is due now. Its transition
-    // to `pending` is suppressed as well, so only the connect outcome shows.
+
     manager.retry_due_servers().await;
     let second = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
         .await
@@ -2216,8 +2276,6 @@ async fn an_automatic_retry_does_not_re_emit_pending_or_failed() {
     manager.shutdown().await;
 }
 
-/// A command that cannot be spawned is a configuration failure (v2
-/// `McpFailureKind` `config`): retrying it would only repeat the same error.
 #[tokio::test]
 async fn a_config_failure_does_not_schedule_a_retry() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -2246,9 +2304,6 @@ async fn a_config_failure_does_not_schedule_a_retry() {
     );
 }
 
-/// v2 `retryOrFailed` + `nextRetryDelayMs`: a transient failure retries only
-/// when the host enabled the retry **and** a scheduler exists to act on the
-/// due time; otherwise it fails outright. The streak grows by one per failure.
 #[test]
 fn the_retry_policy_decides_between_retry_waiting_and_failed() {
     let policy = |enabled, ticker| RetryPolicy {
@@ -2268,7 +2323,6 @@ fn the_retry_policy_decides_between_retry_waiting_and_failed() {
         "the first retry waits 5 s with 50-100 % jitter, got {delay}"
     );
 
-    // A second failure doubles the nominal delay and keeps counting.
     let (_, due, streak) = next_failure_state(policy(true, true), 1, now);
     assert_eq!(streak, 2);
     let delay = due.expect("a due time") - now;
@@ -2277,7 +2331,6 @@ fn the_retry_policy_decides_between_retry_waiting_and_failed() {
         "the second retry doubles, got {delay}"
     );
 
-    // Disabled, or no scheduler: failed, no due time, streak reset.
     assert_eq!(
         next_failure_state(policy(false, true), 3, now),
         ("failed", None, 0)
@@ -2288,10 +2341,6 @@ fn the_retry_policy_decides_between_retry_waiting_and_failed() {
     );
 }
 
-/// v2 `sessionEvidence` / `probeSucceeded`: weak evidence on a healthy session
-/// is silent — the entry keeps its client, tools and streak, and no status
-/// event is emitted because the public entry (`probing` → `connected`) never
-/// changed.
 #[tokio::test]
 async fn weak_evidence_on_a_live_client_keeps_it_connected_silently() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -2338,9 +2387,6 @@ async fn weak_evidence_on_a_live_client_keeps_it_connected_silently() {
     );
 }
 
-/// v2 `probeFailed`: a probe that cannot reach the session fails the entry on
-/// the same ladder a dead transport uses, with `formatUnexpectedCloseError`'s
-/// text, no tools and a scheduled retry exposed as `failed` + `nextRetryAt`.
 #[tokio::test]
 async fn weak_evidence_on_a_dead_client_fails_the_entry_and_schedules_a_retry() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -2362,8 +2408,7 @@ async fn weak_evidence_on_a_dead_client_fails_the_entry_and_schedules_a_retry() 
         .get("remote")
         .cloned()
         .expect("the client is registered");
-    // A closed client cannot answer the ping: this is the "session is dead"
-    // half of v2's weak-evidence branch, reached through `probeMcpLiveness`.
+
     client.close().await;
 
     manager
@@ -2400,8 +2445,6 @@ async fn weak_evidence_on_a_dead_client_fails_the_entry_and_schedules_a_retry() 
     }
 }
 
-/// v2 `shutdown` awaits the entry's operation tail, so a probe still running
-/// when teardown starts is drained before the roster is cleared.
 #[tokio::test]
 async fn shutdown_waits_for_an_in_flight_probe() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -2434,8 +2477,6 @@ async fn shutdown_waits_for_an_in_flight_probe() {
         .expect("shutdown does not panic");
 }
 
-/// v2 `resolveClientName` (connection-manager.ts:834): the identity the host
-/// sets is what every connected client announces, not the builtin name.
 #[tokio::test]
 async fn a_connected_client_announces_the_managers_identity() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -2459,9 +2500,6 @@ async fn a_connected_client_announces_the_managers_identity() {
     manager.shutdown().await;
 }
 
-/// v2 `upsert` (connection-manager.ts:334-353): a live entry whose
-/// configuration is unchanged is returned as it is, so running the same
-/// configuration twice must not retire a connected client.
 #[tokio::test]
 async fn configuring_a_live_server_with_the_same_config_is_a_no_op() {
     let manager = std::sync::Arc::new(McpManager::new());
@@ -2493,8 +2531,6 @@ async fn configuring_a_live_server_with_the_same_config_is_a_no_op() {
         "an unchanged config must keep the live client instead of reconnecting"
     );
 
-    // A changed config is not a no-op: the filter differs, so the entry is
-    // rebuilt and the old client replaced.
     manager
         .configure(
             "mock",
@@ -2520,19 +2556,10 @@ async fn configuring_a_live_server_with_the_same_config_is_a_no_op() {
     manager.shutdown().await;
 }
 
-/// v2 `shutdown` cancels in-flight startup ("serializes replacement close and
-/// tracks disabled or removed clients through shutdown"): a connect that is
-/// still handshaking is not in `clients` yet, so draining `clients` would leave
-/// its child running until the startup timeout. The abort has to drop the
-/// connect future — and `kill_on_drop` takes the child with it — which shows up
-/// as `connect_all`'s task settling immediately instead of at the timeout.
 #[tokio::test]
 async fn shutdown_aborts_an_in_flight_startup() {
     let manager = std::sync::Arc::new(McpManager::new());
-    // A server that never speaks the protocol: it stays alive and silent, so
-    // the handshake can only end through the startup timeout or an abort. One
-    // process, not a shell wrapper — a surviving grandchild would keep the
-    // runtime's child reaper alive and hide how fast the abort settles.
+
     let (command, args): (String, Vec<String>) = if cfg!(windows) {
         (
             "powershell.exe".to_string(),
@@ -2555,7 +2582,7 @@ async fn shutdown_aborts_an_in_flight_startup() {
         },
         McpServerOptions::default(),
     )]);
-    // Let the child spawn and the handshake begin before the teardown.
+
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     manager.shutdown().await;
@@ -2568,8 +2595,6 @@ async fn shutdown_aborts_an_in_flight_startup() {
     settled.expect("connect_all's task must not panic when aborted");
 }
 
-/// A second shutdown must be a no-op: the ledger is already disposed, so no
-/// teardown step runs twice.
 #[tokio::test]
 async fn shutdown_is_idempotent() {
     let manager = McpManager::new();

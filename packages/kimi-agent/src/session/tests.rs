@@ -8,9 +8,7 @@ use crate::turn_loop::types::{LLMChatParams, LLMChatResponse};
 
 struct ScriptedLlm {
     requests: Arc<std::sync::Mutex<Vec<Vec<LLMMessage>>>>,
-    /// One entry per call: `None` = no gate, `Some(rx)` = await before
-    /// returning. `simple(...)` leaves the vec empty; `with_gate(...)`
-    /// fills it with one Some per response.
+
     gates: Arc<std::sync::Mutex<Vec<Option<tokio::sync::oneshot::Receiver<()>>>>>,
     responses: Arc<std::sync::Mutex<Vec<LLMChatResponse>>>,
 }
@@ -77,11 +75,6 @@ impl LLM for ScriptedLlm {
         let cancel = params.cancel.clone();
         Box::pin(async move {
             if let Some(rx) = gate.and_then(|g| g) {
-                // Real transports select on `params.cancel` while the
-                // request is in flight (types.rs `LLMChatParams::cancel`);
-                // mirror that so a turn cancel cuts a gated response short
-                // instead of racing it, and the call fails with an error
-                // the retry layer never retries.
                 let cancelled = async {
                     match cancel.as_ref() {
                         Some(token) => token.cancelled().await,
@@ -112,11 +105,6 @@ fn text_response(text: &str) -> LLMChatResponse {
 }
 
 fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
-    // The engine pulls the tool table before every LLM call (M1d) and the
-    // goal/plan injection snapshot reads the state bridge at each step
-    // head (M4). With no local handler the server falls back to a stdio
-    // round-trip that stalls for the full timeout, so the session tests
-    // answer both here.
     RpcServer::register_arc(
         &server,
         crate::rpc::types::methods::HOST_LIST_TOOLS,
@@ -132,11 +120,6 @@ fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
         &server,
         crate::rpc::types::methods::HOST_STATE_READ,
         |_params| {
-            // The native host serves no state domain over this bridge (the
-            // SDK's `stateRead` throws for everything but `plan`), so the
-            // engine's local store is the authority. Answering with a
-            // successful `null` instead made the host-first goal branch look
-            // authoritative and hid everything the store held.
             Box::pin(async move {
                 Err(crate::rpc::types::JsonRpcError::internal_error(
                     "host does not support state bridge".to_string(),
@@ -144,9 +127,7 @@ fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
             })
         },
     );
-    // A state write this host does not own answers at once; without a handler
-    // the RPC layer falls back to a stdio round-trip that stalls for the whole
-    // host-state timeout, which would hang every goal fold in these tests.
+
     RpcServer::register_arc(
         &server,
         crate::rpc::types::methods::HOST_STATE_WRITE,
@@ -173,8 +154,6 @@ async fn make_session(llm: Arc<dyn LLM>, callbacks: Arc<dyn HostCallbacks>) -> E
     make_session_with_steer(llm, callbacks, None).await
 }
 
-/// [`make_session`] with a steer slot (#3697), so a test can observe the
-/// per-turn signal the pump publishes and steer firings refresh.
 async fn make_session_with_steer(
     llm: Arc<dyn LLM>,
     callbacks: Arc<dyn HostCallbacks>,
@@ -214,8 +193,6 @@ async fn wait_until<F: FnMut() -> bool>(mut pred: F) {
     panic!("condition not met after yield loop");
 }
 
-/// A disposed session must not keep its pump — and through it the whole
-/// conversation — alive for the life of the process.
 #[tokio::test]
 async fn shutdown_releases_the_pump_and_the_conversation() {
     let server = Arc::new(RpcServer::new());
@@ -239,9 +216,6 @@ async fn shutdown_releases_the_pump_and_the_conversation() {
     );
 }
 
-/// `released()` — the fact `dispose()` promises: it must not resolve
-/// while the pump still holds the conversation, and must resolve once the
-/// pump has exited (ROADMAP §15 D1 / §15.8 S1).
 #[tokio::test]
 async fn released_resolves_only_after_the_pump_exits() {
     let server = Arc::new(RpcServer::new());
@@ -257,8 +231,7 @@ async fn released_resolves_only_after_the_pump_exits() {
 
     let waiter = session.clone();
     let waiting = tokio::spawn(async move { waiter.released().await });
-    // Park the waiter on the oneshot: it is registered but must still be
-    // pending — resolving here would mean the future short-circuited.
+
     tokio::task::yield_now().await;
     assert!(
         !waiting.is_finished(),
@@ -279,8 +252,6 @@ async fn released_resolves_only_after_the_pump_exits() {
     );
 }
 
-/// `released()` is not a one-shot notification: a late waiter (a second
-/// `dispose()`) must still resolve, and must resolve promptly.
 #[tokio::test]
 async fn released_resolves_immediately_once_already_released() {
     let server = Arc::new(RpcServer::new());
@@ -301,8 +272,6 @@ async fn released_resolves_immediately_once_already_released() {
         .expect("a later release must not time out");
 }
 
-/// Every waiter registered before the pump exits is woken by the guard —
-/// two concurrent `dispose()` calls must not strand one of them.
 #[tokio::test]
 async fn released_wakes_every_registered_waiter() {
     let server = Arc::new(RpcServer::new());
@@ -332,13 +301,6 @@ async fn released_wakes_every_registered_waiter() {
     }
 }
 
-/// The pump's teardown also stops the session's background work: v2 does
-/// it as an explicit close step (`stopAllOnExit('Session closed')`), and
-/// the runner is process-wide, so nothing else can reach those tasks
-/// (ROADMAP §15 D2). Removing the `stop_session` call in `pump` makes this
-/// red, which is the point: the primitive has its own tests, but a tested
-/// primitive with an unwired caller is exactly the "logic tested, wiring
-/// not" gap §10.44 records.
 #[tokio::test]
 async fn shutdown_stops_the_sessions_background_tasks() {
     let runner = Arc::new(crate::storage::TaskRunner::new(None));
@@ -390,9 +352,6 @@ async fn shutdown_stops_the_sessions_background_tasks() {
     );
 }
 
-/// `[background].print_background_mode` wire mapping: only `drain` /
-/// `steer` hold a turn receipt, and an unrecognised mode must resolve to
-/// `exit` so a typo cannot stall a run behind the ceiling.
 #[test]
 fn test_print_background_mode_from_wire() {
     assert_eq!(
@@ -416,9 +375,6 @@ fn test_print_background_mode_from_wire() {
     assert!(!PrintBackgroundMode::Exit.waits());
 }
 
-/// The steer prompt the engine hands the model: v2's `<notification>` block
-/// per completed task, with the output preview attached when the runner kept
-/// one.
 #[test]
 fn test_render_task_notifications() {
     use crate::storage::{TaskNotification, TaskStatus};
@@ -478,9 +434,6 @@ fn test_render_task_notifications() {
     );
 }
 
-/// `steer`: a completed background task is fed back to the model as a
-/// follow-up turn, and the original turn's receipt stays pending until that
-/// follow-up has run — the host's `prompt()` covers the whole run.
 #[tokio::test]
 async fn test_print_steer_feeds_task_notifications_back() {
     let runner = Arc::new(crate::storage::TaskRunner::new(None));
@@ -545,8 +498,8 @@ async fn test_print_steer_feeds_task_notifications_back() {
     assert!(
         steer_call.iter().any(|m| {
             m.role == "user"
-                && m.content
-                    .contains("Background task t1 (completed) finished: quick job")
+                && m.content.contains("<notification id=\"task:t1:completed\"")
+                && m.content.contains("quick job completed.")
                 && m.content.contains("done output")
         }),
         "steer turn missing the task notification: {steer_call:?}"
@@ -559,11 +512,6 @@ async fn test_print_steer_feeds_task_notifications_back() {
     );
 }
 
-/// The runner is shared across sessions, so a print turn must not fold
-/// another session's completed task into its own follow-up: the settle
-/// drains only the notifications of the session it belongs to. Both
-/// sessions have a completion pending, so the drain itself is exercised —
-/// the steer turn carries this session's task and only that one.
 #[tokio::test]
 async fn test_print_steer_ignores_another_sessions_notifications() {
     let runner = Arc::new(crate::storage::TaskRunner::new(None));
@@ -632,9 +580,11 @@ async fn test_print_steer_ignores_another_sessions_notifications() {
     assert_eq!(calls.len(), 2, "this session's completion steers one turn");
     let steer_call = &calls[1];
     assert!(
-        steer_call
-            .iter()
-            .any(|m| m.role == "user" && m.content.contains("Background task t-mine")),
+        steer_call.iter().any(|m| {
+            m.role == "user"
+                && m.content
+                    .contains("<notification id=\"task:t-mine:completed\"")
+        }),
         "steer turn missing this session's completion: {steer_call:?}"
     );
     assert!(
@@ -648,14 +598,6 @@ async fn test_print_steer_ignores_another_sessions_notifications() {
     );
 }
 
-/// A print run with an active goal continues the goal itself: the turn
-/// loop renders the follow-up prompt (v2's host loop re-prompted, and no
-/// native host consumes `goal.continuation`), and the receipt rides along
-/// until the continuation turn has run. `drain` on purpose — the goal
-/// continuation is mode-independent, the way v2's goal wait preceded the
-/// mode check. `max_turns: 1` also proves the shared budget stops the
-/// loop: the provider here never completes its goal, so an unbounded run
-/// would spin forever.
 #[tokio::test]
 async fn test_print_run_continues_active_goal() {
     let dir = tempfile::tempdir().unwrap();
@@ -747,9 +689,6 @@ async fn test_print_run_continues_active_goal() {
     );
 }
 
-/// The cron fire a print run injects: the documented `<cron-fire>`
-/// envelope (renderers strip it before display) with the `CronJobOrigin`
-/// the transcript folds into a cron card.
 #[test]
 fn test_render_cron_fire_matches_documented_envelope() {
     let entry = crate::cron::scheduler::CronEntry {
@@ -777,8 +716,6 @@ fn test_render_cron_fire_matches_documented_envelope() {
     );
 }
 
-/// A late delivery reports the real coalesced count and staleness instead
-/// of the hardcoded `coalescedCount="1" stale="false"`.
 #[test]
 fn test_render_cron_fire_reports_coalesced_and_stale() {
     let entry = crate::cron::scheduler::CronEntry {
@@ -803,10 +740,6 @@ fn test_render_cron_fire_reports_coalesced_and_stale() {
     );
 }
 
-/// v2 #4627 `SteerResult`: the receipt carries a prompt identity, creation
-/// time, the state observed at admission, and whether the prompt joined the
-/// active turn. A steer into a running turn reports running + steered; a
-/// normal prompt queued behind it reports queued without steering.
 #[tokio::test]
 async fn a_steer_and_a_queued_prompt_report_distinct_submission_states() {
     let server = Arc::new(RpcServer::new());
@@ -821,9 +754,7 @@ async fn a_steer_and_a_queued_prompt_report_distinct_submission_states() {
     assert!(!first.steered);
     assert!(first.prompt_id.starts_with("prompt-"));
     assert!(!first.created_at.is_empty());
-    // The pump marks the turn active before its first provider call; wait
-    // until that call is in flight (held by the gate) so a steer really
-    // joins a running turn instead of racing admission.
+
     for _ in 0..100 {
         if session.status().active_turn_id.is_some() {
             break;
@@ -855,9 +786,6 @@ async fn a_steer_and_a_queued_prompt_report_distinct_submission_states() {
     let _ = first.outcome().await;
 }
 
-/// v2 #4627 `TurnSteer` fires where the loop consumes a steer into context —
-/// this engine's `drain_steers` seam — and names the host prompt id the
-/// submission minted, which is what lets the host clear the pending row.
 #[tokio::test]
 async fn draining_a_steer_reports_it_read_with_its_prompt_id() {
     let (inner, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
@@ -920,9 +848,6 @@ async fn test_history_accumulates_across_turns() {
     );
 }
 
-/// The fold must not re-include the history a turn was handed: from the
-/// third turn on, a re-folding fold would duplicate every earlier message
-/// in the model's context.
 #[tokio::test]
 async fn test_history_does_not_duplicate_across_three_turns() {
     let server = Arc::new(RpcServer::new());
@@ -1021,12 +946,6 @@ async fn test_cancel_queued_turn_resolves_immediately() {
     assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
-/// A queued turn cancelled before it starts must announce the cancel and
-/// **never** a `turn.ended` — the v2 `cancelWaiter` contract
-/// (`loopService.ts:735-750`: `cancelQueueItem` → `publishPromptAborted`,
-/// with no `TurnEnded` anywhere on that path). A client that only watches
-/// `turn.ended` therefore stays busy forever after such a cancel, which is
-/// exactly why `turn.cancel` has to be a wire event.
 #[tokio::test]
 async fn test_queued_cancel_emits_turn_cancel_and_no_turn_ended() {
     let (llm, gates) = ScriptedLlm::with_gate(vec![text_response("first")]);
@@ -1048,7 +967,6 @@ async fn test_queued_cancel_emits_turn_cancel_and_no_turn_ended() {
         TurnOutcome::CancelledBeforeStart
     ));
 
-    // The cancel is announced…
     let seen = recorded(&events);
     assert!(
         seen.iter().any(|event| matches!(
@@ -1060,7 +978,7 @@ async fn test_queued_cancel_emits_turn_cancel_and_no_turn_ended() {
         )),
         "the queued cancel must reach the host: {seen:?}"
     );
-    // …and the turn that never started reports no end at all.
+
     assert!(
         !seen
             .iter()
@@ -1070,7 +988,7 @@ async fn test_queued_cancel_emits_turn_cancel_and_no_turn_ended() {
 
     gates.into_iter().next().unwrap().send(()).unwrap();
     assert!(matches!(r1.outcome().await.unwrap(), TurnOutcome::Ran(_)));
-    // Only the turn that actually ran closes with `turn.ended`.
+
     let seen = recorded(&events);
     assert_eq!(
         seen.iter()
@@ -1108,10 +1026,6 @@ async fn test_active_or_new_steers_when_active() {
 
 #[tokio::test]
 async fn test_steer_fires_the_turn_signal_and_draining_refreshes_it() {
-    // #3697: a steering message fires the running turn's signal so a
-    // blocking `WaitFor` can end early; once the turn has drained the
-    // message the signal is refreshed, so the next wait is not aborted by
-    // the steer that already ended the previous one.
     let server = Arc::new(RpcServer::new());
     let queue: Arc<Mutex<Vec<LLMMessage>>> = Arc::new(Mutex::new(Vec::new()));
     let slot: Arc<Mutex<Option<crate::subagent::types::ParentCancel>>> = Arc::new(Mutex::new(
@@ -1130,7 +1044,6 @@ async fn test_steer_fires_the_turn_signal_and_draining_refreshes_it() {
     };
     assert!(!current().triggered(), "a turn starts unfired");
 
-    // A steer joins the active turn: queued, and the signal fires.
     queue
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1138,7 +1051,6 @@ async fn test_steer_fires_the_turn_signal_and_draining_refreshes_it() {
     current().trigger();
     assert!(current().triggered());
 
-    // Draining it hands the message to the turn and refreshes the signal.
     let drained = callbacks.drain_steers().await.unwrap();
     assert_eq!(drained.len(), 1);
     assert!(
@@ -1146,8 +1058,6 @@ async fn test_steer_fires_the_turn_signal_and_draining_refreshes_it() {
         "draining must refresh the signal for the next wait"
     );
 
-    // An empty drain must not refresh: nothing was consumed, so a wait that
-    // the steer already ended keeps observing the fire.
     current().trigger();
     let drained = callbacks.drain_steers().await.unwrap();
     assert!(drained.is_empty());
@@ -1227,9 +1137,6 @@ async fn test_active_turn_only_without_active_errors() {
 
 #[tokio::test]
 async fn test_pump_wakes_after_idle_gap() {
-    // Regression: the handle must share the pump's wakeup `Notify`. With a
-    // second one, an enqueue arriving after the pump parked for an idle gap
-    // never woke it — the REPL hung on its second prompt.
     let server = Arc::new(RpcServer::new());
     let llm = Arc::new(ScriptedLlm::simple(vec![
         text_response("one"),
@@ -1247,7 +1154,6 @@ async fn test_pump_wakes_after_idle_gap() {
         Ok(TurnOutcome::Ran(_))
     ));
 
-    // Let the pump reach its idle await before the next enqueue.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let mut r2 = session
@@ -1261,8 +1167,6 @@ async fn test_pump_wakes_after_idle_gap() {
     ));
 }
 
-/// Records every turn event and answers the `turn` state domain from a
-/// fixed value, so clock hydration and event dispatch share one harness.
 struct TurnRecordingCallbacks {
     events: Arc<Mutex<Vec<TurnEvent>>>,
     emitted: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -1360,8 +1264,7 @@ async fn test_turn_events_dispatch_in_order() {
 
     let seen = recorded(&events);
     assert_eq!(seen.len(), 3, "prompt + started + ended: {seen:?}");
-    // v2 #4627: the engine mints the prompt id and echoes it on both turn
-    // events, so a host that submitted the prompt as a steer can pair it.
+
     let prompt_id = match &seen[0] {
         TurnEvent::Prompt {
             turn_id,
@@ -1458,11 +1361,6 @@ async fn test_cancel_dispatches_turn_cancel() {
     );
 }
 
-/// The turn-lifecycle hook wiring: `TurnStarted` when a turn starts,
-/// `UserPromptQueued` when a prompt waits behind an active turn, and
-/// `Interrupt` when the active turn is cancelled — each reaching the
-/// session's hook guard (remove the wiring at any site and its capture
-/// file stays empty).
 #[tokio::test]
 async fn turn_lifecycle_hooks_fire_from_the_session_wiring() {
     use crate::tools::external_hooks::capture;
@@ -1517,8 +1415,6 @@ async fn turn_lifecycle_hooks_fire_from_the_session_wiring() {
     assert_eq!(payload["origin_kind"], "user");
     assert_eq!(payload["prompt"], "first prompt");
 
-    // A prompt enqueued while a turn is active fires UserPromptQueued
-    // (the matcher runs against the prompt text).
     let mut r2 = session
         .enqueue_turn(TurnRequest::user(
             msg("user", "the second prompt"),
@@ -1531,10 +1427,6 @@ async fn turn_lifecycle_hooks_fire_from_the_session_wiring() {
     assert_eq!(queued_payload["prompt"], "the second prompt");
     assert!(queued_payload["queue_length"].as_u64().unwrap() >= 1);
 
-    // Cancelling the active turn ends it with the Aborted stop reason ⇒
-    // Interrupt, and releases the gate so the queued turn can run. The
-    // sleep gives the cancel flag's 25 ms poll time to cancel the token
-    // while the gated LLM call is still in flight.
     assert!(session.cancel_turn(Some(r1.turn_id)));
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     for gate in gates {
@@ -1548,9 +1440,6 @@ async fn turn_lifecycle_hooks_fire_from_the_session_wiring() {
     r2.outcome().await.unwrap();
 }
 
-/// A turn that ends `Failed` (a filtered response) reaches `StopFailure`
-/// with the turn's error code and message — remove the arm at the turn-end
-/// dispatch and the capture file stays empty.
 #[tokio::test]
 async fn stop_failure_hook_fires_for_a_failed_turn() {
     use crate::tools::external_hooks::capture;
@@ -1611,9 +1500,6 @@ async fn stop_failure_hook_fires_for_a_failed_turn() {
     );
 }
 
-/// `SessionHeartbeat` fires only when a listener is configured: no guard
-/// and a guard without the event both stay silent, and the payload
-/// carries the uptime with the (engine-untracked) empty session title.
 #[tokio::test]
 async fn heartbeat_tick_fires_only_for_a_listener() {
     use crate::tools::external_hooks::capture;
@@ -1643,8 +1529,6 @@ async fn heartbeat_tick_fires_only_for_a_listener() {
 
 #[tokio::test]
 async fn test_clock_continues_host_turn_sequence() {
-    // A resumed session keeps counting where the host's fold left off
-    // (v2 `turnKey.nextTurnId` is 0-based), rather than restarting at zero.
     let (callbacks, events) = TurnRecordingCallbacks::new(serde_json::json!({ "nextTurnId": 41 }));
     let llm = Arc::new(ScriptedLlm::simple(vec![text_response("ok")]));
     let session = make_session(llm, Arc::new(callbacks)).await;
@@ -1667,7 +1551,7 @@ async fn test_clock_continues_host_turn_sequence() {
 async fn test_host_without_turn_domain_starts_at_zero() {
     let server = Arc::new(RpcServer::new());
     let llm = Arc::new(ScriptedLlm::simple(vec![text_response("ok")]));
-    // RpcHostCallbacks has no state bridge wired, so the read fails.
+
     let session = make_session(llm, rpc_callbacks(server)).await;
     let receipt = session
         .enqueue_turn(TurnRequest::user(
@@ -1687,8 +1571,6 @@ fn turn_end_reasons_map_onto_v2s_four_values() {
         (Stop::Paused, TurnEndReason::Blocked),
         (Stop::BudgetLimited, TurnEndReason::Blocked),
         (Stop::Aborted, TurnEndReason::Cancelled),
-        // v2 fails the turn on a filtered response (loopService.ts:877-882)
-        // and on step-budget exhaustion (loopService.ts:956-962).
         (Stop::Filtered, TurnEndReason::Failed),
         (Stop::MaxSteps, TurnEndReason::Failed),
         (Stop::Unknown, TurnEndReason::Failed),
@@ -1722,8 +1604,6 @@ fn turn_end_reasons_map_onto_v2s_four_values() {
 
 #[test]
 fn test_turn_failure_payload_classifies_the_llm_status() {
-    // The LLM layer's transport failures carry the HTTP status in the
-    // message (llm/http.rs:287); everything else falls back to `internal`.
     let cases = [
         (
             "llm http status 401 Unauthorized: bad key",
@@ -1752,8 +1632,6 @@ fn test_turn_failure_payload_classifies_the_llm_status() {
         ("connection reset by peer", "provider.connection_error"),
         ("request timed out after 60s", "provider.connection_error"),
         ("tool registry is empty", "internal"),
-        // The shapes the native transport actually produces, wrapped by
-        // the retry layer the way a real turn sees them.
         (
             "LLM call failed after 1 attempts: llm transport error connect: \
                  error sending request for url (http://127.0.0.1:1/v1/chat/completions)",
@@ -1835,8 +1713,7 @@ async fn test_failed_turn_reports_ended_with_error() {
         ),
         "a turn that never produced a stop reason must still close: {seen:?}"
     );
-    // The payload is a protocol `KimiErrorPayload`, not a bare string: the
-    // host's terminal-state display reads `error.code` off it.
+
     let Some(TurnEvent::Ended {
         error: Some(payload),
         ..
@@ -1847,21 +1724,13 @@ async fn test_failed_turn_reports_ended_with_error() {
     assert_eq!(payload["code"], "internal");
     assert_eq!(payload["message"], "provider is offline");
     assert_eq!(payload["retryable"], false);
-    // `turn.ended.error` is a `KimiErrorPayload`; only the separate `error`
-    // event below carries `type` (v2 `turnOps.ts` / `mcpEvents.ts`).
+
     assert!(payload.get("type").is_none(), "{payload}");
-    // v2 dispatches a separate error event alongside the failed turn
-    // (loopService.ts:1533-1537); without it a turn that dies before any
-    // output leaves the user with no explanation at all.
+
     let emitted = emitted.lock().unwrap().clone();
     assert_eq!(
         emitted,
         vec![
-            // The loop opens the step before the request goes out, so a
-            // provider refusal leaves the boundary standing until the step is
-            // closed. v2 closes it with `turn.step.interrupted` (reason
-            // "error") before the turn ends; the engine emits the same event
-            // under its own `llm.step.*` vocabulary.
             serde_json::json!({
                 "type": "llm.step.begin",
                 "agent_id": "main",
@@ -1911,8 +1780,6 @@ async fn test_cancel_without_id_reports_the_active_turn_id() {
     let _ = r1.outcome().await;
 }
 
-// ── M1c: quiescence / backpressure / settled ────────────────────────────
-
 #[tokio::test]
 async fn test_settled_resolves_immediately_when_idle() {
     let server = Arc::new(RpcServer::new());
@@ -1939,7 +1806,7 @@ async fn test_settled_waits_for_active_turn() {
 
     let settled = session.settled();
     tokio::pin!(settled);
-    // The turn is gated open — settled must not resolve while it runs.
+
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), &mut settled)
             .await
@@ -2000,12 +1867,12 @@ async fn test_try_acquire_quiescence_fails_while_turns_outstanding() {
         .enqueue_turn(TurnRequest::user(msg("user", "a"), Admission::NewTurn))
         .unwrap();
     wait_until(|| session.status().active_turn_id == Some(receipt_a.turn_id)).await;
-    // chat pops gates LIFO, so turn a is parked on gates[1].
+
     assert!(
         session.try_acquire_quiescence().is_none(),
         "an active turn must deny quiescence"
     );
-    // A pending turn denies too.
+
     let mut receipt_b = session
         .enqueue_turn(TurnRequest::user(
             msg("user", "b"),
@@ -2016,7 +1883,7 @@ async fn test_try_acquire_quiescence_fails_while_turns_outstanding() {
         session.try_acquire_quiescence().is_none(),
         "a pending turn must deny quiescence"
     );
-    // Finish turn a; turn b starts and parks on the remaining gate.
+
     gates.swap_remove(1).send(()).unwrap();
     let _ = receipt_a.outcome().await;
     wait_until(|| session.status().active_turn_id == Some(receipt_b.turn_id)).await;
@@ -2056,9 +1923,6 @@ async fn test_cancel_held_turn_resolves_and_settles() {
         .expect("the settle wait must not time out");
 }
 
-/// A finished turn folds its usage into the model bucket the pump recorded
-/// (`EngineSession::status().usage`), so the host can read it off the live
-/// session shape without re-deriving anything in TS.
 #[tokio::test]
 async fn usage_is_folded_per_model_and_reported_by_status() {
     let server = Arc::new(RpcServer::new());
@@ -2100,10 +1964,6 @@ async fn usage_is_folded_per_model_and_reported_by_status() {
     assert_eq!(status.usage.current_turn.map(|turn| turn.output), Some(5));
 }
 
-/// v2 undo anchors: a user turn snapshots durable state, a continuation
-/// (goal follow-up / cron fire / task wake) does not. The host's undo can
-/// only cut user turns, so a continuation checkpoint would shift the stack
-/// against the history and restore the wrong state.
 #[tokio::test]
 async fn user_turns_checkpoint_state_and_continuations_do_not() {
     struct CountingCallbacks {
@@ -2184,10 +2044,6 @@ async fn user_turns_checkpoint_state_and_continuations_do_not() {
     );
 }
 
-/// The undo-anchor rule mirrors the host's `isUndoAnchorPrompt`
-/// (`sdk-client/helpers.ts`): plain user prompts and user-slash skill /
-/// plugin commands anchor, everything else — including the user prompt a
-/// steer folds into a running turn — does not.
 #[test]
 fn undo_anchor_origins_match_the_host_predicate() {
     for anchor in [
@@ -2212,9 +2068,6 @@ fn undo_anchor_origins_match_the_host_predicate() {
     }
 }
 
-/// v2 `stopAfterBudgetReached` runs before `settleAbnormalTurn`: a turn
-/// cancelled because the wall-clock budget expired blocks the goal with the
-/// budget reason instead of pausing it as an interruption.
 #[tokio::test]
 async fn settle_goal_blocks_on_a_spent_budget_before_settling_an_abort() {
     use crate::session::goal_turn::{GoalTurnEnd, settle_goal_after_turn};
@@ -2265,9 +2118,6 @@ async fn settle_goal_blocks_on_a_spent_budget_before_settling_an_abort() {
     );
 }
 
-/// v2 `handleTurnEnded` + `blockIfBudgetReached`: a completed turn folds into
-/// the goal and owes a continuation until the budget is spent; the write that
-/// exhausts it blocks the goal with the v2 reason instead.
 #[tokio::test]
 async fn settle_goal_after_turn_folds_blocks_and_continues() {
     use crate::session::goal_turn::{GoalTurnEnd, settle_goal_after_turn};
@@ -2342,9 +2192,6 @@ async fn settle_goal_after_turn_folds_blocks_and_continues() {
     );
 }
 
-/// v2 `loop.notify`: a background task that finishes while an interactive
-/// session is idle starts a turn of its own — the model sees the completion
-/// without the user typing anything.
 #[tokio::test]
 async fn test_interactive_session_wakes_on_a_background_task_completion() {
     let runner = Arc::new(crate::storage::TaskRunner::new(None));
@@ -2374,8 +2221,6 @@ async fn test_interactive_session_wakes_on_a_background_task_completion() {
     };
     let session = EngineSession::new(config).await;
 
-    // The pump is idle and parked when the task settles: the wake has to come
-    // from the runner's notification signal, not from a enqueued prompt.
     runner
         .spawn_task_with_meta(
             crate::storage::TaskSpawnMeta {
@@ -2394,9 +2239,11 @@ async fn test_interactive_session_wakes_on_a_background_task_completion() {
     wait_until(|| !requests.lock().unwrap().is_empty()).await;
     let call = requests.lock().unwrap()[0].clone();
     assert!(
-        call.iter().any(|m| m
-            .content
-            .contains("Background task t-wake (completed) finished: wake job")),
+        call.iter().any(|m| {
+            m.content
+                .contains("<notification id=\"task:t-wake:completed\"")
+                && m.content.contains("wake job completed.")
+        }),
         "the wake turn must carry the completion: {call:?}"
     );
     assert!(
@@ -2877,9 +2724,6 @@ async fn engine_session_driver_forwards_replay_handler_and_status() {
     session.shutdown();
 }
 
-/// RPC callbacks plus a live host goal and captured engine events — the native
-/// host's shape: the goal lifecycle is host-owned, and the engine reports its
-/// folds back through `goal.updated` events.
 struct HostGoalCallbacks {
     inner: Arc<dyn HostCallbacks>,
     goal: crate::rpc::types::GoalContext,
@@ -2919,9 +2763,6 @@ impl HostCallbacks for HostGoalCallbacks {
         &self,
         _: StateWriteRequest,
     ) -> futures_util::future::BoxFuture<'static, Result<StateWriteResponse, String>> {
-        // The native host owns the goal lifecycle but not the engine's state
-        // bridge: it refuses goal writes so the adapter falls back to its
-        // local store (after seeding from `goal()`).
         Box::pin(async { Err("host does not support state bridge".into()) })
     }
 
@@ -2944,11 +2785,6 @@ impl HostCallbacks for HostGoalCallbacks {
     }
 }
 
-/// Interactive sessions continue an active goal themselves (v2
-/// `launchContinuationTurn`): the engine folds the finished turn into the
-/// goal — seeding the local store from the host snapshot first — and queues
-/// the next turn with no prompt receipt. The turn budget, advanced by the fold,
-/// stops the chain after the second turn.
 #[tokio::test]
 async fn test_interactive_session_continues_an_active_goal() {
     let dir = tempfile::tempdir().unwrap();
@@ -3034,7 +2870,6 @@ async fn test_interactive_session_continues_an_active_goal() {
     );
     drop(calls);
 
-    // The fold counted both turns; the budget of two then stopped the chain.
     let goal = store
         .goal_context()
         .expect("the goal was seeded and folded");
@@ -3049,12 +2884,6 @@ async fn test_interactive_session_continues_an_active_goal() {
     assert_eq!(updated, vec![1, 2], "one snapshot per folded turn");
 }
 
-/// v2 #4627 tracks a steer "across turns": a message submitted while a turn
-/// runs but never drained before that turn ends is **not** lost. The queue is
-/// per session (nothing clears it at a turn boundary), so the next turn's
-/// first step drains it and emits `turn.steer`, which is what lets the host
-/// keep the row dimmed across the boundary instead of resetting it on
-/// `turn.ended`.
 #[tokio::test]
 async fn a_steer_that_missed_its_turn_is_read_by_the_next_one() {
     let (callbacks, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
@@ -3068,8 +2897,7 @@ async fn a_steer_that_missed_its_turn_is_read_by_the_next_one() {
     let mut first = session
         .enqueue_turn(TurnRequest::user(msg("user", "hello"), Admission::NewTurn))
         .unwrap();
-    // The pump marks the turn active before its provider call; wait for that
-    // call to be parked so the steer really joins a live turn.
+
     for _ in 0..100 {
         if session.status().active_turn_id.is_some() {
             break;
@@ -3087,12 +2915,9 @@ async fn a_steer_that_missed_its_turn_is_read_by_the_next_one() {
     assert!(steer.steered, "the steer joined the running turn");
     let steer_prompt_id = steer.prompt_id.clone();
 
-    // One response ends the turn: it never reaches a second step, so the
-    // queued steer is not drained there.
     let _ = senders.pop().expect("one gate per request").send(());
     let _ = first.outcome().await;
 
-    // The next turn's first step drains the leftover steer.
     let mut second = session
         .enqueue_turn(TurnRequest::user(msg("user", "next"), Admission::NewTurn))
         .unwrap();
@@ -3121,7 +2946,6 @@ async fn a_steer_that_missed_its_turn_is_read_by_the_next_one() {
         other => panic!("expected turn.steer, got {other:?}"),
     }
 
-    // The steered message reached the model in the *next* turn's request.
     let second_request = requests
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -3131,16 +2955,11 @@ async fn a_steer_that_missed_its_turn_is_read_by_the_next_one() {
     assert!(
         second_request
             .iter()
-            .any(|message| message.role == "user" && message.content == "late steer"),
+            .any(|message| message.role == "user" && message.content == "next\n\nlate steer"),
         "the steer is in the next turn's context: {second_request:?}"
     );
 }
 
-/// A steer admission never parks behind a turn: with no active turn it opens
-/// one (`running`, `steered = false`), and with one it joins (`steered =
-/// true`). The `queued` state exists for ordinary prompts behind a turn, not
-/// for steers — which is why the host does not need an optimistic row for a
-/// queued steer.
 #[tokio::test]
 async fn an_active_or_new_turn_admission_is_never_queued() {
     let server = Arc::new(RpcServer::new());
@@ -3156,4 +2975,313 @@ async fn an_active_or_new_turn_admission_is_never_queued() {
     assert_eq!(idle.state.as_str(), "running");
     assert!(!idle.steered);
     let _ = idle.outcome().await;
+}
+
+#[tokio::test]
+async fn session_pump_announces_skill_catalog_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let skills = temp.path().join("skills");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&skills).unwrap();
+    let write_skill = |name: &str| {
+        let dir = skills.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} description\n---\n"),
+        )
+        .unwrap();
+    };
+    write_skill("alpha");
+    let toolset = crate::tools::NativeToolset::new(workspace.to_str().unwrap(), None)
+        .unwrap()
+        .with_skill_scan(vec![skills.clone()], Vec::new(), true);
+    let server = Arc::new(RpcServer::new());
+    let llm = Arc::new(ScriptedLlm::simple(vec![
+        text_response("first"),
+        text_response("second"),
+    ]));
+    let requests = llm.requests.clone();
+    let session = EngineSession::new(SessionConfig {
+        steer_trace: None,
+        llm,
+        callbacks: rpc_callbacks(server),
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
+        goal: None,
+        on_before_turn: None,
+        agent_cancel_slot: None,
+        steer_slot: None,
+        hook_guard: None,
+        print_background: None,
+        session_id: Some("sess-change-notifier-skills".into()),
+        task_runner: None,
+        toolset: Some(Arc::new(toolset)),
+        telemetry: None,
+    })
+    .await;
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(msg("user", "first"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    write_skill("beta");
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(msg("user", "second"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].iter().any(|message| {
+            message.content.contains("beta")
+                && message.origin.as_ref().is_some_and(|origin| {
+                    origin["kind"] == "injection" && origin["variant"] == "skills_change"
+                })
+        }),
+        "second turn missing skills_change: {:?}",
+        requests[1]
+    );
+    session.shutdown();
+}
+
+#[tokio::test]
+async fn session_pump_announces_subagent_catalog_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = Arc::new(crate::subagent::SubagentManager::new());
+    let profile = |name: &str| crate::rpc::types::SubagentProfileWire {
+        name: name.into(),
+        description: format!("{name} description"),
+        when_to_use: None,
+        system_prompt: String::new(),
+        tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        prompt_prefix: None,
+        summary_policy: None,
+        subagents: None,
+    };
+    manager
+        .register_profile_snapshot(&[profile("explorer")])
+        .await;
+    let toolset = crate::tools::NativeToolset::new(temp.path().to_str().unwrap(), None)
+        .unwrap()
+        .with_subagents(manager.clone());
+    let server = Arc::new(RpcServer::new());
+    let llm = Arc::new(ScriptedLlm::simple(vec![
+        text_response("first"),
+        text_response("second"),
+    ]));
+    let requests = llm.requests.clone();
+    let session = EngineSession::new(SessionConfig {
+        steer_trace: None,
+        llm,
+        callbacks: rpc_callbacks(server),
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
+        goal: None,
+        on_before_turn: None,
+        agent_cancel_slot: None,
+        steer_slot: None,
+        hook_guard: None,
+        print_background: None,
+        session_id: Some("sess-change-notifier-subagents".into()),
+        task_runner: None,
+        toolset: Some(Arc::new(toolset)),
+        telemetry: None,
+    })
+    .await;
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(msg("user", "first"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    manager
+        .register_profile_snapshot(&[profile("explorer"), profile("reviewer")])
+        .await;
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(msg("user", "second"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].iter().any(|message| {
+            message.content.contains("reviewer (reviewer description)")
+                && message.origin.as_ref().is_some_and(|origin| {
+                    origin["kind"] == "injection" && origin["variant"] == "subagents_change"
+                })
+        }),
+        "second turn missing subagents_change: {:?}",
+        requests[1]
+    );
+    session.shutdown();
+}
+
+#[tokio::test]
+async fn session_pump_announces_workspace_root_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let old = temp.path().join("old");
+    let new = temp.path().join("new");
+    for dir in [&workspace, &old, &new] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let workspace = std::fs::canonicalize(workspace).unwrap();
+    let old = std::fs::canonicalize(old).unwrap();
+    let new = std::fs::canonicalize(new).unwrap();
+    let manager = Arc::new(crate::subagent::SubagentManager::new());
+    let toolset = crate::tools::NativeToolset::new(workspace.to_str().unwrap(), None)
+        .unwrap()
+        .with_extra_roots(vec![old.to_string_lossy().into_owned()])
+        .with_subagents(manager.clone());
+    let server = Arc::new(RpcServer::new());
+    let llm = Arc::new(ScriptedLlm::simple(vec![
+        text_response("first"),
+        text_response("second"),
+    ]));
+    let requests = llm.requests.clone();
+    let session_id = "sess-change-notifier-workspace";
+    let session = EngineSession::new(SessionConfig {
+        steer_trace: None,
+        llm,
+        callbacks: rpc_callbacks(server),
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
+        goal: None,
+        on_before_turn: None,
+        agent_cancel_slot: None,
+        steer_slot: None,
+        hook_guard: None,
+        print_background: None,
+        session_id: Some(session_id.into()),
+        task_runner: None,
+        toolset: Some(Arc::new(toolset)),
+        telemetry: None,
+    })
+    .await;
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(msg("user", "first"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    manager.refresh_session_workspace_roots(
+        session_id,
+        crate::environment::WorkspaceRoots::new(&workspace, vec![new.clone()]).unwrap(),
+    );
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(msg("user", "second"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].iter().any(|message| {
+            message
+                .content
+                .contains(&format!("Added directories: {}.", new.display()))
+                && message
+                    .content
+                    .contains(&format!("Removed directories: {}.", old.display()))
+                && message.origin.as_ref().is_some_and(|origin| {
+                    origin["kind"] == "injection" && origin["variant"] == "workspace_dirs_change"
+                })
+        }),
+        "second turn missing workspace_dirs_change: {:?}",
+        requests[1]
+    );
+    session.shutdown();
+}
+
+#[tokio::test]
+async fn session_pump_announces_agents_md_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let agents_md = temp.path().join("AGENTS.md");
+    std::fs::write(&agents_md, "before\n").unwrap();
+    let toolset = crate::tools::NativeToolset::new(temp.path().to_str().unwrap(), None).unwrap();
+    let server = Arc::new(RpcServer::new());
+    let llm = Arc::new(ScriptedLlm::simple(vec![
+        text_response("first"),
+        text_response("second"),
+    ]));
+    let requests = llm.requests.clone();
+    let session = EngineSession::new(SessionConfig {
+        steer_trace: None,
+        llm,
+        callbacks: rpc_callbacks(server),
+        max_steps: 5,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
+        goal: None,
+        on_before_turn: None,
+        agent_cancel_slot: None,
+        steer_slot: None,
+        hook_guard: None,
+        print_background: None,
+        session_id: Some("sess-change-notifier-agents-md".into()),
+        task_runner: None,
+        toolset: Some(Arc::new(toolset)),
+        telemetry: None,
+    })
+    .await;
+    let mut first = session
+        .enqueue_turn(TurnRequest::user(msg("user", "first"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        first.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    std::fs::write(&agents_md, "after\n").unwrap();
+    let mut second = session
+        .enqueue_turn(TurnRequest::user(msg("user", "second"), Admission::NewTurn))
+        .unwrap();
+    assert!(matches!(
+        second.outcome().await.unwrap(),
+        TurnOutcome::Ran(_)
+    ));
+    let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].iter().any(|message| {
+            message
+                .content
+                .contains("changed on disk after they were injected")
+                && message.origin.as_ref().is_some_and(|origin| {
+                    origin["kind"] == "injection" && origin["variant"] == "agents_md_change"
+                })
+        }),
+        "second turn missing agents_md_change: {:?}",
+        requests[1]
+    );
+    session.shutdown();
 }

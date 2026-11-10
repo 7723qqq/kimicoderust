@@ -1,11 +1,27 @@
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
-/// A minimal authorization server: origin-level AS metadata, dynamic
-/// registration, and a token endpoint. The protected-resource well-known
-/// answers 404, which exercises the fallback to the origin-level metadata.
 pub(crate) async fn spawn_mock_as() -> (String, Arc<Mutex<Vec<String>>>) {
+    spawn_mock_as_inner(None, false).await
+}
+
+pub(crate) async fn spawn_offline_mock_as() -> (String, Arc<Mutex<Vec<String>>>) {
+    spawn_mock_as_inner(None, true).await
+}
+
+pub(crate) async fn spawn_gated_exchange_as()
+-> (String, Arc<Mutex<Vec<String>>>, Arc<Notify>, Arc<Notify>) {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (base, log) = spawn_mock_as_inner(Some((started.clone(), release.clone())), false).await;
+    (base, log, started, release)
+}
+
+async fn spawn_mock_as_inner(
+    exchange_gate: Option<(Arc<Notify>, Arc<Notify>)>,
+    offline: bool,
+) -> (String, Arc<Mutex<Vec<String>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -21,6 +37,7 @@ pub(crate) async fn spawn_mock_as() -> (String, Arc<Mutex<Vec<String>>>) {
             };
             let base = task_base.clone();
             let log = log_task.clone();
+            let exchange_gate = exchange_gate.clone();
             tokio::spawn(async move {
                 let mut buffer = vec![0u8; 32768];
                 let mut read = 0usize;
@@ -60,11 +77,23 @@ pub(crate) async fn spawn_mock_as() -> (String, Arc<Mutex<Vec<String>>>) {
                     .to_string();
                 log.lock().await.push(request.clone());
                 let (status, body) = match path.as_str() {
-                    "/.well-known/oauth-authorization-server" => (
+                    "/.well-known/oauth-protected-resource/mcp" if offline => (
                         200,
                         format!(
-                            r#"{{"authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token","registration_endpoint":"{base}/register"}}"#
+                            r#"{{"authorization_servers":["{base}"],"scopes_supported":["openid"]}}"#
                         ),
+                    ),
+                    "/.well-known/oauth-authorization-server" => (
+                        200,
+                        if offline {
+                            format!(
+                                r#"{{"authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token","registration_endpoint":"{base}/register","scopes_supported":["openid","offline_access"]}}"#
+                            )
+                        } else {
+                            format!(
+                                r#"{{"authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token","registration_endpoint":"{base}/register"}}"#
+                            )
+                        },
                     ),
                     "/register" => (
                         200,
@@ -77,6 +106,12 @@ pub(crate) async fn spawn_mock_as() -> (String, Arc<Mutex<Vec<String>>>) {
                     ),
                     _ => (404, "{}".to_string()),
                 };
+                if path == "/token"
+                    && let Some((started, release)) = exchange_gate
+                {
+                    started.notify_one();
+                    release.notified().await;
+                }
                 let response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{body}",

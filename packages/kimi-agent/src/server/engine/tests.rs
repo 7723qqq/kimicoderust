@@ -102,6 +102,77 @@ async fn session_spec_publishes_the_session_roots_to_the_agent_manager() {
     );
 }
 
+#[tokio::test]
+async fn session_spec_publishes_each_inactive_tool_pattern_once() {
+    let mut spec = spec();
+    spec.policy_snapshot = Some(crate::permission::PolicySnapshot {
+        tools_filter: Some(crate::tools::tool_policy::ToolsFilter {
+            enabled: vec!["NoSuchGlobal".into(), "Bash*".into(), "mcp__github".into()],
+            disabled: vec!["Read".into()],
+        }),
+        ..Default::default()
+    });
+    let hub = Arc::new(EventHub::new());
+    let engine = ServerEngine::new(
+        spec,
+        hub.clone(),
+        Arc::new(SqliteSessionStore::in_memory().unwrap()),
+    );
+    engine
+        .store()
+        .create_session("sess-tool-warnings", None)
+        .unwrap();
+    engine
+        .store
+        .put_state(
+            "agent_config",
+            "sess-tool-warnings",
+            &serde_json::json!({ "profile": "custom" }),
+        )
+        .unwrap();
+    engine
+        .subagent_manager
+        .register_definition(crate::subagent::types::SubagentDefinition {
+            name: "custom".into(),
+            description: "custom".into(),
+            when_to_use: None,
+            system_prompt: "custom".into(),
+            tools: vec!["NoSuchProfile".into()],
+            disallowed_tools: vec!["OtherMissing".into()],
+            prompt_prefix: None,
+            summary_policy: None,
+            model: None,
+            subagents: None,
+        })
+        .await;
+    let mut events = hub.attach();
+
+    engine.session_spec("sess-tool-warnings").await;
+    engine.session_spec("sess-tool-warnings").await;
+
+    assert_eq!(engine.emitted_session_warnings.lock().unwrap().len(), 5);
+    let mut warnings = Vec::new();
+    for _ in 0..5 {
+        let event = events.recv().await.unwrap();
+        let crate::events::EngineEvent::Custom(payload) = &event.event else {
+            panic!("expected a warning payload");
+        };
+        assert_eq!(payload["type"], "warning");
+        assert_eq!(payload["code"], "tool-pattern-no-match");
+        warnings.push(payload["message"].as_str().unwrap().to_string());
+    }
+    assert_eq!(
+        warnings,
+        vec![
+            "Tool pattern \"NoSuchProfile\" in profile \"custom\" tools does not match any registered or built-in tool; it will never activate anything.",
+            "Tool pattern \"OtherMissing\" in profile \"custom\" disallowedTools does not match any registered or built-in tool; it will never activate anything.",
+            "Tool pattern \"NoSuchGlobal\" in the global [tools] config enabled does not match any registered or built-in tool; it will never activate anything.",
+            "Tool pattern \"Bash*\" in the global [tools] config enabled uses wildcards, which only match MCP tools (names starting with \"mcp__\"); it will never activate anything.",
+            "Tool pattern \"mcp__github\" in the global [tools] config enabled matches no tool; use \"mcp__github__*\" to match the whole MCP server.",
+        ]
+    );
+}
+
 fn engine() -> ServerEngine {
     ServerEngine::new(
         spec(),

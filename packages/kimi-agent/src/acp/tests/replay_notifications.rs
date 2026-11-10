@@ -306,7 +306,8 @@ async fn test_acp_prompt_drains_background_task_notifications() {
     }
     let bodies = requests.lock().unwrap();
     assert!(
-        bodies[1].contains("Background task t-wake (completed) finished: wake job"),
+        bodies[1].contains(r#"<notification id=\"task:t-wake:completed\""#)
+            && bodies[1].contains("wake job completed."),
         "the wake turn must carry the rendered notification: {}",
         bodies[1]
     );
