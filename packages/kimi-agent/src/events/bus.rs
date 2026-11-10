@@ -1,5 +1,3 @@
-//! In-process broadcast EventBus for kimi-agent.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -7,7 +5,6 @@ use super::types::EngineEvent;
 
 pub type EventHandler = Arc<dyn Fn(&EngineEvent) + Send + Sync + 'static>;
 
-/// Subscription token used to unsubscribe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Subscription(u64);
 
@@ -17,12 +14,9 @@ struct SubscriberEntry {
     filter: Option<String>,
 }
 
-/// Thread-safe in-process event bus allowing decoupled publishing and subscription.
 #[derive(Default)]
 pub struct EventBus {
     next_id: AtomicU64,
-    /// Entries are `Arc`ed so `publish` can snapshot the list with refcount
-    /// bumps instead of deep copies — it runs once per engine event.
     subscribers: RwLock<Vec<Arc<SubscriberEntry>>>,
 }
 
@@ -34,7 +28,6 @@ impl EventBus {
         }
     }
 
-    /// Subscribe to all events published to the bus.
     pub fn subscribe<F>(&self, handler: F) -> Subscription
     where
         F: Fn(&EngineEvent) + Send + Sync + 'static,
@@ -49,7 +42,6 @@ impl EventBus {
         id
     }
 
-    /// Subscribe only to events matching a specific event type name (e.g. `"tool.native"`).
     pub fn subscribe_filtered<F>(&self, event_type: impl Into<String>, handler: F) -> Subscription
     where
         F: Fn(&EngineEvent) + Send + Sync + 'static,
@@ -64,7 +56,6 @@ impl EventBus {
         id
     }
 
-    /// Remove a subscriber by subscription token.
     pub fn unsubscribe(&self, sub: Subscription) -> bool {
         let mut subs = self.subscribers.write().unwrap();
         if let Some(pos) = subs.iter().position(|s| s.id == sub) {
@@ -75,13 +66,10 @@ impl EventBus {
         }
     }
 
-    /// Live subscriber count.
     pub fn subscriber_count(&self) -> usize {
         self.subscribers.read().unwrap().len()
     }
 
-    /// Subscriber counts for the debug reflection surface: the total, plus a
-    /// per-event-type breakdown of the filtered subscribers.
     pub fn subscriber_snapshot(&self) -> (usize, std::collections::BTreeMap<String, usize>) {
         let subs = self.subscribers.read().unwrap();
         let mut per_type: std::collections::BTreeMap<String, usize> =
@@ -94,12 +82,6 @@ impl EventBus {
         (subs.len(), per_type)
     }
 
-    /// Publish an event to all matching subscribers.
-    ///
-    /// The subscriber list is snapshotted before any handler runs: a handler
-    /// that subscribes or unsubscribes on this thread would otherwise deadlock
-    /// on the write lock this read guard holds. The snapshot is a list of
-    /// `Arc`s, so the hot path pays refcount bumps, not a deep copy.
     pub fn publish(&self, event: &EngineEvent) {
         let subs: Vec<Arc<SubscriberEntry>> = self.subscribers.read().unwrap().clone();
         let ev_type = event.event_type();
@@ -113,7 +95,6 @@ impl EventBus {
         }
     }
 
-    /// Publish a raw JSON value (automatically parsed into [`EngineEvent`]).
     pub fn publish_json(&self, value: serde_json::Value) {
         let event = EngineEvent::from_json(value);
         self.publish(&event);
@@ -187,9 +168,6 @@ mod tests {
         assert_eq!(tool_events.load(Ordering::Relaxed), 1);
     }
 
-    /// A handler that re-enters the bus used to self-deadlock: `publish` held
-    /// the subscriber read lock while invoking handlers, and `subscribe` /
-    /// `unsubscribe` take the write lock.
     #[test]
     fn a_handler_may_subscribe_and_unsubscribe_during_publish() {
         let bus = Arc::new(EventBus::new());
@@ -213,8 +191,6 @@ mod tests {
             turn_id: "turn-1".into(),
             step: 1,
         });
-        // The nested subscriber was added after the snapshot, so it is not
-        // invoked by this publish; only the outer handler ran.
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(bus.subscriber_count(), 1);
         assert!(bus.unsubscribe(own));

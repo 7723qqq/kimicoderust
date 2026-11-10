@@ -1,18 +1,3 @@
-//! Native workflow engine.
-//!
-//! Workflows are JavaScript scripts executed in an embedded QuickJS sandbox
-//! with injected orchestration primitives (`agent`, `parallel`, `pipeline`,
-//! `phase`, `log`, file IO, `fetch`, `search`, `exec`). The App-scoped
-//! [`WorkflowService`] owns the run registry so runs survive across turns.
-//!
-//! Provenance: ported from `agent-core-v2` `src/app/workflow/` at reference
-//! HEAD `a0ccd487` — [`registry`] mirrors `workflowRegistry.ts`, [`runtime`]
-//! mirrors `workflowRuntime.ts` (node:vm there, QuickJS here), and [`host`] +
-//! the service in this module mirror `workflowService.ts` / `workflowTypes.ts`.
-//! The nine `builtin/*.js` scripts are byte-identical copies of
-//! `app/workflow/builtin/` at that HEAD; re-sync them whenever the reference
-//! scripts change.
-
 pub mod code_runtime;
 pub mod host;
 pub mod registry;
@@ -30,10 +15,6 @@ use tokio::sync::Notify;
 pub use registry::{get_builtin, list_builtins, resolve_user_workflow};
 pub use runtime::{SearchHit, WorkflowAgentOpts, WorkflowHost};
 
-/// Process-wide workflow run registry. v2 scoped `WorkflowService` to the App,
-/// i.e. every run outlives a single turn; a global here gives the per-turn
-/// `NativeToolset` that same persistence without threading a handle through
-/// the pipeline.
 static GLOBAL_SERVICE: once_cell::sync::Lazy<WorkflowService> =
     once_cell::sync::Lazy::new(WorkflowService::new);
 
@@ -41,8 +22,6 @@ pub fn global_service() -> &'static WorkflowService {
     &GLOBAL_SERVICE
 }
 
-/// The Kimi home (`KIMI_CODE_HOME`, else `~/.kimi-code`), where user workflows
-/// live under `workflows/`.
 pub fn kimi_home() -> Option<std::path::PathBuf> {
     if let Some(home) = std::env::var_os("KIMI_CODE_HOME") {
         return Some(std::path::PathBuf::from(home));
@@ -51,7 +30,6 @@ pub fn kimi_home() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("HOME"))
         .map(|home| std::path::PathBuf::from(home).join(".kimi-code"))
 }
-/// Script metadata parsed from the `meta` literal and surfaced by `list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowMeta {
     pub name: String,
@@ -96,8 +74,6 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Shared, interior-mutable state of one run. The JS host hooks update the
-/// phase / agent counter in place while the service reads them.
 pub(crate) struct RunState {
     pub run_id: String,
     status: Mutex<WorkflowStatus>,
@@ -161,7 +137,6 @@ impl RunState {
     }
 }
 
-/// App-scoped workflow run registry. Cloneable handle; all clones share runs.
 #[derive(Clone, Default)]
 pub struct WorkflowService {
     runs: Arc<Mutex<HashMap<String, Arc<RunState>>>>,
@@ -185,7 +160,6 @@ impl WorkflowService {
         Self::default()
     }
 
-    /// Start a workflow in the background and return its run id immediately.
     pub fn start(
         &self,
         script: String,
@@ -199,9 +173,6 @@ impl WorkflowService {
         }
 
         let settle = Arc::clone(&entry);
-        // The QuickJS context and its futures are not `Send`, so the run gets
-        // its own current-thread runtime on a dedicated thread instead of a
-        // `tokio::spawn` (the run registry stays shared and `Send`).
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
@@ -242,7 +213,6 @@ impl WorkflowService {
         Some(entry.to_result())
     }
 
-    /// Wait for a run to settle, optionally bounded by `timeout_ms`.
     pub async fn wait(&self, run_id: &str, timeout_ms: Option<u64>) -> Option<WorkflowRunResult> {
         let entry = self.runs.lock().ok()?.get(run_id).cloned()?;
         if *entry.status.lock().unwrap() != WorkflowStatus::Running {
@@ -268,8 +238,6 @@ impl WorkflowService {
             return;
         };
         entry.cancel();
-        // Give the script a moment to unwind, then force-settle a run that is
-        // parked on a host call which does not observe the cancel flag.
         let _ = tokio::time::timeout(
             std::time::Duration::from_millis(100),
             entry.settled.notified(),

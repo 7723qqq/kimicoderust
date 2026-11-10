@@ -1,71 +1,3 @@
-//! Projection layer: `EngineEvent` → `Vec<EntryOp>` (design
-//! `reports/design/RUST-UI-DECOUPLING.md` §1.1, batching addendum §8).
-//!
-//! A pure state machine — no IO, no clock, no terminal. Same events in ⇒ same
-//! ops out, which is what makes recorded-stream replay a valid acceptance
-//! harness.
-//!
-//! ## Relationship to the transcript projector (deliberate divergence, audited
-//! 2026-11-04)
-//!
-//! `server/transcript/project.rs` also consumes `EngineEvent`, into the
-//! `TranscriptOperation` wire the REST/WS clients render. Two consumers, two
-//! output contracts — merging them is wrong. What must not diverge is the
-//! *interpretation* of a shared event; the 2026-11-04 audit of all twelve
-//! events both handle found exactly one drift, fixed here (`tool.native`'s
-//! `is_error` was dropped, so a failed call looked like a success). The shared
-//! decisions live in `kimi_ui_core` (`classify_delta_part` for what a raw
-//! `llm.delta` part is; the projection classification tables) and are gated by
-//! `bun run check:event-coverage`.
-//!
-//! Recorded as *decisions*, not gaps:
-//!
-//! - **`llm.delta`**: the transcript projector does not handle it. The WS
-//!   clients render `assistant.delta` / `stream.segment` (the typed deltas);
-//!   `llm.delta` is the raw napi/stdio transport shape and reaches only this
-//!   projector. Both names it as `Entry` in the classification table, so the
-//!   gate would fail if either projector stopped being reachable.
-//! - **`tool.call.completed`**: the transcript fold keeps `result` structured
-//!   (`frame.output = Some(result)`); this fold extracts display text
-//!   (`tool_result_text`) because an `EntryOp` body is a string. Same event,
-//!   same input, different carrier — the extraction rules are the only thing
-//!   that could drift, and the slice test pins them.
-//! - **`tool.call.started` without a prior announce**: the transcript
-//!   projection *invents* a frame (a snapshot catch-up may see the completion
-//!   first); this fold drops it (an engine-ordering bug must not become an
-//!   entry). Different contracts, different failure posture.
-//! - **`turn.started`**: both create the turn; the transcript one also
-//!   re-anchors its cursor for steers, which `EntryOp`'s linear stream has no
-//!   notion of.
-//!
-//! ## Coalescing
-//!
-//! Raw per-token deltas are merged engine-side, here in the projector (this
-//! crate *is* engine-side), per `CoalescingPolicy`: a pending buffer per entry
-//! stream flushes when it exceeds `max_pending_bytes` or at a boundary (step
-//! end, stream switch, turn end). The time-window trigger
-//! (`flush_interval`) belongs to the drive/emission layer and is out of scope
-//! for a pure function.
-//!
-//! ## Spans
-//!
-//! `SeqSpan` ordinals are stream-local: each entry's deltas are numbered from
-//! 0 by the projector, so interleaved thinking/assistant streams never
-//! false-positive the store's gap check. When emission-side stamping lands
-//! (phase 2, `stream.segment`), spans arrive on the event and pass through
-//! unchanged.
-//!
-//! ## Not projected (deliberate)
-//!
-//! Transport/accounting events produce no entries: `llm.step.begin`,
-//! `llm.step.end` (see `UiVisibility::TransportOnly`), `event.session.*`,
-//! `session.meta.updated`, `event.config.changed`, `cron.fired`,
-//! `goal.budget.limit_reached`, `subagent.*`. Session/meta chrome (title bar,
-//! status line) is host state, not transcript structure; the list-structure
-//! coverage of this layer is turn/tool lifecycle (`turn.started`,
-//! `tool.call.*`, `turn.ended`). `llm.step.end` still triggers a boundary
-//! flush — that is bookkeeping, not projection of the event.
-
 use std::collections::{BTreeMap, HashMap};
 
 use kimi_ui_core::{
@@ -76,10 +8,6 @@ use kimi_ui_core::{
 use super::types::EngineEvent;
 use serde_json::Value;
 
-/// Buffered text of one open entry stream.
-///
-/// `first` is the stream-local ordinal of the first buffered delta; `count`
-/// deltas are buffered, so the flushed span is `[first, first + count - 1]`.
 #[derive(Debug, Default)]
 struct Pending {
     text: String,
@@ -111,32 +39,14 @@ impl Pending {
     }
 }
 
-/// Per-turn projection state.
 #[derive(Debug)]
 struct TurnState {
-    /// The turn this state belongs to; a host-injected entry is only accepted
-    /// for the turn it names.
     turn_id: String,
     alloc: EntryIdAllocator,
-    /// Open text streams keyed by (agent id, kind). A subagent's answer is an
-    /// entry of its own: folding it into the parent's text is how a swarm
-    /// becomes one long paragraph with no way to tell which member said what.
     streams: BTreeMap<(String, EntryKind), EntryId>,
-    /// tool_call_id → (entry, tool name). The name is kept so the snapshot
-    /// fold can keep it visible above the folded result.
     tools: HashMap<String, (EntryId, String)>,
-    /// Open text streams keyed by entry, so interleaved streams coalesce
-    /// independently. BTreeMap: flush order must be deterministic.
     pendings: BTreeMap<EntryId, Pending>,
-    /// Stream-local ordinal the next delta of each entry takes.
     ordinals: BTreeMap<EntryId, u64>,
-    /// subagent_id → (the entry that member's card lives on, the name to show).
-    /// The name is kept because a completion event carries only the result:
-    /// without it the card would settle to "done: <summary>" and lose which
-    /// member produced it. A member is an
-    /// entry of its own: it has its own lifecycle and its own output, and
-    /// folding it into the parent's text is how a swarm becomes one long
-    /// paragraph with no way to tell which member said what.
     subagents: HashMap<String, (EntryId, String)>,
 }
 
@@ -154,8 +64,6 @@ impl TurnState {
     }
 }
 
-/// The projection state machine. One instance spans a session; turn state is
-/// reset per `turn.started`.
 #[derive(Debug)]
 pub struct Projector {
     policy: CoalescingPolicy,
@@ -167,8 +75,6 @@ impl Projector {
         Self { policy, turn: None }
     }
 
-    /// Project one event. Takes the event by value so large payloads (tool
-    /// results) move into the store exactly once — no copies at the seam.
     pub fn project(&mut self, event: EngineEvent) -> Vec<EntryOp> {
         match event {
             EngineEvent::TurnStarted {
@@ -198,13 +104,6 @@ impl Projector {
                 agent_id, delta, ..
             } => self.text_delta(EntryKind::Thinking, &agent_id, &delta),
             EngineEvent::LlmDelta { agent_id, part, .. } => {
-                // The raw transport shape: `{ "type": "text", "text": … }` or
-                // `{ "type": "think", "think": … }` (+ provider aliases). What
-                // a part *is* is one shared answer (kimi_ui_core), so the
-                // transcript projection cannot disagree with this one by
-                // omission. A hidden thinking part is history payload the
-                // engine keeps for replay, never a display entry (v2
-                // `loopService.ts:1573`).
                 if crate::events::is_hidden_delta_part(&part) {
                     return Vec::new();
                 }
@@ -257,20 +156,11 @@ impl Projector {
                 is_error,
                 ..
             } => {
-                // The delta → snapshot fold: flush the argument stream, then
-                // replace the entry wholesale with the full result. A native
-                // result without a matching `tool.call.started` is an engine
-                // ordering bug; the fold drops it rather than invent an entry.
                 let Some(id) = self.tool_entry(&tool_call_id) else {
                     return Vec::new();
                 };
                 let mut ops = self.flush(&id, true);
                 let label = self.tool_label(&tool_call_id);
-                // `EntryOp` has no error arm: the transcript projection keeps
-                // `is_error` structurally (`frame.state = Error`), this one can
-                // only say it in text. Dropping the flag entirely (the previous
-                // behaviour) made a failed native tool call indistinguishable
-                // from a successful one in the entry stream.
                 let body = if is_error {
                     format!("{label}\nerror: {content}")
                 } else {
@@ -291,9 +181,6 @@ impl Projector {
                     return Vec::new();
                 };
                 let mut ops = self.flush(&id, true);
-                // The completion carries the tool's own output. Sealing without
-                // folding it left the card showing only the tool's name: the
-                // user could see that Read ran, never what it found.
                 if let Some(text) = tool_result_text(&result) {
                     let label = self.tool_label(&tool_call_id);
                     ops.push(EntryOp::Upsert {
@@ -335,9 +222,6 @@ impl Projector {
                 is_final,
                 ..
             } => {
-                // The reserved batched wire shape: spans arrive engine-stamped
-                // and pass straight through; the projector adds only the entry
-                // mapping.
                 let (kind, tool_key) = match &stream {
                     StreamKind::Assistant => (EntryKind::AssistantMsg, None),
                     StreamKind::Thinking => (EntryKind::Thinking, None),
@@ -366,13 +250,6 @@ impl Projector {
             EngineEvent::TurnEnded { .. } => {
                 let mut ops = self.flush_all(true);
                 if let Some(turn) = &self.turn {
-                    // A step-end flush already emitted the pending text with
-                    // `is_final = false`, so that stream has nothing left to
-                    // flush here. Sealing it without a final marker would
-                    // record `SealWithoutFinal` on every real turn; an empty
-                    // segment continues the span and closes the stream. Only
-                    // streams that saw a delta get it — an upsert-only entry
-                    // seals cleanly on its own.
                     let flushed: std::collections::BTreeSet<EntryId> = ops
                         .iter()
                         .filter_map(|op| match op {
@@ -398,7 +275,6 @@ impl Projector {
                 ops.push(EntryOp::Barrier);
                 ops
             }
-            // Boundary flush only: step end is transport-only, never an entry.
             EngineEvent::LlmStepEnd { .. } => self.flush_all(false),
             EngineEvent::SubagentSpawned {
                 subagent_id,
@@ -409,9 +285,6 @@ impl Projector {
                 let Some(turn) = self.turn.as_mut() else {
                     return Vec::new();
                 };
-                // A member's card is created once and keeps its identity for
-                // the member's whole life, so completion and failure update the
-                // same entry rather than appending new ones.
                 if turn.subagents.contains_key(&subagent_id) {
                     return Vec::new();
                 }
@@ -438,21 +311,6 @@ impl Projector {
         }
     }
 
-    /// Allocate a user entry the host submitted into the open turn — a steer.
-    ///
-    /// The projector owns the per-turn id allocator, so a host-created row has
-    /// to come through it: an id minted elsewhere would interleave with the
-    /// streamed entries by sequence and paint in the wrong place. The open text
-    /// streams are flushed (final segment) and detached first; after a steer the
-    /// model's next output is a new assistant message, and appending it to the
-    /// pre-steer row would put the answer above the message the user just sent.
-    ///
-    /// Returns the new entry's id and the ops to apply, or `None` when no turn
-    /// with that id is open (a steer the engine refused, or a stale receipt).
-    ///
-    /// The host calls this *after* the admission was accepted, not before: the
-    /// flush detaches the open stream, so allocating a row for a steer the
-    /// engine then refused would split the answer being streamed for nothing.
     pub fn note_user_entry(
         &mut self,
         turn_id: &str,
@@ -473,10 +331,6 @@ impl Projector {
         Some((id, ops))
     }
 
-    /// Resolve the entry for a stream, creating it on first use. Returns the
-    /// id and whether it was created now. Without an active turn, falls back
-    /// to a throwaway UI-local id: deltas before `turn.started` are an engine
-    /// ordering bug and must not crash the projection.
     fn entry_or_create(
         &mut self,
         kind: EntryKind,
@@ -513,12 +367,6 @@ impl Projector {
         (id, true)
     }
 
-    /// Fold a member's terminal state onto the card its spawn created.
-    ///
-    /// A member that never announced itself has no card: inventing one here
-    /// would put a result on screen with no context for what produced it, so
-    /// the terminal event is dropped exactly like a tool result without a
-    /// `tool.call.started`.
     fn settle_subagent(
         &mut self,
         subagent_id: &str,
@@ -558,7 +406,6 @@ impl Projector {
             .unwrap_or_default()
     }
 
-    /// Buffer a text delta onto a stream, flushing when the byte cap trips.
     fn buffer(&mut self, id: EntryId, text: &str, created: bool) -> Vec<EntryOp> {
         let mut ops = Vec::new();
         if created {
@@ -588,9 +435,6 @@ impl Projector {
         }
         let mut ops = Vec::new();
         if created {
-            // The owner is what keeps a subagent's answer out of the parent's
-            // entry: a reader groups by it, and the main agent's own entries
-            // stay unattributed.
             let mut content = EntryContent::new(id.kind, String::new());
             content.agent_id =
                 (agent_id != crate::callbacks::MAIN_AGENT_ID).then(|| agent_id.to_owned());
@@ -603,7 +447,6 @@ impl Projector {
         ops
     }
 
-    /// Flush one stream, if it has buffered bytes.
     fn flush(&mut self, id: &EntryId, is_final: bool) -> Vec<EntryOp> {
         let Some(turn) = self.turn.as_mut() else {
             return Vec::new();
@@ -620,7 +463,6 @@ impl Projector {
         }]
     }
 
-    /// Flush every open stream in deterministic (entry id) order.
     fn flush_all(&mut self, is_final: bool) -> Vec<EntryOp> {
         let Some(turn) = self.turn.as_mut() else {
             return Vec::new();
@@ -647,14 +489,6 @@ impl Default for Projector {
     }
 }
 
-/// The text a `tool.call.completed` result carries.
-///
-/// The wire shape is a JSON value because tools return different things: most
-/// send `{ content: "..." }`, an image read sends a descriptor, an MCP tool
-/// sends the server's own envelope. A result with no textual field renders as
-/// no line rather than as a raw JSON dump — putting a serialized envelope in
-/// front of the user is worse than showing nothing, and the structured form
-/// arrives with the tool-card slice.
 fn tool_result_text(result: &Value) -> Option<String> {
     let direct = result
         .get("content")
@@ -663,8 +497,6 @@ fn tool_result_text(result: &Value) -> Option<String> {
     if let Some(Value::String(text)) = direct {
         return Some(text.clone());
     }
-    // An array of content blocks (`[{type:"text", text:"..."}]`) is the other
-    // shape the wire uses; concatenate the text blocks.
     if let Some(Value::Array(blocks)) = result.get("content") {
         let joined: String = blocks
             .iter()
@@ -684,10 +516,6 @@ mod tests {
     use crate::events::EngineEvent;
     use serde_json::json;
 
-    /// v2 consumes a hidden thinking delta into the assembled message but never
-    /// dispatches it (`agent/loop/loopService.ts:1573`). The raw transport is
-    /// the one place a `think` part reaches this projector, so a `hidden` flag
-    /// there must not open a Thinking entry.
     #[test]
     fn hidden_thinking_delta_projects_nothing() {
         let mut projector = Projector::new(CoalescingPolicy::default());

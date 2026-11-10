@@ -1,25 +1,3 @@
-//! `run_code` sandbox.
-//!
-//! v2 (`a0ccd487`) executes model-authored JavaScript in a fresh subprocess
-//! (`codeExecutor.ts`) with a 512 MB RSS ceiling, a 30 s default timeout and a
-//! 100k-character output budget. This port keeps the same contract but runs the
-//! program in the embedded QuickJS runtime the workflow engine already uses
-//! ([`rquickjs`]).
-//!
-//! The workflow sandbox in [`super::runtime`] is **not** reused as-is: it
-//! injects `readFile` / `writeFile` / `exec` / `fetch` / `search` host
-//! functions and has neither a memory limit nor an interrupt handler. `run_code`
-//! gets its own context with only `console` and a closed `require` allowlist,
-//! plus two hard bounds:
-//!
-//! * `JS_SetMemoryLimit` — allocations beyond [`MEMORY_CAP_BYTES`] fail inside
-//!   QuickJS instead of growing the host process.
-//! * `JS_SetInterruptHandler` — checked against a wall clock deadline, so a
-//!   synchronous `while (true) {}` is interrupted from inside the engine rather
-//!   than by abandoning the thread.
-//!
-//! Every wait on the engine goes through [`crate::primitives::deadline`].
-
 #![cfg_attr(not(feature = "workflow-js"), allow(dead_code))]
 
 #[cfg(feature = "workflow-js")]
@@ -39,18 +17,12 @@ use crate::primitives::deadline::Deadline;
 #[cfg(feature = "workflow-js")]
 use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Function, Promise};
 
-/// v2 `DEFAULT_MEMORY_LIMIT_BYTES` (`codeRuntime.ts`).
 pub const MEMORY_CAP_BYTES: usize = 512 * 1024 * 1024;
-/// v2 `runCodeTool.ts` default execution budget.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-/// v2 `runCodeTool.ts` lower bound.
 pub const MIN_TIMEOUT_MS: u64 = 1_000;
-/// v2 `runCodeTool.ts` upper bound.
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
-/// v2 `DEFAULT_MAX_OUTPUT_CHARS` (`codeRuntime.ts`).
 pub const MAX_OUTPUT_CHARS: usize = 100_000;
 
-/// Resource bounds for one program.
 #[derive(Debug, Clone, Copy)]
 pub struct CodeRunLimits {
     pub timeout_ms: u64,
@@ -68,15 +40,12 @@ impl Default for CodeRunLimits {
     }
 }
 
-/// A failed program run. `kind` uses the v2 vocabulary (`codeRuntime.ts`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeRunError {
     pub kind: &'static str,
     pub message: String,
 }
 
-/// What `execute_code` reports back: captured console lines, the completion
-/// value (`None` for `undefined`) and at most one error.
 #[derive(Debug, Clone, Default)]
 pub struct CodeRunOutcome {
     pub logs: Vec<String>,
@@ -97,11 +66,6 @@ impl CodeRunOutcome {
     }
 }
 
-/// Run `code` in a fresh sandbox.
-///
-/// The caller owns the outer hard bound: this function returns as soon as the
-/// interrupt handler trips or the engine goes idle, and never observes the
-/// host filesystem.
 pub async fn execute_code(code: &str, limits: CodeRunLimits) -> CodeRunOutcome {
     #[cfg(feature = "workflow-js")]
     {
@@ -125,9 +89,6 @@ async fn execute_code_js(code: &str, limits: CodeRunLimits) -> CodeRunOutcome {
     };
     runtime.set_memory_limit(limits.memory_limit_bytes).await;
 
-    // The interrupt handler runs inside QuickJS, on this thread, while the
-    // program is executing. It must not depend on a tokio timer: a synchronous
-    // loop never yields, so an external `timeout` would never be polled.
     let wall_deadline = Instant::now() + Duration::from_millis(limits.timeout_ms);
     let interrupted = Arc::new(AtomicBool::new(false));
     {
@@ -170,9 +131,6 @@ async fn execute_code_js(code: &str, limits: CodeRunLimits) -> CodeRunOutcome {
                 Err(error) => return classify_engine_error(&ctx, error, &interrupted),
             };
 
-            // The wrap is an async IIFE: the synchronous part (including a
-            // dead loop) has already run by the time `eval` returns, and a
-            // pending `await` is bounded by the shared deadline below.
             match deadline
                 .wait("waiting for the program to finish", promise.into_future::<String>())
                 .await
@@ -185,9 +143,6 @@ async fn execute_code_js(code: &str, limits: CodeRunLimits) -> CodeRunOutcome {
         .await
     };
 
-    // Stop interrupts before draining the job queue. These phases have no
-    // reference counterpart and therefore no bound: the reference's only
-    // timer is the execution watchdog itself.
     let _ = runtime.set_interrupt_handler(None).await;
     let _ = runtime.idle().await;
     drop(context);
@@ -269,10 +224,6 @@ struct Envelope {
     message: Option<String>,
 }
 
-/// Apply the shared output budget to a program that finished. Mirrors
-/// `prepareCompletion` in `codeShimSource.ts`: a truncated log stream leaves
-/// no room for a completion value, and an unserializable completion is an
-/// `invalid-output` error.
 #[cfg(feature = "workflow-js")]
 fn finish_success(envelope: String, logs: Vec<String>, remaining: usize) -> CodeRunOutcome {
     let envelope: Envelope = match serde_json::from_str(&envelope) {
@@ -353,8 +304,6 @@ fn static_kind(kind: Option<&str>) -> &'static str {
     }
 }
 
-/// Console budget shared with the Rust host. v2 starts at two characters (the
-/// empty `[]` envelope), then charges each line plus its separator.
 struct LogBuffer {
     max_chars: usize,
     chars: usize,

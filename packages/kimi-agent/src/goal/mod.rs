@@ -1,27 +1,7 @@
-//! Goal domain pure functions, ported from the v2 goal feature
-//! (`agent-core-v2/src/features/goal/`): wire types, snapshot
-//! serialization, budget conversion, and reminder rendering helpers.
-//!
-//! The engine receives the durable goal state from the host via the state
-//! bridge (`host/state_read {domain: "goal"}`), projects it into a
-//! [`GoalSnapshot`] with [`to_snapshot`], and renders model-facing output
-//! with [`goal_for_model`] / [`goal_result_for_model`]. Budget conversion
-//! ([`normalize_budget_input`] / [`budget_limits_from_input`] /
-//! [`to_milliseconds`]) mirrors the v2 SetGoalBudget tool.
-
 use serde::{Deserialize, Serialize};
 
 pub mod judge;
 
-/// Goal status, mirroring v2 `GoalStatus`.
-///
-/// This is the **persistence** spelling (`budget_limited`, `usage_limited`)
-/// used by `StateStore`'s `goal` domain — it is what lands in `goal.json` on
-/// disk. The host wire uses a different spelling for the same six states
-/// (`budgetLimited`), spelled [`crate::rpc::types::GoalStatus`]; the two are
-/// separate contracts on separate boundaries, and the serde attributes below are
-/// what keep them apart. Do not "unify" them — `state_store` must keep reading
-/// the files it already wrote, and the host must keep seeing camelCase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
@@ -34,7 +14,6 @@ pub enum GoalStatus {
 }
 
 impl GoalStatus {
-    /// The wire string for this status.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -47,8 +26,6 @@ impl GoalStatus {
     }
 }
 
-/// Budget limits, mirroring v2 `GoalBudgetLimits` (camelCase wire fields;
-/// absent limits are omitted).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalBudgetLimits {
@@ -60,8 +37,6 @@ pub struct GoalBudgetLimits {
     pub wall_clock_budget_ms: Option<u64>,
 }
 
-/// Budget report, mirroring v2 `GoalBudgetReport` (camelCase wire fields;
-/// absent budgets serialize as `null`, like the v2 `number | null` fields).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalBudgetReport {
@@ -79,8 +54,6 @@ pub struct GoalBudgetReport {
     pub output_tokens_used: u64,
 }
 
-/// Durable goal state as stored by the host, mirroring v2 `GoalState` (the
-/// `state_read` value for the goal domain).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalState {
@@ -100,24 +73,15 @@ pub struct GoalState {
     pub budget_limits: GoalBudgetLimits,
     #[serde(default)]
     pub terminal_reason: Option<String>,
-    /// Whether the host has reported this goal back to the engine. A host
-    /// that owns goals and reports none can only have cleared a goal it knew
-    /// about; an engine-created goal the host has not adopted yet must survive
-    /// that report.
     #[serde(default)]
     pub host_owned: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
-/// v2 `MAX_GOAL_OBJECTIVE_LENGTH` (`features/goal/goalService.ts:83`).
 pub const MAX_GOAL_OBJECTIVE_CHARS: usize = 4000;
 
 impl GoalState {
-    /// Edit the current goal's objective in place (v2 #4568
-    /// `editGoalObjective`). A completed goal is terminal; the input is
-    /// trimmed and bounded like a create. Returns `false` when the objective
-    /// is unchanged, so the caller can skip the state write and event.
     pub fn edit_objective(&mut self, objective: &str) -> Result<bool, String> {
         if self.status == GoalStatus::Complete {
             return Err(format!(
@@ -142,8 +106,6 @@ impl GoalState {
         Ok(true)
     }
 
-    /// The live wall-clock figure: the settled elapsed time plus the time
-    /// since the last resume for an active goal (v2 `liveWallClockMs`).
     pub fn live_wall_clock_ms(&self, now_ms: u64) -> u64 {
         if self.status == GoalStatus::Active
             && let Some(resumed_at) = self.wall_clock_resumed_at
@@ -153,8 +115,6 @@ impl GoalState {
         self.wall_clock_ms
     }
 
-    /// Project this state with the live wall-clock figure read from the
-    /// system clock (v2 `toSnapshot` on the runtime's live state).
     pub fn snapshot_now(&self) -> GoalSnapshot {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -164,8 +124,6 @@ impl GoalState {
     }
 }
 
-/// Model-facing goal snapshot, mirroring v2 `GoalSnapshot` (camelCase wire
-/// fields; optional fields are omitted when absent).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalSnapshot {
@@ -186,9 +144,6 @@ pub struct GoalSnapshot {
     pub updated_at: u64,
 }
 
-/// Project the durable state into a snapshot, mirroring v2 `toSnapshot`.
-/// `wall_clock_ms` is the live wall-clock figure the caller computes (the
-/// v2 runtime adds the elapsed time since the last resume for active goals).
 pub fn to_snapshot(state: &GoalState, wall_clock_ms: u64) -> GoalSnapshot {
     GoalSnapshot {
         goal_id: state.goal_id.clone(),
@@ -207,8 +162,6 @@ pub fn to_snapshot(state: &GoalState, wall_clock_ms: u64) -> GoalSnapshot {
     }
 }
 
-/// Compute the budget report, mirroring v2 `computeBudgetReport`: reached
-/// flags compare usage against the limits, remaining figures saturate at 0.
 pub fn compute_budget_report(state: &GoalState, wall_clock_ms: u64) -> GoalBudgetReport {
     let token_budget = state.budget_limits.token_budget;
     let turn_budget = state.budget_limits.turn_budget;
@@ -234,8 +187,6 @@ pub fn compute_budget_report(state: &GoalState, wall_clock_ms: u64) -> GoalBudge
     }
 }
 
-/// Model-facing snapshot without `goalId`, mirroring v2
-/// `Omit<GoalSnapshot, 'goalId'>` (the `goalForModel` return type).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalForModel {
@@ -255,14 +206,11 @@ pub struct GoalForModel {
     pub updated_at: u64,
 }
 
-/// Model-facing tool result, mirroring v2 `goalResultForModel`'s return
-/// shape `{goal: Omit<GoalSnapshot, 'goalId'> | null}`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GoalResultForModel {
     pub goal: Option<GoalForModel>,
 }
 
-/// Strip `goalId` from a snapshot, mirroring v2 `goalForModel`.
 pub fn goal_for_model(goal: &GoalSnapshot) -> GoalForModel {
     GoalForModel {
         objective: goal.objective.clone(),
@@ -280,14 +228,12 @@ pub fn goal_for_model(goal: &GoalSnapshot) -> GoalForModel {
     }
 }
 
-/// Build the model-facing tool result, mirroring v2 `goalResultForModel`.
 pub fn goal_result_for_model(goal: Option<&GoalSnapshot>) -> GoalResultForModel {
     GoalResultForModel {
         goal: goal.map(goal_for_model),
     }
 }
 
-/// SetGoalBudget input unit, mirroring v2 `BUDGET_UNITS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetUnit {
     Turns,
@@ -299,7 +245,6 @@ pub enum BudgetUnit {
 }
 
 impl BudgetUnit {
-    /// Parse a wire unit string.
     pub fn parse_unit(s: &str) -> Option<Self> {
         match s {
             "turns" => Some(Self::Turns),
@@ -312,7 +257,6 @@ impl BudgetUnit {
         }
     }
 
-    /// The wire string for this unit.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Turns => "turns",
@@ -325,16 +269,8 @@ impl BudgetUnit {
     }
 }
 
-/// Smallest wall-clock budget the SetGoalBudget tool accepts (v2
-/// `MIN_REASONABLE_TIME_BUDGET_MS`). There is deliberately no upper bound:
-/// upstream removed its former `MAX_REASONABLE_TIME_BUDGET_MS` ceiling, so any
-/// finite duration at or above this floor is accepted.
 pub const MIN_REASONABLE_TIME_BUDGET_MS: u64 = 1_000;
 
-/// Normalize a budget input value, mirroring v2 `normalizeBudgetInput`:
-/// turn/token budgets round to whole numbers and floor at 1; time units
-/// pass through unchanged. Input must be finite (the tool schema rejects
-/// NaN/Infinity upstream).
 pub fn normalize_budget_input(value: f64, unit: BudgetUnit) -> f64 {
     match unit {
         BudgetUnit::Turns | BudgetUnit::Tokens => value.round().max(1.0),
@@ -345,8 +281,6 @@ pub fn normalize_budget_input(value: f64, unit: BudgetUnit) -> f64 {
     }
 }
 
-/// Convert a time-unit value to milliseconds, mirroring v2 `toMilliseconds`.
-/// Returns `None` for turn/token units, which never reach this helper.
 pub fn to_milliseconds(value: f64, unit: BudgetUnit) -> Option<f64> {
     match unit {
         BudgetUnit::Milliseconds => Some(value),
@@ -357,9 +291,6 @@ pub fn to_milliseconds(value: f64, unit: BudgetUnit) -> Option<f64> {
     }
 }
 
-/// Convert a normalized budget input into budget limits, mirroring v2
-/// `budgetLimitsFromInput`. Wall-clock budgets below the 1s floor, or not
-/// finite, yield `None`; there is no upper bound.
 pub fn budget_limits_from_input(value: f64, unit: BudgetUnit) -> Option<GoalBudgetLimits> {
     match unit {
         BudgetUnit::Turns => Some(GoalBudgetLimits {
@@ -388,8 +319,6 @@ pub fn budget_limits_from_input(value: f64, unit: BudgetUnit) -> Option<GoalBudg
     }
 }
 
-/// Render a budget value with its unit, mirroring v2 `formatBudget`
-/// (singular unit when the value is exactly 1).
 pub fn format_budget(value: f64, unit: BudgetUnit) -> String {
     let unit_str = unit.as_str();
     let singular = unit_str.strip_suffix('s').unwrap_or(unit_str);
@@ -400,8 +329,6 @@ pub fn format_budget(value: f64, unit: BudgetUnit) -> String {
     }
 }
 
-/// Format an elapsed duration, mirroring v2 `formatElapsed` (`42s`,
-/// `3m05s`, `1h02m`).
 pub fn format_elapsed(ms: u64) -> String {
     let total_seconds = (ms as f64 / 1000.0).round() as u64;
     if total_seconds < 60 {
@@ -416,8 +343,6 @@ pub fn format_elapsed(ms: u64) -> String {
     format!("{hours}h{:02}m", minutes % 60)
 }
 
-/// Render the budget lines of a goal reminder, mirroring v2 `formatBudgets`
-/// (`turns 3/10 (remaining 7); tokens ...; time ...`).
 pub fn format_budgets(goal: &GoalSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(turn_budget) = goal.budget.turn_budget {
@@ -447,8 +372,6 @@ pub fn format_budgets(goal: &GoalSnapshot) -> String {
     lines.join("; ")
 }
 
-/// Maximum fraction of any budget consumed, mirroring v2 `maxBudgetFraction`
-/// (0 when no budget is set).
 pub fn max_budget_fraction(goal: &GoalSnapshot) -> f64 {
     let mut fractions: Vec<f64> = Vec::new();
     if let Some(budget) = goal.budget.turn_budget.filter(|b| *b > 0) {
@@ -463,53 +386,26 @@ pub fn max_budget_fraction(goal: &GoalSnapshot) -> f64 {
     fractions.into_iter().fold(0.0, f64::max)
 }
 
-/// Whether the goal is nearing any budget (>= 75% consumed), mirroring v2
-/// `isNearingBudget`.
 pub fn is_nearing_budget(goal: &GoalSnapshot) -> bool {
     max_budget_fraction(goal) >= 0.75
 }
 
-// ---------------------------------------------------------------------------
-// Lifecycle reasons and continuation prompts
-// (v2 `goalService.ts` constants; the engine writes these into
-// `terminalReason` and into the continuation turns it queues.)
-// ---------------------------------------------------------------------------
-
-/// v2 `GOAL_BUDGET_BLOCK_PREFIX`: the terminal reason every hard-budget
-/// block starts with. `reason_suffix`/`terminalReason.startsWith` checks
-/// key off this prefix, so it is protocol data.
 pub const GOAL_BUDGET_BLOCK_PREFIX: &str = "Blocked after goal budget reached";
 
-/// v2 `GOAL_RATE_LIMIT_PAUSE_REASON`.
 pub const GOAL_RATE_LIMIT_PAUSE_REASON: &str = "Paused after provider rate limit";
-/// v2 `GOAL_PROVIDER_CONNECTION_PAUSE_PREFIX`.
 pub const GOAL_PROVIDER_CONNECTION_PAUSE_PREFIX: &str = "Paused after provider connection error";
-/// v2 `GOAL_PROVIDER_AUTH_PAUSE_PREFIX`.
 pub const GOAL_PROVIDER_AUTH_PAUSE_PREFIX: &str = "Paused after provider authentication error";
-/// v2 `GOAL_PROVIDER_API_PAUSE_PREFIX`.
 pub const GOAL_PROVIDER_API_PAUSE_PREFIX: &str = "Paused after provider API error";
-/// v2 `GOAL_MODEL_CONFIG_PAUSE_PREFIX`.
 pub const GOAL_MODEL_CONFIG_PAUSE_PREFIX: &str = "Paused after model configuration error";
-/// v2 `GOAL_RUNTIME_PAUSE_PREFIX`.
 pub const GOAL_RUNTIME_PAUSE_PREFIX: &str = "Paused after runtime error";
-/// v2 `GOAL_CONTINUATION_FAILURE_PAUSE_PREFIX`.
 pub const GOAL_CONTINUATION_FAILURE_PAUSE_PREFIX: &str = "Paused after goal continuation failure";
-/// v2 `GOAL_PROVIDER_FILTERED_PAUSE_REASON`.
 pub const GOAL_PROVIDER_FILTERED_PAUSE_REASON: &str = "Paused after provider safety policy block";
-/// v2 `pauseOnInterrupt` reason.
 pub const GOAL_INTERRUPTED_PAUSE_REASON: &str = "Paused after interruption";
 
-/// v2 `GOAL_CONTINUATION_PROMPT`, verbatim: the turn a continuation queues
-/// carries this text. The objective itself arrives through the goal reminder
-/// injection, not through this prompt.
 pub const GOAL_CONTINUATION_PROMPT: &str = "Continue working toward the active goal. Keep the self-audit brief. Do not explore unrelated interpretations once the goal can be decided. If the objective is simple, already answered, impossible, unsafe, or contradictory, do not run another goal turn. Explain briefly if useful, then call UpdateGoal with `complete` or `blocked` in the same turn. Otherwise, weigh the objective and any completion criteria against the work done so far, choose one bounded, useful slice of work, and use the existing conversation context and your tools. Do not try to finish a broad goal in one turn unless the whole goal is genuinely small. Most goal turns should not call UpdateGoal: after completing a useful slice, if material work remains, end the turn normally without calling UpdateGoal so the runtime can continue the goal in the next turn. Call UpdateGoal with `complete` only when all required work is done, any stated validation has passed, and there is no useful next action. Completion audit: before calling `complete`, verify the current state against the actual objective and every explicit requirement. Treat weak or indirect evidence as not complete. Do not mark complete after only producing a plan, summary, first pass, or partial result. Do not mark complete merely because a budget is nearly exhausted or you want to stop. Blocked audit: do not call UpdateGoal with `blocked` the first time you hit a blocker. Use `blocked` only for a genuine impasse: an external condition, required user input, missing credentials or permissions, or a persistent technical failure. For those non-terminal blockers, the same blocking condition must repeat for at least 3 consecutive goal turns before you call `blocked`, counting the original/user-triggered turn and automatic continuations. If a previously blocked goal is resumed, treat the resumed run as a fresh blocked audit. Exception: if the objective itself is impossible, unsafe, or contradictory, call UpdateGoal with `blocked` in the same turn; do not run more goal turns just to satisfy the audit. Do not use `blocked` because the work is large, hard, slow, uncertain, incomplete, still needs validation, would benefit from clarification, or needs more goal turns. Once the 3-turn threshold is met and you cannot make meaningful progress without user input or an external-state change, call UpdateGoal with `blocked`; do not keep reporting the blocker while leaving the goal active. Do not ask the user for input unless a real blocker prevents progress.";
 
-/// v2 `GOAL_STEP_CAP_CONTINUATION_PROMPT` prefix: a continuation that
-/// follows a turn which exhausted its per-turn step budget.
 pub const GOAL_STEP_CAP_CONTINUATION_PREFIX: &str = "The previous goal turn reached the per-turn step limit before finishing its work, so a new turn was started for you. Pick up where that turn stopped and keep each slice of work small enough to fit the limit. ";
 
-/// The continuation prompt a continuation turn carries, mirroring v2
-/// `launchContinuationTurn`'s `stepCapped` selection.
 pub fn continuation_prompt(step_capped: bool) -> String {
     if step_capped {
         format!("{GOAL_STEP_CAP_CONTINUATION_PREFIX}{GOAL_CONTINUATION_PROMPT}")
@@ -518,10 +414,6 @@ pub fn continuation_prompt(step_capped: bool) -> String {
     }
 }
 
-/// The terminal reason a hard-budget block records, mirroring v2
-/// `goalBudgetBlockReason`: `Blocked after goal budget reached: turn budget
-/// N, token budget M, wall-clock budget Kms`. `None` while no budget is
-/// reached.
 pub fn goal_budget_block_reason(budget: &GoalBudgetReport) -> Option<String> {
     let mut reached: Vec<String> = Vec::new();
     if budget.turn_budget_reached
@@ -548,9 +440,6 @@ pub fn goal_budget_block_reason(budget: &GoalBudgetReport) -> Option<String> {
     ))
 }
 
-/// Classify a failed turn onto its v2 goal pause reason, mirroring
-/// `goalFailurePauseReason`. `code` is the protocol error code the turn
-/// failed with; `message` is the failure text when one is available.
 pub fn goal_failure_pause_reason(code: &str, message: Option<&str>) -> String {
     match code {
         "provider.rate_limit" => GOAL_RATE_LIMIT_PAUSE_REASON.to_string(),
@@ -575,8 +464,6 @@ pub fn goal_failure_pause_reason(code: &str, message: Option<&str>) -> String {
     }
 }
 
-/// v2 `pauseReasonWithMessage`: the bare prefix when the message is absent
-/// or blank, `prefix: message` otherwise.
 pub fn pause_reason_with_message(prefix: &str, message: Option<&str>) -> String {
     match message.map(str::trim).filter(|message| !message.is_empty()) {
         Some(message) => format!("{prefix}: {message}"),
@@ -584,16 +471,12 @@ pub fn pause_reason_with_message(prefix: &str, message: Option<&str>) -> String 
     }
 }
 
-/// Escape untrusted goal text for reminder templates, mirroring v2
-/// `escapeUntrustedText` (`&`, `<`, `>`).
 pub fn escape_untrusted_text(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
-/// Render the terminal-reason suffix of a reminder, mirroring v2
-/// `reasonSuffix` (empty when no reason).
 pub fn reason_suffix(goal: &GoalSnapshot) -> String {
     match goal.terminal_reason.as_deref() {
         Some(reason) => format!(" ({})", escape_untrusted_text(reason)),
@@ -601,8 +484,6 @@ pub fn reason_suffix(goal: &GoalSnapshot) -> String {
     }
 }
 
-/// Render the completion-criterion block of a reminder, mirroring v2
-/// `completionCriterionBlock` (empty when no criterion).
 pub fn completion_criterion_block(goal: &GoalSnapshot) -> String {
     match goal.completion_criterion.as_deref() {
         Some(criterion) => format!(
@@ -695,7 +576,6 @@ mod tests {
                 .wall_clock_budget_ms,
             Some(86_400_000)
         );
-        // There is no upper bound: the former 24h ceiling was removed upstream.
         assert_eq!(
             budget_limits_from_input(25.0, BudgetUnit::Hours)
                 .unwrap()
@@ -774,9 +654,6 @@ mod tests {
         assert_eq!(state.status, GoalStatus::Blocked);
     }
 
-    /// v2 #4568 `editGoalObjective`: only an active/paused/blocked goal can
-    /// have its objective edited in place; `complete` is terminal, the input
-    /// is trimmed and bounded, and an unchanged objective is a no-op.
     #[test]
     fn edit_objective_validates_status_and_length() {
         let mut state: GoalState = serde_json::from_value(json!({

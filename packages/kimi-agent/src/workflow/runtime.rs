@@ -1,19 +1,3 @@
-//! Workflow JS sandbox and host primitives.
-//!
-//! Ported from `agent-core-v2` `workflowRuntime.ts` (reference HEAD
-//! `a0ccd487`). The script
-//! runs in an embedded QuickJS context ([`rquickjs`]) as an async IIFE with a
-//! fixed set of injected host functions — no `require`, `process`, or Node API.
-//!
-//! Host functions that cross an `.await` return JSON text to the JS prelude
-//! (`JSON.parse`), never a `Ctx`-bound value: capturing a `Ctx` inside an async
-//! native closure leaves a reference cycle QuickJS cannot collect, which trips
-//! its `list_empty(&rt->gc_obj_list)` assertion when the runtime is freed.
-//!
-//! The embedded engine is behind the `workflow-js` feature. With it off the
-//! pure-Rust helpers stay compiled (they are exercised through the sandbox) but
-//! [`execute_workflow`] reports the engine is unavailable.
-
 #![cfg_attr(not(feature = "workflow-js"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
@@ -32,7 +16,6 @@ use serde_json::Value;
 
 use super::RunState;
 
-/// `agent()` options, matching the v2 `AgentOpts` shape.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WorkflowAgentOpts {
     #[serde(rename = "agentType")]
@@ -52,8 +35,6 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// Host capabilities the sandbox cannot provide itself: subagent spawning and
-/// web search. File IO / exec / fetch are implemented natively in this module.
 #[async_trait]
 pub trait WorkflowHost: Send + Sync {
     async fn spawn_agent(&self, prompt: String, opts: WorkflowAgentOpts) -> Option<Value>;
@@ -65,10 +46,6 @@ pub trait WorkflowHost: Send + Sync {
 const DEFAULT_DEADLINE_MS: u64 = 12 * 60 * 60 * 1000;
 const CANCEL_POLL_MS: u64 = 50;
 
-/// Execute a workflow script and return its (JSON) result.
-///
-/// Without the `workflow-js` feature there is no sandbox to run the script in;
-/// the workflow tool surfaces this string as the failure reason.
 pub(crate) async fn execute_workflow(
     script: &str,
     args: Option<Value>,
@@ -98,8 +75,6 @@ async fn execute_workflow_js(
         .await
         .map_err(|error| error.to_string())?;
 
-    // `export` is module syntax the eval context rejects; the meta literal is
-    // metadata only, so demote it to a plain const before running.
     let script = script.replace("export const meta", "const meta");
     let args_js = args.unwrap_or(Value::String(String::new()));
 
@@ -201,7 +176,6 @@ fn install_globals<'js>(
         )?,
     )?;
 
-    // agent(prompt, optsJson) -> JSON text (or "null")
     {
         let host = host.clone();
         let run = run.clone();
@@ -228,7 +202,6 @@ fn install_globals<'js>(
         )?;
     }
 
-    // search(query) -> JSON array text
     {
         let host = host.clone();
         globals.set(
@@ -247,7 +220,6 @@ fn install_globals<'js>(
         )?;
     }
 
-    // readFile / writeFile / glob / exists are all jailed to the workspace root.
     let root = host.workspace_root();
 
     {
@@ -337,7 +309,6 @@ fn install_globals<'js>(
         )?;
     }
 
-    // exec(command, optsJson) -> JSON text
     {
         let root = root.clone();
         globals.set(
@@ -370,7 +341,6 @@ fn install_globals<'js>(
         )?;
     }
 
-    // fetch(url, optsJson) -> JSON text
     globals.set(
         "__native_fetch",
         Function::new(
@@ -424,7 +394,6 @@ fn install_globals<'js>(
         )?,
     )?;
 
-    // Prelude: wrap the native hooks, define parallel / pipeline / console / URL.
     let prelude = r#"
 globalThis.agent = async (prompt, opts) => JSON.parse(await __native_agent(String(prompt), opts === undefined ? '' : JSON.stringify(opts)));
 globalThis.search = async (query) => JSON.parse(await __native_search(String(query)));
@@ -551,8 +520,6 @@ async fn run_shell(command: &str, cwd: &Path, timeout_ms: u64) -> (String, Strin
         Err(_) => (String::new(), "command timed out".to_string(), 1),
     }
 }
-
-// ── JSON -> JS conversion (sync only; async hooks return JSON text) ────────
 
 #[cfg(feature = "workflow-js")]
 fn json_to_js<'js>(ctx: &Ctx<'js>, value: &Value) -> rquickjs::Result<JsValue<'js>> {

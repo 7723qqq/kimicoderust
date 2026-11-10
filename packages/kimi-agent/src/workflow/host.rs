@@ -1,12 +1,3 @@
-//! `WorkflowHost` backed by the engine's [`SubagentManager`].
-//!
-//! The workflow runtime's `agent()` primitive becomes a real foreground
-//! subagent run; `search()` is bound to a web-search provider when one is
-//! attached via [`SubagentWorkflowHost::with_search`] — the `Workflow` tool
-//! wires the native DuckDuckGo search there. Without a provider `search()`
-//! returns an empty list (a bare `SubagentWorkflowHost` built in a test still
-//! behaves that way).
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,7 +32,6 @@ impl SubagentWorkflowHost {
         }
     }
 
-    /// Attach a synchronous web-search provider (`agent()`-grade results).
     pub fn with_search(mut self, search: Arc<SearchProvider>) -> Self {
         self.search = Some(search);
         self
@@ -57,7 +47,6 @@ impl WorkflowHost for SubagentWorkflowHost {
             .unwrap_or_else(|| "coder".to_string());
         let agent_id = self.manager.spawn(&profile, &prompt).await.ok()?;
 
-        // v2 `spawnAgent`: a schema appends a strict JSON-output instruction.
         let full_prompt = match opts.schema.as_ref() {
             Some(schema) => format!(
                 "{prompt}\n\nYou MUST respond with a JSON object matching this schema:\n{}\n\nReturn ONLY the JSON object, no markdown fences, no explanation.",
@@ -111,8 +100,6 @@ impl WorkflowHost for SubagentWorkflowHost {
     }
 }
 
-/// Parse a subagent summary as JSON: direct, then a fenced block, then the
-/// first `{...}` span. Ported from v2 `parseJsonResult`.
 fn parse_json_result(text: &str) -> Option<Value> {
     if let Ok(value) = serde_json::from_str::<Value>(text) {
         return Some(value);

@@ -1,11 +1,3 @@
-//! Workflow registry: built-in embedded scripts and user `.js` files under
-//! `<home>/workflows/`.
-//!
-//! Ported from `agent-core-v2` `workflowRegistry.ts` (reference HEAD
-//! `a0ccd487`); the meta
-//! extractor is regex-based (no `eval`), accepting only string-keyed string
-//! fields and a string-array `phases`.
-
 use std::path::Path;
 
 use once_cell::sync::Lazy;
@@ -40,7 +32,6 @@ static FIELD: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(\w+)\s*:\s*["']([^"']*?)
 static PHASES: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)phases\s*:\s*\[([\s\S]*?)\]").unwrap());
 static PHASE_ITEM: Lazy<Regex> = Lazy::new(|| Regex::new(r#"["']([^"']*?)["']"#).unwrap());
 
-/// Every built-in workflow, sorted by name.
 pub fn list_builtins() -> Vec<WorkflowMeta> {
     let mut metas: Vec<WorkflowMeta> = BUILTIN_SCRIPTS
         .iter()
@@ -50,7 +41,6 @@ pub fn list_builtins() -> Vec<WorkflowMeta> {
     metas
 }
 
-/// The script and meta of a built-in workflow.
 pub fn get_builtin(name: &str) -> Option<(&'static str, WorkflowMeta)> {
     BUILTIN_SCRIPTS
         .iter()
@@ -58,7 +48,6 @@ pub fn get_builtin(name: &str) -> Option<(&'static str, WorkflowMeta)> {
         .and_then(|(_, script)| parse_meta(script).map(|meta| (*script, meta)))
 }
 
-/// Resolve `<home>/workflows/<name>.js` into its script and meta.
 pub fn resolve_user_workflow(home: &Path, name: &str) -> Option<(String, WorkflowMeta)> {
     if name.is_empty()
         || !name
@@ -72,8 +61,6 @@ pub fn resolve_user_workflow(home: &Path, name: &str) -> Option<(String, Workflo
     Some((script, meta))
 }
 
-/// Extract the `export const meta = { ... }` literal. Returns `None` when
-/// `name` / `description` are missing.
 pub fn parse_meta(script: &str) -> Option<WorkflowMeta> {
     let body = META_BODY.captures(script)?.get(1)?.as_str().to_string();
     let mut fields = std::collections::HashMap::new();

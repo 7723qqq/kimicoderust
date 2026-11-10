@@ -1,5 +1,3 @@
-//! Strongly-typed event definitions for kimi-agent.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -7,15 +5,6 @@ use kimi_ui_core::{SeqSpan, StreamKind};
 
 use crate::rpc::types::TokenUsage;
 
-/// Engine lifecycle and streaming events emitted during a turn.
-///
-/// Every event a turn produces carries the `agent_id` of the agent running it
-/// (v2: `turnEvents.ts` gives `agentId` to each `TurnStartedPayload` /
-/// `AssistantDeltaPayload` / `ToolCallStartedPayload`, and
-/// `loopService.ts:1426-1455` fills it from `this.scopeContext.agentId`).
-/// That field is what lets a host keep a subagent's events out of the main
-/// transcript — v2 additionally refuses a cross-agent dispatch outright
-/// (`eventDispatcherService.ts:502-510`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineEvent {
@@ -41,9 +30,6 @@ pub enum EngineEvent {
         turn_id: String,
         step: u32,
         usage: Option<TokenUsage>,
-        /// Per-request LLM timing (v2 `ModelRequestTiming`, upstream #3938).
-        /// Absent on the host-proxy path and from transports that do not
-        /// measure.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timing: Option<crate::llm::LlmTiming>,
     },
@@ -61,10 +47,6 @@ pub enum EngineEvent {
     },
     #[serde(rename = "goal.budget.limit_reached")]
     GoalBudgetLimitReached { turn_id: String, goal_id: String },
-    /// A scheduled cron entry fired (v2 `cron.fired`). The host subscribes
-    /// and turns the fired prompt into a new turn or surfaces it to the user.
-    /// Wire shape carries the entry id and prompt so the host can render or
-    /// route without a separate fetch.
     #[serde(rename = "cron.fired")]
     CronFired { entry_id: String, prompt: String },
     #[serde(rename = "assistant.delta")]
@@ -73,7 +55,6 @@ pub enum EngineEvent {
         agent_id: String,
         turn_id: String,
         delta: String,
-        /// v2 #4663: the provider's content-block index this delta belongs to.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block: Option<u32>,
     },
@@ -160,16 +141,9 @@ pub enum EngineEvent {
     },
     #[serde(rename = "session.meta.updated")]
     SessionMetaUpdated { session_id: String, meta: Value },
-    /// A config mutation the server applied (kap-server `ConfigChangedEvent`,
-    /// wire name `event.config.changed`). The payload spells
-    /// `changed_fields` — snake_case, what kimi-web's mapper reads; kap-server's
-    /// own zod schema says `changedFields`, so the two TS sides disagree and the
-    /// live consumer wins.
     #[serde(rename = "event.config.changed")]
     ConfigChanged {
-        /// The config sections the mutation touched (kap-server `changedFields`).
         changed_fields: Vec<String>,
-        /// The effective config after the mutation (kap-server `ConfigResponse`).
         config: Value,
     },
     #[serde(rename = "subagent.spawned")]
@@ -177,23 +151,12 @@ pub enum EngineEvent {
         subagent_id: String,
         #[serde(default)]
         subagent_name: Option<String>,
-        /// The parent tool call that spawned the member (v2
-        /// `SubagentSpawnedPayload.parentToolCallId`, upstream #3970) — the
-        /// transcript fold keys the agent↔task association off it.
         #[serde(default)]
         parent_tool_call_id: Option<String>,
         #[serde(default)]
         description: Option<String>,
         #[serde(default)]
         run_in_background: bool,
-        /// The member's 1-based position in its batch (v2
-        /// `SubagentSpawnedPayload.swarmIndex`).
-        ///
-        /// Serde drops unknown fields, so leaving this out of the record loses
-        /// the swarm identity for everything rebuilt from the journal: the
-        /// transcript projector cannot tell a member from a plain child, and a
-        /// resumed swarm renders as a stack of ordinary subagent cards. `None`
-        /// is an ordinary `Agent` subagent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         swarm_index: Option<u32>,
     },
@@ -202,30 +165,19 @@ pub enum EngineEvent {
         subagent_id: String,
         #[serde(default)]
         result_summary: Option<String>,
-        /// The member's token usage (upstream #3970): the durable record
-        /// carries it and the fold restores it onto the task.
         #[serde(default)]
         usage: Option<TokenUsage>,
     },
     #[serde(rename = "subagent.failed")]
     SubagentFailed { subagent_id: String, error: String },
-    /// Batched stream segment — the merged-delta shape of the batching
-    /// contract (one event folds a coalesced span of deltas instead of one
-    /// event per token; `span` covers the folded engine seqs, `is_final`
-    /// marks the stream-closing segment so the tail cannot be lost silently).
-    /// Skeleton phase: defined, not yet emitted; the per-delta variants keep
-    /// flowing until the behavior slice switches emission over.
     #[serde(rename = "stream.segment")]
     StreamSegment {
         #[serde(default = "crate::rpc::types::main_agent_id")]
         agent_id: String,
         turn_id: String,
         stream: StreamKind,
-        /// Merged text of every coalesced delta, in seq order.
         text: String,
-        /// Inclusive span of engine seqs folded into this segment.
         span: SeqSpan,
-        /// True on the stream-closing segment (tail-loss guard).
         is_final: bool,
     },
     #[serde(untagged)]
@@ -270,12 +222,6 @@ impl EngineEvent {
         }
     }
 
-    /// The agent that produced this event, when it names one.
-    ///
-    /// v2 reads the same field off the payload when filtering
-    /// (`sessionEventBroadcaster.ts:1211-1214` takes `payload.agentId` and
-    /// passes anything non-string through). A `Custom` event that predates
-    /// the stamp has no id, and is treated the same way there.
     pub fn agent_id(&self) -> Option<&str> {
         match self {
             EngineEvent::LlmStepBegin { agent_id, .. }
@@ -298,36 +244,18 @@ impl EngineEvent {
     }
 }
 
-/// In-process sequencing envelope for [`EngineEvent`].
-///
-/// Carries the optional per-`(agent_id, turn_id)` monotonic `seq` the event
-/// contract reserves (design `reports/design/RUST-UI-DECOUPLING.md` §1.1).
-/// Scope: engine internals and the napi bindings layer only. The wire is
-/// untouched — `EngineEvent` itself gains no field, this wrapper is not
-/// serialized onto either channel (TSFN / WS), and even an explicit envelope
-/// serialization omits `seq` while unset.
-///
-/// Why an envelope rather than a field on each variant: a new variant field
-/// must be named at every literal construction site, including `acp/` test
-/// code that is outside this phase's editable scope. The envelope carries the
-/// same information with zero churn; collapsing it into per-variant fields is
-/// a mechanical follow-up once that scope opens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SequencedEngineEvent {
-    /// Monotonic within the event's `(agent_id, turn_id)` scope; `None` until
-    /// the emission layer stamps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
     pub event: EngineEvent,
 }
 
 impl SequencedEngineEvent {
-    /// An unstamped envelope.
     pub fn new(event: EngineEvent) -> Self {
         Self { seq: None, event }
     }
 
-    /// An envelope stamped with `seq`.
     pub fn with_seq(seq: u64, event: EngineEvent) -> Self {
         Self {
             seq: Some(seq),
@@ -352,10 +280,6 @@ impl SequencedEngineEvent {
 mod tests {
     use super::*;
 
-    /// The swarm discriminator has to survive the journal round-trip. Serde
-    /// drops unknown fields, so a record that omits `swarm_index` silently
-    /// degrades every swarm member into an ordinary child — which is exactly
-    /// how a restored swarm ended up rendered as a pile of plain subagent cards.
     #[test]
     fn a_swarm_members_index_survives_the_journal() {
         let raw = serde_json::json!({
@@ -378,14 +302,10 @@ mod tests {
             ),
             "the index is parsed, not dropped: {event:?}"
         );
-        // …and it is still there when the record is written back out.
         let round_tripped = event.to_json();
         assert_eq!(round_tripped["swarm_index"], 1, "{round_tripped}");
     }
 
-    /// An ordinary `Agent` subagent has no index, and the field must stay
-    /// absent rather than become `null` — the client's discriminator is
-    /// `typeof swarm_index === 'number'`.
     #[test]
     fn a_plain_subagent_records_no_index() {
         let raw = serde_json::json!({
@@ -408,7 +328,6 @@ mod tests {
         );
     }
 
-    /// The envelope defaults to unstamped and stamps explicitly.
     #[test]
     fn sequenced_envelope_defaults_to_none() {
         let event = EngineEvent::TurnEnded {
@@ -424,7 +343,6 @@ mod tests {
         assert_eq!(stamped.into_event().event_type(), "turn.ended");
     }
 
-    /// `seq` stays off the wire while unset, and serializes only when stamped.
     #[test]
     fn sequenced_envelope_omits_seq_until_stamped() {
         let event = EngineEvent::AssistantDelta {
@@ -442,7 +360,6 @@ mod tests {
         assert_eq!(back.seq(), Some(7));
     }
 
-    /// Assistant/thinking deltas carry the provider's content-block index.
     #[test]
     fn block_indexed_deltas_round_trip() {
         let assistant = EngineEvent::AssistantDelta {
@@ -472,7 +389,6 @@ mod tests {
         assert!(value.get("block").is_none(), "absent block must not leak");
     }
 
-    /// The batched-segment variant round-trips with its span and stream tag.
     #[test]
     fn stream_segment_round_trips() {
         let event = EngineEvent::StreamSegment {
@@ -503,9 +419,6 @@ mod tests {
         ));
     }
 
-    /// Wire regression pin: no event variant may ever serialize a `seq` key.
-    /// Sequencing is in-process only (the envelope); the WS contract and the
-    /// TSFN payload shape stay unchanged.
     #[test]
     fn no_variant_serializes_a_seq_field() {
         let events = vec![

@@ -1,10 +1,3 @@
-//! Pure cron expression parsing, next-fire computation, and human-readable
-//! rendering, ported from the v2 cron feature
-//! (`agent-core-v2/src/features/cron/internal/cron-expr.ts`). Error messages
-//! and rendered output are aligned with v2. The time-dependent functions
-//! take an explicit local-timezone offset (minutes east of UTC) because std
-//! has no local-time API; the caller supplies the host's offset.
-
 pub mod jitter;
 pub mod scheduler;
 
@@ -12,7 +5,6 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
-/// A parsed 5-field cron expression, mirroring v2 `ParsedCronExpression`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedCron {
     pub raw: String,
@@ -25,7 +17,6 @@ pub struct ParsedCron {
     pub days_of_week_wildcard: bool,
 }
 
-/// Cron expression validation error; the message mirrors v2 `Error2` text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronError(pub String);
 
@@ -37,11 +28,8 @@ impl fmt::Display for CronError {
 
 impl Error for CronError {}
 
-/// One-shot cap: a one-shot cron whose first fire is more than 350 days out
-/// is refused (v2 `ONE_SHOT_MAX_FUTURE_MS`).
 pub const ONE_SHOT_MAX_FUTURE_MS: i64 = 350 * 24 * 60 * 60 * 1000;
 
-/// Prompt byte cap for cron jobs (v2 `MAX_PROMPT_BYTES`).
 pub const MAX_PROMPT_BYTES: usize = 8 * 1024;
 
 const MS_PER_MINUTE: i64 = 60_000;
@@ -73,10 +61,6 @@ const DAY_NAMES: [&str; 7] = [
     "Saturday",
 ];
 
-/// Parse a 5-field cron expression ("minute hour day-of-month month
-/// day-of-week"), mirroring v2 `parseCronExpression`: comma lists, `*`,
-/// `N`, `N-M` ranges, and `/step` suffixes; day-of-week 7 is normalized to
-/// 0 (Sunday).
 pub fn parse(expr: &str) -> Result<ParsedCron, CronError> {
     let trimmed = expr.trim();
     if trimmed.is_empty() {
@@ -135,8 +119,6 @@ fn parse_cron_int(raw: &str, name: &str, role: &str) -> Result<i64, CronError> {
             "cron {name} {role} must be a non-negative integer with digits only (got \"{raw}\")"
         )));
     }
-    // Overflowing digit strings fail the caller's range check, matching v2
-    // where a huge parse result is rejected as out of range.
     Ok(raw.parse::<i64>().unwrap_or(i64::MAX))
 }
 
@@ -211,16 +193,10 @@ fn add_term(
     Ok(())
 }
 
-/// Compute the next fire time (epoch ms) strictly after `from_ms`, mirroring
-/// v2 `computeNextCronRun`: the scan starts at the next minute boundary in
-/// the given timezone and stops after a 5-year (366-day years) window.
-/// `tz_offset_minutes` is the local offset east of UTC (e.g. UTC+8 = 480).
 pub fn next_fire(expr: &ParsedCron, from_ms: i64, tz_offset_minutes: i32) -> Option<i64> {
     next_run_within_minutes(expr, from_ms, tz_offset_minutes, FIVE_YEAR_WINDOW_MINUTES)
 }
 
-/// Whether the expression fires at least once within `years` (366-day
-/// years), mirroring v2 `hasFireWithinYears`.
 pub fn has_fire_within_years(
     expr: &ParsedCron,
     years: u32,
@@ -266,8 +242,6 @@ fn next_run_within_minutes(
     None
 }
 
-/// Validate that a prompt fits within `max_bytes` UTF-8 bytes, mirroring the
-/// v2 CronCreate byte cap check.
 pub fn validate_prompt_bytes(prompt: &str, max_bytes: usize) -> Result<(), CronError> {
     let len = prompt.len();
     if len > max_bytes {
@@ -278,9 +252,6 @@ pub fn validate_prompt_bytes(prompt: &str, max_bytes: usize) -> Result<(), CronE
     Ok(())
 }
 
-/// Validate the one-shot cap: the first fire must be within
-/// [`ONE_SHOT_MAX_FUTURE_MS`] of `from_ms`; returns the first fire on
-/// success, mirroring the v2 CronCreate one-shot check.
 pub fn validate_one_shot(
     expr: &ParsedCron,
     from_ms: i64,
@@ -302,8 +273,6 @@ pub fn validate_one_shot(
     Ok(first_fire)
 }
 
-/// Format an epoch-ms timestamp as local ISO 8601 with a numeric offset,
-/// mirroring v2 `formatLocalIsoWithOffset`.
 pub fn format_local_iso_with_offset(ms: i64, tz_offset_minutes: i32) -> String {
     let civil = epoch_ms_to_civil(ms, tz_offset_minutes);
     let sign = if tz_offset_minutes >= 0 { '+' } else { '-' };
@@ -323,8 +292,6 @@ pub fn format_local_iso_with_offset(ms: i64, tz_offset_minutes: i32) -> String {
     )
 }
 
-/// Render a human-readable schedule description, mirroring v2
-/// `cronToHuman`; falls back to the raw expression when no pattern matches.
 pub fn to_human(expr: &ParsedCron) -> String {
     let all_min = is_full_range(&expr.minutes, 0, 59);
     let all_hour = is_full_range(&expr.hours, 0, 23);
@@ -449,7 +416,6 @@ fn pad(n: u8) -> String {
     }
 }
 
-/// A civil (wall-clock) datetime in a fixed-offset timezone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Civil {
     year: i64,
@@ -562,8 +528,6 @@ fn civil_to_epoch_ms(c: &Civil, tz_offset_minutes: i32) -> i64 {
         - i64::from(tz_offset_minutes) * MS_PER_MINUTE
 }
 
-/// Days since 1970-01-01 for a proleptic Gregorian civil date (Hinnant's
-/// `days_from_civil`).
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -574,7 +538,6 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Inverse of [`days_from_civil`] (Hinnant's `civil_from_days`).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -652,11 +615,9 @@ mod tests {
         assert!(p.days_of_month_wildcard);
         assert!(!p.days_of_week_wildcard);
 
-        // Range combined with a step
         let p = parse("10-30/5 * * * *").unwrap();
         assert_eq!(p.minutes, set(&[10, 15, 20, 25, 30]));
 
-        // List of ranges
         let p = parse("1-3,10-12 * * * *").unwrap();
         assert_eq!(p.minutes, set(&[1, 2, 3, 10, 11, 12]));
     }
@@ -673,7 +634,6 @@ mod tests {
 
     #[test]
     fn parse_trims_and_keeps_raw() {
-        // v2 trims the expression but preserves internal whitespace.
         let p = parse("  */5   * * * *  ").unwrap();
         assert_eq!(p.raw, "*/5   * * * *");
         assert_eq!(
@@ -810,7 +770,6 @@ mod tests {
         let p = parse("* * * * *").unwrap();
         let from = ms_utc(2024, 6, 1, 10, 30) + 45_500;
         assert_eq!(next_fire(&p, from, 0), Some(ms_utc(2024, 6, 1, 10, 31)));
-        // Exactly on a minute boundary: strictly after.
         assert_eq!(
             next_fire(&p, ms_utc(2024, 6, 1, 10, 30), 0),
             Some(ms_utc(2024, 6, 1, 10, 31))
@@ -822,7 +781,6 @@ mod tests {
         let p = parse("30 14 * * *").unwrap();
         let from = ms_utc(2024, 6, 1, 10, 30);
         assert_eq!(next_fire(&p, from, 0), Some(ms_utc(2024, 6, 1, 14, 30)));
-        // Already past today's 14:30: next day.
         assert_eq!(
             next_fire(&p, ms_utc(2024, 6, 1, 14, 30), 0),
             Some(ms_utc(2024, 6, 2, 14, 30))
@@ -831,7 +789,6 @@ mod tests {
 
     #[test]
     fn next_fire_weekdays() {
-        // 2024-06-01 is a Saturday; next weekday 09:00 is Monday 06-03.
         let p = parse("0 9 * * 1-5").unwrap();
         let from = ms_utc(2024, 6, 1, 0, 0);
         assert_eq!(next_fire(&p, from, 0), Some(ms_utc(2024, 6, 3, 9, 0)));
@@ -840,12 +797,10 @@ mod tests {
     #[test]
     fn next_fire_leap_day() {
         let p = parse("0 0 29 2 *").unwrap();
-        // 2024-02-29 already passed; next is 2028-02-29.
         assert_eq!(
             next_fire(&p, ms_utc(2024, 3, 1, 0, 0), 0),
             Some(ms_utc(2028, 2, 29, 0, 0))
         );
-        // Exactly on a fire: strictly after.
         assert_eq!(
             next_fire(&p, ms_utc(2024, 2, 29, 0, 0), 0),
             Some(ms_utc(2028, 2, 29, 0, 0))
@@ -868,7 +823,6 @@ mod tests {
 
     #[test]
     fn next_fire_never_matches() {
-        // Feb 30 and Apr 31 never exist: no fire within the 5-year window.
         let p = parse("0 0 30 2 *").unwrap();
         assert_eq!(next_fire(&p, ms_utc(2024, 6, 1, 0, 0), 0), None);
         let p = parse("0 0 31 4 *").unwrap();
@@ -879,30 +833,22 @@ mod tests {
     fn next_fire_timezone_offset() {
         let p = parse("30 14 * * *").unwrap();
         let from = ms_utc(2024, 6, 1, 6, 30);
-        // UTC: 14:30 same day. UTC+8: 14:30 local is 06:30Z (already past),
-        // so the next fire is tomorrow 14:30 local = 06:30Z.
         assert_eq!(next_fire(&p, from, 0), Some(ms_utc(2024, 6, 1, 14, 30)));
         assert_eq!(next_fire(&p, from, 480), Some(ms_utc(2024, 6, 2, 6, 30)));
     }
 
     #[test]
     fn next_fire_dow_seven_equals_zero() {
-        let from = ms_utc(2024, 6, 1, 0, 0); // Saturday
+        let from = ms_utc(2024, 6, 1, 0, 0);
         let p0 = parse("0 0 * * 0").unwrap();
         let p7 = parse("0 0 * * 7").unwrap();
-        let expected = ms_utc(2024, 6, 2, 0, 0); // Sunday
+        let expected = ms_utc(2024, 6, 2, 0, 0);
         assert_eq!(next_fire(&p0, from, 0), Some(expected));
         assert_eq!(next_fire(&p7, from, 0), Some(expected));
     }
 
     #[test]
     fn next_fire_day_of_month_and_day_of_week_union() {
-        // "0 0 15 * 5": 15th of the month OR Friday (standard cron / v2 union semantics)
-        // In June 2024 (starts on Saturday 2024-06-01):
-        // 2024-06-07 is Friday (dow=5 matches)
-        // 2024-06-14 is Friday (dow=5 matches)
-        // 2024-06-15 is Saturday (dom=15 matches)
-        // 2024-06-21 is Friday (dow=5 matches)
         let p = parse("0 0 15 * 5").unwrap();
         let from = ms_utc(2024, 6, 1, 0, 0);
 
@@ -928,7 +874,6 @@ mod tests {
 
         let p = parse("* * * * *").unwrap();
         assert!(has_fire_within_years(&p, 1, from, 0));
-        // Boundary case: years = 0 clamps to a 1-minute window
         assert!(has_fire_within_years(&p, 0, from, 0));
 
         let p_daily = parse("0 0 1 1 *").unwrap();
@@ -976,12 +921,10 @@ mod tests {
             "at 00:00 on day 1 of January"
         );
         assert_eq!(to_human(&parse("0 0 * * 7").unwrap()), "at 00:00 on Sunday");
-        // detectStep on a partial set matches v2.
         assert_eq!(
             to_human(&parse("0,5,10,15 * * * *").unwrap()),
             "every 5 minutes"
         );
-        // A dom wildcard with a pinned time renders "every day" (v2 parity).
         assert_eq!(to_human(&parse("0 0 * * *").unwrap()), "at 00:00 every day");
     }
 
@@ -1003,7 +946,6 @@ mod tests {
             validate_prompt_bytes(&"x".repeat(8193), MAX_PROMPT_BYTES),
             Err(CronError("Prompt exceeds 8192 bytes (got 8193).".into()))
         );
-        // Multi-byte UTF-8: "你" is 3 bytes.
         assert_eq!(
             validate_prompt_bytes(&"你".repeat(2730), MAX_PROMPT_BYTES),
             Ok(())
@@ -1017,22 +959,18 @@ mod tests {
     #[test]
     fn validate_one_shot_cap() {
         let p = parse("0 0 1 1 *").unwrap();
-        // From 2024-01-01 the next Jan 1 is 366 days out (> 350): refused.
         let err = validate_one_shot(&p, ms_utc(2024, 1, 1, 0, 0), 0).unwrap_err();
         assert_eq!(
             err.0,
             "One-shot cron \"0 0 1 1 *\" would not fire until 2025-01-01T00:00:00.000+00:00 (more than a year out). If you meant \"today\" or a near date, the pinned day/month has already passed this year — pick a future date or use wildcards."
         );
-        // With UTC+8 (+480 min) offset, formatted time reflects +08:00
         let err_tz = validate_one_shot(&p, ms_utc(2024, 1, 1, 0, 0), 480).unwrap_err();
         assert_eq!(
             err_tz.0,
             "One-shot cron \"0 0 1 1 *\" would not fire until 2025-01-01T00:00:00.000+08:00 (more than a year out). If you meant \"today\" or a near date, the pinned day/month has already passed this year — pick a future date or use wildcards."
         );
-        // From 2024-06-01 the next Jan 1 is 214 days out: allowed.
         let first = validate_one_shot(&p, ms_utc(2024, 6, 1, 0, 0), 0).unwrap();
         assert_eq!(first, ms_utc(2025, 1, 1, 0, 0));
-        // Never-firing expressions are refused.
         let p = parse("0 0 30 2 *").unwrap();
         assert_eq!(
             validate_one_shot(&p, ms_utc(2024, 6, 1, 0, 0), 0)
@@ -1057,7 +995,6 @@ mod tests {
             format_local_iso_with_offset(ms, -300),
             "2024-06-01T01:30:45.123-05:00"
         );
-        // Fractional-hour timezones: India (+05:30 = +330 min) and Newfoundland (-03:30 = -210 min)
         assert_eq!(
             format_local_iso_with_offset(ms, 330),
             "2024-06-01T12:00:45.123+05:30"
@@ -1083,7 +1020,6 @@ mod tests {
             let days = days_from_civil(year, month, day);
             assert_eq!(civil_from_days(days), (year, month, day));
         }
-        // 1970-01-01 was a Thursday.
         assert_eq!(
             weekday(&Civil {
                 year: 1970,
@@ -1094,7 +1030,6 @@ mod tests {
             }),
             4
         );
-        // 2024-06-01 was a Saturday.
         assert_eq!(
             weekday(&Civil {
                 year: 2024,
@@ -1106,7 +1041,6 @@ mod tests {
             6
         );
 
-        // epoch_ms_to_civil and civil_to_epoch_ms roundtrip across timezones
         let test_ms = ms_utc(2024, 6, 1, 14, 30);
         for tz in [-300, 0, 330, 480] {
             let civil = epoch_ms_to_civil(test_ms, tz);

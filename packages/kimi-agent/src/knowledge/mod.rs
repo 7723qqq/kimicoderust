@@ -1,10 +1,3 @@
-//! Knowledge Base — SQLite + FTS5 local coding standards database.
-//!
-//! Process-global `Mutex<Option<Connection>>` singleton over a WAL-mode
-//! schema (entries table + FTS5 virtual table + triggers + indexes). The
-//! seven storage operations return `Result<T, String>`, use a fastrand-based
-//! id, and a hand-rolled RFC3339 UTC timestamp formatter.
-
 use once_cell::sync::Lazy;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -16,12 +9,7 @@ type Result<T> = std::result::Result<T, String>;
 
 static DB: Lazy<Mutex<Option<Connection>>> = Lazy::new(|| Mutex::new(None));
 
-/// The file the global connection was opened from. The automatic read path
-/// (per-turn injection) must not borrow a connection another caller opened for
-/// a different database — that would inject entries from an unrelated store.
 static DB_PATH: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
-
-// ─── Schema ─────────────────────────────────────────────────────────────────
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS entries (
@@ -54,8 +42,6 @@ CREATE INDEX IF NOT EXISTS idx_entries_scope ON entries(scope);
 CREATE INDEX IF NOT EXISTS idx_entries_confidence ON entries(confidence);
 "#;
 
-// ─── Models ─────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Serialize, Deserialize)]
 struct KnowledgeEntry {
     id: String,
@@ -84,8 +70,6 @@ struct Stats {
     by_source: HashMap<String, usize>,
     avg_confidence: f64,
 }
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn with_db<F, R>(f: F) -> Result<R>
 where
@@ -123,8 +107,6 @@ fn now_iso() -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}Z")
 }
 
-/// Days since 1970-01-01 → (year, month, day) in the proleptic Gregorian
-/// calendar (Howard Hinnant's `civil_from_days` algorithm).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -158,10 +140,6 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEntry> {
     })
 }
 
-// ─── Storage operations ─────────────────────────────────────────────────────
-
-/// v2 `bootstrap.homeDir`: `KIMI_CODE_HOME` when set and non-empty, else
-/// `~/.kimi-code`.
 fn home_dir() -> Option<PathBuf> {
     if let Ok(home) = std::env::var("KIMI_CODE_HOME")
         && !home.trim().is_empty()
@@ -173,11 +151,6 @@ fn home_dir() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".kimi-code"))
 }
 
-/// v2's database path resolution (`knowledgeService.ts:56-86`):
-/// `KIMI_KNOWLEDGE_DB`, then an existing `<cwd>/.kimi-code/knowledge.db`, then
-/// `<homeDir>/knowledge.db`. With `existing_only` a candidate that does not
-/// exist yet is not returned — that is the read path's guarantee that a search
-/// never creates a database as a side effect.
 fn resolve_db_path(cwd: &Path, existing_only: bool) -> Option<PathBuf> {
     if let Ok(override_path) = std::env::var("KIMI_KNOWLEDGE_DB") {
         let override_path = override_path.trim().to_string();
@@ -205,8 +178,6 @@ fn is_open_at(path: &Path) -> bool {
     matches && DB.lock().map(|guard| guard.is_some()).unwrap_or(false)
 }
 
-/// v2 `ensureDatabase`: the write path, which creates the user database when
-/// neither the project nor the user one exists.
 pub fn ensure_open(cwd: &Path) -> bool {
     let Some(path) = resolve_db_path(cwd, false) else {
         return false;
@@ -217,7 +188,6 @@ pub fn ensure_open(cwd: &Path) -> bool {
     open_database(&path)
 }
 
-/// v2 `openExisting`: the read path, which only opens what already exists.
 pub fn open_existing(cwd: &Path) -> bool {
     let Some(path) = resolve_db_path(cwd, true) else {
         return false;
@@ -240,8 +210,6 @@ fn open_database(path: &Path) -> bool {
 
 pub fn open(db_path: String) -> Result<()> {
     let mut guard = DB.lock().map_err(|e| format!("DB lock: {e}"))?;
-    // Close any previously-open database (dropping the rusqlite connection,
-    // which flushes WAL and releases the file handle) before reopening.
     if guard.is_some() {
         *guard = None;
     }
@@ -254,7 +222,6 @@ pub fn open(db_path: String) -> Result<()> {
     let conn = Connection::open(&db_path).map_err(|e| format!("Open DB: {e}"))?;
     conn.execute_batch("PRAGMA journal_mode = WAL;")
         .map_err(|e| format!("{e}"))?;
-    // Check if schema exists
     let has_table: bool = conn
         .prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='entries'")
         .and_then(|mut s| s.query_row([], |r| r.get::<_, i64>(0)))
@@ -309,9 +276,6 @@ pub fn add(
     })
 }
 
-/// v2 `normalizeScopePath` (`sqliteKnowledge.ts`): unify separators and drop
-/// trailing slashes so a Windows-captured path and the stored form compare
-/// equal. A bare root stays `/`.
 fn normalize_scope_path(raw: &str) -> String {
     let unified = raw.replace('\\', "/");
     let without_trailing = if unified.len() > 1 {
@@ -336,12 +300,7 @@ pub fn search(
     with_db(|conn| {
         let mut results_map: HashMap<String, (KnowledgeEntry, f64, Vec<String>)> = HashMap::new();
 
-        // 1. Scope match
         if let Some(ref path) = scope_path {
-            // v2 `SCOPE_SQL`: the stored scope is normalized inside SQL
-            // (backslashes → `/`, trailing slashes trimmed), the candidate is
-            // normalized here, and the prefix test requires a path boundary —
-            // `G:/repo` must not match `G:/repo2`.
             let candidate = normalize_scope_path(path);
             let mut stmt = conn.prepare(
                 "SELECT id,category,title,content,tags,scope,confidence,source,created_at,updated_at FROM entries WHERE confidence >= ?1 AND (scope IS NULL OR ?2 = rtrim(replace(scope, char(92), '/'), '/') OR instr(?2, rtrim(replace(scope, char(92), '/'), '/') || '/') = 1) ORDER BY confidence DESC LIMIT 20"
@@ -358,12 +317,7 @@ pub fn search(
             }
         }
 
-        // 2. FTS5
         if !query.is_empty() && query != "*" {
-            // v2 `escapeFtsQuery`: every whitespace-separated word is quoted
-            // and joined with OR, with embedded quotes doubled. Passing the
-            // query through raw makes FTS5 reject user punctuation as syntax
-            // and silently drops the whole FTS leg.
             let fts_query = query
                 .split_whitespace()
                 .filter(|word| !word.is_empty())
@@ -391,7 +345,6 @@ pub fn search(
             }
         }
 
-        // 3. Tag overlap
         if let Some(ref tag_str) = tags {
             let query_tags: HashSet<&str> = tag_str
                 .split(',')
@@ -416,7 +369,6 @@ pub fn search(
             }
         }
 
-        // Sort and truncate
         let mut results: Vec<SearchResult> = results_map
             .into_values()
             .map(|(entry, score, sources)| {
@@ -578,21 +530,9 @@ pub fn import(markdown: String) -> Result<String> {
     })
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
-/// Serializes tests that touch the process-global DB singleton. Shared with
-/// the tool-shell tests in `tools/knowledge_tool.rs`, which run in the same
-/// test binary.
 #[cfg(test)]
 pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-/// Take [`TEST_LOCK`] and recover from poisoning.
-///
-/// The lock guards a process-global singleton, so one failing assertion while
-/// it is held would otherwise turn every later test in the binary into a
-/// `PoisonError` failure (`24 failed` from a single root cause is exactly what
-/// this used to do). The guarded state is a SQLite connection the next test
-/// reopens anyway, so running on a poisoned lock is safe.
 #[cfg(test)]
 pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     TEST_LOCK
@@ -600,14 +540,6 @@ pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Point the database resolution at a throwaway file for the whole test
-/// process.
-///
-/// `resolve_db_path` falls back to `<home>/.kimi-code/knowledge.db` when the
-/// workspace has no project database, and in the test binary that home is the
-/// developer's real one: a turn with a correction would read — and, through
-/// the learner, write — the user's actual knowledge base. Tests must never
-/// touch it, so the override wins before either candidate is considered.
 #[cfg(test)]
 pub(crate) fn isolate_test_db() {
     static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -616,14 +548,10 @@ pub(crate) fn isolate_test_db() {
             std::env::temp_dir().join(format!("kimi-agent-knowledge-tests-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("the test knowledge directory must be creatable");
         let path = dir.join("knowledge.db");
-        // Safe under `OnceLock`: the variable is written once, before any test
-        // that resolves the database runs, and never removed afterwards.
         unsafe { std::env::set_var("KIMI_KNOWLEDGE_DB", path) };
     });
 }
 
-/// Close the process-global connection (test-only): lets `TempDir` cleanup
-/// succeed on Windows, where an open file handle would block deletion.
 #[cfg(test)]
 pub(crate) fn close_db_for_tests() {
     *DB.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -728,8 +656,6 @@ mod tests {
 
     #[test]
     fn test_search_fallback_when_fixed_prefix_wrong() {
-        // The fixed prefix `"error" OR "handling"` style query must not match
-        // when the phrase is absent.
         let _guard = test_lock();
         let _db = TestDb::new();
         add_entry("Naming", "coding-style", "Use snake_case for functions.");
@@ -763,7 +689,6 @@ mod tests {
         )
         .unwrap();
 
-        // Path under the scoped entry's prefix matches.
         let results: Vec<serde_json::Value> = parse_vec(
             &search(
                 "".to_string(),
@@ -775,10 +700,8 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(results.len(), 2);
-        // Scoped entry scores higher (3.0 scope + 1.0 unscoped = 4.0*1.0 vs 1.0).
         assert_eq!(results[0]["entry"]["title"], "Scoped rule");
 
-        // Unrelated path: only the unscoped entry matches.
         let results: Vec<serde_json::Value> = parse_vec(
             &search("".to_string(), Some("G:/other".to_string()), None, 10, 0.0).unwrap(),
         );
@@ -786,9 +709,6 @@ mod tests {
         assert_eq!(results[0]["entry"]["title"], "Global rule");
     }
 
-    /// v2 `SCOPE_SQL` + `normalizeScopePath`: separators are unified and the
-    /// prefix requires a path boundary, so `G:/repo` matches `G:\repo\src` but
-    /// not the sibling `G:/repo2`.
     #[test]
     fn test_search_scope_normalizes_separators_and_respects_boundaries() {
         let _guard = test_lock();
@@ -898,11 +818,9 @@ mod tests {
         let _db = TestDb::new();
         let id = add_entry_id("To remove", "pitfall", "Remove me.");
         assert!(remove(id.clone()).unwrap());
-        // Removed entry is gone from search.
         let results: Vec<serde_json::Value> =
             parse_vec(&search("remove".to_string(), None, None, 10, 0.0).unwrap());
         assert!(results.is_empty());
-        // Second remove of the same id is a no-op.
         assert!(!remove(id).unwrap());
     }
 
@@ -931,7 +849,6 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["entry"]["source"], "ai-confirmed");
         assert_eq!(results[0]["entry"]["confidence"], 1.0);
-        // Confirm of a missing id is a no-op.
         assert!(!confirm("missing-id".to_string()).unwrap());
     }
 
@@ -981,7 +898,6 @@ Content only.
         assert_eq!(second["tags"], serde_json::json!([]));
         assert_eq!(second["content"], "Content only.");
 
-        // Imported entries are searchable.
         let results: Vec<serde_json::Value> =
             parse_vec(&search("imported".to_string(), None, None, 10, 0.0).unwrap());
         assert_eq!(results.len(), 1);
@@ -1025,7 +941,6 @@ Good content.
     #[test]
     fn test_operations_without_open_error() {
         let _guard = test_lock();
-        // Ensure no database is open (TestDb::drop resets the singleton).
         close_db_for_tests();
         let err = add(
             "X".to_string(),
@@ -1049,7 +964,6 @@ Good content.
         add_entry("Old data", "pitfall", "From the first database.");
         assert!(db.dir.path().join("knowledge.db").exists());
 
-        // Re-open a fresh database in a new location: old data must be gone.
         let dir2 = tempfile::tempdir().unwrap();
         let path2 = dir2.path().join("kb2.db");
         open(path2.to_string_lossy().to_string()).unwrap();
@@ -1064,8 +978,6 @@ Good content.
     #[test]
     fn test_now_iso_is_rfc3339_utc() {
         let iso = now_iso();
-        // `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ` — the same shape chrono's
-        // `to_rfc3339()` produced in the original napi module.
         assert_eq!(iso.len(), 30, "got: {iso}");
         assert!(iso.ends_with('Z'), "got: {iso}");
         assert_eq!(&iso[10..11], "T", "got: {iso}");

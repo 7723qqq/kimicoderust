@@ -1,18 +1,3 @@
-//! Transcript-based goal completion verification (v2
-//! `agent/goal/judge/goalJudgeService.ts` + `judgePrompt.ts`).
-//!
-//! v2's `AgentGoalJudgeService` is called by `UpdateGoal` when the model asks
-//! to mark a goal `complete`: an independent model request re-reads the
-//! transcript and returns `{ ok, impossible?, reason }`. A rejected verdict
-//! keeps the goal active; an `impossible` verdict blocks it instead. Network
-//! or parse failures **allow** completion — the judge is a guard rail, not a
-//! new failure source.
-//!
-//! v2's `evaluateViaSubagent` is explicitly not wired in this fork ("subagent
-//! by profile not yet wired"), so only the transcript path exists here. The
-//! `goal-judge` agent profile is likewise not registered: nothing can launch
-//! that subagent while the subagent path is disabled.
-
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -20,7 +5,6 @@ use tokio_util::sync::CancellationToken;
 use crate::goal::GoalSnapshot;
 use crate::turn_loop::types::{LLM, LLMChatParams, LLMMessage};
 
-/// v2 `JUDGE_SYSTEM_PROMPT` (`judgePrompt.ts`), verbatim.
 pub const JUDGE_SYSTEM_PROMPT: &str = r#"You are an independent judge evaluating whether a goal has been completed.
 
 Your role is to verify — with concrete evidence — that the stated goal and its
@@ -65,10 +49,8 @@ or
 - A partially completed goal is NOT complete.
 - Do not invent evidence that is not in the transcript."#;
 
-/// v2 `RETRY_SYSTEM_PROMPT`: the second attempt only asks for the JSON shape.
 const RETRY_SYSTEM_PROMPT: &str = "You are a judge. Return ONLY a JSON object with fields \"ok\" (boolean) and \"reason\" (string). No other text.";
 
-/// One judge verdict (v2 `JudgeVerdict`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgeVerdict {
     pub ok: bool,
@@ -76,9 +58,6 @@ pub struct JudgeVerdict {
     pub reason: String,
 }
 
-/// Parse the durable goal domain value (`{ "goal": snapshot | null }`) into
-/// the snapshot the judge verifies. A missing/null/unreadable goal is `None`
-/// — the write itself is left to report that.
 pub fn goal_snapshot_from_domain(value: &serde_json::Value) -> Option<GoalSnapshot> {
     let nested = value.get("goal")?;
     if nested.is_null() {
@@ -97,7 +76,6 @@ impl JudgeVerdict {
     }
 }
 
-/// v2 `buildJudgeUserPrompt`.
 pub fn build_judge_user_prompt(objective: &str, completion_criterion: Option<&str>) -> String {
     let mut lines: Vec<String> = vec!["## Goal Objective".into(), objective.to_string()];
     if let Some(criterion) = completion_criterion {
@@ -132,7 +110,6 @@ pub fn build_judge_user_prompt(objective: &str, completion_criterion: Option<&st
     lines.join("\n")
 }
 
-/// v2's retry user prompt (`goalJudgeService.ts:138-141`).
 fn build_retry_user_prompt(goal: &GoalSnapshot) -> String {
     let mut text = format!("The goal objective is: {}\n", goal.objective);
     if let Some(criterion) = &goal.completion_criterion {
@@ -145,8 +122,6 @@ fn build_retry_user_prompt(goal: &GoalSnapshot) -> String {
     text
 }
 
-/// v2 `parseVerdict`: direct JSON, then a fenced block, then the last
-/// inline JSON object in the text.
 pub fn parse_verdict(text: &str) -> Option<JudgeVerdict> {
     if let Some(verdict) = try_parse_verdict_json(text.trim()) {
         return Some(verdict);
@@ -165,8 +140,6 @@ pub fn parse_verdict(text: &str) -> Option<JudgeVerdict> {
     None
 }
 
-/// v2 tries the first ```…``` block (`fenceMatch`); only its first group is
-/// read.
 fn fenced_json(text: &str) -> Option<&str> {
     let start = text.find("```")?;
     let after = &text[start + 3..];
@@ -180,8 +153,6 @@ fn fenced_json(text: &str) -> Option<&str> {
     Some(&body[..end])
 }
 
-/// v2 `extractJsonCandidates`: balanced `{…}` spans, ignoring braces inside
-/// quoted strings.
 fn extract_json_candidates(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut candidates = Vec::new();
@@ -233,8 +204,6 @@ fn extract_json_candidates(text: &str) -> Vec<String> {
     candidates
 }
 
-/// v2 `tryParseVerdictJson`: both fields must have the right type; an
-/// `impossible: true` verdict is forced to `ok: false`.
 fn try_parse_verdict_json(raw: &str) -> Option<JudgeVerdict> {
     let value: serde_json::Value = serde_json::from_str(raw).ok()?;
     let ok = value.get("ok")?.as_bool()?;
@@ -250,8 +219,6 @@ fn try_parse_verdict_json(raw: &str) -> Option<JudgeVerdict> {
     })
 }
 
-/// One judge request: the judge system prompt, the transcript (without the
-/// agent's own system prompt), then the judge task.
 async fn request_verdict(
     llm: &dyn LLM,
     transcript: &[LLMMessage],
@@ -283,11 +250,6 @@ async fn request_verdict(
         .map_err(|error| error.to_string())
 }
 
-/// v2 `evaluateFromTranscript`: ask the judge about `transcript`, retrying
-/// once with the strict JSON prompt when the first answer does not parse.
-///
-/// Failures fail **open** (v2: "network/timeout — allowing completion"), so a
-/// judge outage can never trap a finished goal.
 pub async fn evaluate_transcript(
     llm: &dyn LLM,
     transcript: &[LLMMessage],
@@ -365,7 +327,6 @@ mod tests {
         }
     }
 
-    /// A scripted transport: each call returns the next canned answer.
     struct ScriptedLlm {
         answers: Mutex<Vec<Result<String, String>>>,
         requests: Mutex<Vec<Vec<LLMMessage>>>,
